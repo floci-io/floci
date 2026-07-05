@@ -7,6 +7,11 @@ keyed by action name and leaves a "-" placeholder for new/unknown actions. The
 generator only ever rewrites the bytes between the marker pair; everything else in
 the file is byte-identical pre and post.
 
+Assumption: a switch `case` label counts as supported purely by existing, so an arm
+that is present but throws `UnsupportedOperation` in its body would still be listed.
+Handlers here reject unsupported actions from the `default` arm, so this holds; a
+per-action stub that throws would be a false positive.
+
 Run from anywhere in the repo:
     python3 tools/docs/regen_action_docs.py            # rewrite docs in place
     python3 tools/docs/regen_action_docs.py --strict   # exit non-zero on warnings
