@@ -117,6 +117,8 @@ public class NeptuneService {
 
     private void rollbackDbCluster(String id, NeptuneContainerHandle handle, int proxyPort) {
         try {
+            // The proxy only starts after the container is ready, so a null handle means it
+            // never started — nothing to stop.
             if (handle != null) {
                 proxyManager.stopProxy(id);
             }
@@ -124,9 +126,11 @@ public class NeptuneService {
             LOG.warnv("Error stopping proxy for Neptune cluster {0}: {1}", id, e.getMessage());
         }
         try {
-            if (handle != null) {
-                containerManager.stop(handle);
-            }
+            // Stop by id, not handle: a readiness timeout in containerManager.start() throws
+            // after the container was created and registered but before the handle is returned,
+            // so cleaning up by handle here would miss (and orphan) it. stopByClusterId is
+            // idempotent, so it's safe when the container never started.
+            containerManager.stopByClusterId(id);
         } catch (RuntimeException e) {
             LOG.warnv("Error stopping container for Neptune cluster {0}: {1}", id, e.getMessage());
         } finally {
