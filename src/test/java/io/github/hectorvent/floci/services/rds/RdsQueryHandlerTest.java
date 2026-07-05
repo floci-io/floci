@@ -649,8 +649,6 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DBSubnetGroupArn>arn:aws:rds:us-east-1:123456789012:subgrp:default</DBSubnetGroupArn>"));
     }
 
-    // ──────────────────────────── Helpers ────────────────────────────
-
     // ─────────────── NotFound faults for missing identifiers (AWS parity) ───────────────
 
     @Test
@@ -716,6 +714,8 @@ class RdsQueryHandlerTest {
                 "Filters form must return an empty list, not fault: " + body);
         assertFalse(body.contains("DBClusterNotFoundFault"));
     }
+
+    // ──────────────────────────── Helpers ────────────────────────────
 
     private static MultivaluedMap<String, String> params() {
         return new MultivaluedHashMap<>();
