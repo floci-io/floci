@@ -1862,7 +1862,7 @@ class S3IntegrationTest {
                 .get("/" + bucket + "?list-type=2&encoding-type=url")
             .then()
                 .statusCode(200)
-                .body(containsString("<Key>run_id=2026-06-26T00:00:00%2B00:00/f.log</Key>"));
+                .body(containsString("<Key>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2Ff.log</Key>"));
 
             // 4. list-objects-v2 with encoding-type=url and prefix/delimiter with '+' should return encoded fields
             given()
@@ -1870,7 +1870,7 @@ class S3IntegrationTest {
                 .get("/" + bucket + "?list-type=2&encoding-type=url&prefix=run_id=2026-06-26T00:00:00%2B00:00/&delimiter=%2B")
             .then()
                 .statusCode(200)
-                .body(containsString("<Prefix>run_id=2026-06-26T00:00:00%2B00:00/</Prefix>"))
+                .body(containsString("<Prefix>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2F</Prefix>"))
                 .body(containsString("<Delimiter>%2B</Delimiter>"));
         } finally {
             given().urlEncodingEnabled(false).when().delete("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log");
