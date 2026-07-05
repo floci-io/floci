@@ -77,35 +77,61 @@ public class NeptuneService {
         LOG.infov("Creating Neptune cluster {0} on proxy port {1}, dbType={2}, image={3}",
                 id, String.valueOf(proxyPort), dbType, image);
 
-        NeptuneContainerHandle handle = containerManager.start(id, image, dbType);
+        NeptuneContainerHandle handle = null;
+        try {
+            handle = containerManager.start(id, image, dbType);
 
-        String region = regionResolver.getDefaultRegion();
-        String endpointHost = resolveEndpointHost();
+            String region = regionResolver.getDefaultRegion();
+            String endpointHost = resolveEndpointHost();
 
-        NeptuneCluster cluster = new NeptuneCluster();
-        cluster.setDbClusterIdentifier(id);
-        cluster.setStatus("available");
-        cluster.setEngineVersion(engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT);
-        cluster.setEndpoint(endpointHost);
-        cluster.setReaderEndpoint(endpointHost);
-        cluster.setPort(proxyPort);
-        cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
-        cluster.setDbClusterArn(regionResolver.buildArn("neptune", region, "cluster:" + id));
-        cluster.setDbClusterResourceId("cluster-" + UUID.randomUUID().toString()
-                .replace("-", "").substring(0, 24).toUpperCase());
-        cluster.setCreatedAt(Instant.now());
-        cluster.setDbClusterMembers(new ArrayList<>());
-        cluster.setContainerId(handle.getContainerId());
-        cluster.setContainerHost(handle.getHost());
-        cluster.setContainerPort(handle.getPort());
-        cluster.setProxyPort(proxyPort);
+            NeptuneCluster cluster = new NeptuneCluster();
+            cluster.setDbClusterIdentifier(id);
+            cluster.setStatus("available");
+            cluster.setEngineVersion(engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT);
+            cluster.setEndpoint(endpointHost);
+            cluster.setReaderEndpoint(endpointHost);
+            cluster.setPort(proxyPort);
+            cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
+            cluster.setDbClusterArn(regionResolver.buildArn("neptune", region, "cluster:" + id));
+            cluster.setDbClusterResourceId("cluster-" + UUID.randomUUID().toString()
+                    .replace("-", "").substring(0, 24).toUpperCase());
+            cluster.setCreatedAt(Instant.now());
+            cluster.setDbClusterMembers(new ArrayList<>());
+            cluster.setContainerId(handle.getContainerId());
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
+            cluster.setProxyPort(proxyPort);
 
-        proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
+            proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
 
-        clusters.put(id, cluster);
-        LOG.infov("Neptune cluster {0} created ({1}), endpoint={2}:{3}",
-                id, dbType, endpointHost, String.valueOf(proxyPort));
-        return cluster;
+            clusters.put(id, cluster);
+            LOG.infov("Neptune cluster {0} created ({1}), endpoint={2}:{3}",
+                    id, dbType, endpointHost, String.valueOf(proxyPort));
+            return cluster;
+        } catch (RuntimeException e) {
+            LOG.warnv("Neptune cluster {0} provisioning failed, rolling back: {1}", id, e.getMessage());
+            rollbackDbCluster(id, handle, proxyPort);
+            throw e;
+        }
+    }
+
+    private void rollbackDbCluster(String id, NeptuneContainerHandle handle, int proxyPort) {
+        try {
+            if (handle != null) {
+                proxyManager.stopProxy(id);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping proxy for Neptune cluster {0}: {1}", id, e.getMessage());
+        }
+        try {
+            if (handle != null) {
+                containerManager.stop(handle);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping container for Neptune cluster {0}: {1}", id, e.getMessage());
+        } finally {
+            releaseProxyPort(proxyPort);
+        }
     }
 
     public NeptuneCluster getDbCluster(String id) {
