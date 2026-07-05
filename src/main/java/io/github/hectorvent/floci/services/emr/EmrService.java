@@ -50,7 +50,9 @@ public class EmrService {
     // ──────────────────────────── Cluster lifecycle ────────────────────────────
 
     public EmrCluster runJobFlow(EmrCluster cluster, String region) {
-        if (cluster.getName() == null || cluster.getName().isBlank()) {
+        // Only a missing Name fails AWS's framework validation: the member is REQUIRED but its
+        // constraint is len=[0..256], so an explicit empty string is accepted by real EMR.
+        if (cluster.getName() == null) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'name' failed to satisfy constraint: "
                             + "Member must not be null", 400);

@@ -190,11 +190,24 @@ class EmrIntegrationTest {
     void runJobFlowWithoutNameIsValidationException() {
         call("RunJobFlow", "{\"ReleaseLabel\":\"emr-7.5.0\",\"Instances\":{}}")
                 .then().statusCode(400)
-                .body("__type", equalTo("ValidationException"));
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(
+                        "1 validation error detected: Value null at 'name' failed to satisfy constraint: "
+                                + "Member must not be null"));
     }
 
     @Test
     @Order(15)
+    void runJobFlowWithEmptyNameIsAccepted() {
+        // The Name member is REQUIRED but its model constraint is len=[0..256], so real EMR
+        // accepts an explicit empty string; only a missing Name fails framework validation.
+        call("RunJobFlow", "{\"Name\":\"\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200)
+                .body("JobFlowId", startsWith("j-"));
+    }
+
+    @Test
+    @Order(16)
     void addStepsToUnknownClusterIsInvalidRequest() {
         call("AddJobFlowSteps",
                 "{\"JobFlowId\":\"j-DOESNOTEXIST0\",\"Steps\":[{\"Name\":\"s\","
@@ -205,7 +218,7 @@ class EmrIntegrationTest {
     }
 
     @Test
-    @Order(16)
+    @Order(17)
     void terminationProtectionIsValidationExceptionAndUnprotectedStillTerminate() {
         String protectedId = call("RunJobFlow",
                 "{\"Name\":\"protected\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
