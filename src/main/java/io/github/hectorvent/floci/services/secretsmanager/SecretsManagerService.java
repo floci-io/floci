@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -325,6 +326,11 @@ public class SecretsManagerService {
                 }
             }
         }
+        // Stable order (created date, then name) so offset-based pagination in the handler
+        // never skips or duplicates entries across calls — same contract as ListSecrets.
+        result.sort(Comparator.comparing(BatchSecretValue::createdDate,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(BatchSecretValue::name, Comparator.nullsLast(Comparator.naturalOrder())));
         return result;
     }
 
@@ -369,6 +375,9 @@ public class SecretsManagerService {
             case "description" -> secret.getDescription() != null && secret.getDescription().toLowerCase().startsWith(targetVal.toLowerCase());
             case "tag-key" -> secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.key() != null && t.key().startsWith(targetVal));
             case "tag-value" -> secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.value() != null && t.value().startsWith(targetVal));
+            // Floci does not model cross-region replication, so every secret's primary region
+            // IS the region it lives in — comparing the request region is equivalent to a
+            // per-secret attribute here (all match when the prefix fits, none otherwise).
             case "primary-region" -> region != null && region.startsWith(targetVal);
             // owning-service is a valid Filter.Key enum value but is currently deferred (always returning false)
             case "owning-service" -> false;
