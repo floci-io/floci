@@ -674,7 +674,7 @@ public class ApiGatewayService {
 
     public ApiKey getApiKey(String region, String apiKeyId) {
         return apiKeyStore.get(apiKeyGlobalKey(region, apiKeyId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "API Key not found", 404));
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API Key identifier specified", 404));
     }
 
     public List<ApiKey> getApiKeys(String region) {

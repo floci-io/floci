@@ -65,12 +65,19 @@ class ApiGatewayApiKeyIntegrationTest {
     }
 
     @Test @Order(4)
-    void listApiKeysIncludesTags() {
+    void listApiKeysIncludesTagsAndOmitsValueByDefault() {
         given()
                 .when().get("/apikeys")
                 .then()
                 .statusCode(200)
-                .body("item.find { it.id == '" + apiKeyId + "' }.tags.Team", equalTo("platform"));
+                .body("item.find { it.id == '" + apiKeyId + "' }.tags.Team", equalTo("platform"))
+                .body("item.find { it.id == '" + apiKeyId + "' }.value", nullValue());
+
+        given()
+                .when().get("/apikeys?includeValues=true")
+                .then()
+                .statusCode(200)
+                .body("item.find { it.id == '" + apiKeyId + "' }.value", notNullValue());
     }
 
     @Test @Order(5)
@@ -81,6 +88,6 @@ class ApiGatewayApiKeyIntegrationTest {
                 .statusCode(404)
                 .contentType(ContentType.JSON)
                 .body("__type", equalTo("NotFoundException"))
-                .body("message", equalTo("API Key not found"));
+                .body("message", equalTo("Invalid API Key identifier specified"));
     }
 }
