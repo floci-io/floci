@@ -651,6 +651,72 @@ class RdsQueryHandlerTest {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
+    // ─────────────── NotFound faults for missing identifiers (AWS parity) ───────────────
+
+    @Test
+    void describeDbInstances_missingIdentifierFaultsWithDbInstanceNotFound() {
+        when(service.listDbInstances("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "missing");
+        Response response = handler.handle("DescribeDBInstances", p);
+
+        assertEquals(404, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>DBInstanceNotFound</Code>"),
+                "Expected DBInstanceNotFound error code, got: " + body);
+        assertTrue(body.contains("DBInstance missing not found."),
+                "Expected AWS-style message, got: " + body);
+    }
+
+    @Test
+    void describeDbInstances_filtersFormReturnsEmptyListForMissing() {
+        when(service.listDbInstances("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "db-instance-id");
+        p.add("Filters.Filter.1.Values.Value.1", "missing");
+        Response response = handler.handle("DescribeDBInstances", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBInstances>"),
+                "Filters form must return an empty list, not fault: " + body);
+        assertFalse(body.contains("DBInstanceNotFound"));
+    }
+
+    @Test
+    void describeDbClusters_missingIdentifierFaultsWithDbClusterNotFoundFault() {
+        when(service.listDbClusters("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "missing");
+        Response response = handler.handle("DescribeDBClusters", p);
+
+        assertEquals(404, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>DBClusterNotFoundFault</Code>"),
+                "Expected DBClusterNotFoundFault error code, got: " + body);
+        assertTrue(body.contains("DBCluster missing not found."),
+                "Expected AWS-style message, got: " + body);
+    }
+
+    @Test
+    void describeDbClusters_filtersFormReturnsEmptyListForMissing() {
+        when(service.listDbClusters("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "db-cluster-id");
+        p.add("Filters.Filter.1.Values.Value.1", "missing");
+        Response response = handler.handle("DescribeDBClusters", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBClusters>"),
+                "Filters form must return an empty list, not fault: " + body);
+        assertFalse(body.contains("DBClusterNotFoundFault"));
+    }
+
     private static MultivaluedMap<String, String> params() {
         return new MultivaluedHashMap<>();
     }
