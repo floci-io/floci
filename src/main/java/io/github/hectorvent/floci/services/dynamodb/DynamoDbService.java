@@ -1710,15 +1710,15 @@ public class DynamoDbService {
             String[] parts = clause.split("\\s+", 3);
             if (parts.length < 2) break;
 
-            String attrName = resolveAttributeName(parts[0], exprAttrNames);
+            String attrPath = parts[0].trim();
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
                 JsonNode addValue = exprAttrValues.get(valuePlaceholder);
                 if (addValue != null) {
-                    JsonNode existingValue = item.get(attrName);
+                    JsonNode existingValue = getValueAtPath(item, attrPath, exprAttrNames);
                     JsonNode newValue = applyAddOperation(existingValue, addValue);
-                    item.set(attrName, newValue);
+                    setValueAtPath(item, attrPath, newValue, exprAttrNames);
                 }
             }
 

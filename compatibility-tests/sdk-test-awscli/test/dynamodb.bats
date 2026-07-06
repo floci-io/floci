@@ -767,3 +767,48 @@ teardown() {
     [ "$foo" = "null" ]
     [ "$bar" = "3" ]
 }
+
+# --- DynamoDB ADD nested map path tests (GH #1756) ---
+
+@test "DynamoDB: ADD on nested map path with expression attribute names" {
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH \
+        --billing-mode PAY_PER_REQUEST >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    # Seed the nested map — SET + if_not_exists on nested placeholder paths works fine
+    aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item1"}}' \
+        --update-expression 'SET #fis = if_not_exists(#fis, :empty)' \
+        --expression-attribute-names '{"#fis":"functionInvocationSummaries"}' \
+        --expression-attribute-values '{":empty":{"M":{}}}' >/dev/null
+
+    aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item1"}}' \
+        --update-expression 'SET #fis.#isa = if_not_exists(#fis.#isa, :seed)' \
+        --expression-attribute-names '{"#fis":"functionInvocationSummaries","#isa":"ISA_10136"}' \
+        --expression-attribute-values '{":seed":{"M":{"eventsAvailable":{"N":"0"}}}}' >/dev/null
+
+    # ADD on the nested placeholder path
+    aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item1"}}' \
+        --update-expression 'ADD #fis.#isa.#ea :one' \
+        --expression-attribute-names '{"#fis":"functionInvocationSummaries","#isa":"ISA_10136","#ea":"eventsAvailable"}' \
+        --expression-attribute-values '{":one":{"N":"1"}}' >/dev/null
+
+    run aws_cmd dynamodb get-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item1"}}' \
+        --consistent-read
+    assert_success
+    ea=$(echo "$output" | jq -r '.Item.functionInvocationSummaries.M.ISA_10136.M.eventsAvailable.N')
+    phantom=$(echo "$output" | jq -r '.Item["#fis.#isa.#ea"] // "null"')
+    [ "$ea" = "1" ]
+    [ "$phantom" = "null" ]
+}

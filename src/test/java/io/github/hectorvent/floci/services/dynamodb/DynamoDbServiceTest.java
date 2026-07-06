@@ -2348,4 +2348,127 @@ class DynamoDbServiceTest {
         JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
         assertEquals("2", stored.get("counter").get("N").asText());
     }
+
+    private void seedNestedCounterItem(String id, String region) {
+        ObjectNode inner = mapper.createObjectNode();
+        inner.set("eventsAvailable", attributeValue("N", "0"));
+        ObjectNode innerWrapper = mapper.createObjectNode();
+        innerWrapper.set("M", inner);
+
+        ObjectNode summaries = mapper.createObjectNode();
+        summaries.set("ISA_10136", innerWrapper);
+        ObjectNode summariesWrapper = mapper.createObjectNode();
+        summariesWrapper.set("M", summaries);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", id));
+        initialItem.set("functionInvocationSummaries", summariesWrapper);
+        service.putItem("Users", initialItem, region);
+    }
+
+    /**
+     * Reproduces GitHub issue #1756: ADD on a nested map path expressed with
+     * ExpressionAttributeNames placeholders ("ADD #fis.#isa.#ea :one") must
+     * resolve the placeholders, traverse the map, and increment the nested
+     * numeric attribute — not create a phantom top-level attribute.
+     */
+    @Test
+    void addOnNestedPathWithExpressionNamesIncrementsNestedCounter() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        seedNestedCounterItem("nested-1", region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#fis", "functionInvocationSummaries");
+        names.put("#isa", "ISA_10136");
+        names.put("#ea", "eventsAvailable");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":one", attributeValue("N", "1"));
+
+        service.updateItem("Users", userIdKey("nested-1"), null,
+                "ADD #fis.#isa.#ea :one", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-1"), region);
+        assertEquals("1", stored.get("functionInvocationSummaries").get("M")
+                        .get("ISA_10136").get("M").get("eventsAvailable").get("N").asText(),
+                "ADD must increment the nested counter");
+        assertFalse(stored.has("#fis.#isa.#ea"),
+                "ADD must not create a phantom top-level attribute named after the raw expression");
+    }
+
+    /**
+     * ADD on a nested map path expressed as a literal dotted path (no
+     * ExpressionAttributeNames) must also traverse the map and increment the
+     * nested numeric attribute.
+     */
+    @Test
+    void addOnNestedPathWithLiteralNamesIncrementsNestedCounter() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        seedNestedCounterItem("nested-2", region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":one", attributeValue("N", "2"));
+
+        service.updateItem("Users", userIdKey("nested-2"), null,
+                "ADD functionInvocationSummaries.ISA_10136.eventsAvailable :one",
+                null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-2"), region);
+        assertEquals("2", stored.get("functionInvocationSummaries").get("M")
+                        .get("ISA_10136").get("M").get("eventsAvailable").get("N").asText(),
+                "ADD on a literal dotted path must increment the nested counter");
+        assertFalse(stored.has("functionInvocationSummaries.ISA_10136.eventsAvailable"),
+                "ADD must not create a phantom top-level attribute named after the dotted path");
+    }
+
+    /**
+     * ADD on a nested numeric attribute that does not yet exist must create it
+     * (treating the missing value as 0) rather than a phantom top-level attribute.
+     */
+    @Test
+    void addOnMissingNestedNumberCreatesNestedAttribute() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        seedNestedCounterItem("nested-3", region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#fis", "functionInvocationSummaries");
+        names.put("#isa", "ISA_10136");
+        names.put("#nc", "newCounter");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":one", attributeValue("N", "1"));
+
+        service.updateItem("Users", userIdKey("nested-3"), null,
+                "ADD #fis.#isa.#nc :one", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-3"), region);
+        JsonNode isa = stored.get("functionInvocationSummaries").get("M").get("ISA_10136").get("M");
+        assertEquals("1", isa.get("newCounter").get("N").asText(),
+                "ADD on a missing nested number must initialize it from 0");
+        assertEquals("0", isa.get("eventsAvailable").get("N").asText(),
+                "existing sibling attribute must be untouched");
+    }
+
+    /**
+     * Regression guard: ADD on a plain top-level attribute must keep working
+     * exactly as before the nested-path fix.
+     */
+    @Test
+    void addOnTopLevelAttributeStillIncrements() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        seedCounterItem("nested-4", 5L, "old");
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#c", "counter");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":inc", attributeValue("N", "3"));
+
+        service.updateItem("Users", userIdKey("nested-4"), null,
+                "ADD #c :inc", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-4"), region);
+        assertEquals("8", stored.get("counter").get("N").asText());
+    }
 }
