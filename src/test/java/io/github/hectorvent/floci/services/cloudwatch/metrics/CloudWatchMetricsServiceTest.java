@@ -235,7 +235,7 @@ class CloudWatchMetricsServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.setAlarmState("missing-alarm", "ALARM", "reason", null, REGION));
 
-        assertEquals(400, ex.getHttpStatus());
+        assertEquals(404, ex.getHttpStatus());
         assertEquals("ResourceNotFound", ex.getErrorCode());
     }
 
