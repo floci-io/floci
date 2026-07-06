@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.ws.rs.core.MediaType;
@@ -98,7 +99,8 @@ class IamEnforcementFilterTest {
 
         IamEnforcementFilter filter = new IamEnforcementFilter(
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
-                requestContext, conditionContextResolver);
+                requestContext, conditionContextResolver,
+                mock(CloudTrailService.class), mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class));
 
         filter.filter(containerRequest);
 
@@ -132,7 +134,8 @@ class IamEnforcementFilterTest {
 
         IamEnforcementFilter filter = new IamEnforcementFilter(
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
-                requestContext, conditionContextResolver);
+                requestContext, conditionContextResolver,
+                mock(CloudTrailService.class), mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class));
 
         filter.filter(containerRequest);
 
