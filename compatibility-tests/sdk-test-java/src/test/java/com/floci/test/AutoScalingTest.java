@@ -30,7 +30,7 @@ class AutoScalingTest {
             "Valid requests must contain either the InstanceID parameter "
                     + "or both the ImageId and InstanceType parameters.";
     private static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
-            "You cannot update the launch template, launch configuration, or mixed instances policy while an instance refresh with a desired configuration is active.";
+            "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
     private static AutoScalingClient autoScaling;
     private static Ec2Client ec2;
