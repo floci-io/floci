@@ -3,6 +3,12 @@ package io.github.hectorvent.floci.services.apigatewayv2.proxy;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -12,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
@@ -39,17 +46,7 @@ public class HttpProxyInvoker {
 
     /** Headers java.net.http.HttpClient refuses to set via Builder.header(). */
     private static final Set<String> RESTRICTED = Set.of(
-            "connection", "content-length", "expect", "upgrade");
-
-    static {
-        String key = "jdk.httpclient.allowRestrictedHeaders";
-        String configured = System.getProperty(key, "");
-        if (configured.isBlank()) {
-            System.setProperty(key, "host");
-        } else if (List.of(configured.toLowerCase().split(",")).stream().map(String::trim).noneMatch("host"::equals)) {
-            System.setProperty(key, configured + ",host");
-        }
-    }
+            "connection", "content-length", "expect", "host", "upgrade");
 
     // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
     // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the
@@ -92,10 +89,20 @@ public class HttpProxyInvoker {
         mapper.apply(integration.getRequestParameters(), builder, ctx);
 
         // 5. Build java.net.http.HttpRequest
+        String finalUrl = buildFinalUrl(builder);
+        if (hasHeader(builder, "Host") && finalUrl.startsWith("http://")) {
+            try {
+                return invokeHttpWithHostOverride(finalUrl, method, builder);
+            } catch (Exception e) {
+                LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
+                return errorResult("Bad Gateway: " + e.getMessage());
+            }
+        }
+
         HttpRequest.Builder hrb;
         try {
             hrb = HttpRequest.newBuilder()
-                    .uri(URI.create(buildFinalUrl(builder)))
+                    .uri(URI.create(finalUrl))
                     .timeout(Duration.ofSeconds(30));
         } catch (IllegalArgumentException e) {
             LOG.warnv("HTTP_PROXY: invalid target URL: {0}", e.getMessage());
@@ -132,6 +139,100 @@ public class HttpProxyInvoker {
             LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
             return errorResult("Bad Gateway: " + e.getMessage());
         }
+    }
+
+    private static boolean hasHeader(ProxyRequestBuilder builder, String headerName) {
+        return builder.headers().keySet().stream().anyMatch(headerName::equalsIgnoreCase);
+    }
+
+    private static String firstHeader(ProxyRequestBuilder builder, String headerName) {
+        for (Map.Entry<String, List<String>> entry : builder.headers().entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(headerName) && !entry.getValue().isEmpty()) {
+                return entry.getValue().get(0);
+            }
+        }
+        return null;
+    }
+
+    private static ProxyResult invokeHttpWithHostOverride(String finalUrl, String method, ProxyRequestBuilder builder)
+            throws IOException {
+        URI uri = URI.create(finalUrl);
+        int port = uri.getPort() == -1 ? 80 : uri.getPort();
+        String path = uri.getRawPath();
+        if (path == null || path.isBlank()) {
+            path = "/";
+        }
+        if (uri.getRawQuery() != null) {
+            path += "?" + uri.getRawQuery();
+        }
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(uri.getHost(), port), 10_000);
+            socket.setSoTimeout(30_000);
+
+            OutputStream out = socket.getOutputStream();
+            byte[] body = builder.body() == null ? new byte[0] : builder.body();
+            StringBuilder request = new StringBuilder()
+                    .append(method.toUpperCase(Locale.ROOT)).append(' ').append(path).append(" HTTP/1.1\r\n")
+                    .append("Host: ").append(firstHeader(builder, "Host")).append("\r\n")
+                    .append("Connection: close\r\n");
+            for (Map.Entry<String, List<String>> header : builder.headers().entrySet()) {
+                String name = header.getKey();
+                String lower = name.toLowerCase(Locale.ROOT);
+                if (RESTRICTED.contains(lower) || lower.equals("connection")) {
+                    continue;
+                }
+                for (String value : header.getValue()) {
+                    request.append(name).append(": ").append(value).append("\r\n");
+                }
+            }
+            if (body.length > 0) {
+                request.append("Content-Length: ").append(body.length).append("\r\n");
+            }
+            request.append("\r\n");
+            out.write(request.toString().getBytes(StandardCharsets.ISO_8859_1));
+            out.write(body);
+            out.flush();
+
+            return readRawHttpResponse(socket.getInputStream());
+        }
+    }
+
+    private static ProxyResult readRawHttpResponse(InputStream input) throws IOException {
+        ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
+        int previous3 = -1;
+        int previous2 = -1;
+        int previous1 = -1;
+        int current;
+        while ((current = input.read()) != -1) {
+            headerBytes.write(current);
+            if (previous3 == '\r' && previous2 == '\n' && previous1 == '\r' && current == '\n') {
+                break;
+            }
+            previous3 = previous2;
+            previous2 = previous1;
+            previous1 = current;
+        }
+
+        String headersText = headerBytes.toString(StandardCharsets.ISO_8859_1);
+        String[] lines = headersText.split("\r\n");
+        if (lines.length == 0 || !lines[0].startsWith("HTTP/")) {
+            throw new IOException("invalid HTTP response");
+        }
+        String[] status = lines[0].split(" ", 3);
+        int statusCode = Integer.parseInt(status[1]);
+        Map<String, String> headers = new LinkedHashMap<>();
+        for (int i = 1; i < lines.length; i++) {
+            int separator = lines[i].indexOf(':');
+            if (separator <= 0) {
+                continue;
+            }
+            String name = lines[i].substring(0, separator);
+            if (!HOP_BY_HOP.contains(name.toLowerCase(Locale.ROOT))) {
+                headers.put(name, lines[i].substring(separator + 1).trim());
+            }
+        }
+        return new ProxyResult(statusCode, headers, input.readAllBytes());
     }
 
     private static String buildFinalUrl(ProxyRequestBuilder builder) {

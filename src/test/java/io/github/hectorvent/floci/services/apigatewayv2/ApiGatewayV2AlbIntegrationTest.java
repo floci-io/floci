@@ -14,15 +14,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -257,20 +255,11 @@ class ApiGatewayV2AlbIntegrationTest {
         // Verifies the ALB data plane independently of the API Gateway path: hit the
         // listener directly. Polls because server.listen() is async — if the listener
         // never accepts a connection we get a fast ConnectException and retry.
-        HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(2))
-                .build();
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + LISTENER_PORT + "/health"))
-                .header("Host", lbDnsName)
-                .timeout(Duration.ofSeconds(3))
-                .GET()
-                .build();
         long deadline = System.currentTimeMillis() + 15_000;
         Exception lastErr = null;
         while (System.currentTimeMillis() < deadline) {
             try {
-                HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+                RawHttpResponse resp = rawGetWithHost("/health", lbDnsName);
                 if (resp.statusCode() == 200 && resp.body().contains("\"status\":\"ok\"")) {
                     return;
                 }
@@ -282,6 +271,47 @@ class ApiGatewayV2AlbIntegrationTest {
         }
         Assertions.fail("listener direct probe never succeeded: " + lastErr);
     }
+
+    private static RawHttpResponse rawGetWithHost(String path, String host) throws IOException {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", LISTENER_PORT), 2_000);
+            socket.setSoTimeout(3_000);
+            OutputStream output = socket.getOutputStream();
+            String request = "GET " + path + " HTTP/1.1\r\n"
+                    + "Host: " + host + "\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n";
+            output.write(request.getBytes(StandardCharsets.ISO_8859_1));
+            output.flush();
+            return readRawHttpResponse(socket.getInputStream());
+        }
+    }
+
+    private static RawHttpResponse readRawHttpResponse(InputStream input) throws IOException {
+        ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
+        int previous3 = -1;
+        int previous2 = -1;
+        int previous1 = -1;
+        int current;
+        while ((current = input.read()) != -1) {
+            headerBytes.write(current);
+            if (previous3 == '\r' && previous2 == '\n' && previous1 == '\r' && current == '\n') {
+                break;
+            }
+            previous3 = previous2;
+            previous2 = previous1;
+            previous1 = current;
+        }
+
+        String[] lines = headerBytes.toString(StandardCharsets.ISO_8859_1).split("\r\n");
+        if (lines.length == 0 || !lines[0].startsWith("HTTP/")) {
+            throw new IOException("invalid HTTP response");
+        }
+        int statusCode = Integer.parseInt(lines[0].split(" ", 3)[1]);
+        return new RawHttpResponse(statusCode, new String(input.readAllBytes(), StandardCharsets.UTF_8));
+    }
+
+    private record RawHttpResponse(int statusCode, String body) {}
 
     /** Full HttpAlbIntegration happy path: execute-api → ALB resolver → listener → stub returns 200. */
     @Test
