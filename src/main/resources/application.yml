@@ -109,6 +109,10 @@ floci:
         flush-interval-ms: 5000
       codedeploy:
         flush-interval-ms: 5000
+      tagging:
+        flush-interval-ms: 5000
+      elasticbeanstalk:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
@@ -155,6 +159,10 @@ floci:
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""                     # FLOCI_TLS_KEY_PATH (PEM private key file)
     self-signed: true                  # FLOCI_TLS_SELF_SIGNED — auto-generate a self-signed cert if no cert-path provided
+    aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
+
+  protocols:
+    strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
 
   docker:
     log-max-size: "10m"
@@ -207,6 +215,10 @@ floci:
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
+    amazonmq:
+      enabled: true
+      mock: false
+      default-image: "rabbitmq:3-management"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -221,6 +233,7 @@ floci:
       default-image: "valkey/valkey:8"
     rds:
       enabled: true
+      mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
@@ -299,6 +312,11 @@ floci:
       imds-port: 9169
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
+      publish-security-group-ports: true
+      app-port-range-start: 30000
+      app-port-range-end: 30999
+      max-published-ports-per-instance: 20
+      socat-image: alpine/socat
       mock: false
     ecs:
       enabled: true
@@ -378,6 +396,8 @@ floci:
       enabled: true
       emit-mode: synchronous
     cloudtrail:
+      enabled: true
+    cloudcontrol:
       enabled: true
     cloudfront:
       enabled: true

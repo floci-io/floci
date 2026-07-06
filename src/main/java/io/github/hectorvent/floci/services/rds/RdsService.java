@@ -222,6 +222,9 @@ public class RdsService implements Resettable {
             getDbSubnetGroup(dbSubnetGroupName);
         }
         validateInstanceParameterGroup(paramGroupName, engineParam, engineVersion);
+        boolean mock = config.services().rds().mock();
+        // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
+        // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
@@ -230,8 +233,8 @@ public class RdsService implements Resettable {
             masterPassword = generatedMasterPassword();
         }
 
-        String backendHost;
-        int backendPort;
+        String backendHost = null;
+        int backendPort = 0;
         String containerId = null;
         String containerHost = null;
         int containerPort = 0;
@@ -240,7 +243,7 @@ public class RdsService implements Resettable {
         PlacementResolution placement;
 
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
-            // Cluster member — share the cluster's container
+            // Cluster member — share the cluster's container (none exists in mock mode)
             DbCluster cluster = clusters.get(dbClusterIdentifier).orElseThrow(() ->
                     new AwsException("DBClusterNotFoundFault",
                             "DB cluster " + dbClusterIdentifier + " not found.", 404));
@@ -249,25 +252,31 @@ public class RdsService implements Resettable {
             containerId = cluster.getContainerId();
             containerHost = cluster.getContainerHost();
             containerPort = cluster.getContainerPort();
-            instanceDockerVolumeName = cluster.getDockerVolumeName() != null
-                    ? cluster.getDockerVolumeName()
-                    : volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier());
+            if (!mock) {
+                // In mock mode the cluster has no volume id, so the fallback would persist a
+                // bogus volume name that a later non-mock restore could try to reference.
+                instanceDockerVolumeName = cluster.getDockerVolumeName() != null
+                        ? cluster.getDockerVolumeName()
+                        : volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier());
+            }
             placement = PlacementResolution.fromCluster(cluster);
         } else {
             placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz);
-            // Standalone instance — start its own container
-            String image = imageForEngine(engine, engineVersion);
-            instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
-            RdsContainerHandle handle = containerManager.start(id, instanceVolumeId, engine, image, masterUsername, masterPassword, dbName);
-            backendHost = handle.getHost();
-            backendPort = handle.getPort();
-            containerId = handle.getContainerId();
-            containerHost = handle.getHost();
-            containerPort = handle.getPort();
-            instanceDockerVolumeName = volumeName(instanceVolumeId, id);
+            if (!mock) {
+                // Standalone instance — start its own container
+                String image = imageForEngine(engine, engineVersion);
+                instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+                RdsContainerHandle handle = containerManager.start(id, instanceVolumeId, engine, image, masterUsername, masterPassword, dbName);
+                backendHost = handle.getHost();
+                backendPort = handle.getPort();
+                containerId = handle.getContainerId();
+                containerHost = handle.getHost();
+                containerPort = handle.getPort();
+                instanceDockerVolumeName = volumeName(instanceVolumeId, id);
+            }
         }
 
-        DbEndpoint endpoint = new DbEndpoint(proxyEndpointHost(), proxyPort);
+        DbEndpoint endpoint = new DbEndpoint(mock ? "localhost" : proxyEndpointHost(), proxyPort);
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
@@ -291,9 +300,11 @@ public class RdsService implements Resettable {
             attachManagedMasterUserSecret(instance, region, masterUserSecretKmsKeyId);
         }
 
-        proxyManager.startProxy(id, engine, iamEnabled, proxyPort, backendHost, backendPort,
-                masterUsername, masterPassword, dbName,
-                (user, pw) -> validateDbPassword(id, user, pw));
+        if (!mock) {
+            proxyManager.startProxy(id, engine, iamEnabled, proxyPort, backendHost, backendPort,
+                    masterUsername, masterPassword, dbName,
+                    (user, pw) -> validateDbPassword(id, user, pw));
+        }
 
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
             DbCluster cluster = clusters.get(dbClusterIdentifier).orElse(null);
@@ -443,34 +454,39 @@ public class RdsService implements Resettable {
         instance.setStatus(DbInstanceStatus.REBOOTING);
         instances.put(id, instance);
 
-        // Stop proxy during reboot
-        proxyManager.stopProxy(id);
+        boolean mock = config.services().rds().mock();
+        if (!mock) {
+            // Stop proxy during reboot
+            proxyManager.stopProxy(id);
 
-        // Restart container if it's a standalone instance
-        if (instance.getDbClusterIdentifier() == null && instance.getContainerId() != null) {
-            try {
-                containerManager.stop(buildHandle(instance));
-            } catch (Exception e) {
-                LOG.warnv("Error stopping container during reboot of {0}: {1}", id, e.getMessage());
+            // Restart container if it's a standalone instance
+            if (instance.getDbClusterIdentifier() == null && instance.getContainerId() != null) {
+                try {
+                    containerManager.stop(buildHandle(instance));
+                } catch (Exception e) {
+                    LOG.warnv("Error stopping container during reboot of {0}: {1}", id, e.getMessage());
+                }
+                String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
+                RdsContainerHandle handle = containerManager.start(id, instance.getVolumeId(), instance.getEngine(), image,
+                        instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
+                instance.setContainerId(handle.getContainerId());
+                instance.setContainerHost(handle.getHost());
+                instance.setContainerPort(handle.getPort());
             }
-            String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-            RdsContainerHandle handle = containerManager.start(id, instance.getVolumeId(), instance.getEngine(), image,
-                    instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
-            instance.setContainerId(handle.getContainerId());
-            instance.setContainerHost(handle.getHost());
-            instance.setContainerPort(handle.getPort());
         }
 
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         instances.put(id, instance);
 
-        String effectiveMasterUser = instance.getMasterUsername() != null
-                ? instance.getMasterUsername() : "root";
-        proxyManager.startProxy(id, instance.getEngine(),
-                instance.isIamDatabaseAuthenticationEnabled(),
-                instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
-                effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
-                (user, pw) -> validateDbPassword(id, user, pw));
+        if (!mock) {
+            String effectiveMasterUser = instance.getMasterUsername() != null
+                    ? instance.getMasterUsername() : "root";
+            proxyManager.startProxy(id, instance.getEngine(),
+                    instance.isIamDatabaseAuthenticationEnabled(),
+                    instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
+                    effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
+                    (user, pw) -> validateDbPassword(id, user, pw));
+        }
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
@@ -488,15 +504,20 @@ public class RdsService implements Resettable {
         instance.setStatus(DbInstanceStatus.DELETING);
         instances.put(id, instance);
 
-        proxyManager.stopProxy(id);
+        boolean mock = config.services().rds().mock();
+        if (!mock) {
+            proxyManager.stopProxy(id);
+        }
 
         String clusterId = instance.getDbClusterIdentifier();
         if (clusterId == null || clusterId.isBlank()) {
-            // Standalone — stop its container and clean up its Docker volume
-            if (instance.getContainerId() != null) {
-                containerManager.stop(buildHandle(instance));
+            // Standalone — stop its container and clean up its Docker volume (neither exists in mock mode)
+            if (!mock) {
+                if (instance.getContainerId() != null) {
+                    containerManager.stop(buildHandle(instance));
+                }
+                containerManager.removeVolume(instance.getDbInstanceIdentifier(), instance.getVolumeId());
             }
-            containerManager.removeVolume(instance.getDbInstanceIdentifier(), instance.getVolumeId());
         } else {
             // Cluster member — remove from cluster's member list
             DbCluster cluster = clusters.get(clusterId).orElse(null);
@@ -534,21 +555,25 @@ public class RdsService implements Resettable {
         DatabaseEngine engine = resolveEngine(engineParam);
         validateClusterParameterGroup(paramGroupName, engineParam, engineVersion);
         PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz);
+
+        boolean mock = config.services().rds().mock();
+        // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
+        // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = allocateProxyPort();
-        String image = imageForEngine(engine, engineVersion);
-        String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
-
-        RdsContainerHandle handle = containerManager.start(id, clusterVolumeId, engine, image, masterUsername, masterPassword, databaseName);
-
-        DbEndpoint endpoint = new DbEndpoint(proxyEndpointHost(), proxyPort);
+        DbEndpoint endpoint = new DbEndpoint(mock ? "localhost" : proxyEndpointHost(), proxyPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
-        cluster.setContainerId(handle.getContainerId());
-        cluster.setContainerHost(handle.getHost());
-        cluster.setContainerPort(handle.getPort());
-        cluster.setVolumeId(clusterVolumeId);
-        cluster.setDockerVolumeName(volumeName(clusterVolumeId, id));
+        if (!mock) {
+            String image = imageForEngine(engine, engineVersion);
+            String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+            RdsContainerHandle handle = containerManager.start(id, clusterVolumeId, engine, image, masterUsername, masterPassword, databaseName);
+            cluster.setContainerId(handle.getContainerId());
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
+            cluster.setVolumeId(clusterVolumeId);
+            cluster.setDockerVolumeName(volumeName(clusterVolumeId, id));
+        }
         cluster.setDbSubnetGroupName(placement.dbSubnetGroupName());
         cluster.setVpcId(placement.vpcId());
         cluster.setAvailabilityZone(placement.availabilityZone());
@@ -559,13 +584,16 @@ public class RdsService implements Resettable {
         cluster.setDbClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
         cluster.setDbClusterArn(regionResolver.buildArn("rds", region, "cluster:" + id));
 
-        String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
-        proxyManager.startProxy(id, engine, iamEnabled, proxyPort, handle.getHost(), handle.getPort(),
-                effectiveMasterUser, masterPassword, databaseName,
-                (user, pw) -> validateDbClusterPassword(id, user, pw));
+        if (!mock) {
+            String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
+            proxyManager.startProxy(id, engine, iamEnabled, proxyPort, cluster.getContainerHost(), cluster.getContainerPort(),
+                    effectiveMasterUser, masterPassword, databaseName,
+                    (user, pw) -> validateDbClusterPassword(id, user, pw));
+        }
 
         clusters.put(id, cluster);
-        LOG.infov("DB cluster {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
+        LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint=localhost:{3}",
+                id, String.valueOf(mock), engine, String.valueOf(proxyPort));
         return cluster;
     }
 
@@ -608,12 +636,13 @@ public class RdsService implements Resettable {
         cluster.setStatus(DbInstanceStatus.DELETING);
         clusters.put(id, cluster);
 
-        proxyManager.stopProxy(id);
-
-        if (cluster.getContainerId() != null) {
-            containerManager.stop(buildClusterHandle(cluster));
+        if (!config.services().rds().mock()) {
+            proxyManager.stopProxy(id);
+            if (cluster.getContainerId() != null) {
+                containerManager.stop(buildClusterHandle(cluster));
+            }
+            containerManager.removeVolume(id, cluster.getVolumeId());
         }
-        containerManager.removeVolume(id, cluster.getVolumeId());
 
         releaseProxyPort(cluster.getProxyPort());
         clusters.delete(id);
@@ -927,6 +956,14 @@ public class RdsService implements Resettable {
             if (cluster.getStatus() == DbInstanceStatus.DELETING) {
                 continue;
             }
+            if (config.services().rds().mock()) {
+                int mockPort = reserveOrAllocateProxyPort(cluster.getProxyPort());
+                cluster.setProxyPort(mockPort);
+                cluster.setEndpoint(new DbEndpoint("localhost", mockPort));
+                cluster.setReaderEndpoint(new DbEndpoint("localhost", mockPort));
+                cluster.setStatus(DbInstanceStatus.AVAILABLE);
+                continue;
+            }
             int proxyPort = reserveOrAllocateProxyPort(cluster.getProxyPort());
             cluster.setProxyPort(proxyPort);
             cluster.setEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
@@ -961,6 +998,13 @@ public class RdsService implements Resettable {
     private void restoreInstances() {
         for (DbInstance instance : allInstances()) {
             if (instance.getStatus() == DbInstanceStatus.DELETING) {
+                continue;
+            }
+            if (config.services().rds().mock()) {
+                int mockPort = reserveOrAllocateProxyPort(instance.getProxyPort());
+                instance.setProxyPort(mockPort);
+                instance.setEndpoint(new DbEndpoint("localhost", mockPort));
+                instance.setStatus(DbInstanceStatus.AVAILABLE);
                 continue;
             }
             int proxyPort = reserveOrAllocateProxyPort(instance.getProxyPort());

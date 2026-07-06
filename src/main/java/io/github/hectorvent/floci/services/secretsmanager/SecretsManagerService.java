@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -291,6 +292,108 @@ public class SecretsManagerService {
                 .map(s -> s.getDeletedDate() == null)
                 .orElse(false));
     }
+
+    public List<Secret> listSecrets(String region, List<Filter> filters) {
+        List<Secret> allSecrets = listSecrets(region);
+        if (filters == null || filters.isEmpty()) {
+            return allSecrets;
+        }
+        List<Secret> result = new ArrayList<>();
+        for (Secret secret : allSecrets) {
+            if (matchesFilters(secret, filters, region)) {
+                result.add(secret);
+            }
+        }
+        return result;
+    }
+
+    public List<BatchSecretValue> batchGetSecretValueByFilters(List<Filter> filters, String region) {
+        List<BatchSecretValue> result = new ArrayList<>();
+        List<Secret> allSecrets = listSecrets(region);
+        for (Secret secret : allSecrets) {
+            if (matchesFilters(secret, filters, region)) {
+                SecretVersion version = findVersionByStage(secret, AWSCURRENT);
+                if (version != null) {
+                    result.add(new BatchSecretValue(
+                            secret.getArn(),
+                            secret.getName(),
+                            version.getSecretString(),
+                            version.getSecretBinary(),
+                            version.getVersionId(),
+                            version.getVersionStages(),
+                            version.getCreatedDate()
+                    ));
+                }
+            }
+        }
+        // Stable order (created date, then name) so offset-based pagination in the handler
+        // never skips or duplicates entries across calls — same contract as ListSecrets.
+        result.sort(Comparator.comparing(BatchSecretValue::createdDate,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(BatchSecretValue::name, Comparator.nullsLast(Comparator.naturalOrder())));
+        return result;
+    }
+
+    private boolean matchesFilters(Secret secret, List<Filter> filters, String region) {
+        if (filters == null || filters.isEmpty()) {
+            return true;
+        }
+        for (Filter filter : filters) {
+            if (!matchesFilter(secret, filter, region)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean matchesFilter(Secret secret, Filter filter, String region) {
+        String key = filter.key();
+        List<String> values = filter.values();
+        if (values == null || values.isEmpty()) {
+            return true;
+        }
+
+        for (String val : values) {
+            if (matchesValue(secret, key, val, region)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesValue(Secret secret, String key, String filterVal, String region) {
+        boolean negate = filterVal.startsWith("!");
+        String targetVal = negate ? filterVal.substring(1) : filterVal;
+
+        boolean matched = matchesTarget(secret, key, targetVal, region);
+        return negate ? !matched : matched;
+    }
+
+    private boolean matchesTarget(Secret secret, String key, String targetVal, String region) {
+        return switch (key) {
+            case "name" -> secret.getName() != null && secret.getName().startsWith(targetVal);
+            case "description" -> secret.getDescription() != null && secret.getDescription().toLowerCase().startsWith(targetVal.toLowerCase());
+            case "tag-key" -> secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.key() != null && t.key().startsWith(targetVal));
+            case "tag-value" -> secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.value() != null && t.value().startsWith(targetVal));
+            // Floci does not model cross-region replication, so every secret's primary region
+            // IS the region it lives in — comparing the request region is equivalent to a
+            // per-secret attribute here (all match when the prefix fits, none otherwise).
+            case "primary-region" -> region != null && region.startsWith(targetVal);
+            // owning-service is a valid Filter.Key enum value but is currently deferred (always returning false)
+            case "owning-service" -> false;
+            case "all" -> {
+                String lowerVal = targetVal.toLowerCase();
+                boolean nameMatch = secret.getName() != null && secret.getName().toLowerCase().startsWith(lowerVal);
+                boolean descMatch = secret.getDescription() != null && secret.getDescription().toLowerCase().startsWith(lowerVal);
+                boolean tagKeyMatch = secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.key() != null && t.key().toLowerCase().startsWith(lowerVal));
+                boolean tagValueMatch = secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.value() != null && t.value().toLowerCase().startsWith(lowerVal));
+                yield nameMatch || descMatch || tagKeyMatch || tagValueMatch;
+            }
+            default -> false;
+        };
+    }
+
+    public record Filter(String key, List<String> values) {}
 
     public Secret deleteSecret(String secretId, Integer recoveryWindowInDays, boolean forceDelete, String region) {
         Secret secret = resolveSecret(secretId, region);

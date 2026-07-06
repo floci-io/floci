@@ -178,7 +178,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**65 AWS services. Broad coverage. Free forever.**
+**68 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -225,7 +225,7 @@ Floci supports local emulation for application services, data services, eventing
 | Containers and compute | ECS, EC2, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Elastic Beanstalk, ELB v2 |
 | Data, analytics, and AI | Athena, Glue, EMR, Firehose, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
-| Messaging and transfer | SES, Kinesis, MSK, Transfer Family |
+| Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family |
 | Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
@@ -253,7 +253,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Kinesis | In-process | Streams, shards, enhanced fan-out, split and merge |
 | Secrets Manager | In-process | Versioning, resource policies, tagging |
 | Step Functions | In-process | ASL execution, task tokens, execution history |
-| CloudFormation | In-process | Stacks, change sets, resource provisioning |
+| CloudFormation | In-process | Stacks, change sets, resource provisioning, StackSets (cross-account instances) |
 | EventBridge | In-process | Custom buses, rules, SQS, SNS and Lambda targets |
 | EventBridge Pipes | In-process | Poller-based integration connecting SQS, Kinesis, DynamoDB, and MSK sources to targets with optional filtering |
 | EventBridge Scheduler | In-process | Schedule groups, schedules, flexible time windows, retry policies, DLQs |
@@ -266,6 +266,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server (default) or Neo4j for openCypher/Bolt (`NEPTUNE_DB_TYPE`); RDS-shaped control plane; SigV4 proxy on port 8182 |
 | DocumentDB | Real Docker, mock mode available | MongoDB-compatible cluster via real MongoDB containers; RDS-shaped control plane; MongoDB wire protocol on port 27017 |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
+| Amazon MQ | Real Docker | RabbitMQ broker via rabbitmq:3-management; AMQP + management console |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets, steps, security configurations, tagging |
@@ -320,6 +321,7 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | Neptune (openCypher) | `neo4j:5-community` | Neo4j backend when `FLOCI_SERVICES_NEPTUNE_DB_TYPE=neo4j`; openCypher over Bolt |
 | DocumentDB | `mongo:7.0` | MongoDB engine; MongoDB wire protocol on port 27017 |
 | MSK | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda |
+| Amazon MQ | `rabbitmq:3-management` | RabbitMQ broker; AMQP on port 5672, management console on 15672 |
 | EC2 | AMI-mapped Linux images | Linux containers, SSH key injection, UserData, IMDS, IAM credentials |
 | ECS | User-specified task image | Container lifecycle, start, stop, health checks |
 | EKS | `rancher/k3s:latest` | Kubernetes API server via k3s |
@@ -670,17 +672,16 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 
 | Module | Language / Tool | SDK / Client | Tests |
 |---|---|---|---:|
-| `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 899 |
-| `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 366 |
-| `sdk-test-python` | Python 3 | boto3 | 272 |
-| `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 145 |
-| `sdk-test-awscli` | Bash | AWS CLI v2 | 152 |
-| `sdk-test-rust` | Rust | AWS SDK for Rust | 90 |
-| `compat-terraform` | Terraform | v1.10+ | 14 |
-| `compat-opentofu` | OpenTofu | v1.9+ | 14 |
-| `compat-cdk` | AWS CDK | v2+ | 17 |
+| `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 1,326 |
+| `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 449 |
+| `sdk-test-python` | Python 3 | boto3 | 311 |
+| `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 157 |
+| `sdk-test-awscli` | Bash | AWS CLI v2 | 205 |
+| `compat-terraform` | Terraform | v1.10+ | 22 |
+| `compat-opentofu` | OpenTofu | v1.9+ | 16 |
+| `compat-cdk` | AWS CDK | v2+ | 20 |
 
-**1,969 automated compatibility tests across 6 SDKs and 3 IaC tools.**
+**2,506 automated compatibility tests across 5 SDKs and 3 IaC tools.**
 
 ## Migrating from LocalStack
 
@@ -780,6 +781,33 @@ Without this, services may return URLs using `localhost`, which points to the wr
 ## Community
 
 Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design tradeoffs, and rough proposals are welcome.
+
+## Sponsors
+
+Floci is independent open source, funded by its users. If Floci saves you time,
+consider [sponsoring the project](https://github.com/sponsors/floci-io) — every
+tier keeps the emulators fast, light, and free.
+
+### 🥇 Gold
+
+Large logo with top placement, a dedicated support channel, input on roadmap
+priorities, and custom integration help.
+
+*Your logo here — [become a Gold sponsor](https://github.com/sponsors/floci-io).*
+
+### 🥈 Silver
+
+Logo in this README and on floci.io, priority issue support, and a mention in
+release notes.
+
+*Your logo here — [become a Silver sponsor](https://github.com/sponsors/floci-io).*
+
+### 🥉 Community
+
+Name in this README, a sponsor badge on GitHub, and our sincere thanks.
+
+- [Nexxion.ai](https://github.com/Nexxion-ai)
+- [Your name here](https://github.com/sponsors/floci-io)
 
 ## Star History
 

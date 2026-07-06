@@ -50,8 +50,12 @@ public class EmrService {
     // ──────────────────────────── Cluster lifecycle ────────────────────────────
 
     public EmrCluster runJobFlow(EmrCluster cluster, String region) {
-        if (cluster.getName() == null || cluster.getName().isBlank()) {
-            throw new AwsException("InternalServerError", "Name is required.", 500);
+        // Only a missing Name fails AWS's framework validation: the member is REQUIRED but its
+        // constraint is len=[0..256], so an explicit empty string is accepted by real EMR.
+        if (cluster.getName() == null) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'name' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
         }
         String id = "j-" + randomId(13);
         cluster.setId(id);
@@ -104,14 +108,17 @@ public class EmrService {
     }
 
     public void terminateJobFlows(List<String> ids) {
+        // AWS terminates the unprotected clusters in the request and then fails it with a
+        // ValidationException if any were termination protected.
+        boolean anyProtected = false;
         for (String id : ids) {
             EmrCluster cluster = clusterStore.get(id).orElse(null);
             if (cluster == null) {
                 continue;
             }
             if (cluster.isTerminationProtected()) {
-                throw new AwsException("InternalServerError",
-                        "Cluster " + id + " is protected from termination.", 500);
+                anyProtected = true;
+                continue;
             }
             if ("TERMINATED".equals(cluster.getState())) {
                 continue;
@@ -121,6 +128,10 @@ public class EmrService {
             cluster.setStateChangeMessage("Terminated by user request");
             cluster.setEndDateTime(Instant.now());
             clusterStore.put(id, cluster);
+        }
+        if (anyProtected) {
+            throw new AwsException("ValidationException",
+                    "Could not shut down one or more job flows since they are termination protected.", 400);
         }
     }
 
@@ -156,7 +167,7 @@ public class EmrService {
 
     public List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
         EmrCluster cluster = clusterStore.get(clusterId).orElseThrow(() -> new AwsException(
-                "InternalServerError", "Cluster " + clusterId + " does not exist.", 500));
+                "InvalidRequestException", "Cluster id '" + clusterId + "' is not valid.", 400));
         List<String> ids = new ArrayList<>();
         for (EmrStep step : steps) {
             initStep(step);

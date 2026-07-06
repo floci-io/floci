@@ -12,7 +12,8 @@ name: Nightly
 
 on:
   schedule:
-    - cron: '0 4 * * *'   # 23:00 CT (CDT/UTC-5); shifts to 23:00 CST in winter
+    - cron: '0 23 * * *'
+      timezone: 'America/Chicago'
   workflow_dispatch:        # Allow maintainers to trigger manually
 
 permissions:
@@ -28,6 +29,7 @@ jobs:
   prepare:
     name: Prepare nightly version
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' || !github.event.repository.fork
     outputs:
       version: ${{ steps.date.outputs.version }}
 
@@ -44,11 +46,11 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
-      - uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f # v1
+      - uses: graalvm/setup-graalvm@6f3fa030c4b8f77c1f554a860f593a654538fa38 # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
@@ -79,11 +81,11 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
-      - uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f # v1
+      - uses: graalvm/setup-graalvm@6f3fa030c4b8f77c1f554a860f593a654538fa38 # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
@@ -114,7 +116,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
@@ -147,7 +149,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6.1.2
+        uses: aws-actions/configure-aws-credentials@v6.2.0
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1

@@ -33,6 +33,13 @@ public class FunctionEventInvokeConfig {
         return lastModifiedMillis / 1000.0;
     }
 
+    // Deserialization counterpart so the timestamp survives a persisted-state reload;
+    // without it "LastModified" falls into ignoreUnknown and resets to 0.
+    @JsonProperty("LastModified")
+    void setLastModifiedSeconds(double seconds) {
+        this.lastModifiedMillis = Math.round(seconds * 1000);
+    }
+
     public String getFunctionArn() { return functionArn; }
     public void setFunctionArn(String functionArn) { this.functionArn = functionArn; }
 

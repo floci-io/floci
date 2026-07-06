@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * A mutable {@link Map} facade over {@link StorageBackend}.
@@ -53,6 +54,24 @@ public class StorageBackedMap<V>
             return false;
         }
         return storage.get(stringKey).isPresent();
+    }
+
+    @Override
+    public synchronized V computeIfAbsent(String key, Function<? super String, ? extends V> mappingFunction)
+    {
+        Objects.requireNonNull(key, "key is null");
+        Objects.requireNonNull(mappingFunction, "mappingFunction is null");
+
+        V value = get(key);
+        if (value != null) {
+            return value;
+        }
+
+        V newValue = mappingFunction.apply(key);
+        if (newValue != null) {
+            storage.put(key, newValue);
+        }
+        return newValue;
     }
 
     @Override

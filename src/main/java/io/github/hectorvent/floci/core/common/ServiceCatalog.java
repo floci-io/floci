@@ -48,6 +48,15 @@ public class ServiceCatalog {
             }
             for (String prefix : descriptor.targetPrefixes()) {
                 targets.add(Map.entry(prefix, descriptor));
+                // The smithy-rpc-v2 request path is /service/{serviceName}/operation/{op},
+                // where {serviceName} is the Smithy service shape name — for AWS services
+                // this equals the X-Amz-Target prefix without its trailing dot (verified
+                // against aws-sdk-java-v2 SmithyRpcV2CborProtocolProcessor and live
+                // CloudWatch traffic). Explicit cborSdkServiceIds take precedence.
+                String rpcV2ServiceName = prefix.endsWith(".")
+                        ? prefix.substring(0, prefix.length() - 1)
+                        : prefix;
+                cborSdkServiceIds.putIfAbsent(rpcV2ServiceName, descriptor);
             }
         }
         targets.sort(Comparator.comparingInt((Map.Entry<String, ServiceDescriptor> entry) -> entry.getKey().length())

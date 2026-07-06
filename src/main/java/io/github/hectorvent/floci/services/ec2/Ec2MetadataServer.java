@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import io.vertx.ext.web.Router;
@@ -40,6 +42,7 @@ public class Ec2MetadataServer {
 
     private final Vertx vertx;
     private final EmulatorConfig config;
+    private final IamService iamService;
 
     /** IMDSv2: token value → Instance */
     private final Map<String, Instance> tokenToInstance = new ConcurrentHashMap<>();
@@ -49,9 +52,10 @@ public class Ec2MetadataServer {
     private volatile HttpServer httpServer;
 
     @Inject
-    public Ec2MetadataServer(Vertx vertx, EmulatorConfig config) {
+    public Ec2MetadataServer(Vertx vertx, EmulatorConfig config, IamService iamService) {
         this.vertx = vertx;
         this.config = config;
+        this.iamService = iamService;
     }
 
     /** Called by Ec2ContainerManager after a container starts to register its IP. */
@@ -227,7 +231,7 @@ public class Ec2MetadataServer {
             ctx.response().setStatusCode(404).end();
             return;
         }
-        String roleName = extractRoleName(profileArn);
+        String roleName = resolveRoleName(profileArn);
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "text/plain")
                 .end(roleName);
@@ -306,9 +310,19 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
+        String body = instanceIdentityDocument(inst, config.defaultAccountId());
+        ctx.response().setStatusCode(200)
+                .putHeader("content-type", "application/json")
+                .end(body);
+    }
+
+    static String instanceIdentityDocument(Instance inst, String accountId) {
         String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : "us-east-1a";
-        String body = "{\"accountId\":\"" + config.defaultAccountId() + "\","
-                + "\"architecture\":\"x86_64\","
+        String architecture = inst.getArchitecture() == null || inst.getArchitecture().isBlank()
+                ? "x86_64"
+                : inst.getArchitecture();
+        String body = "{\"accountId\":\"" + accountId + "\","
+                + "\"architecture\":\"" + architecture + "\","
                 + "\"availabilityZone\":\"" + az + "\","
                 + "\"imageId\":\"" + inst.getImageId() + "\","
                 + "\"instanceId\":\"" + inst.getInstanceId() + "\","
@@ -316,9 +330,7 @@ public class Ec2MetadataServer {
                 + "\"privateIp\":\"" + nvl(inst.getPrivateIpAddress()) + "\","
                 + "\"region\":\"" + inst.getRegion() + "\","
                 + "\"version\":\"2017-09-30\"}";
-        ctx.response().setStatusCode(200)
-                .putHeader("content-type", "application/json")
-                .end(body);
+        return body;
     }
 
     // ── Instance resolution ───────────────────────────────────────────────────
@@ -350,7 +362,23 @@ public class Ec2MetadataServer {
 
     // ── Utilities ─────────────────────────────────────────────────────────────
 
-    private static String extractRoleName(String profileArn) {
+    String resolveRoleName(String profileArn) {
+        if (iamService != null) {
+            String profileName = extractProfileName(profileArn);
+            try {
+                var profile = iamService.getInstanceProfile(profileName);
+                if (profile.getRoleNames() != null && !profile.getRoleNames().isEmpty()) {
+                    return profile.getRoleNames().getFirst();
+                }
+            } catch (AwsException e) {
+                LOG.debugf(e, "IMDS: instance profile %s unavailable; falling back to profile name", profileName);
+                // Fall back to the profile name when only the EC2 profile ARN was modeled.
+            }
+        }
+        return extractProfileName(profileArn);
+    }
+
+    private static String extractProfileName(String profileArn) {
         // arn:aws:iam::000000000000:instance-profile/my-role
         int lastSlash = profileArn.lastIndexOf('/');
         if (lastSlash >= 0 && lastSlash < profileArn.length() - 1) {

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
+import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -69,6 +70,7 @@ public class EmulatorLifecycle {
     private final DocDbContainerManager docDbContainerManager;
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
+    private final RabbitMqManager rabbitMqManager;
     private final RdsService rdsService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
@@ -93,6 +95,7 @@ public class EmulatorLifecycle {
                              DocDbContainerManager docDbContainerManager,
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
+                             RabbitMqManager rabbitMqManager,
                              RdsService rdsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
@@ -116,6 +119,7 @@ public class EmulatorLifecycle {
         this.docDbContainerManager = docDbContainerManager;
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
+        this.rabbitMqManager = rabbitMqManager;
         this.rdsService = rdsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
@@ -252,6 +256,7 @@ public class EmulatorLifecycle {
         memoryDbContainerManager.stopAll();
         docDbContainerManager.stopAll();
         neptuneContainerManager.stopAll();
+        rabbitMqManager.stopAll();
         ecrRegistryManager.shutdown();
         flociUiManager.shutdown();
         storageFactory.shutdownAll();
