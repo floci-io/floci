@@ -48,7 +48,7 @@ public class OpenSearchDomainManager {
 
     public void startDomain(Domain domain) {
         String image = resolveImage(domain.getEngineVersion());
-        String containerName = ContainerStorageHelper.resourceName(config, "opensearch", domain.getVolumeId(), domain.getDomainName());
+        String containerName = containerName(domain);
 
         LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
                 domain.getDomainName(), domain.getEngineVersion(), image);
@@ -100,7 +100,7 @@ public class OpenSearchDomainManager {
     }
 
     public boolean isReady(Domain domain) {
-        String containerName = ContainerStorageHelper.resourceName(config, "opensearch", domain.getVolumeId(), domain.getDomainName());
+        String containerName = containerName(domain);
         String url = "http://" + containerName + ":" + OPENSEARCH_PORT + "/_cluster/health";
         try {
             HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
@@ -142,6 +142,10 @@ public class OpenSearchDomainManager {
     private String resolveImage(String engineVersion) {
         return OpenSearchVersions.resolveImage(
                 config.services().opensearch().defaultImage(), engineVersion);
+    }
+
+    private String containerName(Domain domain) {
+        return ContainerStorageHelper.resourceName(config, "opensearch", null, domain.getDomainName());
     }
 
     /**

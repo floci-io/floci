@@ -16,6 +16,7 @@ class ContainerStorageHelperTest {
     void resourceNamesStayUnchangedWithoutNamespace() {
         assertEquals("floci-rds-db1", ContainerStorageHelper.resourceName("rds", null, "db1"));
         assertEquals("floci-rds-vol1", ContainerStorageHelper.resourceName(config(""), "rds", "vol1", "db1"));
+        assertEquals("floci-opensearch-domain1", ContainerStorageHelper.resourceName(config(""), "opensearch", null, "domain1"));
         assertEquals("floci-ec2-i-123", ContainerStorageHelper.dockerName(config(""), "floci-ec2-i-123"));
     }
 
