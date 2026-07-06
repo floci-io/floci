@@ -428,10 +428,17 @@ class ApiGatewayIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("item.find { it.id == '" + apiKeyId + "' }.name", equalTo("k"))
-                .body("item.find { it.id == '" + apiKeyId + "' }.value", equalTo(apiKeyValue))
+                .body("item.find { it.id == '" + apiKeyId + "' }.value", nullValue())
                 .body("item.find { it.id == '" + apiKeyId + "' }.enabled", equalTo(true))
                 .body("item.find { it.id == '" + apiKeyId + "' }.tags.Team", equalTo("platform"))
                 .body("item.find { it.id == '" + apiKeyId + "' }.tags.Project", equalTo("demo"));
+
+        given()
+                .queryParam("includeValues", true)
+                .when().get("/apikeys")
+                .then()
+                .statusCode(200)
+                .body("item.find { it.id == '" + apiKeyId + "' }.value", equalTo(apiKeyValue));
     }
 
     @Test @Order(43)

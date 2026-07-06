@@ -613,12 +613,13 @@ public class ApiGatewayController {
 
     @GET
     @Path("/apikeys")
-    public Response getApiKeys(@Context HttpHeaders headers) {
+    public Response getApiKeys(@Context HttpHeaders headers,
+                               @QueryParam("includeValues") Boolean includeValues) {
         String region = regionResolver.resolveRegion(headers);
         List<ApiKey> keys = service.getApiKeys(region);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        keys.forEach(k -> items.add(toApiKeyNode(k)));
+        keys.forEach(k -> items.add(toApiKeyNode(k, Boolean.TRUE.equals(includeValues))));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
