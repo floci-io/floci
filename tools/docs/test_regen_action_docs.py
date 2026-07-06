@@ -35,6 +35,27 @@ def test_extract_switch_multi_label_arm():
     ]
 
 
+def test_extract_switch_multiline_arm():
+    # Labels wrapped across lines (valid Java 14+ switch syntax) must all be captured,
+    # and the capture must stop at the arm's `->` rather than running into the next
+    # arm's `{ ... }` body. A miss here would be invisible: the doc and the regenerated
+    # output would agree on the omission and docs-check would stay green.
+    src = '''
+        return switch (action) {
+            case "CreateStackSet",
+                 "DescribeStackSet",
+                 "ListStackSets" -> handleStackSets(req);
+            case "GetTemplate" -> { return handleGet(req); }
+        };
+    '''
+    assert r.extract_switch_actions(src) == [
+        "CreateStackSet",
+        "DescribeStackSet",
+        "ListStackSets",
+        "GetTemplate",
+    ]
+
+
 def test_extract_switch_ignores_non_pascal_and_default():
     src = '''
         case "lowercase" -> a();
@@ -89,6 +110,24 @@ def test_extract_rest_ucfirsts_method_names():
 def test_extract_rest_requires_class_path():
     no_path = REST_CONTROLLER.replace('@Path("/")\n', "")
     assert r.extract_rest_actions(no_path) == []
+
+
+def test_extract_rest_skips_comments_between_annotation_and_method():
+    # A Javadoc or inline comment sitting between the verb annotation and the method
+    # signature must not reset the lookahead and drop the action.
+    src = '''
+@Path("/")
+public class C {
+    @POST
+    /** Creates a thing. */
+    public Response createThing(Req r) { return ok(); }
+
+    @GET
+    // list them
+    public Response listThings(Req r) { return ok(); }
+}
+'''
+    assert r.extract_rest_actions(src) == ["CreateThing", "ListThings"]
 
 
 def test_extract_actions_applies_rename_and_exclude(tmp_path: Path):

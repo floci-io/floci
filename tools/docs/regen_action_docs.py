@@ -33,11 +33,17 @@ PLACEHOLDER = "-"
 
 # `case "ActionName" ->` switch arms (Query / JSON 1.1 protocols). A single arm may
 # carry several labels: `case "Foo", "Bar", "Baz" ->`; all are extracted, in order.
+# The label list may also wrap across lines (valid Java 14+ switch syntax), so the
+# capture group excludes only the `{ } ;` statement/body boundaries rather than
+# newlines: it spans line breaks between labels but stops at the arm's `->` and can't
+# run into an arm body or a colon-style `case` that has no `->`. Without this a
+# wrapped arm would be silently dropped, and `docs-check` would stay green because the
+# doc and the tool's output would agree on the omission.
 # The label head requires `[A-Z][a-z]` (PascalCase), which deliberately excludes
 # SCREAMING_CASE enum labels in non-action switches a handler may also contain
 # (e.g. `switch (state) { case "DISABLED" -> ... }`). AWS action names are always
 # PascalCase, so no real action is lost.
-SWITCH_CASE_RE = re.compile(r"^\s*case\s+(.+?)\s*->", re.MULTILINE)
+SWITCH_CASE_RE = re.compile(r"^\s*case\s+([^{};]+?)\s*->", re.MULTILINE)
 SWITCH_LABEL_RE = re.compile(r'"([A-Z][a-z][A-Za-z0-9]*)"')
 
 # REST controllers: a JAX-RS verb annotation followed by the public method it decorates,
@@ -48,6 +54,9 @@ CLASS_PATH_RE = re.compile(r"^\s*@Path\b", re.MULTILINE)
 HTTP_ANNO_RE = re.compile(r"^\s*@(?:GET|POST|PUT|DELETE|PATCH)\b")
 ANNOTATION_LINE_RE = re.compile(r"^\s*@\w")
 PUBLIC_METHOD_RE = re.compile(r"^\s*public\s+\S+(?:<[^>]*>)?\s+([a-z][A-Za-z0-9]*)\s*\(")
+# Line/block-comment lines (Javadoc) that may sit between the verb annotation and the
+# method signature; skipped so they don't reset the `pending` flag mid-lookahead.
+COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\*)")
 
 
 @dataclass(frozen=True)
@@ -100,6 +109,8 @@ def extract_rest_actions(java_source: str) -> list[str]:
             continue
         if ANNOTATION_LINE_RE.match(line):
             continue
+        if COMMENT_LINE_RE.match(line):
+            continue
         m = PUBLIC_METHOD_RE.match(line)
         if m:
             name = m.group(1)
@@ -118,7 +129,7 @@ def extract_actions(entry: ServiceEntry) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for source in entry.sources:
-        text = source.path.read_text()
+        text = source.path.read_text(encoding="utf-8")
         if source.mode == "switch":
             raw = extract_switch_actions(text)
         elif source.mode == "rest":
@@ -194,8 +205,13 @@ def parse_marker_block(md: str) -> tuple[str, dict[str, str], str]:
     if end_idx < start_idx:
         raise ValueError("end marker appears before start marker")
 
-    after_start = md.index("\n", start_idx) + 1
-    before_end = md.rindex("\n", 0, end_idx) + 1
+    try:
+        after_start = md.index("\n", start_idx) + 1
+        before_end = md.rindex("\n", 0, end_idx) + 1
+    except ValueError:
+        raise ValueError(
+            f"'{MARKER_START}' and '{MARKER_END}' must each sit on their own line"
+        ) from None
 
     prefix = md[:after_start]
     suffix = md[before_end:]
@@ -288,7 +304,7 @@ def _load_registry(repo_root: Path) -> tuple[list[ServiceEntry], set[Path]]:
     covered, so the unregistered-handler sentinel doesn't flag them every run).
     """
     registry_path = repo_root / "tools" / "docs" / "services.yaml"
-    raw = yaml.safe_load(registry_path.read_text()) or {}
+    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
     entries: list[ServiceEntry] = []
     for item in raw.get("services") or []:
         sources = [
@@ -318,10 +334,10 @@ def _process_entry(entry: ServiceEntry) -> tuple[bool, list[str]]:
     if not entry.sources:
         return False, []
     actions = extract_actions(entry)
-    doc_content = entry.doc.read_text()
+    doc_content = entry.doc.read_text(encoding="utf-8")
     new_content, orphans = regenerate_doc_content(actions, doc_content)
     if new_content != doc_content:
-        entry.doc.write_text(new_content)
+        entry.doc.write_text(new_content, encoding="utf-8")
         return True, orphans
     return False, orphans
 
@@ -345,7 +361,7 @@ def _find_unregistered_handlers(
     for path in sorted(services_root.glob("**/[A-Z]*Handler.java")):
         if path.resolve() in registered:
             continue
-        if not extract_switch_actions(path.read_text()):
+        if not extract_switch_actions(path.read_text(encoding="utf-8")):
             continue
         unregistered.append(str(path.relative_to(repo_root)))
     return unregistered

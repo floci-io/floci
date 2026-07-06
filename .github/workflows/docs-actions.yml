@@ -19,6 +19,8 @@ on:
       - 'src/main/**'
       - 'docs/services/**'
       - 'tools/docs/**'
+      - 'Makefile'
+      - '.github/workflows/docs-actions.yml'
 
 permissions:
   contents: read
