@@ -232,6 +232,9 @@ public class ElbV2DataPlane {
         if (listenerArn != null) {
             return listenerArn;
         }
+        if (listenersByHost.size() == 1) {
+            return listenersByHost.values().iterator().next();
+        }
         return null;
     }
 

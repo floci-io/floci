@@ -1277,8 +1277,8 @@ public class ApiGatewayExecuteController {
                             .entity(jsonMessage("Bad Gateway: cannot resolve ALB listener: " + integrationUri))
                             .type(MediaType.APPLICATION_JSON).build();
                 }
-                String resolvedUrl = "http://" + listenerEndpoint.host() + ":" + listenerEndpoint.port() + path;
-                effective = withResolvedUri(integration, resolvedUrl);
+                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + path;
+                effective = withResolvedUriAndHost(integration, resolvedUrl, listenerEndpoint.host());
                 LOG.debugv("ALB integration: listener {0} → {1}", integrationUri, resolvedUrl);
             }
         }
@@ -1351,6 +1351,18 @@ public class ApiGatewayExecuteController {
         io.github.hectorvent.floci.services.apigatewayv2.model.Integration copy =
                 new io.github.hectorvent.floci.services.apigatewayv2.model.Integration(original);
         copy.setIntegrationUri(targetUri);
+        return copy;
+    }
+
+    private static io.github.hectorvent.floci.services.apigatewayv2.model.Integration withResolvedUriAndHost(
+            io.github.hectorvent.floci.services.apigatewayv2.model.Integration original, String targetUri, String host) {
+        io.github.hectorvent.floci.services.apigatewayv2.model.Integration copy = withResolvedUri(original, targetUri);
+        Map<String, String> requestParameters = new java.util.LinkedHashMap<>();
+        if (copy.getRequestParameters() != null) {
+            requestParameters.putAll(copy.getRequestParameters());
+        }
+        requestParameters.put("overwrite:header.Host", host);
+        copy.setRequestParameters(requestParameters);
         return copy;
     }
 

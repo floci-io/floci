@@ -69,8 +69,8 @@ class ElbV2SamePortHostDispatchIntegrationTest {
 
     @Test
     @Order(2)
-    void singleListenerRejectsUnknownHostHeader() {
-        assertNoListenerForHost("unknown.example.test");
+    void singleListenerFallsBackForUnknownHostHeader() {
+        assertHostResponse("unknown.example.test", "first");
     }
 
     @Test

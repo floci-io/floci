@@ -24,7 +24,7 @@ import java.util.StringJoiner;
  *
  * <p>Hop-by-hop headers (per RFC 7230 §6.1) are stripped from both the outgoing
  * request and the response. Java's HttpClient also restricts certain headers
- * (Host, Content-Length, etc.) — those are skipped silently.
+ * (Content-Length, etc.) — those are skipped silently.
  *
  * <p>If the backend is unreachable or times out, returns a 502 Bad Gateway
  * ProxyResult so the controller can relay a clean error to the original client.
@@ -39,7 +39,17 @@ public class HttpProxyInvoker {
 
     /** Headers java.net.http.HttpClient refuses to set via Builder.header(). */
     private static final Set<String> RESTRICTED = Set.of(
-            "connection", "content-length", "expect", "host", "upgrade");
+            "connection", "content-length", "expect", "upgrade");
+
+    static {
+        String key = "jdk.httpclient.allowRestrictedHeaders";
+        String configured = System.getProperty(key, "");
+        if (configured.isBlank()) {
+            System.setProperty(key, "host");
+        } else if (List.of(configured.toLowerCase().split(",")).stream().map(String::trim).noneMatch("host"::equals)) {
+            System.setProperty(key, configured + ",host");
+        }
+    }
 
     // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
     // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the

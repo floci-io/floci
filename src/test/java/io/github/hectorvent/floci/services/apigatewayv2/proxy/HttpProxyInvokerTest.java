@@ -114,6 +114,19 @@ class HttpProxyInvokerTest {
     }
 
     @Test
+    void appliesRequestParametersHostHeaderOverride() {
+        Integration integration = httpProxyIntegration(
+                "http://127.0.0.1:" + backendPort + "/public/{proxy}",
+                Map.of("overwrite:header.Host", "lb.localhost.test"));
+        RequestContext ctx = ctxFor("GET", "/wallet/balance", "balance",
+                Map.of("Host", "client.example.test"), Map.of(), null, Map.of());
+
+        new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals("lb.localhost.test", received.get().headers().getFirst("Host"));
+    }
+
+    @Test
     void overwritePathReplacesBackendPath() {
         Integration integration = httpProxyIntegration(
                 "http://127.0.0.1:" + backendPort + "/wrong",

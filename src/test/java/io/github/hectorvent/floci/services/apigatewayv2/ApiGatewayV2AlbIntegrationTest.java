@@ -261,7 +261,8 @@ class ApiGatewayV2AlbIntegrationTest {
                 .connectTimeout(Duration.ofSeconds(2))
                 .build();
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://" + lbDnsName + ":" + LISTENER_PORT + "/health"))
+                .uri(URI.create("http://127.0.0.1:" + LISTENER_PORT + "/health"))
+                .header("Host", lbDnsName)
                 .timeout(Duration.ofSeconds(3))
                 .GET()
                 .build();
