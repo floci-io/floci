@@ -34,8 +34,10 @@
 | `DeleteStackSet` | Delete an empty stack set |
 | `CreateStackInstances` | Provision instances into target accounts/regions |
 | `ListStackInstances` | List instances (optionally filtered by account/region) |
+| `DescribeStackInstance` | - |
 | `DeleteStackInstances` | Remove instances and their resources |
 | `ListStackSetOperations` | List operations performed on a stack set |
+| `DescribeStackSetOperation` | - |
 <!-- floci:actions:end -->
 
 ## Supported Resource Types

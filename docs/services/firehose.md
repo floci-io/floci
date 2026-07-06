@@ -11,6 +11,7 @@ Floci emulates Amazon Data Firehose for streaming data ingestion and delivery to
 | Action | Description |
 | --- | --- |
 | `CreateDeliveryStream` | Creates a new delivery stream |
+| `UpdateDestination` | - |
 | `DescribeDeliveryStream` | Returns metadata about a stream |
 | `ListDeliveryStreams` | Lists all delivery streams |
 | `DeleteDeliveryStream` | Deletes a delivery stream |

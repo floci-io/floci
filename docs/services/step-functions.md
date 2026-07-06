@@ -12,6 +12,9 @@
 | `DescribeStateMachine` | Get state machine definition and metadata |
 | `ListStateMachines` | List all state machines |
 | `DeleteStateMachine` | Delete a state machine |
+| `PublishStateMachineVersion` | - |
+| `ListStateMachineVersions` | - |
+| `DeleteStateMachineVersion` | - |
 | `ValidateStateMachineDefinition` | Validate an ASL definition without creating a state machine |
 | `StartExecution` | Start a new execution |
 | `StartSyncExecution` | - |
