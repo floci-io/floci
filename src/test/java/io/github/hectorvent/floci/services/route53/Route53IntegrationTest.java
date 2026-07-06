@@ -96,6 +96,135 @@ class Route53IntegrationTest {
 
     @Test
     @Order(5)
+    void listHostedZonesByName_returnsPaginationCursor() {
+        String createBody = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>example.net</Name>
+                  <CallerReference>ref-pagination</CallerReference>
+                </CreateHostedZoneRequest>
+                """;
+
+        String loc = given()
+                .contentType(XML)
+                .body(createBody)
+                .when().post("/2013-04-01/hostedzone")
+                .then()
+                .statusCode(201)
+                .extract()
+                .header("Location");
+        String pagedZoneId = loc.substring(loc.lastIndexOf('/') + 1);
+
+        String body = given()
+                .queryParam("dnsname", "example.com.")
+                .queryParam("maxitems", 1)
+                .when().get("/2013-04-01/hostedzonesbyname")
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("ListHostedZonesByNameResponse.IsTruncated", equalTo("true"))
+                .body("ListHostedZonesByNameResponse.NextDNSName", equalTo("example.net."))
+                .body("ListHostedZonesByNameResponse.NextHostedZoneId", equalTo(pagedZoneId))
+                .extract()
+                .body()
+                .asString();
+
+        assertThat(body, containsString("<Id>/hostedzone/" + zoneId + "</Id>"));
+        assertThat(body, not(containsString("<Id>/hostedzone/" + pagedZoneId + "</Id>")));
+
+        given()
+                .queryParam("dnsname", "example.net.")
+                .queryParam("hostedzoneid", pagedZoneId)
+                .queryParam("maxitems", 1)
+                .when().get("/2013-04-01/hostedzonesbyname")
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("ListHostedZonesByNameResponse.IsTruncated", equalTo("false"))
+                .body("ListHostedZonesByNameResponse.HostedZoneId", equalTo(pagedZoneId))
+                .body("ListHostedZonesByNameResponse.HostedZones.HostedZone.Id", equalTo("/hostedzone/" + pagedZoneId));
+
+        given()
+                .when().delete("/2013-04-01/hostedzone/" + pagedZoneId)
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
+    @Order(6)
+    void listHostedZonesByName_usesAwsLexicographicOrdering() {
+        String createComZone = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>zzz.com</Name>
+                  <CallerReference>ref-zzz-com</CallerReference>
+                </CreateHostedZoneRequest>
+                """;
+        String createNetZone = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>aaa.net</Name>
+                  <CallerReference>ref-aaa-net</CallerReference>
+                </CreateHostedZoneRequest>
+                """;
+
+        String zzzLoc = given()
+                .contentType(XML)
+                .body(createComZone)
+                .when().post("/2013-04-01/hostedzone")
+                .then()
+                .statusCode(201)
+                .extract()
+                .header("Location");
+        String zzzZoneId = zzzLoc.substring(zzzLoc.lastIndexOf('/') + 1);
+
+        String aaaLoc = given()
+                .contentType(XML)
+                .body(createNetZone)
+                .when().post("/2013-04-01/hostedzone")
+                .then()
+                .statusCode(201)
+                .extract()
+                .header("Location");
+        String aaaZoneId = aaaLoc.substring(aaaLoc.lastIndexOf('/') + 1);
+
+        try {
+            String firstPage = given()
+                    .queryParam("maxitems", 1)
+                    .when().get("/2013-04-01/hostedzonesbyname")
+                    .then()
+                    .statusCode(200)
+                    .contentType(XML)
+                    .body("ListHostedZonesByNameResponse.IsTruncated", equalTo("true"))
+                    .body("ListHostedZonesByNameResponse.HostedZones.HostedZone.Name", equalTo("example.com."))
+                    .body("ListHostedZonesByNameResponse.NextDNSName", equalTo("zzz.com."))
+                    .body("ListHostedZonesByNameResponse.NextHostedZoneId", equalTo(zzzZoneId))
+                    .extract()
+                    .body()
+                    .asString();
+
+            assertThat(firstPage, not(containsString(aaaZoneId)));
+
+            given()
+                    .queryParam("dnsname", "zzz.com.")
+                    .queryParam("hostedzoneid", zzzZoneId)
+                    .queryParam("maxitems", 1)
+                    .when().get("/2013-04-01/hostedzonesbyname")
+                    .then()
+                    .statusCode(200)
+                    .contentType(XML)
+                    .body("ListHostedZonesByNameResponse.IsTruncated", equalTo("true"))
+                    .body("ListHostedZonesByNameResponse.HostedZones.HostedZone.Name", equalTo("zzz.com."))
+                    .body("ListHostedZonesByNameResponse.NextDNSName", equalTo("aaa.net."))
+                    .body("ListHostedZonesByNameResponse.NextHostedZoneId", equalTo(aaaZoneId));
+        } finally {
+            given().delete("/2013-04-01/hostedzone/" + zzzZoneId).then().statusCode(200);
+            given().delete("/2013-04-01/hostedzone/" + aaaZoneId).then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(7)
     void getHostedZoneCount_includesZone() {
         given()
                 .when().get("/2013-04-01/hostedzonecount")
@@ -107,7 +236,7 @@ class Route53IntegrationTest {
     // ── Resource Record Sets ──────────────────────────────────────────────────
 
     @Test
-    @Order(6)
+    @Order(8)
     void listResourceRecordSets_autoCreatedSOAandNS() {
         String body = given()
                 .when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
@@ -122,7 +251,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     void changeResourceRecordSets_createARecord() {
         String body = """
                 <?xml version="1.0" encoding="UTF-8"?>
@@ -165,7 +294,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(10)
     void listResourceRecordSets_includesARecord() {
         String body = given()
                 .when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
@@ -178,7 +307,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void changeResourceRecordSets_deleteSOA_fails() {
         String body = """
                 <?xml version="1.0" encoding="UTF-8"?>
@@ -211,7 +340,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(12)
     void getChange_returnsInsync() {
         if (changeId == null) return;
         given()
@@ -223,7 +352,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(13)
     void changeResourceRecordSets_deleteARecord() {
         String body = """
                 <?xml version="1.0" encoding="UTF-8"?>
@@ -256,7 +385,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(14)
     void deleteHostedZone_failsWhenNonDefaultRecordsExist() {
         String createBody = """
                 <?xml version="1.0" encoding="UTF-8"?>
@@ -312,7 +441,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(15)
     void deleteHostedZone_succeedsAfterRecordsRemoved() {
         given()
                 .when().delete("/2013-04-01/hostedzone/" + zoneId)
@@ -322,7 +451,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(16)
     void getHostedZone_returns404AfterDelete() {
         given()
                 .when().get("/2013-04-01/hostedzone/" + zoneId)
@@ -334,7 +463,7 @@ class Route53IntegrationTest {
     // ── Health Checks ─────────────────────────────────────────────────────────
 
     @Test
-    @Order(15)
+    @Order(17)
     void createHealthCheck_returns201() {
         String body = """
                 <?xml version="1.0" encoding="UTF-8"?>
@@ -366,7 +495,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(16)
+    @Order(18)
     void getHealthCheck_returnsCreated() {
         given()
                 .when().get("/2013-04-01/healthcheck/" + healthCheckId)
@@ -377,7 +506,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(17)
+    @Order(19)
     void listHealthChecks_includesCreated() {
         String body = given()
                 .when().get("/2013-04-01/healthcheck")
@@ -389,7 +518,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(20)
     void deleteHealthCheck_returns200() {
         given()
                 .when().delete("/2013-04-01/healthcheck/" + healthCheckId)
@@ -406,7 +535,7 @@ class Route53IntegrationTest {
     // ── Tags ──────────────────────────────────────────────────────────────────
 
     @Test
-    @Order(19)
+    @Order(21)
     void tagging_addListRemove() {
         String createBody = """
                 <?xml version="1.0" encoding="UTF-8"?>
@@ -474,7 +603,7 @@ class Route53IntegrationTest {
     // ── Limits ────────────────────────────────────────────────────────────────
 
     @Test
-    @Order(20)
+    @Order(22)
     void getAccountLimit_returnsValue() {
         given()
                 .when().get("/2013-04-01/accountlimit/MAX_HOSTED_ZONES_BY_OWNER")

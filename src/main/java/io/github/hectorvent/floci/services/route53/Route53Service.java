@@ -31,6 +31,10 @@ public class Route53Service {
 
     public record CreateZoneResult(HostedZone zone, ChangeInfo change) {}
 
+    public record ListHostedZonesByNameResult(List<HostedZone> hostedZones,
+                                              String nextDnsName,
+                                              String nextHostedZoneId) {}
+
     private final StorageBackend<String, HostedZone> zoneStore;
     private final StorageBackend<String, List<ResourceRecordSet>> recordStore;
     private final StorageBackend<String, HealthCheck> healthCheckStore;
@@ -127,23 +131,48 @@ public class Route53Service {
         return all;
     }
 
-    public List<HostedZone> listHostedZonesByName(String dnsName, int maxItems) {
+    public ListHostedZonesByNameResult listHostedZonesByName(String dnsName, String hostedZoneId, int maxItems) {
         List<HostedZone> all = new ArrayList<>(zoneStore.scan(k -> true));
-        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        all.sort((a, b) -> {
+            int cmp = compareDnsNames(a.getName(), b.getName());
+            if (cmp != 0) {
+                return cmp;
+            }
+            return a.getId().compareTo(b.getId());
+        });
         for (HostedZone zone : all) {
             zone.setResourceRecordSetCount(recordCount(zone.getId()));
         }
+        int startIndex = 0;
         if (dnsName != null && !dnsName.isEmpty()) {
             String normalized = normalizeName(dnsName);
-            all = all.stream()
-                    .filter(z -> z.getName().compareTo(normalized) >= 0)
-                    .toList();
-            all = new ArrayList<>(all);
+            startIndex = all.size();
+            for (int i = 0; i < all.size(); i++) {
+                HostedZone zone = all.get(i);
+                int cmp = compareDnsNames(zone.getName(), normalized);
+                if (cmp > 0) {
+                    startIndex = i;
+                    break;
+                }
+                if (cmp == 0) {
+                    if (hostedZoneId == null || hostedZoneId.isEmpty() || zone.getId().compareTo(hostedZoneId) >= 0) {
+                        startIndex = i;
+                        break;
+                    }
+                }
+            }
         }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
+
+        List<HostedZone> page = new ArrayList<>(all.subList(Math.min(startIndex, all.size()), all.size()));
+        String nextDnsName = null;
+        String nextHostedZoneId = null;
+        if (maxItems > 0 && page.size() > maxItems) {
+            HostedZone next = page.get(maxItems);
+            nextDnsName = next.getName();
+            nextHostedZoneId = next.getId();
+            page = page.subList(0, maxItems);
         }
-        return all;
+        return new ListHostedZonesByNameResult(page, nextDnsName, nextHostedZoneId);
     }
 
     public long getHostedZoneCount() {
@@ -410,5 +439,32 @@ public class Route53Service {
         if (a == null && b == null) return true;
         if (a == null || b == null) return false;
         return a.equals(b);
+    }
+
+    private static int compareDnsNames(String left, String right) {
+        if (left == null && right == null) {
+            return 0;
+        }
+        if (left == null) {
+            return -1;
+        }
+        if (right == null) {
+            return 1;
+        }
+
+        String[] leftLabels = normalizeName(left).split("\\.");
+        String[] rightLabels = normalizeName(right).split("\\.");
+
+        int leftIndex = leftLabels.length - 1;
+        int rightIndex = rightLabels.length - 1;
+        while (leftIndex >= 0 && rightIndex >= 0) {
+            int cmp = leftLabels[leftIndex].compareTo(rightLabels[rightIndex]);
+            if (cmp != 0) {
+                return cmp;
+            }
+            leftIndex--;
+            rightIndex--;
+        }
+        return Integer.compare(leftLabels.length, rightLabels.length);
     }
 }

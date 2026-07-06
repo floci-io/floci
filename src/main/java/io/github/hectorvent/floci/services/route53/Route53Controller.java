@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.route53.Route53Service.CreateZoneResult;
+import io.github.hectorvent.floci.services.route53.Route53Service.ListHostedZonesByNameResult;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.ChangeInfo;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
@@ -151,11 +152,12 @@ public class Route53Controller {
     @GET
     @Path("/hostedzonesbyname")
     public Response listHostedZonesByName(@QueryParam("dnsname") String dnsName,
-                                           @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
+                                          @QueryParam("hostedzoneid") String hostedZoneId,
+                                          @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
         try {
-            List<HostedZone> zones = service.listHostedZonesByName(dnsName, maxItems);
-            long total = service.getHostedZoneCount();
-            boolean truncated = zones.size() == maxItems && zones.size() < total;
+            ListHostedZonesByNameResult result = service.listHostedZonesByName(dnsName, hostedZoneId, maxItems);
+            List<HostedZone> zones = result.hostedZones();
+            boolean truncated = result.nextDnsName() != null;
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListHostedZonesByNameResponse", NS)
@@ -164,10 +166,17 @@ public class Route53Controller {
                 xml.raw(xmlHostedZone(zone));
             }
             xml.end("HostedZones")
-               .elem("IsTruncated", String.valueOf(truncated))
-               .elem("MaxItems", String.valueOf(maxItems));
+                    .elem("IsTruncated", String.valueOf(truncated))
+                    .elem("MaxItems", String.valueOf(maxItems));
             if (dnsName != null && !dnsName.isEmpty()) {
                 xml.elem("DNSName", dnsName);
+            }
+            if (hostedZoneId != null && !hostedZoneId.isEmpty()) {
+                xml.elem("HostedZoneId", hostedZoneId);
+            }
+            if (truncated) {
+                xml.elem("NextDNSName", result.nextDnsName())
+                        .elem("NextHostedZoneId", result.nextHostedZoneId());
             }
             xml.end("ListHostedZonesByNameResponse");
 
