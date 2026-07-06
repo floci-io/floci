@@ -109,7 +109,7 @@ public class ScheduleInvoker {
                 ecs.getTaskCount() != null ? ecs.getTaskCount() : 1,
                 parseLaunchType(ecs.getLaunchType()),
                 null,
-                "scheduler",
+                ecs.getGroup() != null ? ecs.getGroup() : "scheduler",
                 List.of(),
                 ecsNetworkConfiguration(ecs.getNetworkConfiguration()),
                 region);

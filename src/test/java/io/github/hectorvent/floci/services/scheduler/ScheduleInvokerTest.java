@@ -117,6 +117,7 @@ class ScheduleInvokerTest {
         EcsParameters ecsParameters = new EcsParameters();
         ecsParameters.setTaskDefinitionArn("arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1");
         ecsParameters.setLaunchType("FARGATE");
+        ecsParameters.setGroup("batch-group");
         ecsParameters.setTaskCount(2);
         AwsVpcConfiguration vpc = new AwsVpcConfiguration();
         vpc.setSubnets(List.of("subnet-a", "subnet-b"));
@@ -137,7 +138,7 @@ class ScheduleInvokerTest {
                 eq(2),
                 eq(LaunchType.FARGATE),
                 isNull(),
-                eq("scheduler"),
+                eq("batch-group"),
                 eq(List.<ContainerOverride>of()),
                 networkCaptor.capture(),
                 eq("us-east-1"));

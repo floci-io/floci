@@ -419,9 +419,19 @@ class SchedulerIntegrationTest {
                         "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/proof",
                         "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
                         "EcsParameters": {
+                            "CapacityProviderStrategy": [{"CapacityProvider": "FARGATE", "Weight": 1, "Base": 0}],
+                            "EnableECSManagedTags": true,
+                            "EnableExecuteCommand": true,
+                            "Group": "batch-group",
                             "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
                             "LaunchType": "FARGATE",
+                            "PlacementConstraints": [{"Type": "distinctInstance"}],
+                            "PlacementStrategy": [{"Type": "spread", "Field": "attribute:ecs.availability-zone"}],
                             "TaskCount": 1,
+                            "PlatformVersion": "1.4.0",
+                            "PropagateTags": "TASK_DEFINITION",
+                            "ReferenceId": "ref-123",
+                            "Tags": [{"Key": "env", "Value": "test"}],
                             "NetworkConfiguration": {
                                 "awsvpcConfiguration": {
                                     "Subnets": ["subnet-a"],
@@ -444,9 +454,20 @@ class SchedulerIntegrationTest {
         .then()
             .statusCode(200)
             .body("State", equalTo("DISABLED"))
+            .body("Target.EcsParameters.CapacityProviderStrategy[0].CapacityProvider", equalTo("FARGATE"))
+            .body("Target.EcsParameters.CapacityProviderStrategy[0].Weight", equalTo(1))
+            .body("Target.EcsParameters.EnableECSManagedTags", equalTo(true))
+            .body("Target.EcsParameters.EnableExecuteCommand", equalTo(true))
+            .body("Target.EcsParameters.Group", equalTo("batch-group"))
             .body("Target.EcsParameters.TaskDefinitionArn", equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1"))
             .body("Target.EcsParameters.LaunchType", equalTo("FARGATE"))
+            .body("Target.EcsParameters.PlacementConstraints[0].Type", equalTo("distinctInstance"))
+            .body("Target.EcsParameters.PlacementStrategy[0].Type", equalTo("spread"))
             .body("Target.EcsParameters.TaskCount", equalTo(1))
+            .body("Target.EcsParameters.PlatformVersion", equalTo("1.4.0"))
+            .body("Target.EcsParameters.PropagateTags", equalTo("TASK_DEFINITION"))
+            .body("Target.EcsParameters.ReferenceId", equalTo("ref-123"))
+            .body("Target.EcsParameters.Tags[0].Key", equalTo("env"))
             .body("Target.EcsParameters.NetworkConfiguration.awsvpcConfiguration.Subnets", contains("subnet-a"))
             .body("Target.EcsParameters.NetworkConfiguration.awsvpcConfiguration.SecurityGroups", contains("sg-a"))
             .body("Target.EcsParameters.NetworkConfiguration.awsvpcConfiguration.AssignPublicIp", equalTo("DISABLED"));

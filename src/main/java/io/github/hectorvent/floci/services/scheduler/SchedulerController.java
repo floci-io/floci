@@ -419,11 +419,29 @@ public class SchedulerController {
 
     private EcsParameters parseEcsParameters(JsonNode node) {
         EcsParameters ecs = new EcsParameters();
+        if (node.has("CapacityProviderStrategy") && node.get("CapacityProviderStrategy").isArray()) {
+            ecs.setCapacityProviderStrategy(mapList(node.get("CapacityProviderStrategy")));
+        }
+        if (node.has("EnableECSManagedTags") && !node.get("EnableECSManagedTags").isNull()) {
+            ecs.setEnableECSManagedTags(node.get("EnableECSManagedTags").asBoolean());
+        }
+        if (node.has("EnableExecuteCommand") && !node.get("EnableExecuteCommand").isNull()) {
+            ecs.setEnableExecuteCommand(node.get("EnableExecuteCommand").asBoolean());
+        }
+        if (node.has("Group") && !node.get("Group").isNull()) {
+            ecs.setGroup(node.get("Group").asText());
+        }
         if (node.has("TaskDefinitionArn") && !node.get("TaskDefinitionArn").isNull()) {
             ecs.setTaskDefinitionArn(node.get("TaskDefinitionArn").asText());
         }
         if (node.has("LaunchType") && !node.get("LaunchType").isNull()) {
             ecs.setLaunchType(node.get("LaunchType").asText());
+        }
+        if (node.has("PlacementConstraints") && node.get("PlacementConstraints").isArray()) {
+            ecs.setPlacementConstraints(mapList(node.get("PlacementConstraints")));
+        }
+        if (node.has("PlacementStrategy") && node.get("PlacementStrategy").isArray()) {
+            ecs.setPlacementStrategy(mapList(node.get("PlacementStrategy")));
         }
         if (node.has("TaskCount") && !node.get("TaskCount").isNull()) {
             ecs.setTaskCount(node.get("TaskCount").asInt());
@@ -431,10 +449,25 @@ public class SchedulerController {
         if (node.has("PlatformVersion") && !node.get("PlatformVersion").isNull()) {
             ecs.setPlatformVersion(node.get("PlatformVersion").asText());
         }
+        if (node.has("PropagateTags") && !node.get("PropagateTags").isNull()) {
+            ecs.setPropagateTags(node.get("PropagateTags").asText());
+        }
+        if (node.has("ReferenceId") && !node.get("ReferenceId").isNull()) {
+            ecs.setReferenceId(node.get("ReferenceId").asText());
+        }
+        if (node.has("Tags") && node.get("Tags").isArray()) {
+            ecs.setTags(mapList(node.get("Tags")));
+        }
         if (node.has("NetworkConfiguration") && !node.get("NetworkConfiguration").isNull()) {
             ecs.setNetworkConfiguration(parseNetworkConfiguration(node.get("NetworkConfiguration")));
         }
         return ecs;
+    }
+
+    private List<Map<String, Object>> mapList(JsonNode node) {
+        return objectMapper.convertValue(node,
+                objectMapper.getTypeFactory().constructCollectionType(List.class,
+                        objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)));
     }
 
     private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
@@ -461,17 +494,44 @@ public class SchedulerController {
 
     private Map<String, Object> buildEcsParametersResponse(EcsParameters ecs) {
         Map<String, Object> ep = new HashMap<>();
+        if (ecs.getCapacityProviderStrategy() != null && !ecs.getCapacityProviderStrategy().isEmpty()) {
+            ep.put("CapacityProviderStrategy", ecs.getCapacityProviderStrategy());
+        }
+        if (ecs.getEnableECSManagedTags() != null) {
+            ep.put("EnableECSManagedTags", ecs.getEnableECSManagedTags());
+        }
+        if (ecs.getEnableExecuteCommand() != null) {
+            ep.put("EnableExecuteCommand", ecs.getEnableExecuteCommand());
+        }
+        if (ecs.getGroup() != null) {
+            ep.put("Group", ecs.getGroup());
+        }
         if (ecs.getTaskDefinitionArn() != null) {
             ep.put("TaskDefinitionArn", ecs.getTaskDefinitionArn());
         }
         if (ecs.getLaunchType() != null) {
             ep.put("LaunchType", ecs.getLaunchType());
         }
+        if (ecs.getPlacementConstraints() != null && !ecs.getPlacementConstraints().isEmpty()) {
+            ep.put("PlacementConstraints", ecs.getPlacementConstraints());
+        }
+        if (ecs.getPlacementStrategy() != null && !ecs.getPlacementStrategy().isEmpty()) {
+            ep.put("PlacementStrategy", ecs.getPlacementStrategy());
+        }
         if (ecs.getTaskCount() != null) {
             ep.put("TaskCount", ecs.getTaskCount());
         }
         if (ecs.getPlatformVersion() != null) {
             ep.put("PlatformVersion", ecs.getPlatformVersion());
+        }
+        if (ecs.getPropagateTags() != null) {
+            ep.put("PropagateTags", ecs.getPropagateTags());
+        }
+        if (ecs.getReferenceId() != null) {
+            ep.put("ReferenceId", ecs.getReferenceId());
+        }
+        if (ecs.getTags() != null && !ecs.getTags().isEmpty()) {
+            ep.put("Tags", ecs.getTags());
         }
         if (ecs.getNetworkConfiguration() != null) {
             Map<String, Object> network = buildNetworkConfigurationResponse(ecs.getNetworkConfiguration());
