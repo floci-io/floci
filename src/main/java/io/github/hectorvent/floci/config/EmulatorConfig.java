@@ -1396,6 +1396,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean iamAuthWebhook();
+
+        /**
+         * When true (and ECR is enabled), each new k3s cluster gets a generated
+         * {@code /etc/rancher/k3s/registries.yaml} that mirrors every ECR repository URI the
+         * emulator can mint to the registry container's in-network endpoint, so pods can pull
+         * images pushed to Floci ECR without any manual containerd configuration.
+         */
+        @WithDefault("true")
+        boolean ecrRegistryMirror();
     }
 
     interface InitHooksConfig {

@@ -26,6 +26,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
@@ -2406,12 +2407,7 @@ public class Ec2Service {
     }
 
     public List<String> describeRegions() {
-        return List.of(
-                "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-                "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1",
-                "ap-northeast-1", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2",
-                "ap-south-1", "sa-east-1", "ca-central-1"
-        );
+        return AwsRegions.ALL;
     }
 
     public Map<String, String> describeAccountAttributes(String region) {
