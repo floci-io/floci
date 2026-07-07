@@ -2771,13 +2771,38 @@ public class CloudFormationResourceProvisioner {
         return out;
     }
 
+    /**
+     * Resolves {@code IdentitySource} accepting either the documented array form or a single
+     * scalar string — {@code ApiGatewayV2Service.createAuthorizer}/{@code updateAuthorizer}
+     * already accept both ({@code identitySourceRaw instanceof String}), so the CFN provisioner
+     * should not be stricter than the service it calls.
+     */
+    private List<String> resolveIdentitySource(JsonNode props, String source, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null) {
+            return List.of();
+        }
+        if (resolved.isTextual()) {
+            return List.of(resolved.asText());
+        }
+        if (!resolved.isArray()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        resolved.forEach(v -> values.add(v.asText()));
+        return values;
+    }
+
     private void provisionApiGatewayV2Authorizer(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                                  String region) {
         String apiId = resolveOptional(props, "ApiId", engine);
         Map<String, Object> req = new HashMap<>();
         req.put("name", resolveOptional(props, "Name", engine));
         req.put("authorizerType", resolveOptional(props, "AuthorizerType", engine));
-        req.put("identitySource", resolveStringListOrEmpty(props, "IdentitySource", engine));
+        req.put("identitySource", resolveIdentitySource(props, "IdentitySource", engine));
         req.put("authorizerUri", resolveOptional(props, "AuthorizerUri", engine));
         req.put("authorizerPayloadFormatVersion", resolveOptional(props, "AuthorizerPayloadFormatVersion", engine));
 
