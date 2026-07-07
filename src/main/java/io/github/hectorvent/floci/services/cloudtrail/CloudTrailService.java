@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
@@ -33,22 +36,20 @@ public class CloudTrailService {
     private static final String EVENT_VERSION = "1.11";
     private static final String S3_EVENT_SOURCE = "s3.amazonaws.com";
 
+    private final StorageBackend<String, CloudTrailEntry> store;
     private final RegionResolver regionResolver;
     private final IamService iamService;
     private final ObjectMapper mapper;
 
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Trail>> trailsByRegion = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, List<EventSelector>>> selectorsByRegion = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Boolean>> loggingByRegion = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Long>> startTimeByRegion = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Long>> stopTimeByRegion = new ConcurrentHashMap<>();
-
-    /** Per-trail pending record buffers, keyed by (region, trailName). */
+    /** Per-trail pending record buffers — ephemeral, never persisted. */
     private final ConcurrentHashMap<TrailKey, ConcurrentLinkedQueue<ObjectNode>> pendingRecordsByTrail =
             new ConcurrentHashMap<>();
 
     @Inject
-    public CloudTrailService(RegionResolver regionResolver, IamService iamService, ObjectMapper mapper) {
+    public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
+                             IamService iamService, ObjectMapper mapper) {
+        this.store = storageFactory.create("cloudtrail", "cloudtrail-trails.json",
+                new TypeReference<Map<String, CloudTrailEntry>>() {});
         this.regionResolver = regionResolver;
         this.iamService = iamService;
         this.mapper = mapper;
@@ -64,8 +65,8 @@ public class CloudTrailService {
         if (s3BucketName == null || s3BucketName.isEmpty()) {
             throw new AwsException("S3BucketDoesNotExistException", "S3 bucket name is required.", 400);
         }
-        ConcurrentHashMap<String, Trail> store = trailsFor(region);
-        if (store.containsKey(name)) {
+        String key = regionKey(region, name);
+        if (store.get(key).isPresent()) {
             throw new AwsException("TrailAlreadyExistsException",
                     "Trail " + name + " already exists.", 400);
         }
@@ -75,28 +76,13 @@ public class CloudTrailService {
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
                 enableLogFileValidation, false, false, isOrganizationTrail);
-        store.put(name, trail);
+        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null));
         return trail;
     }
 
     public void deleteTrail(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        for (ConcurrentHashMap<String, Trail> store : trailsByRegion.values()) {
-            store.remove(trail.name());
-        }
-        for (ConcurrentHashMap<String, List<EventSelector>> store : selectorsByRegion.values()) {
-            store.remove(trail.name());
-        }
-        for (ConcurrentHashMap<String, Boolean> store : loggingByRegion.values()) {
-            store.remove(trail.name());
-        }
-        for (ConcurrentHashMap<String, Long> store : startTimeByRegion.values()) {
-            store.remove(trail.name());
-        }
-        for (ConcurrentHashMap<String, Long> store : stopTimeByRegion.values()) {
-            store.remove(trail.name());
-        }
-        // Drop any buffered records targeted at the deleted trail.
+        store.delete(regionKey(trail.homeRegion(), trail.name()));
         pendingRecordsByTrail.keySet().removeIf(k -> k.trailName().equals(trail.name()));
     }
 
@@ -118,34 +104,28 @@ public class CloudTrailService {
                 existing.hasCustomEventSelectors(),
                 existing.hasInsightSelectors(),
                 isOrganizationTrail != null ? isOrganizationTrail : existing.isOrganizationTrail());
-        // Find which region the trail lives in (it may be a multi-region trail)
-        for (Map.Entry<String, ConcurrentHashMap<String, Trail>> e : trailsByRegion.entrySet()) {
-            if (e.getValue().containsKey(existing.name())) {
-                e.getValue().put(existing.name(), updated);
-            }
-        }
+        String key = regionKey(existing.homeRegion(), existing.name());
+        store.get(key).ifPresent(entry -> store.put(key, entry.withTrail(updated)));
         return updated;
     }
 
     public List<Trail> describeTrails(String region, List<String> trailNameOrArnList) {
-        List<Trail> results = new ArrayList<>();
         if (trailNameOrArnList == null || trailNameOrArnList.isEmpty()) {
-            // Return all trails in the region
-            ConcurrentHashMap<String, Trail> store = trailsByRegion.get(region);
-            if (store != null) {
-                results.addAll(store.values());
-            }
-            // Multi-region trails created in another region also surface here
-            for (Map.Entry<String, ConcurrentHashMap<String, Trail>> e : trailsByRegion.entrySet()) {
-                if (e.getKey().equals(region)) continue;
-                for (Trail t : e.getValue().values()) {
-                    if (t.isMultiRegionTrail()) results.add(t);
+            List<Trail> results = new ArrayList<>();
+            for (String k : store.keys()) {
+                String trailRegion = regionFromKey(k);
+                CloudTrailEntry entry = store.get(k).orElse(null);
+                if (entry == null) continue;
+                Trail t = entry.trail();
+                if (trailRegion.equals(region) || t.isMultiRegionTrail()) {
+                    results.add(t);
                 }
             }
             return results;
         }
-        for (String key : trailNameOrArnList) {
-            Trail t = findTrail(region, key);
+        List<Trail> results = new ArrayList<>();
+        for (String nameOrArn : trailNameOrArnList) {
+            Trail t = findTrail(region, nameOrArn);
             if (t != null) results.add(t);
         }
         return results;
@@ -153,49 +133,36 @@ public class CloudTrailService {
 
     public List<EventSelector> putEventSelectors(String region, String trailNameOrArn, List<EventSelector> selectors) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        String homeRegion = trail.homeRegion();
         List<EventSelector> normalized = selectors == null ? List.of() : List.copyOf(selectors);
-        selectorsFor(homeRegion).put(trail.name(), normalized);
-        // Mark hasCustomEventSelectors=true on the trail, stored under its home region
-        trailsFor(homeRegion).put(trail.name(), new Trail(
-                trail.name(), trail.trailArn(), trail.s3BucketName(), trail.s3KeyPrefix(),
-                trail.snsTopicArn(), trail.includeGlobalServiceEvents(), trail.isMultiRegionTrail(),
-                homeRegion, trail.logFileValidationEnabled(), true, trail.hasInsightSelectors(),
-                trail.isOrganizationTrail()));
+        String key = regionKey(trail.homeRegion(), trail.name());
+        store.get(key).ifPresent(entry -> store.put(key, entry.withSelectors(normalized, true)));
         return normalized;
     }
 
     public List<EventSelector> getEventSelectors(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        ConcurrentHashMap<String, List<EventSelector>> store = selectorsByRegion.get(trail.homeRegion());
-        if (store == null) return List.of();
-        return store.getOrDefault(trail.name(), List.of());
+        return store.get(regionKey(trail.homeRegion(), trail.name()))
+                .map(e -> e.selectors() != null ? e.selectors() : List.<EventSelector>of())
+                .orElse(List.of());
     }
 
     public void startLogging(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        String homeRegion = trail.homeRegion();
-        loggingFor(homeRegion).put(trail.name(), true);
-        startTimesFor(homeRegion).put(trail.name(), System.currentTimeMillis());
+        String key = regionKey(trail.homeRegion(), trail.name());
+        store.get(key).ifPresent(entry -> store.put(key, entry.startLogging(System.currentTimeMillis())));
     }
 
     public void stopLogging(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        String homeRegion = trail.homeRegion();
-        loggingFor(homeRegion).put(trail.name(), false);
-        stopTimesFor(homeRegion).put(trail.name(), System.currentTimeMillis());
+        String key = regionKey(trail.homeRegion(), trail.name());
+        store.get(key).ifPresent(entry -> store.put(key, entry.stopLogging(System.currentTimeMillis())));
     }
 
     public TrailStatus getTrailStatus(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        String homeRegion = trail.homeRegion();
-        boolean logging = loggingByRegion.getOrDefault(homeRegion, new ConcurrentHashMap<>())
-                .getOrDefault(trail.name(), false);
-        Long start = startTimeByRegion.getOrDefault(homeRegion, new ConcurrentHashMap<>())
-                .get(trail.name());
-        Long stop = stopTimeByRegion.getOrDefault(homeRegion, new ConcurrentHashMap<>())
-                .get(trail.name());
-        return new TrailStatus(logging, start, stop);
+        return store.get(regionKey(trail.homeRegion(), trail.name()))
+                .map(e -> new TrailStatus(e.logging(), e.startLoggingTime(), e.stopLoggingTime()))
+                .orElse(new TrailStatus(false, null, null));
     }
 
     // --- Data plane: called by S3 (and other services) when an op happens ---
@@ -221,7 +188,6 @@ public class CloudTrailService {
         }
     }
 
-    /** Drain pending records for a specific trail (used by the log-file writer + tests). */
     public void requeueRecords(String region, String trailName, List<ObjectNode> records) {
         if (!records.isEmpty()) {
             queueFor(new TrailKey(region, trailName)).addAll(records);
@@ -244,7 +210,6 @@ public class CloudTrailService {
         return q == null ? 0 : q.size();
     }
 
-    /** Snapshot of all (region, trailName) pairs that currently have records pending. */
     public List<TrailKey> trailsWithPendingRecords() {
         List<TrailKey> result = new ArrayList<>();
         for (Map.Entry<TrailKey, ConcurrentLinkedQueue<ObjectNode>> e : pendingRecordsByTrail.entrySet()) {
@@ -256,8 +221,9 @@ public class CloudTrailService {
     }
 
     public Trail getTrail(String region, String trailName) {
-        ConcurrentHashMap<String, Trail> store = trailsByRegion.get(region);
-        return store == null ? null : store.get(trailName);
+        return store.get(regionKey(region, trailName))
+                .map(CloudTrailEntry::trail)
+                .orElse(null);
     }
 
     private ConcurrentLinkedQueue<ObjectNode> queueFor(TrailKey key) {
@@ -270,23 +236,17 @@ public class CloudTrailService {
 
     private List<MatchedTrail> trailsMatching(String region, S3EventInput in) {
         List<MatchedTrail> result = new ArrayList<>();
-        for (Map.Entry<String, ConcurrentHashMap<String, Trail>> regionEntry : trailsByRegion.entrySet()) {
-            String trailRegion = regionEntry.getKey();
+        for (String k : store.keys()) {
+            String trailRegion = regionFromKey(k);
             boolean sameRegion = trailRegion.equals(region);
-            for (Trail trail : regionEntry.getValue().values()) {
-                if (!sameRegion && !trail.isMultiRegionTrail()) {
-                    continue;
-                }
-                Boolean logging = loggingByRegion.getOrDefault(trailRegion, new ConcurrentHashMap<>())
-                        .get(trail.name());
-                if (logging == null || !logging) {
-                    continue;
-                }
-                List<EventSelector> selectors = selectorsByRegion.getOrDefault(trailRegion, new ConcurrentHashMap<>())
-                        .getOrDefault(trail.name(), List.of());
-                if (matchesAnySelector(selectors, in)) {
-                    result.add(new MatchedTrail(trail, trailRegion));
-                }
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            if (entry == null) continue;
+            Trail trail = entry.trail();
+            if (!sameRegion && !trail.isMultiRegionTrail()) continue;
+            if (!entry.logging()) continue;
+            List<EventSelector> selectors = entry.selectors() != null ? entry.selectors() : List.of();
+            if (matchesAnySelector(selectors, in)) {
+                result.add(new MatchedTrail(trail, trailRegion));
             }
         }
         return result;
@@ -294,7 +254,6 @@ public class CloudTrailService {
 
     private boolean matchesAnySelector(List<EventSelector> selectors, S3EventInput in) {
         if (selectors.isEmpty()) {
-            // No selectors configured → no data events captured (matches AWS default trail behavior).
             return false;
         }
         boolean isRead = isReadOnlyEvent(in.eventName());
@@ -339,7 +298,6 @@ public class CloudTrailService {
         }
         int slash = tail.indexOf('/');
         if (slash < 0) {
-            // Bucket-only form: exact name or wildcard "*"
             return tail.equals("*") || tail.equals(bucketName);
         }
         String configBucket = tail.substring(0, slash);
@@ -348,7 +306,6 @@ public class CloudTrailService {
         if (configKeyPart.isEmpty()) {
             return true;
         }
-        // Wildcard key parts ("*" or "*/*") match any non-null key
         if (configKeyPart.equals("*") || configKeyPart.equals("*/*")) {
             return key != null;
         }
@@ -444,7 +401,6 @@ public class CloudTrailService {
         String accountId = regionResolver.getAccountId();
 
         if (accessKeyId == null || "test".equals(accessKeyId)) {
-            // Anonymous / root-style: best-effort placeholder.
             identity.put("type", "IAMUser");
             identity.put("principalId", "AIDA" + repeat('A', 17));
             identity.put("arn", "arn:aws:iam::" + accountId + ":root");
@@ -468,7 +424,6 @@ public class CloudTrailService {
             }
         }
 
-        // Unknown access key — fall back to anonymous shape.
         identity.put("type", "IAMUser");
         identity.put("principalId", "AIDA" + repeat('A', 17));
         identity.put("arn", "arn:aws:iam::" + accountId + ":user/anonymous");
@@ -485,11 +440,12 @@ public class CloudTrailService {
     }
 
     private Trail findTrail(String region, String nameOrArn) {
-        for (ConcurrentHashMap<String, Trail> store : trailsByRegion.values()) {
-            for (Trail t : store.values()) {
-                if (nameOrArn.equals(t.name()) || nameOrArn.equals(t.trailArn())) {
-                    return t;
-                }
+        for (String k : store.keys()) {
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            if (entry == null) continue;
+            Trail t = entry.trail();
+            if (nameOrArn.equals(t.name()) || nameOrArn.equals(t.trailArn())) {
+                return t;
             }
         }
         return null;
@@ -532,24 +488,13 @@ public class CloudTrailService {
         }
     }
 
-    private ConcurrentHashMap<String, Trail> trailsFor(String region) {
-        return trailsByRegion.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    private static String regionKey(String region, String name) {
+        return region + ":" + name;
     }
 
-    private ConcurrentHashMap<String, List<EventSelector>> selectorsFor(String region) {
-        return selectorsByRegion.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
-    }
-
-    private ConcurrentHashMap<String, Boolean> loggingFor(String region) {
-        return loggingByRegion.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
-    }
-
-    private ConcurrentHashMap<String, Long> startTimesFor(String region) {
-        return startTimeByRegion.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
-    }
-
-    private ConcurrentHashMap<String, Long> stopTimesFor(String region) {
-        return stopTimeByRegion.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    private static String regionFromKey(String key) {
+        int colon = key.indexOf(':');
+        return colon < 0 ? key : key.substring(0, colon);
     }
 
     public record TrailStatus(boolean logging, Long startLoggingTime, Long stopLoggingTime) {}

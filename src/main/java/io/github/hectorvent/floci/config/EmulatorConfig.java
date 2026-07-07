@@ -266,6 +266,7 @@ public interface EmulatorConfig {
         TranscribeStorageConfig transcribe();
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
+        CloudTrailStorageConfig cloudtrail();
     }
 
     interface SsmStorageConfig {
@@ -461,6 +462,13 @@ public interface EmulatorConfig {
     }
 
     interface ElasticBeanstalkStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface CloudTrailStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
