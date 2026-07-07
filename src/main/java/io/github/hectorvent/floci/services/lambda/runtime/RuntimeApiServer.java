@@ -90,9 +90,22 @@ public class RuntimeApiServer {
     private volatile boolean stopped;
     private volatile CompletableFuture<Void> closeFuture;
 
+    // Set by ContainerLauncher once it knows which function this server instance is for (the
+    // factory creates the server generically, before that's known) — used only to populate the
+    // Extensions API register response.
+    private volatile String functionName = "function";
+    private volatile String functionVersion = "$LATEST";
+    private volatile String handler = "";
+
     RuntimeApiServer(Vertx vertx, int port) {
         this.vertx = vertx;
         this.port = port;
+    }
+
+    public void setFunctionMetadata(String functionName, String functionVersion, String handler) {
+        this.functionName = functionName != null ? functionName : "function";
+        this.functionVersion = functionVersion != null ? functionVersion : "$LATEST";
+        this.handler = handler != null ? handler : "";
     }
 
     public int getPort() {
@@ -194,9 +207,9 @@ public class RuntimeApiServer {
             LOG.infov("Extension registered: {0} ({1}), events={2}", name, identifier, events);
 
             JsonObject responseBody = new JsonObject()
-                    .put("functionName", "function")
-                    .put("functionVersion", "$LATEST")
-                    .put("handler", "bootstrap");
+                    .put("functionName", functionName)
+                    .put("functionVersion", functionVersion)
+                    .put("handler", handler);
             ctx.response()
                     .setStatusCode(200)
                     .putHeader(EXTENSION_ID_HEADER, identifier)
