@@ -6367,6 +6367,66 @@ class CloudFormationIntegrationTest {
             .body("Code.ImageUri", equalTo("000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"));
     }
 
+    @Test
+    void createStack_samFunctionWithImageConfigDeploysWithOverrides() {
+        // ImageConfig must also be carried through the SAM transform to CloudFormationResourceProvisioner,
+        // which already reads it (provisionLambda's putResolvedMapIfPresent(configRequest, props,
+        // "ImageConfig", ...)) — without the transform copying it, a PackageType: Image SAM function's
+        // EntryPoint/Command/WorkingDirectory override silently never reaches the deployed function.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Image",
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+                    "ImageConfig": {
+                      "EntryPoint": ["/bootstrap"],
+                      "Command": ["handler.main"],
+                      "WorkingDirectory": "/var/task"
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-imageconfig-function-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String functionName = physicalIdByLogicalId(resourcesXml, "MyFunction");
+
+        given()
+            .when().get("/2015-03-31/functions/" + functionName)
+            .then()
+            .statusCode(200)
+            .body("Configuration.ImageConfigResponse.ImageConfig.EntryPoint[0]", equalTo("/bootstrap"))
+            .body("Configuration.ImageConfigResponse.ImageConfig.Command[0]", equalTo("handler.main"))
+            .body("Configuration.ImageConfigResponse.ImageConfig.WorkingDirectory", equalTo("/var/task"));
+    }
+
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
 
     @Test

@@ -137,6 +137,41 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_functionWithImageConfig() throws Exception {
+        // ImageConfig (EntryPoint/Command/WorkingDirectory overrides for a container-image
+        // function) must also be carried through: CloudFormationResourceProvisioner.provisionLambda
+        // already reads it (putResolvedMapIfPresent(configRequest, props, "ImageConfig", ...)), but
+        // the SAM transform previously dropped it, silently losing any container entry-point/command
+        // override on a PackageType: Image SAM function.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Image",
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+                    "ImageConfig": {
+                      "EntryPoint": ["/bootstrap"],
+                      "Command": ["handler.main"],
+                      "WorkingDirectory": "/var/task"
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+
+        JsonNode imageConfig = expanded.path("Resources").path("MyFunc").path("Properties").path("ImageConfig");
+        assertEquals("/bootstrap", imageConfig.path("EntryPoint").get(0).asText());
+        assertEquals("handler.main", imageConfig.path("Command").get(0).asText());
+        assertEquals("/var/task", imageConfig.path("WorkingDirectory").asText());
+    }
+
+    @Test
     void expandSamTemplate_functionWithExplicitRole() throws Exception {
         JsonNode template = objectMapper.readTree("""
             {

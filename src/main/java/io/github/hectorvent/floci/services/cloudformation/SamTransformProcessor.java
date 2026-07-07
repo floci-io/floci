@@ -420,6 +420,7 @@ class SamTransformProcessor {
         copyIfPresent(properties, "PackageType", lambdaProps);
         copyIfPresent(properties, "Handler", lambdaProps);
         copyIfPresent(properties, "Runtime", lambdaProps);
+        copyIfPresent(properties, "ImageConfig", lambdaProps);
 
         lambdaProps.set("Code", buildLambdaCode(properties));
 
