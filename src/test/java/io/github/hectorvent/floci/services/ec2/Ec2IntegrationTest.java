@@ -3054,4 +3054,163 @@ class Ec2IntegrationTest {
             // otherwise the AWS SDK for Go fails to deserialize interface endpoints.
             .body("CreateVpcEndpointResponse.vpcEndpoint.subnetIdSet.item", equalTo(subnet));
     }
+
+    @Test
+    @Order(317)
+    void subnetTagsFromCreateSurviveDescribe() {
+        String vpc = newVpc("10.37.0.0/16");
+        String subnet = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.37.1.0/24")
+            .formParam("TagSpecification.1.ResourceType", "subnet")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "tagged-subnet")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("SubnetId.1", subnet)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.key", equalTo("Name"))
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.value", equalTo("tagged-subnet"));
+    }
+
+    @Test
+    @Order(318)
+    void routeNatGatewayIdRoundTrips() {
+        String vpc = newVpc("10.38.0.0/16");
+        String rt = given()
+            .formParam("Action", "CreateRouteTable")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateRouteTableResponse.routeTable.routeTableId");
+
+        given()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", rt)
+            .formParam("DestinationCidrBlock", "0.0.0.0/0")
+            .formParam("NatGatewayId", "nat-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateRouteResponse.return", equalTo("true"));
+
+        given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("RouteTableId.1", rt)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeRouteTablesResponse.routeTableSet.item.routeSet.item.natGatewayId",
+                    equalTo("nat-0123456789abcdef0"));
+    }
+
+    @Test
+    @Order(319)
+    void securityGroupRuleDescribableByRuleId() {
+        String vpc = newVpc("10.39.0.0/16");
+        String sg = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "rule-test")
+            .formParam("GroupDescription", "rule test")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String ruleId = given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", sg)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "443")
+            .formParam("IpPermissions.1.ToPort", "443")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/16")
+            .formParam("TagSpecification.1.ResourceType", "security-group-rule")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "allow-https")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AuthorizeSecurityGroupIngressResponse.securityGroupRuleSet.item.securityGroupRuleId");
+
+        // The modern aws_vpc_security_group_ingress_rule reads back by security-group-rule-id,
+        // and its create-time tags must round-trip or Terraform recreates the rule every plan.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", ruleId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.securityGroupRuleId",
+                    equalTo(ruleId))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.tagSet.item.key",
+                    equalTo("Name"))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.tagSet.item.value",
+                    equalTo("allow-https"));
+    }
+
+    @Test
+    @Order(320)
+    void securityGroupRuleIdParamAndFilterAreConjunctive() {
+        String vpc = newVpc("10.40.0.0/16");
+        String sg = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "conjunctive-test")
+            .formParam("GroupDescription", "conjunctive test")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String ruleId = given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", sg)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "80")
+            .formParam("IpPermissions.1.ToPort", "80")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AuthorizeSecurityGroupIngressResponse.securityGroupRuleSet.item.securityGroupRuleId");
+
+        // Param and filter naming different rules must intersect to nothing, not union to both.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("SecurityGroupRuleId.1", ruleId)
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", "sgr-00000000000000000")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet", emptyOrNullString());
+
+        // Param and filter naming the same rule still match.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("SecurityGroupRuleId.1", ruleId)
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", ruleId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.securityGroupRuleId",
+                    equalTo(ruleId));
+    }
 }

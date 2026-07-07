@@ -622,10 +622,8 @@ public class CloudFormationResourceProvisioner {
         String routeTableId = resolveOptional(props, "RouteTableId", engine);
         String destinationCidr = resolveOptional(props, "DestinationCidrBlock", engine);
         String gatewayId = resolveOptional(props, "GatewayId", engine);
-        if (gatewayId == null || gatewayId.isBlank()) {
-            gatewayId = resolveOptional(props, "NatGatewayId", engine);
-        }
-        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId);
+        String natGatewayId = resolveOptional(props, "NatGatewayId", engine);
+        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId, natGatewayId);
         r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
     }
 
