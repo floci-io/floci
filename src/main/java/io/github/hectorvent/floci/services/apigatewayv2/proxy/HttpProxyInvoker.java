@@ -222,17 +222,84 @@ public class HttpProxyInvoker {
         String[] status = lines[0].split(" ", 3);
         int statusCode = Integer.parseInt(status[1]);
         Map<String, String> headers = new LinkedHashMap<>();
+        String transferEncoding = null;
+        int contentLength = -1;
         for (int i = 1; i < lines.length; i++) {
             int separator = lines[i].indexOf(':');
             if (separator <= 0) {
                 continue;
             }
             String name = lines[i].substring(0, separator);
+            String value = lines[i].substring(separator + 1).trim();
+            if (name.equalsIgnoreCase("Transfer-Encoding")) {
+                transferEncoding = value;
+            }
+            if (name.equalsIgnoreCase("Content-Length")) {
+                contentLength = Integer.parseInt(value);
+            }
             if (!HOP_BY_HOP.contains(name.toLowerCase(Locale.ROOT))) {
-                headers.put(name, lines[i].substring(separator + 1).trim());
+                headers.put(name, value);
             }
         }
-        return new ProxyResult(statusCode, headers, input.readAllBytes());
+        byte[] body = transferEncoding != null && transferEncoding.toLowerCase(Locale.ROOT).contains("chunked")
+                ? readChunkedBody(input)
+                : contentLength >= 0 ? input.readNBytes(contentLength) : input.readAllBytes();
+        return new ProxyResult(statusCode, headers, body);
+    }
+
+    private static byte[] readChunkedBody(InputStream input) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        while (true) {
+            String sizeLine = readAsciiLine(input);
+            if (sizeLine == null) {
+                throw new IOException("unexpected end of chunked response");
+            }
+            int extension = sizeLine.indexOf(';');
+            int size = Integer.parseInt((extension >= 0 ? sizeLine.substring(0, extension) : sizeLine).trim(), 16);
+            if (size == 0) {
+                while (true) {
+                    String trailer = readAsciiLine(input);
+                    if (trailer == null || trailer.isEmpty()) {
+                        return body.toByteArray();
+                    }
+                }
+            }
+            body.write(input.readNBytes(size));
+            expectCrlf(input);
+        }
+    }
+
+    private static String readAsciiLine(InputStream input) throws IOException {
+        ByteArrayOutputStream line = new ByteArrayOutputStream();
+        while (true) {
+            int b = input.read();
+            if (b == -1) {
+                return line.size() == 0 ? null : line.toString(StandardCharsets.ISO_8859_1);
+            }
+            if (b == '\n') {
+                return line.toString(StandardCharsets.ISO_8859_1);
+            }
+            if (b == '\r') {
+                int next = input.read();
+                if (next == '\n') {
+                    return line.toString(StandardCharsets.ISO_8859_1);
+                }
+                line.write(b);
+                if (next != -1) {
+                    line.write(next);
+                }
+                continue;
+            }
+            line.write(b);
+        }
+    }
+
+    private static void expectCrlf(InputStream input) throws IOException {
+        int cr = input.read();
+        int lf = input.read();
+        if (cr != '\r' || lf != '\n') {
+            throw new IOException("invalid chunked response");
+        }
     }
 
     private static String buildFinalUrl(ProxyRequestBuilder builder) {

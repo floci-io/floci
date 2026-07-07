@@ -120,11 +120,22 @@ public class ElbV2DataPlane {
         if (config.services().elbv2().mock()) {
             return;
         }
-        ListenerBinding oldBinding = listenerBindings.remove(listener.getListenerArn());
+        String listenerArn = listener.getListenerArn();
+        ListenerBinding newBinding = binding(listener, region);
+        ListenerBinding oldBinding = listenerBindings.get(listenerArn);
+        if (newBinding.equals(oldBinding)) {
+            ruleChains.put(listenerArn, new AtomicReference<>(compileRules(rules)));
+            listenerRegions.put(listenerArn, region);
+            listenersByHostAndPort.computeIfAbsent(newBinding.port(), ignored -> new ConcurrentHashMap<>())
+                    .put(newBinding.host(), listenerArn);
+            servers.computeIfAbsent(newBinding.port(), this::startPortServer);
+            return;
+        }
+        oldBinding = listenerBindings.remove(listenerArn);
         if (oldBinding != null) {
             Map<String, String> listenersByHost = listenersByHostAndPort.get(oldBinding.port());
             if (listenersByHost != null) {
-                listenersByHost.remove(oldBinding.host(), listener.getListenerArn());
+                listenersByHost.remove(oldBinding.host(), listenerArn);
                 closePortServerIfUnused(oldBinding.port(), listenersByHost);
             }
         }
