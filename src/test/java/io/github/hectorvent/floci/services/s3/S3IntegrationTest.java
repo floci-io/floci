@@ -204,6 +204,7 @@ class S3IntegrationTest {
 
         // Verify the copy
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting-copy.txt")
         .then()
@@ -241,6 +242,7 @@ class S3IntegrationTest {
 
         // Verify the copy inherits the source checksum (CRC64NVME)
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting-copy-no-override.txt")
         .then()
@@ -274,6 +276,7 @@ class S3IntegrationTest {
 
         // Verify the source object has a SHA256 checksum
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/sha256-source.txt")
         .then()
@@ -293,6 +296,7 @@ class S3IntegrationTest {
 
         // Verify the copy preserves the source's SHA256 checksum
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/sha256-copy.txt")
         .then()
@@ -536,24 +540,56 @@ class S3IntegrationTest {
     @Order(118)
     void getObjectWithChecksumModeReturnsChecksum() {
         given()
+            .when()
+            .put("/checksum-mode-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("Hello World from S3!")
+        .when()
+            .put("/checksum-mode-bucket/greeting.txt")
+        .then()
+            .statusCode(200);
+
+        given()
             .header("x-amz-checksum-mode", "ENABLED")
         .when()
-            .get("/test-bucket/greeting.txt")
+            .get("/checksum-mode-bucket/greeting.txt")
         .then()
             .statusCode(200)
             .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given().delete("/checksum-mode-bucket/greeting.txt");
+        given().delete("/checksum-mode-bucket");
     }
 
     @Test
     @Order(119)
     void headObjectWithChecksumModeReturnsChecksum() {
         given()
+            .when()
+            .put("/checksum-mode-head-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("Hello World from S3!")
+        .when()
+            .put("/checksum-mode-head-bucket/greeting.txt")
+        .then()
+            .statusCode(200);
+
+        given()
             .header("x-amz-checksum-mode", "ENABLED")
         .when()
-            .head("/test-bucket/greeting.txt")
+            .head("/checksum-mode-head-bucket/greeting.txt")
         .then()
             .statusCode(200)
             .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given().delete("/checksum-mode-head-bucket/greeting.txt");
+        given().delete("/checksum-mode-head-bucket");
     }
 
     @Test
