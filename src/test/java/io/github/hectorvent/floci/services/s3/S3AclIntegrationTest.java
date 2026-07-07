@@ -326,4 +326,52 @@ class S3AclIntegrationTest {
             .statusCode(501)
             .body(containsString("NotImplemented"));
     }
+
+    // Regression coverage for a second empty-body pitfall found in review: calling PutObjectAcl/
+    // PutBucketAcl with neither a canned/explicit ACL header NOR a body must not store the empty
+    // body as the ACL (that would break the next GetObjectAcl/GetBucketAcl the same way the
+    // header-with-empty-body bug did).
+
+    @Test
+    @Order(15)
+    void putObjectAclWithNoHeadersAndNoBodyKeepsDefaultAcl() {
+        given()
+            .body("acl no-op target")
+        .when()
+            .put("/" + BUCKET + "/acl-noop.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .put("/" + BUCKET + "/acl-noop.txt?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/acl-noop.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(ALL_USERS_GROUP_URI)))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
+
+    @Test
+    @Order(16)
+    void putBucketAclWithNoHeadersAndNoBodyKeepsDefaultAcl() {
+        given()
+        .when()
+            .put("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(ALL_USERS_GROUP_URI)))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
 }

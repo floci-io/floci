@@ -1624,7 +1624,7 @@ public class S3Service implements Resettable {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
-        bucket.setAcl(resolvedAcl != null ? resolvedAcl : bodyAcl);
+        bucket.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         bucketStore.put(bucketName, bucket);
     }
 
@@ -1638,7 +1638,7 @@ public class S3Service implements Resettable {
                               String grantReadAcp, String grantWriteAcp) {
         S3Object obj = getObject(bucketName, key, versionId);
         String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
-        obj.setAcl(resolvedAcl != null ? resolvedAcl : bodyAcl);
+        obj.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         String storeKey = (versionId != null) ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
         objectStore.put(storeKey, obj);
     }
@@ -1784,9 +1784,10 @@ public class S3Service implements Resettable {
     /**
      * Resolves the ACL to store for an object/bucket from a canned ACL and/or the explicit
      * ACL grant headers (x-amz-grant-read, x-amz-grant-write, x-amz-grant-full-control,
-     * x-amz-grant-read-acp, x-amz-grant-write-acp). A canned ACL takes precedence if both are
-     * somehow present (matches S3's own precedence). Returns null if neither is set, so callers
-     * can fall back to a pre-existing ACL (e.g. an explicit AccessControlPolicy XML body).
+     * x-amz-grant-read-acp, x-amz-grant-write-acp). If both are somehow present, the canned ACL
+     * takes precedence - real S3 instead rejects that combination with 400 "Conflicting header
+     * values", but Floci doesn't model that validation yet. Returns null if neither is set, so
+     * callers can fall back to a pre-existing ACL (e.g. an explicit AccessControlPolicy XML body).
      */
     String resolveObjectAclXml(String cannedAcl, String grantRead, String grantWrite,
                                 String grantFullControl, String grantReadAcp, String grantWriteAcp) {
