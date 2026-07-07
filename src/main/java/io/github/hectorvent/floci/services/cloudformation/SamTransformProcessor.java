@@ -147,7 +147,13 @@ class SamTransformProcessor {
         return routes;
     }
 
-    private record HttpApiRoute(String functionLogicalId, String apiLogicalId, String path, String httpMethod) {}
+    /**
+     * @param noAuthorizer true when this event declares {@code Auth: {Authorizer: NONE}},
+     *                     overriding the API's {@code DefaultAuthorizer} for this route specifically
+     *                     (SAM's documented per-event opt-out of the default authorizer).
+     */
+    private record HttpApiRoute(String functionLogicalId, String apiLogicalId, String path, String httpMethod,
+                                boolean noAuthorizer) {}
 
     /**
      * Collects HttpApi-typed Function events bound to an explicit {@code AWS::Serverless::HttpApi}
@@ -185,7 +191,8 @@ class SamTransformProcessor {
                 }
                 JsonNode methodNode = p.path("Method");
                 String method = methodNode.isTextual() ? methodNode.asText() : "ANY";
-                routes.add(new HttpApiRoute(logicalId, apiLogicalId, pathNode.asText(), method));
+                boolean noAuthorizer = "NONE".equals(p.path("Auth").path("Authorizer").asText(null));
+                routes.add(new HttpApiRoute(logicalId, apiLogicalId, pathNode.asText(), method, noAuthorizer));
             }
         }
         return routes;
@@ -295,7 +302,7 @@ class SamTransformProcessor {
         ObjectNode routeProps = objectMapper.createObjectNode();
         routeProps.set("ApiId", ref(apiLogicalId));
         routeProps.put("RouteKey", routeKey);
-        if (defaultAuthorizerLogicalId != null) {
+        if (defaultAuthorizerLogicalId != null && !route.noAuthorizer()) {
             routeProps.put("AuthorizationType", "JWT");
             routeProps.set("AuthorizerId", ref(defaultAuthorizerLogicalId));
         } else {
