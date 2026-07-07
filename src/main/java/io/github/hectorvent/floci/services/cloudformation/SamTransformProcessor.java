@@ -417,6 +417,7 @@ class SamTransformProcessor {
         ObjectNode lambdaProps = objectMapper.createObjectNode();
 
         copyIfPresent(properties, "FunctionName", lambdaProps);
+        copyIfPresent(properties, "PackageType", lambdaProps);
         copyIfPresent(properties, "Handler", lambdaProps);
         copyIfPresent(properties, "Runtime", lambdaProps);
 

@@ -102,6 +102,41 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_functionWithPackageTypeImage() throws Exception {
+        // PackageType must be carried through to the expanded AWS::Lambda::Function: without it,
+        // CloudFormationResourceProvisioner.buildLambdaDesiredState defaults PackageType to "Zip"
+        // (resolveOrDefault(props, "PackageType", engine, "Zip")), which then forces Runtime/Handler
+        // defaults (nodejs18.x / index.handler) onto a function that never had either — the function
+        // gets created as a Zip function running the wrong runtime instead of the real container image.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Image",
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+
+        JsonNode lambdaProps = expanded.path("Resources").path("MyFunc").path("Properties");
+        assertEquals("Image", lambdaProps.path("PackageType").asText());
+        assertEquals("000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+                lambdaProps.path("Code").path("ImageUri").asText());
+        // No Handler/Runtime were declared and none should be synthesized by the transform itself —
+        // CloudFormationResourceProvisioner is responsible for not defaulting them once it sees
+        // PackageType: Image (verified separately in CloudFormationIntegrationTest).
+        assertTrue(lambdaProps.path("Handler").isMissingNode());
+        assertTrue(lambdaProps.path("Runtime").isMissingNode());
+    }
+
+    @Test
     void expandSamTemplate_functionWithExplicitRole() throws Exception {
         JsonNode template = objectMapper.readTree("""
             {

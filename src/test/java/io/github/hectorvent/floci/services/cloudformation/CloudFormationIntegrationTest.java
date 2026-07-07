@@ -6311,6 +6311,62 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
+    // ── SAM AWS::Serverless::Function PackageType: Image dropped by the transform ──
+
+    @Test
+    void createStack_samFunctionWithPackageTypeImageDeploysAsImageFunction() {
+        // Without PackageType carried through by the SAM transform, CloudFormationResourceProvisioner
+        // defaults PackageType to "Zip" (buildLambdaDesiredState's resolveOrDefault), which then also
+        // forces Runtime/Handler defaults onto a function that declared neither — the function is
+        // created as a broken Zip function instead of running the real container image.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Image",
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"
+                  }
+                }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-image-function-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String functionName = physicalIdByLogicalId(resourcesXml, "MyFunction");
+
+        given()
+            .when().get("/2015-03-31/functions/" + functionName)
+            .then()
+            .statusCode(200)
+            .body("Configuration.PackageType", equalTo("Image"))
+            .body("Code.ImageUri", equalTo("000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"));
+    }
+
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
 
     @Test
