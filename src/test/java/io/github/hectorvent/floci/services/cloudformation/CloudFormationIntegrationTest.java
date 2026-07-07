@@ -6907,6 +6907,108 @@ class CloudFormationIntegrationTest {
             .body("Configuration.ImageConfigResponse.ImageConfig.WorkingDirectory", equalTo("/var/task"));
     }
 
+    // ── Issue #1759: SAM AWS::Serverless::HttpApi transform not expanded ──────
+
+    @Test
+    void createStack_samHttpApiExpandsToRealApiRouteAndAuthorizer() {
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "JwtConfiguration": {
+                            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "audience": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+
+        // The AWS::Serverless::HttpApi transform resource is a real ApiGatewayV2 API,
+        // not silently dropped by the SAM-type default branch.
+        given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetApis")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Items.findAll { it.ApiId == '" + apiId + "' }.size()", equalTo(1));
+
+        // The Auth.Authorizers entry expanded to a real JWT authorizer.
+        String authorizerId = getAuthorizers(apiId)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].Name", equalTo("MyAuthorizer"))
+                .body("Items[0].AuthorizerType", equalTo("JWT"))
+                .body("Items[0].JwtConfiguration.Issuer",
+                        equalTo("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"))
+                .extract().path("Items[0].AuthorizerId");
+
+        // The Function's HttpApi event expanded to a route wired to the DefaultAuthorizer,
+        // backed by an AWS_PROXY integration targeting the function.
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].RouteKey", equalTo("GET /hello"))
+                .body("Items[0].AuthorizationType", equalTo("JWT"))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId));
+
+        getIntegrations(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].IntegrationType", equalTo("AWS_PROXY"));
+
+        getStages(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].StageName", equalTo("$default"))
+                .body("Items[0].AutoDeploy", equalTo(true));
+    }
+
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
 
     @Test
