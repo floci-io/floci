@@ -769,8 +769,8 @@ public class SesService {
      * supplied by the caller takes precedence (a blank value is treated as absent); otherwise the
      * default configuration set associated with the sending identity (set via
      * {@code PutEmailIdentityConfigurationSetAttributes}) is used, with the email-address identity
-     * taking precedence over its parent domain. A stale association whose configuration set no
-     * longer exists is ignored so it cannot fail an otherwise-valid send.
+     * taking precedence over its parent domain. If that default association is stale (its
+     * configuration set was deleted), the send fails with a bad-request error, matching AWS.
      */
     private String resolveDefaultConfigurationSet(String configurationSetName, String source, String region) {
         if (configurationSetName != null && !configurationSetName.isBlank()) {
@@ -806,7 +806,13 @@ public class SesService {
         if (cs == null || cs.isEmpty()) {
             return null;
         }
-        return configSetStore.get(configSetKey(region, cs)).isPresent() ? cs : null;
+        // AWS: deleting the configuration set that is an identity's default, then sending through
+        // that identity, fails with a bad-request error rather than silently sending without it.
+        if (configSetStore.get(configSetKey(region, cs)).isEmpty()) {
+            throw new AwsException("BadRequestException",
+                    "Configuration set <" + cs + "> does not exist.", 400);
+        }
+        return cs;
     }
 
     public void setMailFromDomain(String identityValue, String mailFromDomain,

@@ -266,6 +266,41 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
                 .body("ConfigurationSetName", equalTo(CS));
     }
 
+    @Test
+    @Order(10)
+    void sendThroughIdentityWhoseDefaultConfigSetWasDeleted_returns400() {
+        // Verified against the SES Developer Guide: deleting the configuration set that is an
+        // identity's default, then sending through that identity, fails with a bad-request error.
+        String id = "cs-attr-stale@floci.test";
+        String cs = "cs-attr-stale-cs";
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"" + id + "\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"ConfigurationSetName\":\"" + cs + "\"}")
+        .when().post("/v2/email/configuration-sets").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"ConfigurationSetName\":\"" + cs + "\"}")
+        .when().put("/v2/email/identities/" + id + "/configuration-set").then().statusCode(200);
+
+        // Delete the configuration set that is now the identity's default.
+        given().header("Authorization", SES_AUTH)
+        .when().delete("/v2/email/configuration-sets/" + cs).then().statusCode(200);
+
+        // A send with no explicit ConfigurationSetName must fail rather than silently drop it.
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("""
+                    {
+                      "FromEmailAddress": "%s",
+                      "Destination": {"ToAddresses": ["bounce@simulator.amazonses.com"]},
+                      "Content": {"Simple": {"Subject": {"Data": "stale"}, "Body": {"Text": {"Data": "hi"}}}}
+                    }
+                    """.formatted(id))
+        .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Configuration set <" + cs + "> does not exist."));
+    }
+
     private void drainQueue() {
         for (int i = 0; i < 5; i++) {
             Response r = given().contentType(JSON_10).header("Authorization", SQS_AUTH)
