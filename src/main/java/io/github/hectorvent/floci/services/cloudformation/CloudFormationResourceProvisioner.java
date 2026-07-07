@@ -277,6 +277,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ApiGateway::Deployment" -> provisionApiGatewayDeployment(resource, properties, engine, region);
                 case "AWS::ApiGateway::Stage" -> provisionApiGatewayStage(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Api" -> provisionApiGatewayV2Api(resource, properties, engine, region, accountId, stackName);
+                case "AWS::ApiGatewayV2::Authorizer" -> provisionApiGatewayV2Authorizer(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Route" -> provisionApiGatewayV2Route(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Integration" -> provisionApiGatewayV2Integration(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Stage" -> provisionApiGatewayV2Stage(resource, properties, engine, region);
@@ -2770,12 +2771,49 @@ public class CloudFormationResourceProvisioner {
         return out;
     }
 
+    private void provisionApiGatewayV2Authorizer(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                                 String region) {
+        String apiId = resolveOptional(props, "ApiId", engine);
+        Map<String, Object> req = new HashMap<>();
+        req.put("name", resolveOptional(props, "Name", engine));
+        req.put("authorizerType", resolveOptional(props, "AuthorizerType", engine));
+        req.put("identitySource", resolveStringListOrEmpty(props, "IdentitySource", engine));
+        req.put("authorizerUri", resolveOptional(props, "AuthorizerUri", engine));
+        req.put("authorizerPayloadFormatVersion", resolveOptional(props, "AuthorizerPayloadFormatVersion", engine));
+
+        String ttl = resolveOptional(props, "AuthorizerResultTtlInSeconds", engine);
+        if (ttl != null) {
+            req.put("authorizerResultTtlInSeconds", Integer.parseInt(ttl));
+        }
+        String simpleResponses = resolveOptional(props, "EnableSimpleResponses", engine);
+        if (simpleResponses != null) {
+            req.put("enableSimpleResponses", simpleResponses);
+        }
+
+        JsonNode jwtConfigNode = props != null ? props.get("JwtConfiguration") : null;
+        if (jwtConfigNode != null && !jwtConfigNode.isNull()) {
+            Map<String, Object> jwtConfig = new HashMap<>();
+            jwtConfig.put("audience", resolveStringListOrEmpty(jwtConfigNode, "Audience", engine));
+            jwtConfig.put("issuer", resolveOptional(jwtConfigNode, "Issuer", engine));
+            req.put("jwtConfiguration", jwtConfig);
+        }
+
+        Authorizer authorizer;
+        if (r.getPhysicalId() == null) {
+            authorizer = apiGatewayV2Service.createAuthorizer(region, apiId, req);
+        } else {
+            authorizer = apiGatewayV2Service.updateAuthorizer(region, apiId, r.getPhysicalId(), req);
+        }
+        r.setPhysicalId(authorizer.getAuthorizerId());
+    }
+
     private void provisionApiGatewayV2Route(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                             String region) {
         String apiId = resolveOptional(props, "ApiId", engine);
         Map<String, Object> req = new HashMap<>();
         req.put("routeKey", resolveOptional(props, "RouteKey", engine));
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
+        req.put("authorizerId", resolveOptional(props, "AuthorizerId", engine));
         req.put("target", resolveOptional(props, "Target", engine));
 
         Route route;

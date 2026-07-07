@@ -6311,6 +6311,100 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
+    private io.restassured.response.ValidatableResponse getAuthorizers(String apiId) {
+        return given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetAuthorizers")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{\"ApiId\": \"" + apiId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    // ── Issue #1758: AWS::ApiGatewayV2::Authorizer dropped by CloudFormation ──
+
+    @Test
+    void createStack_apiGatewayV2AuthorizerIsProvisionedAndWiredToRoute() {
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "cfn-apigwv2-authz-api", "ProtocolType": "HTTP" }
+                },
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "Name": "cfn-jwt-authorizer",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": ["$request.header.Authorization"],
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                },
+                "Integration": {
+                  "Type": "AWS::ApiGatewayV2::Integration",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "IntegrationType": "HTTP_PROXY",
+                    "IntegrationUri": "https://example.com",
+                    "PayloadFormatVersion": "1.0"
+                  }
+                },
+                "Route": {
+                  "Type": "AWS::ApiGatewayV2::Route",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "RouteKey": "GET /hello",
+                    "AuthorizationType": "JWT",
+                    "AuthorizerId": { "Ref": "Authorizer" },
+                    "Target": { "Fn::Join": ["/", ["integrations", { "Ref": "Integration" }]] }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "HttpApi" } },
+                "AuthorizerId": { "Value": { "Ref": "Authorizer" } },
+                "RouteId": { "Value": { "Ref": "Route" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-authorizer-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+        String authorizerId = apigwOutputValue(createXml, "AuthorizerId");
+        String routeId = apigwOutputValue(createXml, "RouteId");
+
+        // The authorizer is a real resource, not dropped by the default-case stub.
+        getAuthorizers(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId))
+                .body("Items[0].Name", equalTo("cfn-jwt-authorizer"))
+                .body("Items[0].AuthorizerType", equalTo("JWT"))
+                .body("Items[0].JwtConfiguration.Issuer",
+                        equalTo("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"));
+
+        // The route's Ref to the authorizer resolved to a real id and was persisted.
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].RouteId", equalTo(routeId))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId));
+    }
+
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
 
     @Test
