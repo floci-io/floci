@@ -40,7 +40,7 @@ class GlueJsonHandlerEmptyListTest {
         GlueSchemaRegistryService schemaRegistryService =
                 new GlueSchemaRegistryService(storageFactory, regionResolver);
         GlueService glueService = new GlueService(
-                storageFactory, schemaRegistryService, regionResolver, new ResourceGroupsTaggingService());
+                storageFactory, schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(storageFactory));
         handler = new GlueJsonHandler(glueService, schemaRegistryService, mapper);
     }
 
