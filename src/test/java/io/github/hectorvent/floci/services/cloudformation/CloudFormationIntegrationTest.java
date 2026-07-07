@@ -6396,6 +6396,7 @@ class CloudFormationIntegrationTest {
                 .body("Items[0].AuthorizerId", equalTo(authorizerId))
                 .body("Items[0].Name", equalTo("cfn-jwt-authorizer"))
                 .body("Items[0].AuthorizerType", equalTo("JWT"))
+                .body("Items[0].IdentitySource", hasItem("$request.header.Authorization"))
                 .body("Items[0].JwtConfiguration.Issuer",
                         equalTo("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"));
 
@@ -6403,6 +6404,57 @@ class CloudFormationIntegrationTest {
         getRoutes(apiId).body("Items.size()", equalTo(1))
                 .body("Items[0].RouteId", equalTo(routeId))
                 .body("Items[0].AuthorizerId", equalTo(authorizerId));
+    }
+
+    @Test
+    void createStack_apiGatewayV2AuthorizerAcceptsScalarIdentitySource() {
+        // IdentitySource is documented as Array of String, but ApiGatewayV2Service.createAuthorizer
+        // already accepts a bare scalar string too — the CFN provisioner must not be stricter than
+        // the service it calls, or a template written with the scalar form silently loses its
+        // identity source instead of erroring or working.
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "cfn-apigwv2-authz-scalar-api", "ProtocolType": "HTTP" }
+                },
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "Name": "cfn-jwt-authorizer-scalar",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": "$request.header.Authorization",
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "HttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-authorizer-scalar-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String apiId = apigwOutputValue(apigwv2DescribeStacks(stackName), "ApiId");
+
+        getAuthorizers(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].IdentitySource", hasItem("$request.header.Authorization"));
     }
 
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
