@@ -139,6 +139,6 @@ print(cluster["DBCluster"]["Endpoint"])
 
 - IAM database authentication for MongoDB connections (the flag is stored and echoed back, but connections are not SigV4-proxied).
 - TLS / `--tls` enforced connections.
-- Snapshot and restore operations.
+- Snapshot creation and restore (`DescribeDBClusterSnapshots` returns an empty stub result; snapshots are not modeled).
 - Global clusters, replicas, and read-scaling beyond a single MongoDB container per cluster.
 - Parameter groups, subnet groups, and maintenance windows.
