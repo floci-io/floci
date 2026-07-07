@@ -361,6 +361,32 @@ class RuntimeApiServerTest {
         assertNotNull(body.getString("functionVersion"));
     }
 
+    /**
+     * Regression: the register response previously hardcoded functionName/functionVersion/handler
+     * to placeholder values regardless of which function the server was actually serving — extensions
+     * that key telemetry off this response (e.g. per-function metrics tagging) would mislabel every
+     * function identically. ContainerLauncher calls setFunctionMetadata once it knows which
+     * LambdaFunction a given RuntimeApiServer instance belongs to.
+     */
+    @Test
+    @Timeout(10)
+    void extensionRegister_returnsRealFunctionMetadataOnceSet() throws Exception {
+        server.setFunctionMetadata("my-real-function", "3", "index.handler");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "lambda-adapter")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        JsonObject body = new JsonObject(response.body());
+        assertEquals("my-real-function", body.getString("functionName"));
+        assertEquals("3", body.getString("functionVersion"));
+        assertEquals("index.handler", body.getString("handler"));
+    }
+
     @Test
     @Timeout(10)
     void extensionRegister_missingNameHeader_returns400() throws Exception {

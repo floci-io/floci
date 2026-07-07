@@ -150,6 +150,7 @@ public class ContainerLauncher {
 
         // Start Runtime API server first so container can connect on boot
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
+        runtimeApiServer.setFunctionMetadata(fn.getFunctionName(), fn.getVersion(), fn.getHandler());
 
         // Everything after the runtime-api server is allocated runs inside one try/catch: a failure
         // ANYWHERE below — image/host resolve, the code-volume populate (ensureCodeVolume), the spec
@@ -664,8 +665,14 @@ public class ContainerLauncher {
      */
     private List<String> listExtensionBinaries(DockerClient dockerClient, String containerId, String functionName) {
         try {
+            // -maxdepth 1 -type f -perm -u+x: only regular, executable files directly under the
+            // directory (real AWS's documented layout — extension binaries, not subdirectories),
+            // so a stray non-executable file (e.g. a README dropped in by a layer) isn't fed into
+            // the exec loop below as if it were an extension.
             var create = dockerClient.execCreateCmd(containerId)
-                    .withCmd("/bin/sh", "-c", "ls -1 " + EXTENSIONS_DIR + " 2>/dev/null")
+                    .withCmd("/bin/sh", "-c",
+                            "find " + EXTENSIONS_DIR + " -maxdepth 1 -type f -perm -u+x "
+                                    + "-exec basename {} \\; 2>/dev/null")
                     .withAttachStdout(true)
                     .withAttachStderr(false);
             String execId = create.exec().getId();
@@ -675,7 +682,14 @@ public class ContainerLauncher {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getStreamType() == StreamType.STDOUT && frame.getPayload() != null) {
-                        try { stdout.write(frame.getPayload()); } catch (IOException ignored) { /* in-memory */ }
+                        try {
+                            stdout.write(frame.getPayload());
+                        } catch (IOException e) {
+                            // ByteArrayOutputStream.write never actually throws IOException (its
+                            // Javadoc documents this), but the checked signature must be handled.
+                            LOG.debugv(e, "Unexpected write failure buffering /opt/extensions listing "
+                                    + "for function {0}", functionName);
+                        }
                     }
                 }
 
