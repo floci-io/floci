@@ -14,9 +14,15 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.ExecCreateCmd;
+import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
+import com.github.dockerjava.api.model.StreamType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -564,5 +570,91 @@ class ContainerLauncherTest {
         // ...and we bailed before creating or starting any container (nothing to reap).
         verify(lifecycleManager, never()).create(any());
         verify(lifecycleManager, never()).startCreated(any(), any());
+    }
+
+    /** Stubs container-123's /opt/extensions listing to return the given binary names (newline-joined
+     *  stdout, matching `ls -1`), and stubs exec of each resulting /opt/extensions/<name> path to
+     *  succeed immediately. Returns the exec-cmd mock passed to the listing (ls) call, if the caller
+     *  wants to verify the exact command used to discover extensions. */
+    private ExecCreateCmd stubExtensionDiscovery(String... binaryNames) {
+        String listing = String.join("\n", binaryNames);
+
+        ExecCreateCmd listCmd = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        ExecCreateCmdResponse listResponse = mock(ExecCreateCmdResponse.class);
+        when(listResponse.getId()).thenReturn("exec-list");
+        when(listCmd.exec()).thenReturn(listResponse);
+
+        ExecStartCmd listStart = mock(ExecStartCmd.class);
+        when(listStart.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback<Frame> callback = invocation.getArgument(0);
+            if (!listing.isEmpty()) {
+                callback.onNext(new Frame(StreamType.STDOUT, (listing + "\n").getBytes()));
+            }
+            callback.onComplete();
+            return callback;
+        });
+        when(dockerClient.execStartCmd("exec-list")).thenReturn(listStart);
+
+        // The first execCreateCmd call (launchExtensions' ls probe) returns listCmd; every
+        // subsequent call (one per discovered extension binary) gets its own fresh mock.
+        when(dockerClient.execCreateCmd("container-123"))
+                .thenReturn(listCmd)
+                .thenAnswer(invocation -> {
+                    ExecCreateCmd launchCmd = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+                    ExecCreateCmdResponse launchResponse = mock(ExecCreateCmdResponse.class);
+                    when(launchResponse.getId()).thenReturn("exec-launch-" + java.util.UUID.randomUUID());
+                    when(launchCmd.exec()).thenReturn(launchResponse);
+                    return launchCmd;
+                });
+        lenient().when(dockerClient.execStartCmd(argThat(id -> id != null && id.startsWith("exec-launch-"))))
+                .thenAnswer(invocation -> {
+                    ExecStartCmd start = mock(ExecStartCmd.class);
+                    when(start.exec(any())).thenAnswer(startInvocation -> {
+                        @SuppressWarnings("unchecked")
+                        ResultCallback<Frame> cb = startInvocation.getArgument(0);
+                        cb.onComplete();
+                        return cb;
+                    });
+                    return start;
+                });
+        return listCmd;
+    }
+
+    @Test
+    void launchFunction_discoversAndLaunchesExtensionBinaries() throws Exception {
+        stubExtensionDiscovery("lambda-adapter");
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("with-extension-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        // The extension binary was execed by its full /opt/extensions path, after the container
+        // was started (real AWS starts extensions once the container is up, alongside the runtime).
+        ArgumentCaptor<String> execCmdCaptor = ArgumentCaptor.forClass(String.class);
+        verify(dockerClient, atLeast(2)).execCreateCmd(eq("container-123"));
+
+        InOrder inOrder = inOrder(lifecycleManager, dockerClient);
+        inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
+        inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
+    }
+
+    @Test
+    void launchFunction_noExtensionsDirectory_doesNotFailLaunch() throws Exception {
+        stubExtensionDiscovery(); // empty /opt/extensions listing
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("no-extension-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        // The discovery probe still runs (best-effort ls), but nothing beyond it — no extension
+        // binary path is ever execed since the listing was empty.
+        verify(dockerClient, times(1)).execCreateCmd("container-123");
     }
 }

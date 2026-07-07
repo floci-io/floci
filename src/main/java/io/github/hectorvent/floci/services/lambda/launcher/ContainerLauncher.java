@@ -17,6 +17,9 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -328,6 +331,14 @@ public class ContainerLauncher {
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
 
+        // Real AWS's runtime interface client discovers and launches every binary under
+        // /opt/extensions/ as a sibling process to the main entrypoint before the runtime is
+        // considered ready; Floci only runs the image's own ENTRYPOINT/CMD, so extensions
+        // (e.g. aws-lambda-web-adapter) never start without this. Best-effort: an extension
+        // launch failure shouldn't fail the whole container launch, since a function with no
+        // extensions is the common case and this must be a no-op for it.
+        launchExtensions(dockerClient, containerId, fn.getFunctionName());
+
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
         // Attach log streaming
@@ -598,6 +609,99 @@ public class ContainerLauncher {
 
     private static boolean isProvidedRuntime(String runtime) {
         return runtime != null && runtime.startsWith("provided");
+    }
+
+    /** Directory Lambda's real init system scans for extension binaries. */
+    private static final String EXTENSIONS_DIR = "/opt/extensions";
+
+    /**
+     * Discovers binaries under {@link #EXTENSIONS_DIR} inside the (already started) container and
+     * launches each as a detached process — the piece of real AWS's init system (which starts every
+     * registered extension alongside the runtime) that Floci otherwise has no equivalent for. Uses
+     * {@code docker exec} rather than baking a wrapper entrypoint into the image, since the image is
+     * user-supplied and unmodified.
+     *
+     * <p>Extensions inherit the container's env (already set on the container itself, including
+     * {@code AWS_LAMBDA_RUNTIME_API}) automatically — {@code docker exec} does not need it re-supplied.
+     * Best-effort throughout: a function with no {@code /opt/extensions} directory (the common case)
+     * must be a silent no-op, and a failure launching one extension must not prevent the container
+     * (or other extensions) from running.
+     */
+    private void launchExtensions(DockerClient dockerClient, String containerId, String functionName) {
+        List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName);
+        for (String name : extensionNames) {
+            try {
+                String path = EXTENSIONS_DIR + "/" + name;
+                var create = dockerClient.execCreateCmd(containerId)
+                        .withCmd(path)
+                        .withAttachStdout(true)
+                        .withAttachStderr(true);
+                String execId = create.exec().getId();
+                // Detached: an extension runs for the container's whole lifetime, so this must not
+                // block the launch waiting for it to exit. Its stdout/stderr piggybacks onto the same
+                // ContainerLogStreamer output as the main process via Vert.x's own frame draining below,
+                // rather than left completely undrained (which can backpressure/stall the exec).
+                dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+                    @Override
+                    public void onNext(Frame frame) {
+                        // Drained, not forwarded to CloudWatch: floci's ContainerLogStreamer already
+                        // tails the container's own PID-1 log stream for that; this only exists so the
+                        // exec's output pipe doesn't fill up and block the extension process.
+                    }
+                });
+                LOG.infov("Launched extension {0} for function {1} (container {2})",
+                        name, functionName, containerId);
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to launch extension {0} for function {1}; continuing without it",
+                        name, functionName);
+            }
+        }
+    }
+
+    /**
+     * Lists file names directly under {@link #EXTENSIONS_DIR} inside the container, or an empty
+     * list if the directory doesn't exist or the probe fails (most functions have no extensions).
+     */
+    private List<String> listExtensionBinaries(DockerClient dockerClient, String containerId, String functionName) {
+        try {
+            var create = dockerClient.execCreateCmd(containerId)
+                    .withCmd("/bin/sh", "-c", "ls -1 " + EXTENSIONS_DIR + " 2>/dev/null")
+                    .withAttachStdout(true)
+                    .withAttachStderr(false);
+            String execId = create.exec().getId();
+            var stdout = new java.io.ByteArrayOutputStream();
+            var latch = new java.util.concurrent.CountDownLatch(1);
+            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+                @Override
+                public void onNext(Frame frame) {
+                    if (frame.getStreamType() == StreamType.STDOUT && frame.getPayload() != null) {
+                        try { stdout.write(frame.getPayload()); } catch (IOException ignored) { /* in-memory */ }
+                    }
+                }
+
+                @Override
+                public void onComplete() {
+                    latch.countDown();
+                }
+            });
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                LOG.debugv("Timed out listing {0} for function {1}; assuming no extensions",
+                        EXTENSIONS_DIR, functionName);
+                return List.of();
+            }
+            String listing = stdout.toString(java.nio.charset.StandardCharsets.UTF_8).trim();
+            if (listing.isEmpty()) {
+                return List.of();
+            }
+            return java.util.Arrays.stream(listing.split("\\R"))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .toList();
+        } catch (Exception e) {
+            LOG.debugv("Could not list {0} for function {1} ({2}); assuming no extensions",
+                    EXTENSIONS_DIR, functionName, e.getMessage());
+            return List.of();
+        }
     }
 
     /**
