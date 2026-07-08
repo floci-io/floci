@@ -42,8 +42,23 @@ public class FirehoseJsonHandler {
                         tags.add(mapper.treeToValue(tNode, io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag.class));
                     }
                 }
-                String arn = firehoseService.createDeliveryStream(name, s3, tags);
+                String deliveryStreamType = request.has("DeliveryStreamType")
+                        ? request.get("DeliveryStreamType").asText() : null;
+                String arn = firehoseService.createDeliveryStream(name, s3, tags, deliveryStreamType);
                 yield Response.ok(Map.of("DeliveryStreamARN", arn)).build();
+            }
+            case "UpdateDestination" -> {
+                String name = request.get("DeliveryStreamName").asText();
+                String currentVersionId = request.get("CurrentDeliveryStreamVersionId").asText();
+                String destinationId = request.get("DestinationId").asText();
+                S3Destination update = null;
+                if (request.has("ExtendedS3DestinationUpdate")) {
+                    update = mapper.treeToValue(request.get("ExtendedS3DestinationUpdate"), S3Destination.class);
+                } else if (request.has("S3DestinationUpdate")) {
+                    update = mapper.treeToValue(request.get("S3DestinationUpdate"), S3Destination.class);
+                }
+                firehoseService.updateDestination(name, currentVersionId, destinationId, update);
+                yield Response.ok(Map.of()).build();
             }
             case "DescribeDeliveryStream" -> {
                 String name = request.get("DeliveryStreamName").asText();

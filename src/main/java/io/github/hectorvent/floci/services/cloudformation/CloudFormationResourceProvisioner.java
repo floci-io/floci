@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
@@ -461,6 +463,7 @@ public class CloudFormationResourceProvisioner {
             bucketName = generatePhysicalName(stackName, r.getLogicalId(), 63, true);
         }
         s3Service.createBucket(bucketName, region);
+        applyBucketCorsConfiguration(bucketName, props, engine);
         r.setPhysicalId(bucketName);
         r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
         r.getAttributes().put("DomainName", bucketName + ".s3.amazonaws.com");
@@ -469,7 +472,57 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("BucketName", bucketName);
     }
 
-    // ── SQS ───────────────────────────────────────────────────────────────────
+    /**
+     * Applies the optional {@code CorsConfiguration} property of {@code AWS::S3::Bucket} by translating
+     * the CloudFormation {@code CorsRules} list into the S3 CORS XML document the bucket stores and
+     * serves from its {@code ?cors} subresource.
+     *
+     * <p>This reconciles to the template on every provision (create and update): when the property is
+     * absent or has no rules, any existing CORS configuration is cleared so the bucket matches the
+     * template. Clearing is a harmless no-op on create since a freshly created bucket has none.
+     */
+    private void applyBucketCorsConfiguration(String bucketName, JsonNode props,
+                                              CloudFormationTemplateEngine engine) {
+        JsonNode corsRules = null;
+        if (props != null && props.has("CorsConfiguration") && !props.get("CorsConfiguration").isNull()) {
+            corsRules = props.get("CorsConfiguration").get("CorsRules");
+        }
+        if (corsRules == null || !corsRules.isArray() || corsRules.isEmpty()) {
+            s3Service.deleteBucketCors(bucketName);
+            return;
+        }
+        XmlBuilder xml = new XmlBuilder().start("CORSConfiguration", AwsNamespaces.S3);
+        for (JsonNode rule : corsRules) {
+            xml.start("CORSRule");
+            xml.elem("ID", resolveOptional(rule, "Id", engine));
+            appendCorsRuleElements(xml, rule.get("AllowedHeaders"), "AllowedHeader", engine);
+            appendCorsRuleElements(xml, rule.get("AllowedMethods"), "AllowedMethod", engine);
+            appendCorsRuleElements(xml, rule.get("AllowedOrigins"), "AllowedOrigin", engine);
+            appendCorsRuleElements(xml, rule.get("ExposedHeaders"), "ExposeHeader", engine);
+            String maxAge = resolveOptional(rule, "MaxAge", engine);
+            if (maxAge != null && !maxAge.isBlank()) {
+                xml.elem("MaxAgeSeconds", maxAge);
+            }
+            xml.end("CORSRule");
+        }
+        xml.end("CORSConfiguration");
+        s3Service.putBucketCors(bucketName, xml.build());
+    }
+
+    private void appendCorsRuleElements(XmlBuilder xml, JsonNode values, String elementName,
+                                        CloudFormationTemplateEngine engine) {
+        if (values == null || !values.isArray()) {
+            return;
+        }
+        for (JsonNode value : values) {
+            if (value != null && !value.isNull()) {
+                String resolved = engine.resolve(value);
+                if (resolved != null && !resolved.isBlank()) {
+                    xml.elem(elementName, resolved);
+                }
+            }
+        }
+    }
 
     private void provisionSqsQueue(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                    String region, String accountId, String stackName) {

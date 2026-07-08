@@ -649,6 +649,41 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DBSubnetGroupArn>arn:aws:rds:us-east-1:123456789012:subgrp:default</DBSubnetGroupArn>"));
     }
 
+    // ──────────────────────────── Snapshots & Proxies (empty lists) ─────────────
+
+    @Test
+    void describeDbSnapshots_returnsEmptyListWith200() {
+        Response response = handler.handle("DescribeDBSnapshots", params());
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DescribeDBSnapshotsResult>"));
+        assertTrue(body.contains("<DBSnapshots></DBSnapshots>"));
+        assertFalse(body.contains("<Marker>"));
+    }
+
+    @Test
+    void describeDbProxies_returnsEmptyListWith200() {
+        Response response = handler.handle("DescribeDBProxies", params());
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DescribeDBProxiesResult>"));
+        assertTrue(body.contains("<DBProxies></DBProxies>"));
+        assertFalse(body.contains("<Marker>"));
+    }
+
+    @Test
+    void describeDbClusterSnapshots_returnsEmptyListWith200() {
+        Response response = handler.handle("DescribeDBClusterSnapshots", params());
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DescribeDBClusterSnapshotsResult>"));
+        assertTrue(body.contains("<DBClusterSnapshots></DBClusterSnapshots>"));
+        assertFalse(body.contains("<Marker>"));
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private static MultivaluedMap<String, String> params() {

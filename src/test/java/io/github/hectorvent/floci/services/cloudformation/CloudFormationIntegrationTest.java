@@ -173,6 +173,217 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_s3BucketWithCorsConfiguration() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-cors-test-bucket",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "Id": "allow-app",
+                          "AllowedHeaders": ["*"],
+                          "AllowedMethods": ["GET", "PUT"],
+                          "AllowedOrigins": ["https://app.example.com"],
+                          "ExposedHeaders": ["x-amz-request-id"],
+                          "MaxAge": 3000
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-cors-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // The bucket's ?cors subresource should reflect the CloudFormation CorsConfiguration.
+        given()
+        .when()
+            .get("/cfn-cors-test-bucket?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CORSRule>"))
+            .body(containsString("<ID>allow-app</ID>"))
+            .body(containsString("<AllowedMethod>GET</AllowedMethod>"))
+            .body(containsString("<AllowedMethod>PUT</AllowedMethod>"))
+            .body(containsString("<AllowedOrigin>https://app.example.com</AllowedOrigin>"))
+            .body(containsString("<AllowedHeader>*</AllowedHeader>"))
+            .body(containsString("<ExposeHeader>x-amz-request-id</ExposeHeader>"))
+            .body(containsString("<MaxAgeSeconds>3000</MaxAgeSeconds>"));
+    }
+
+    @Test
+    void createStack_s3BucketCorsConfigurationSkipsBlankListValues() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-cors-blank-bucket",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "AllowedHeaders": ["x-real-header", ""],
+                          "AllowedMethods": ["GET"],
+                          "AllowedOrigins": ["https://app.example.com"]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-cors-blank-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // A blank list entry must be skipped rather than emitted as an empty (invalid) element.
+        given()
+        .when()
+            .get("/cfn-cors-blank-bucket?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<AllowedHeader>x-real-header</AllowedHeader>"))
+            .body(not(containsString("<AllowedHeader></AllowedHeader>")));
+    }
+
+    @Test
+    void updateStack_s3BucketCorsConfigurationIsReconciled() {
+        String stackName = "cfn-cors-update-stack";
+        String bucketName = "cfn-cors-update-bucket";
+        String withCors = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "AllowedMethods": ["GET"],
+                          "AllowedOrigins": ["https://old.example.com"]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        String changedCors = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "AllowedMethods": ["POST"],
+                          "AllowedOrigins": ["https://new.example.com"]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        String withoutCors = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s"
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", withCors)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<AllowedOrigin>https://old.example.com</AllowedOrigin>"));
+
+        // Update: rules change → CORS document is replaced, no stale rule left behind.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", changedCors)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<AllowedOrigin>https://new.example.com</AllowedOrigin>"))
+            .body(not(containsString("https://old.example.com")));
+
+        // Update: property dropped → CORS is cleared, ?cors returns NoSuchCORSConfiguration.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", withoutCors)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?cors")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchCORSConfiguration"));
+    }
+
+    @Test
     void createStack_lambdaWithS3Code() {
         byte[] zipBytes = buildHandlerZip();
 

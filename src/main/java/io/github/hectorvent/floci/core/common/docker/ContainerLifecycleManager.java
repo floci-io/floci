@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -45,7 +44,7 @@ public class ContainerLifecycleManager {
     private final PortAllocator portAllocator;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
-    private final Set<String> initializedSharedVolumes = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
 
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
@@ -208,54 +207,68 @@ public class ContainerLifecycleManager {
      * {@code RootDirectory.CreationInfo}. A Docker named volume is created {@code root:root 0755},
      * so a container whose image runs as a non-root {@code USER} (as ECS tasks and
      * access-point-mounted workloads typically do) cannot create files on it. This chowns/chmods
-     * the mount root — optionally setting the setgid bit so subdirectories inherit the owner gid,
-     * the standard pattern for a group-shared tree — inside a short-lived helper container.
+     * the mount root inside a short-lived helper container. A 4-digit octal
+     * {@code rootPermissions} (e.g. {@code "2775"}) carries the setgid bit, so subdirectories
+     * inherit the owner gid — matching {@code CreationInfo.Permissions} exactly.
      *
      * <p>The initialisation runs at most once per volume name per process. When no ownership is
-     * configured (all of {@code ownerUid}/{@code ownerGid}/{@code rootPermissions} empty and
-     * {@code setgid} false) this degrades to a plain {@link #ensureVolume}, so the default
-     * behaviour is unchanged.
+     * configured (all of {@code ownerUid}/{@code ownerGid}/{@code rootPermissions} empty) this
+     * degrades to a plain {@link #ensureVolume}, so the default behaviour is unchanged.
      *
      * @param volumeName      the named volume
      * @param ownerUid        owner uid for the volume root (EFS {@code CreationInfo.OwnerUid})
      * @param ownerGid        owner gid for the volume root (EFS {@code CreationInfo.OwnerGid})
      * @param rootPermissions octal permissions for the volume root (e.g. {@code "0777"}); empty skips init
-     * @param setgid          also set the setgid bit on the volume root
      * @param initImage       lightweight image used for the one-off chown/chmod helper
      */
     public void ensureSharedVolume(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
-                                   Optional<String> rootPermissions, boolean setgid, String initImage) {
+                                   Optional<String> rootPermissions, String initImage) {
         ensureVolume(volumeName);
-        if (rootPermissions.isEmpty() && ownerUid.isEmpty() && ownerGid.isEmpty() && !setgid) {
+        if (rootPermissions.isEmpty() && ownerUid.isEmpty() && ownerGid.isEmpty()) {
             return;
         }
-        if (!initializedSharedVolumes.add(volumeName)) {
-            return;
+        // An EFS access point's CreationInfo requires OwnerUid and OwnerGid together; reject a
+        // partial ownership config rather than emitting a malformed `chown uid:` (whose trailing
+        // colon makes chown resolve the login group and fail in busybox for an unknown uid).
+        if (ownerUid.isPresent() != ownerGid.isPresent()) {
+            throw new IllegalArgumentException(
+                    "floci.storage.efs owner-uid and owner-gid must be set together");
         }
-        try {
-            initSharedVolumeRoot(volumeName, ownerUid, ownerGid, rootPermissions, setgid, initImage);
-        } catch (RuntimeException e) {
-            // Allow a retry on the next launch if the one-off init failed.
-            initializedSharedVolumes.remove(volumeName);
-            LOG.warnv("Failed to initialise shared volume {0} ownership: {1}", volumeName, e.getMessage());
-        }
+        // Validate before splicing into the helper's `sh -c`, matching CreationInfo.Permissions
+        // (^[0-7]{3,4}$), so a typo can't produce a mangled script that soft-fails.
+        rootPermissions.ifPresent(p -> {
+            if (!p.matches("^[0-7]{3,4}$")) {
+                throw new IllegalArgumentException(
+                        "floci.storage.efs root-permissions must be 3-4 octal digits (e.g. \"0777\","
+                                + " or \"2775\" for setgid): " + p);
+            }
+        });
+        // computeIfAbsent runs the one-off init under a per-volume lock, so a concurrent launch for
+        // the same volume waits for it to finish rather than mounting a still root:root 0755 root.
+        // Returning null on failure leaves the volume unmemoised, so the next launch retries.
+        initializedSharedVolumes.computeIfAbsent(volumeName, k -> {
+            try {
+                initSharedVolumeRoot(volumeName, ownerUid, ownerGid, rootPermissions, initImage);
+                return Boolean.TRUE;
+            } catch (RuntimeException e) {
+                LOG.warnv("Failed to initialise shared volume {0} ownership: {1}", volumeName, e.getMessage());
+                return null;
+            }
+        });
     }
 
     private void initSharedVolumeRoot(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
-                                      Optional<String> rootPermissions, boolean setgid, String initImage) {
+                                      Optional<String> rootPermissions, String initImage) {
         String mount = "/floci-shared-volume";
         StringBuilder script = new StringBuilder();
-        if (ownerUid.isPresent() || ownerGid.isPresent()) {
-            script.append("chown ")
-                    .append(ownerUid.isPresent() ? ownerUid.getAsInt() : "")
-                    .append(':')
-                    .append(ownerGid.isPresent() ? ownerGid.getAsInt() : "")
+        // ownerUid and ownerGid are validated to be present together by the caller, so the chown
+        // always has both operands (no trailing colon). setgid is expressed via a 4-digit octal
+        // rootPermissions (e.g. "2775"), matching CreationInfo.Permissions.
+        if (ownerUid.isPresent() && ownerGid.isPresent()) {
+            script.append("chown ").append(ownerUid.getAsInt()).append(':').append(ownerGid.getAsInt())
                     .append(' ').append(mount).append(" && ");
         }
         rootPermissions.ifPresent(p -> script.append("chmod ").append(p).append(' ').append(mount).append(" && "));
-        if (setgid) {
-            script.append("chmod g+s ").append(mount).append(" && ");
-        }
         script.append("true");
 
         String image = (initImage != null && !initImage.isBlank()) ? initImage : "busybox:stable";
@@ -274,11 +287,12 @@ public class ContainerLifecycleManager {
                     .exec(new WaitContainerResultCallback())
                     .awaitStatusCode(60, TimeUnit.SECONDS);
             if (status == null || status != 0) {
-                LOG.warnv("Shared-volume init for {0} exited with status {1} (cmd: {2})",
-                        volumeName, String.valueOf(status), script);
-            } else {
-                LOG.infov("Initialised shared volume {0} root (cmd: {1})", volumeName, script);
+                // Throw so the caller leaves the volume unmemoised and retries on the next launch,
+                // rather than leaving it root:root 0755 with no further attempt.
+                throw new IllegalStateException("shared-volume init for " + volumeName
+                        + " exited with status " + status + " (cmd: " + script + ")");
             }
+            LOG.infov("Initialised shared volume {0} root (cmd: {1})", volumeName, script);
         } finally {
             try {
                 dockerClient.removeContainerCmd(helperId).withForce(true).exec();
@@ -353,11 +367,36 @@ public class ContainerLifecycleManager {
         }
 
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
+        Map<Integer, Integer> publishedHostPorts = new HashMap<>();
         for (int port : ports) {
             endpoints.put(port, resolveEndpoint(inspect, port));
+            OptionalInt published = readPublishedHostPort(inspect, port);
+            if (published.isPresent()) {
+                publishedHostPorts.put(port, published.getAsInt());
+            }
         }
 
-        return new ContainerInfo(containerId, endpoints);
+        return new ContainerInfo(containerId, endpoints, publishedHostPorts);
+    }
+
+    /**
+     * Reads the host port a container's internal port is published on, independent of
+     * whether Floci itself runs inside a container. Unlike {@link #resolveEndpoint} —
+     * which switches to container-IP + internal port in container mode — this always
+     * reads the port binding, for URIs consumed by the host-side Docker daemon.
+     */
+    private static OptionalInt readPublishedHostPort(InspectContainerResponse inspect, int containerPort) {
+        Ports ports = inspect.getNetworkSettings().getPorts();
+        if (ports != null) {
+            Ports.Binding[] binding = ports.getBindings().get(ExposedPort.tcp(containerPort));
+            if (binding != null && binding.length > 0) {
+                try {
+                    return OptionalInt.of(Integer.parseInt(binding[0].getHostPortSpec()));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        return OptionalInt.empty();
     }
 
     /**
@@ -378,12 +417,14 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Returns whether the container is currently running. A missing container
-     * is treated as not-running; any other Docker error is treated as running
-     * so a transient daemon hiccup does not evict a healthy warm pool.
+     * Returns whether the container is currently running. A missing container is treated as
+     * not-running; any other Docker error (e.g. an inspect timeout under daemon overload) is also
+     * treated as not-running, so a hung/dead container is not reused from the warm pool — a false
+     * negative merely triggers a clean cold-start, which is far cheaper than blocking until the
+     * function timeout.
      *
      * @param containerId the container ID to inspect
-     * @return true if the container exists and is reported as running
+     * @return true only if the container exists and is reported as running; false on any error
      */
     public boolean isContainerRunning(String containerId) {
         try {
@@ -392,8 +433,13 @@ public class ContainerLifecycleManager {
         } catch (NotFoundException e) {
             return false;
         } catch (Exception e) {
-            LOG.warnv("Liveness check failed for container {0}: {1}", containerId, e.getMessage());
-            return true;
+            // Treat an inspect failure/timeout as NOT running. Under Docker-daemon overload,
+            // returning true here caused the warm pool to "reuse" dead/hung containers, so the
+            // invocation blocked until the function timeout (~20-30s) every time. A false
+            // negative merely triggers a clean cold-start, which is far cheaper than a hang.
+            LOG.warnv("Liveness check failed for container {0}; treating as not running: {1}",
+                    containerId, e.getMessage());
+            return false;
         }
     }
 
@@ -605,16 +651,32 @@ public class ContainerLifecycleManager {
      *
      * @param containerId the Docker container ID
      * @param endpoints map of container port to resolved endpoint (host:port for connection)
+     * @param publishedHostPorts map of container port to the host port it is published on;
+     *                           a port without a binding is absent
      */
     public record ContainerInfo(
             String containerId,
-            Map<Integer, EndpointInfo> endpoints
+            Map<Integer, EndpointInfo> endpoints,
+            Map<Integer, Integer> publishedHostPorts
     ) {
+        public ContainerInfo(String containerId, Map<Integer, EndpointInfo> endpoints) {
+            this(containerId, endpoints, Map.of());
+        }
+
         /**
          * Gets the endpoint for a specific container port.
          */
         public EndpointInfo getEndpoint(int containerPort) {
             return endpoints.get(containerPort);
+        }
+
+        /**
+         * Gets the host port a container port is published on, regardless of whether
+         * Floci itself runs inside a container. Empty when the port has no binding.
+         */
+        public OptionalInt publishedHostPort(int containerPort) {
+            Integer published = publishedHostPorts.get(containerPort);
+            return published != null ? OptionalInt.of(published) : OptionalInt.empty();
         }
     }
 

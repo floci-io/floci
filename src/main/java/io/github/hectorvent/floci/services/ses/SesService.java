@@ -5,12 +5,17 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.HostedZone;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
@@ -18,6 +23,7 @@ import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
+import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
@@ -33,6 +39,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -50,6 +58,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -62,6 +71,7 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
+    private static final Duration DKIM_LOOKUP_CACHE_TTL = Duration.ofSeconds(5);
 
     private static final SecureRandom BOUNDARY_RANDOM = new SecureRandom();
 
@@ -73,14 +83,21 @@ public class SesService {
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
     private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
+    private final StorageBackend<String, ContactList> contactListStore;
+    // Guards the one-list-per-account check-then-create so concurrent creates can't both pass.
+    private final Object contactListCreateLock = new Object();
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
+    private final Route53Service route53Service;
+    private final Clock clock;
+    private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
 
     @Inject
     public SesService(StorageFactory storageFactory, SmtpRelay smtpRelay, ObjectMapper objectMapper,
-                       SesEventPublisher eventPublisher, EmulatorConfig config) {
+                       SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
+                       Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
@@ -97,10 +114,14 @@ public class SesService {
                 new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
         this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
                 new TypeReference<Map<String, DedicatedIpPool>>() {});
+        this.contactListStore = storageFactory.create("ses", "ses-contact-lists.json",
+                new TypeReference<Map<String, ContactList>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
+        this.route53Service = route53Service;
+        this.clock = clock;
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -111,8 +132,27 @@ public class SesService {
                StorageBackend<String, SuppressedDestination> suppressionStore,
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
+               StorageBackend<String, ContactList> contactListStore,
                SmtpRelay smtpRelay,
-               ObjectMapper objectMapper) {
+               ObjectMapper objectMapper,
+               Clock clock) {
+        this(identityStore, emailStore, accountSettingsStore, templateStore, configSetStore, suppressionStore,
+                accountSuppressionStore, dedicatedIpPoolStore, contactListStore, smtpRelay, objectMapper, null, clock);
+    }
+
+    SesService(StorageBackend<String, Identity> identityStore,
+               StorageBackend<String, SentEmail> emailStore,
+               StorageBackend<String, Boolean> accountSettingsStore,
+               StorageBackend<String, EmailTemplate> templateStore,
+               StorageBackend<String, ConfigurationSet> configSetStore,
+               StorageBackend<String, SuppressedDestination> suppressionStore,
+               StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
+               StorageBackend<String, ContactList> contactListStore,
+               SmtpRelay smtpRelay,
+               ObjectMapper objectMapper,
+               Route53Service route53Service,
+               Clock clock) {
         this.identityStore = identityStore;
         this.emailStore = emailStore;
         this.accountSettingsStore = accountSettingsStore;
@@ -121,10 +161,13 @@ public class SesService {
         this.suppressionStore = suppressionStore;
         this.accountSuppressionStore = accountSuppressionStore;
         this.dedicatedIpPoolStore = dedicatedIpPoolStore;
+        this.contactListStore = contactListStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
+        this.route53Service = route53Service;
+        this.clock = clock;
     }
 
     public Identity verifyEmailIdentity(String emailAddress, String region) {
@@ -152,6 +195,10 @@ public class SesService {
         if (existing != null) return existing;
 
         Identity identity = new Identity(domain, "Domain");
+        identity.setDkimTokens(generateDkimTokens());
+        identity.setVerificationStatus("Pending");
+        identity.setDkimEnabled(true);
+        identity.setDkimVerificationStatus("Pending");
         identityStore.put(key, identity);
         LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
         return identity;
@@ -163,6 +210,7 @@ public class SesService {
         }
         String key = identityKey(region, identityValue);
         identityStore.delete(key);
+        invalidateDkimLookupCache(region, identityValue);
 
         String prefix = "identity::" + region + "::";
         List<String> keys = new ArrayList<>(identityStore.keys().stream()
@@ -191,7 +239,8 @@ public class SesService {
 
     public Identity getIdentityVerificationAttributes(String identityValue, String region) {
         String key = identityKey(region, identityValue);
-        return identityStore.get(key).orElse(null);
+        Identity identity = identityStore.get(key).orElse(null);
+        return refreshIdentityState(identity, region);
     }
 
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
@@ -536,6 +585,147 @@ public class SesService {
         identityStore.put(key, identity);
         LOG.infov("Updated DKIM attributes for {0}: signingEnabled={1}", identityValue, signingEnabled);
     }
+
+    private List<String> generateDkimTokens() {
+        List<String> tokens = new ArrayList<>(3);
+        for (int i = 0; i < 3; i++) {
+            tokens.add(UUID.randomUUID().toString().replace("-", ""));
+        }
+        return tokens;
+    }
+
+    private Identity refreshIdentityState(Identity identity, String region) {
+        if (identity == null) {
+            return null;
+        }
+
+        boolean changed = false;
+        if ("Domain".equals(identity.getIdentityType()) && identity.getDkimTokens() == null) {
+            identity.setDkimTokens(generateDkimTokens());
+            changed = true;
+        }
+
+        if ("Domain".equals(identity.getIdentityType()) && hasDkimTokens(identity)) {
+            changed |= normalizePendingDomainState(identity);
+            if (!"Success".equals(identity.getVerificationStatus())
+                    && hasAllExpectedDkimRecords(identity, region)) {
+                identity.setVerificationStatus("Success");
+                if (identity.isDkimEnabled()) {
+                    identity.setDkimVerificationStatus("Success");
+                }
+                changed = true;
+            }
+        }
+
+        if ("Success".equals(identity.getVerificationStatus())) {
+            invalidateDkimLookupCache(region, identity.getIdentity());
+        }
+
+        if (changed) {
+            identityStore.put(identityKey(region, identity.getIdentity()), identity);
+        }
+        return identity;
+    }
+
+    private boolean hasDkimTokens(Identity identity) {
+        return identity.getDkimTokens() != null && !identity.getDkimTokens().isEmpty();
+    }
+
+    private boolean normalizePendingDomainState(Identity identity) {
+        boolean changed = false;
+        if (!"Success".equals(identity.getVerificationStatus())
+                && !"Pending".equals(identity.getVerificationStatus())) {
+            identity.setVerificationStatus("Pending");
+            changed = true;
+        }
+        if (identity.isDkimEnabled()
+                && !"Success".equals(identity.getDkimVerificationStatus())
+                && !"Pending".equals(identity.getDkimVerificationStatus())) {
+            identity.setDkimVerificationStatus("Pending");
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean hasAllExpectedDkimRecords(Identity identity, String region) {
+        if (route53Service == null) {
+            return false;
+        }
+        Instant now = Instant.now(clock);
+        String cacheKey = dkimLookupCacheKey(region, identity);
+        DkimLookupCacheEntry cached = dkimLookupCache.get(cacheKey);
+        if (cached != null) {
+            if (now.isBefore(cached.expiresAt())) {
+                return cached.present();
+            }
+            dkimLookupCache.remove(cacheKey, cached);
+        }
+
+        boolean present = true;
+        for (String token : identity.getDkimTokens()) {
+            if (!hasExpectedDkimRecord(identity.getIdentity(), token)) {
+                present = false;
+                break;
+            }
+        }
+        dkimLookupCache.put(cacheKey, new DkimLookupCacheEntry(present, now.plus(DKIM_LOOKUP_CACHE_TTL)));
+        return present;
+    }
+
+    private boolean hasExpectedDkimRecord(String domain, String token) {
+        String expectedName = normalizeDnsName(token + "._domainkey." + domain);
+        String expectedValue = normalizeDnsName(token + ".dkim.amazonses.com");
+        for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
+            for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
+                    Integer.MAX_VALUE)) {
+                if (!"CNAME".equalsIgnoreCase(recordSet.getType())) {
+                    continue;
+                }
+                if (!expectedName.equals(normalizeDnsName(recordSet.getName()))) {
+                    continue;
+                }
+                List<ResourceRecord> records = recordSet.getRecords();
+                if (records == null) {
+                    continue;
+                }
+                for (ResourceRecord record : records) {
+                    if (record != null && expectedValue.equals(normalizeDnsName(record.getValue()))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private String normalizeDnsName(String value) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        while (normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    private void invalidateDkimLookupCache(String region, String identityValue) {
+        if (identityValue == null || identityValue.isBlank()) {
+            return;
+        }
+        String cachePrefix = region + "::" + normalizeDnsName(identityValue) + "::";
+        dkimLookupCache.keySet().removeIf(key -> key.startsWith(cachePrefix));
+    }
+
+    private String dkimLookupCacheKey(String region, Identity identity) {
+        List<String> normalizedTokens = identity.getDkimTokens().stream()
+                .map(this::normalizeDnsName)
+                .sorted()
+                .toList();
+        return region + "::" + normalizeDnsName(identity.getIdentity()) + "::" + String.join(",", normalizedTokens);
+    }
+
+    private record DkimLookupCacheEntry(boolean present, Instant expiresAt) {}
 
     public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
         String key = identityKey(region, identityValue);
@@ -1035,6 +1225,183 @@ public class SesService {
 
     private static String dedicatedIpPoolKey(String region, String name) {
         return "dedicatedIpPool::" + region + "::" + name;
+    }
+
+    private static final Set<String> SUBSCRIPTION_STATUSES = Set.of("OPT_IN", "OPT_OUT");
+    private static final Pattern CONTACT_LIST_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+    private static final int MAX_TOPICS_PER_LIST = 20;
+    private static final int MAX_DISPLAY_NAME_LENGTH = 128;
+    private static final int MAX_LIST_DESCRIPTION_LENGTH = 500;
+
+    public ContactList createContactList(String name, String description, List<Topic> topics,
+                                         List<Tag> tags, String region) {
+        validateContactListInput(name, description, topics);
+        ContactList list = new ContactList(name);
+        list.setDescription(description);
+        list.setTopics(topics);
+        list.setTags(tags);
+        Instant now = Instant.now();
+        list.setCreatedTimestamp(now);
+        list.setLastUpdatedTimestamp(now);
+        // AWS allows at most one contact list per account per region (verified against real AWS).
+        // A duplicate name hits this same limit before any "already exists" check, so
+        // AlreadyExistsException is never reachable for contact lists. Lock only the check-then-put
+        // so concurrent calls can't both observe an empty region; building and logging stay outside.
+        synchronized (contactListCreateLock) {
+            if (!listContactLists(region).isEmpty()) {
+                throw new AwsException("BadRequestException",
+                        "A maximum of 1 Lists allowed per account.", 400);
+            }
+            contactListStore.put(contactListKey(region, name), list);
+        }
+        LOG.infov("Created SES contact list: {0} in region {1}", name, region);
+        return list;
+    }
+
+    public ContactList getContactList(String name, String region) {
+        return contactListStore.get(contactListKey(region, name))
+                .orElseThrow(() -> contactListNotFound(name));
+    }
+
+    public List<ContactList> listContactLists(String region) {
+        String prefix = "contactList::" + region + "::";
+        return contactListStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(ContactList::getContactListName))
+                .toList();
+    }
+
+    public ContactList updateContactList(String name, String description, boolean descriptionPresent,
+                                         List<Topic> topics, String region) {
+        validateContactListInput(name, description, topics);
+        String key = contactListKey(region, name);
+        ContactList existing = contactListStore.get(key).orElseThrow(() -> contactListNotFound(name));
+        if (topics != null) {
+            existing.setTopics(topics);
+        }
+        if (descriptionPresent) {
+            existing.setDescription(description);
+        }
+        existing.setLastUpdatedTimestamp(Instant.now());
+        contactListStore.put(key, existing);
+        LOG.infov("Updated SES contact list: {0} in region {1}", name, region);
+        return existing;
+    }
+
+    public void deleteContactList(String name, String region) {
+        String key = contactListKey(region, name);
+        if (contactListStore.get(key).isEmpty()) {
+            throw contactListNotFound(name);
+        }
+        contactListStore.delete(key);
+        LOG.infov("Deleted SES contact list: {0} in region {1}", name, region);
+    }
+
+    private static AwsException contactListNotFound(String name) {
+        return new AwsException("NotFoundException",
+                "List with name: " + name + " doesn't exist.", 404);
+    }
+
+    // SES V2 surfaces missing/invalid input as Smithy validation errors. Field paths and the
+    // enum value order are taken verbatim from real AWS.
+    private static AwsException validationError(String fieldPath, String constraint) {
+        return new AwsException("BadRequestException",
+                "1 validation error detected: Value at '" + fieldPath
+                        + "' failed to satisfy constraint: " + constraint, 400);
+    }
+
+    private static void validateContactListName(String name) {
+        if (name == null) {
+            throw validationError("contactListName", "Member must not be null");
+        }
+        if (name.isBlank()) {
+            throw new AwsException("BadRequestException", "ContactListName can't be blank.", 400);
+        }
+        if (!CONTACT_LIST_NAME_CHARS.matcher(name).matches()) {
+            throw new AwsException("BadRequestException",
+                    "ContactListName can contain up to 64 characters. Only alphanumeric characters, "
+                            + "underscores(_) and hyphens(-) are allowed.", 400);
+        }
+    }
+
+    private static void validateDescription(String description) {
+        if (description != null && description.length() > MAX_LIST_DESCRIPTION_LENGTH) {
+            throw new AwsException("BadRequestException",
+                    "List description can contain up to 500 characters.", 400);
+        }
+    }
+
+    // Validates Create/Update input in the same two-phase order as real AWS (verified by probe):
+    // protocol-layer (Smithy) checks across all fields first, then service-level constraints with
+    // ContactListName ahead of topic/description constraints.
+    private static void validateContactListInput(String name, String description, List<Topic> topics) {
+        // Phase 1 — protocol-layer (Smithy) validation: null members and the subscription-status
+        // enum. AWS reports these before any service-level constraint.
+        if (name == null) {
+            throw validationError("contactListName", "Member must not be null");
+        }
+        if (topics != null) {
+            for (int i = 0; i < topics.size(); i++) {
+                Topic t = topics.get(i);
+                String member = "topics." + (i + 1) + ".member.";
+                if (t.getTopicName() == null) {
+                    throw validationError(member + "topicName", "Member must not be null");
+                }
+                if (t.getDisplayName() == null) {
+                    throw validationError(member + "displayName", "Member must not be null");
+                }
+                if (t.getDefaultSubscriptionStatus() == null) {
+                    throw validationError(member + "defaultSubscriptionStatus", "Member must not be null");
+                }
+                if (!SUBSCRIPTION_STATUSES.contains(t.getDefaultSubscriptionStatus())) {
+                    throw validationError(member + "defaultSubscriptionStatus",
+                            "Member must satisfy enum value set: [OPT_OUT, OPT_IN]");
+                }
+            }
+        }
+        // Phase 2 — service-level constraints: ContactListName first, then topics, then description.
+        if (name.isBlank()) {
+            throw new AwsException("BadRequestException", "ContactListName can't be blank.", 400);
+        }
+        if (!CONTACT_LIST_NAME_CHARS.matcher(name).matches()) {
+            throw new AwsException("BadRequestException",
+                    "ContactListName can contain up to 64 characters. Only alphanumeric characters, "
+                            + "underscores(_) and hyphens(-) are allowed.", 400);
+        }
+        if (topics != null) {
+            if (topics.size() > MAX_TOPICS_PER_LIST) {
+                throw new AwsException("BadRequestException",
+                        "Maximum of <" + MAX_TOPICS_PER_LIST + "> topics allowed per ContactList", 400);
+            }
+            Set<String> seenNames = new HashSet<>();
+            for (Topic t : topics) {
+                if (t.getTopicName().isBlank()) {
+                    throw new AwsException("BadRequestException", "TopicName can't be blank.", 400);
+                }
+                if (!CONTACT_LIST_NAME_CHARS.matcher(t.getTopicName()).matches()) {
+                    throw new AwsException("BadRequestException",
+                            "TopicName can contain up to 64 characters. Only alphanumeric characters, "
+                                    + "underscores(_) and hyphens(-) are allowed.", 400);
+                }
+                if (t.getDisplayName().length() > MAX_DISPLAY_NAME_LENGTH) {
+                    throw new AwsException("BadRequestException",
+                            "Topic DisplayName can contain up to <" + MAX_DISPLAY_NAME_LENGTH
+                                    + "> characters.", 400);
+                }
+                if (!seenNames.add(t.getTopicName())) {
+                    throw new AwsException("BadRequestException",
+                            "Duplicate topic names are not allowed within a List.", 400);
+                }
+            }
+        }
+        validateDescription(description);
+    }
+
+    private static String contactListKey(String region, String name) {
+        // Validate in the key builder so Get/Update/Delete reject an invalid ContactListName with
+        // the AWS validation error (400) rather than a 404, matching configSetKey. Verified
+        // against real AWS: read/delete with an invalid name returns the same constraint message.
+        validateContactListName(name);
+        return "contactList::" + region + "::" + name;
     }
 
     static void validateConfigurationSetName(String name) {

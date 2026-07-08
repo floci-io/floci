@@ -73,6 +73,21 @@ public interface EmulatorConfig {
 
     TlsConfig tls();
 
+    ProtocolsConfig protocols();
+
+    interface ProtocolsConfig {
+        /**
+         * When enabled, requests carrying an RPC protocol signal that no
+         * supported wire protocol claims are rejected per the Smithy
+         * wire-protocol-selection guide (e.g. an unknown Smithy-Protocol header
+         * value, a recognized-but-unimplemented rpc-v2-json request, or an
+         * X-Amz-Target post with a foreign content type). When disabled such
+         * requests are only logged and pass through to JAX-RS matching.
+         */
+        @WithDefault("false")
+        boolean strictClaiming();
+    }
+
     interface DnsConfig {
         /**
          * Additional hostname suffixes the embedded DNS server will resolve to Floci's
@@ -189,20 +204,15 @@ public interface EmulatorConfig {
 
         /**
          * Octal permissions applied to the volume root (EFS {@code RootDirectory.CreationInfo.Permissions}),
-         * e.g. {@code "0777"}. When empty, no {@code chmod} for the permission bits is performed; however
-         * the init helper container still runs if {@link #ownerUid()}, {@link #ownerGid()}, or
-         * {@link #setgid()} are set. Volume-root initialisation is skipped entirely only when all of
-         * {@code owner-uid}, {@code owner-gid}, {@code root-permissions}, and {@code setgid} are left at
-         * their defaults (plain named volume).
+         * e.g. {@code "0777"}. A 4-digit value carries the special bits exactly as AWS does — e.g.
+         * {@code "2775"} sets the setgid bit so subdirectories inherit the owner gid (the standard
+         * POSIX pattern for a group-shared tree). When empty, no {@code chmod} for the permission
+         * bits is performed; however the init helper container still runs if {@link #ownerUid()} or
+         * {@link #ownerGid()} is set. Volume-root initialisation is skipped entirely only when all of
+         * {@code owner-uid}, {@code owner-gid}, and {@code root-permissions} are left at their
+         * defaults (plain named volume).
          */
         Optional<String> rootPermissions();
-
-        /**
-         * When {@code true}, also sets the setgid bit on the volume root so subdirectories created
-         * under it inherit the owner gid — the standard POSIX pattern for a group-shared tree.
-         */
-        @WithDefault("false")
-        boolean setgid();
 
         /** Lightweight image used for the one-off {@code chown}/{@code chmod} of the volume root. */
         @WithDefault("busybox:stable")
@@ -253,6 +263,8 @@ public interface EmulatorConfig {
         ConfigStorageConfig config();
         CodeDeployStorageConfig codedeploy();
         TranscribeStorageConfig transcribe();
+        TaggingStorageConfig tagging();
+        ElasticBeanstalkStorageConfig elasticbeanstalk();
     }
 
     interface SsmStorageConfig {
@@ -433,6 +445,20 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface TaggingStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface ElasticBeanstalkStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -467,6 +493,7 @@ public interface EmulatorConfig {
         ApiGatewayServiceConfig apigateway();
         IamServiceConfig iam();
         MskServiceConfig msk();
+        AmazonMqServiceConfig amazonmq();
         ElastiCacheServiceConfig elasticache();
         MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
@@ -520,6 +547,7 @@ public interface EmulatorConfig {
         BcmDataExportsServiceConfig bcmDataExports();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
+        CloudControlServiceConfig cloudcontrol();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
@@ -556,6 +584,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CloudControlServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -710,6 +743,17 @@ public interface EmulatorConfig {
         int kafkaHostPortMax();
     }
 
+    interface AmazonMqServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean mock();
+
+        @WithDefault("rabbitmq:3-management")
+        String defaultImage();
+    }
+
     interface ElastiCacheServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -753,6 +797,12 @@ public interface EmulatorConfig {
     interface RdsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** When true, DB clusters and instances are created instantly without a real Docker
+         *  container or auth proxy (API/metadata only). Useful for CI and environments without
+         *  access to the Docker socket. */
+        @WithDefault("false")
+        boolean mock();
 
         @WithDefault("7000")
         int proxyBasePort();
@@ -883,6 +933,15 @@ public interface EmulatorConfig {
 
         @WithDefault("10000")
         int maxEventsPerQuery();
+
+        /**
+         * Artificial Logs Insights query completion delay, in milliseconds. With the default 0,
+         * queries complete immediately (fast local dev). A positive value emulates the real
+         * asynchronous lifecycle — StartQuery → Running → Complete after this delay — which also
+         * makes StopQuery on a still-running query return {@code success=true}.
+         */
+        @WithDefault("0")
+        long queryCompletionDelayMs();
     }
 
     interface CloudWatchMetricsServiceConfig {
@@ -1391,6 +1450,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean iamAuthWebhook();
+
+        /**
+         * When true (and ECR is enabled), each new k3s cluster gets a generated
+         * {@code /etc/rancher/k3s/registries.yaml} that mirrors every ECR repository URI the
+         * emulator can mint to the registry container's in-network endpoint, so pods can pull
+         * images pushed to Floci ECR without any manual containerd configuration.
+         */
+        @WithDefault("true")
+        boolean ecrRegistryMirror();
     }
 
     interface InitHooksConfig {
@@ -1470,6 +1538,12 @@ public interface EmulatorConfig {
         /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
         @WithDefault("unix:///var/run/docker.sock")
         String dockerHost();
+
+        /**
+         * Optional namespace inserted into Floci-managed child container and volume names.
+         * Useful when multiple Floci processes share one Docker daemon.
+         */
+        Optional<String> resourceNamespace();
 
         /**
          * Optional registry/repository base for every Docker image Floci launches.

@@ -63,6 +63,15 @@ for suite in "${SUITES[@]}"; do
     DNS_ARGS=(--dns "$FLOCI_IP")
   fi
 
+  # Per-suite extra args, mirroring .github/workflows/compatibility.yml.
+  # sdk-test-java's Lambda hot-reload test needs a host directory that the Docker
+  # daemon can bind-mount into the hot-reload Lambda container.
+  EXTRA_ARGS=()
+  if [ "$suite" = "sdk-test-java" ]; then
+    mkdir -p /tmp/floci-hot-reload
+    EXTRA_ARGS=(-v /tmp/floci-hot-reload:/tmp/floci-hot-reload -e HOT_RELOAD_BASE_DIR=/tmp/floci-hot-reload)
+  fi
+
   # Run
   docker run --rm --network "$NETWORK" \
     "${DNS_ARGS[@]}" \
@@ -71,6 +80,7 @@ for suite in "${SUITES[@]}"; do
     -v "$(pwd)/test-results:/results" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     --group-add "$DOCKER_GID" \
+    "${EXTRA_ARGS[@]}" \
     "$IMAGE_NAME" || echo "Test suite $suite failed"
 done
 

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -94,7 +95,7 @@ public class EcsContainerManager {
         }
 
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
-            String containerName = "floci-ecs-" + taskId + "-" + def.getName();
+            String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
 
             // RunTask containerOverrides matched by container name: command replaces
             // the task-def command; environment is merged over the task-def environment.
@@ -179,13 +180,20 @@ public class EcsContainerManager {
                         var efsCfg = config.storage().efs();
                         lifecycleManager.ensureSharedVolume(efsVolumeName(efs.fileSystemId()),
                                 efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
-                                efsCfg.setgid(), efsCfg.initImage());
+                                efsCfg.initImage());
                         specBuilder.withNamedVolume(efsVolumeName(efs.fileSystemId()),
                                 mp.containerPath(), mp.readOnly());
                         // Emulate the access point's PosixUser: run the container under the
                         // configured uid[:gid] and/or add the supplementary group, so a non-root
                         // image can read/write the shared volume owned by ownerUid/ownerGid.
-                        efsCfg.mountUser().ifPresent(specBuilder::withUser);
+                        efsCfg.mountUser().ifPresent(u -> {
+                            // Validate the access point PosixUser format before applying it.
+                            if (!u.matches("^\\d+(:\\d+)?$")) {
+                                throw new IllegalArgumentException(
+                                        "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + u);
+                            }
+                            specBuilder.withUser(u);
+                        });
                         efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
                     } else {
                         LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",

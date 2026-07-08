@@ -61,6 +61,10 @@ public class SsmJsonHandler {
             // Patch Manager (read-only: AWS-owned predefined baselines)
             case "DescribePatchBaselines" -> handleDescribePatchBaselines(request, region);
             case "GetDefaultPatchBaseline" -> handleGetDefaultPatchBaseline(request, region);
+            // Read-only list operations (resources not modeled: empty results)
+            case "ListDocuments" -> handleListDocuments(request, region);
+            case "ListAssociations" -> handleListAssociations(request, region);
+            case "DescribeMaintenanceWindows" -> handleDescribeMaintenanceWindows(request, region);
             // Agent registration (internal, not in public SDK)
             case "UpdateInstanceInformation" -> handleUpdateInstanceInformation(request, region);
             default -> Response.status(400)
@@ -242,6 +246,27 @@ public class SsmJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("BaselineId", baselineId);
         response.put("OperatingSystem", (operatingSystem == null || operatingSystem.isBlank()) ? "WINDOWS" : operatingSystem);
+        return Response.ok(response).build();
+    }
+
+    private Response handleListDocuments(JsonNode request, String region) {
+        // SSM documents are not modeled: return an empty list.
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("DocumentIdentifiers", objectMapper.createArrayNode());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListAssociations(JsonNode request, String region) {
+        // SSM associations are not modeled: return an empty list.
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Associations", objectMapper.createArrayNode());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeMaintenanceWindows(JsonNode request, String region) {
+        // Maintenance windows are not modeled: return an empty list.
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("WindowIdentities", objectMapper.createArrayNode());
         return Response.ok(response).build();
     }
 
