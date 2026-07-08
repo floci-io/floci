@@ -333,13 +333,6 @@ class EventBridgeSchedulerIntegrationTest {
                     @Override public int awsHttpsPort() { return 443; }
                 };
             }
-            @Override
-            public TuiConfig tui() {
-                return new TuiConfig() {
-                    @Override public boolean enabled() { return false; }
-                    @Override public int refreshIntervalSeconds() { return 2; }
-                };
-            }
         };
     }
 }
