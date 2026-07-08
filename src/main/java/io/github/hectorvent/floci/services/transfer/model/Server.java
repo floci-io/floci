@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.transfer.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+@RegisterForReflection
 public class Server {
 
     private String serverId;
