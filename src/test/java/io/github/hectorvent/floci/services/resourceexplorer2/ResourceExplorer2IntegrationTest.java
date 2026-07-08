@@ -252,6 +252,23 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // Amazon MQ broker (mocked in test config, so no backing container)
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "brokerName": "re2-test-broker",
+                    "engineType": "RABBITMQ",
+                    "deploymentMode": "SINGLE_INSTANCE",
+                    "hostInstanceType": "mq.t3.micro",
+                    "users": [{"username": "admin", "password": "re2BrokerPass99"}]
+                }
+                """)
+        .when()
+            .post("/v1/brokers")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -422,7 +439,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm", "cognito-idp", "iam"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm", "cognito-idp", "iam", "mq"));
         }
     }
 
@@ -440,7 +457,8 @@ class ResourceExplorer2IntegrationTest {
             "kafka,       kafka:cluster",
             "pipes,       pipes:pipe",
             "acm,         acm:certificate",
-            "cognito-idp, cognito-idp:userpool"
+            "cognito-idp, cognito-idp:userpool",
+            "mq,          mq:broker"
         })
         void resourceSurfacesViaListResources(String service, String resourceType) {
             given()
