@@ -217,8 +217,17 @@ class GlobalSignOutIntegrationTest {
                 {"AccessToken":"%s"}
                 """.formatted(forged));
 
-        assertEquals("UserNotFoundException", body.path("__type").asText(),
-                "GlobalSignOut for a nonexistent user must fail with UserNotFoundException, body was: " + body);
+        assertEquals("NotAuthorizedException", body.path("__type").asText(),
+                "GlobalSignOut for a nonexistent user must fail with NotAuthorizedException, body was: " + body);
+    }
+
+    @Test
+    @Order(11)
+    void globalSignOutRejectsMissingAccessToken() throws Exception {
+        JsonNode body = cognitoJsonAny("GlobalSignOut", "{}");
+
+        assertEquals("InvalidParameterException", body.path("__type").asText(),
+                "GlobalSignOut with no AccessToken must fail with InvalidParameterException, body was: " + body);
     }
 
     /** Build an unsigned JWT-shaped access token — the emulator decodes the payload without verifying the signature. */

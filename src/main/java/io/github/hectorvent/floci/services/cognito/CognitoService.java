@@ -854,6 +854,11 @@ public class CognitoService {
      * ID, and refresh tokens Cognito issued to the user, matching AWS behavior.
      */
     public void globalSignOut(String accessToken) {
+        if (accessToken == null || accessToken.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+        }
+
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);
         String jti = extractJtiFromToken(accessToken);
@@ -870,7 +875,14 @@ public class CognitoService {
 
         // Confirm the pool and user actually exist before mutating the revocation store,
         // matching the implicit validation AWS performs and the adminUserGlobalSignOut counterpart.
-        adminGetUser(poolId, username);
+        try {
+            adminGetUser(poolId, username);
+        } catch (AwsException e) {
+            if ("UserNotFoundException".equals(e.getErrorCode())) {
+                throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+            }
+            throw e;
+        }
 
         // Revoke all of the user's issued tokens (access, ID, refresh).
         revokeAllUserTokens(poolId, username);
