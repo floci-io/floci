@@ -21,6 +21,7 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 | --- | --- |
 | `CreateDBCluster` | Create a DocumentDB cluster and start a MongoDB container |
 | `DescribeDBClusters` | List clusters and their connection details |
+| `DescribeDBClusterSnapshots` | - |
 | `DeleteDBCluster` | Stop and remove a cluster (must have no instances) |
 | `ModifyDBCluster` | Update engine version or IAM auth setting |
 | `CreateDBInstance` | Add an instance to a cluster |
