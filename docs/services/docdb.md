@@ -16,8 +16,9 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|--------|-------------|
+| --- | --- |
 | `CreateDBCluster` | Create a DocumentDB cluster and start a MongoDB container |
 | `DescribeDBClusters` | List clusters and their connection details |
 | `DeleteDBCluster` | Stop and remove a cluster (must have no instances) |
@@ -26,6 +27,7 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 | `DescribeDBInstances` | List instances |
 | `DeleteDBInstance` | Remove an instance from a cluster |
 | `ModifyDBInstance` | Update instance class or IAM auth setting |
+<!-- floci:actions:end -->
 
 ## Configuration
 

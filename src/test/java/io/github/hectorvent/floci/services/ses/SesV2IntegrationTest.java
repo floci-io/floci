@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -49,7 +51,11 @@ class SesV2IntegrationTest {
             .post("/v2/email/identities")
         .then()
             .statusCode(200)
-            .body("IdentityType", equalTo("DOMAIN"));
+            .body("IdentityType", equalTo("DOMAIN"))
+            .body("VerifiedForSendingStatus", equalTo(false))
+            .body("DkimAttributes.SigningEnabled", equalTo(true))
+            .body("DkimAttributes.Status", equalTo("PENDING"))
+            .body("DkimAttributes.Tokens", not(empty()));
     }
 
     @Test
@@ -95,6 +101,93 @@ class SesV2IntegrationTest {
             .body("IdentityType", equalTo("EMAIL_ADDRESS"))
             .body("VerifiedForSendingStatus", equalTo(true))
             .body("DkimAttributes", notNullValue());
+    }
+
+    @Test
+    @Order(61)
+    void getEmailIdentity_domainTransitionsToSuccessWhenDkimRecordsExist() {
+        List<String> tokens = given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailIdentity": "v2dkim-success.floci.test"}
+                """)
+        .when()
+            .post("/v2/email/identities")
+        .then()
+            .statusCode(200)
+            .body("VerifiedForSendingStatus", equalTo(false))
+            .extract()
+            .jsonPath()
+            .getList("DkimAttributes.Tokens", String.class);
+
+        String locationHeader = given()
+            .contentType("application/xml")
+            .body("""
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>floci.test</Name>
+                  <CallerReference>ses-v2-dkim-success</CallerReference>
+                </CreateHostedZoneRequest>
+                """)
+        .when()
+            .post("/2013-04-01/hostedzone")
+        .then()
+            .statusCode(201)
+            .extract()
+            .header("Location");
+
+        String zoneId = locationHeader.substring(locationHeader.lastIndexOf('/') + 1);
+        StringBuilder body = new StringBuilder("""
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch>
+                    <Changes>
+                """);
+        for (String token : tokens) {
+            body.append("""
+                      <Change>
+                        <Action>CREATE</Action>
+                        <ResourceRecordSet>
+                          <Name>""").append(token).append("._domainkey.v2dkim-success.floci.test.</Name>\n")
+                    .append("""
+                          <Type>CNAME</Type>
+                          <TTL>300</TTL>
+                          <ResourceRecords>
+                            <ResourceRecord><Value>""").append(token).append(".dkim.amazonses.com.</Value></ResourceRecord>\n")
+                    .append("""
+                          </ResourceRecords>
+                        </ResourceRecordSet>
+                      </Change>
+                    """);
+        }
+        body.append("""
+                    </Changes>
+                  </ChangeBatch>
+                </ChangeResourceRecordSetsRequest>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body.toString())
+        .when()
+            .post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2dkim-success.floci.test")
+        .then()
+            .statusCode(200)
+            .body("IdentityType", equalTo("DOMAIN"))
+            .body("VerifiedForSendingStatus", equalTo(true))
+            .body("VerificationStatus", equalTo("SUCCESS"))
+            .body("DkimAttributes.SigningEnabled", equalTo(true))
+            .body("DkimAttributes.Status", equalTo("SUCCESS"))
+            .body("DkimAttributes.Tokens", not(empty()));
     }
 
     @Test

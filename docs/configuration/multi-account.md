@@ -33,7 +33,7 @@ Account 111111111111 ──AssumeRole arn:aws:iam::222222222222:role/Deployer─
 ASIA… temp key ──CreateTable orders──▶ stored as 222222222222/...::orders  ◀──┘
 ```
 
-This makes the cross-account `AssumeRole`-then-provision pattern (e.g. CloudFormation deploying into a target account) work locally exactly as it does in AWS. Resolution precedence is: **12-digit AKID → temporary-session lookup → `FLOCI_DEFAULT_ACCOUNT_ID`.**
+This makes the cross-account `AssumeRole`-then-provision pattern (e.g. CloudFormation deploying into a target account) work locally exactly as it does in AWS. Resolution precedence is: **12-digit AKID → account ID; otherwise temporary-session lookup → `FLOCI_DEFAULT_ACCOUNT_ID`.**
 
 ## Default Behavior (Single Account)
 

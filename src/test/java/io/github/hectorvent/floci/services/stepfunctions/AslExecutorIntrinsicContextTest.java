@@ -23,7 +23,7 @@ class AslExecutorIntrinsicContextTest {
     /** Only ObjectMapper is exercised by the path/intrinsic resolution methods under test. */
     private AslExecutor newExecutor() {
         return new AslExecutor(null, null, null, null, null, null, null, null,
-                mapper, null, null);
+                null, null, mapper, null, null);
     }
 
     @Test
@@ -96,6 +96,10 @@ class AslExecutorIntrinsicContextTest {
 
         // The 2-arg form (context == null) must behave exactly as before: $. args resolve,
         // and a stray $$. arg — which has no context to resolve against — yields "null".
+        // The "null" here pins Floci-internal transitional behavior, NOT AWS semantics (on real
+        // AWS the Context Object always exists); see resolveIntrinsicArg. It only holds until
+        // context is threaded into the remaining resolvePath callers, at which point this
+        // assertion should be updated rather than treated as a contract.
         assertEquals("widget", executor.resolvePath("States.Format('{}', $.name)", input).asText());
         assertEquals("null", executor.resolvePath(
                 "States.Format('{}', $$.Map.Item.Value.solutionId)", input).asText());

@@ -310,9 +310,19 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
+        String body = instanceIdentityDocument(inst, config.defaultAccountId());
+        ctx.response().setStatusCode(200)
+                .putHeader("content-type", "application/json")
+                .end(body);
+    }
+
+    static String instanceIdentityDocument(Instance inst, String accountId) {
         String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : "us-east-1a";
-        String body = "{\"accountId\":\"" + config.defaultAccountId() + "\","
-                + "\"architecture\":\"x86_64\","
+        String architecture = inst.getArchitecture() == null || inst.getArchitecture().isBlank()
+                ? "x86_64"
+                : inst.getArchitecture();
+        String body = "{\"accountId\":\"" + accountId + "\","
+                + "\"architecture\":\"" + architecture + "\","
                 + "\"availabilityZone\":\"" + az + "\","
                 + "\"imageId\":\"" + inst.getImageId() + "\","
                 + "\"instanceId\":\"" + inst.getInstanceId() + "\","
@@ -320,9 +330,7 @@ public class Ec2MetadataServer {
                 + "\"privateIp\":\"" + nvl(inst.getPrivateIpAddress()) + "\","
                 + "\"region\":\"" + inst.getRegion() + "\","
                 + "\"version\":\"2017-09-30\"}";
-        ctx.response().setStatusCode(200)
-                .putHeader("content-type", "application/json")
-                .end(body);
+        return body;
     }
 
     // ── Instance resolution ───────────────────────────────────────────────────

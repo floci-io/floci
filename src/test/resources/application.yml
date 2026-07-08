@@ -52,6 +52,10 @@ floci:
         flush-interval-ms: 60000
       codedeploy:
         flush-interval-ms: 60000
+      tagging:
+        flush-interval-ms: 60000
+      elasticbeanstalk:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
@@ -70,9 +74,13 @@ floci:
     enabled: false
     self-signed: true
 
+  protocols:
+    strict-claiming: false
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
+    resource-namespace: ""
 
   services:
     ssm:
@@ -106,6 +114,9 @@ floci:
       enabled: true
       mock: true
       default-image: "redpandadata/redpanda:latest"
+    amazonmq:
+      enabled: true
+      mock: true
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -120,6 +131,7 @@ floci:
       default-image: "valkey/valkey:8"
     rds:
       enabled: true
+      mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
@@ -183,6 +195,11 @@ floci:
       imds-port: 9169
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
+      publish-security-group-ports: true
+      app-port-range-start: 30000
+      app-port-range-end: 30999
+      max-published-ports-per-instance: 20
+      socat-image: alpine/socat
       mock: true
     ecs:
       enabled: true
@@ -200,6 +217,7 @@ floci:
     eks:
       enabled: true
       mock: true
+      ecr-registry-mirror: true
     pipes:
       enabled: true
     elbv2:
@@ -239,6 +257,8 @@ floci:
       enabled: true
       emit-mode: off
     cloudtrail:
+      enabled: true
+    cloudcontrol:
       enabled: true
     cloudfront:
       enabled: true

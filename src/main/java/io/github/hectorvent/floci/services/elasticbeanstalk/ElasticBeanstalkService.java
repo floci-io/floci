@@ -1,11 +1,16 @@
 package io.github.hectorvent.floci.services.elasticbeanstalk;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticbeanstalk.model.BeanstalkApplication;
 import io.github.hectorvent.floci.services.elasticbeanstalk.model.BeanstalkApplicationVersion;
 import io.github.hectorvent.floci.services.elasticbeanstalk.model.BeanstalkEnvironment;
 import io.github.hectorvent.floci.services.elasticbeanstalk.model.ConfigurationOptionSetting;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -22,7 +27,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class ElasticBeanstalkService {
+public class ElasticBeanstalkService implements Resettable {
 
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String LOWER_ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -30,16 +35,44 @@ public class ElasticBeanstalkService {
             "64bit Amazon Linux 2023 v4.3.0 running Docker";
 
     private final RegionResolver regionResolver;
-    private final Map<String, BeanstalkApplication> applications = new ConcurrentHashMap<>();
-    private final Map<String, BeanstalkApplicationVersion> versions = new ConcurrentHashMap<>();
-    private final Map<String, BeanstalkEnvironment> environments = new ConcurrentHashMap<>();
+    private final StorageFactory storageFactory;
+    private Map<String, BeanstalkApplication> applications = new ConcurrentHashMap<>();
+    private Map<String, BeanstalkApplicationVersion> versions = new ConcurrentHashMap<>();
+    private Map<String, BeanstalkEnvironment> environments = new ConcurrentHashMap<>();
 
     @Inject
-    ElasticBeanstalkService(RegionResolver regionResolver) {
+    ElasticBeanstalkService(RegionResolver regionResolver, StorageFactory storageFactory) {
         this.regionResolver = regionResolver;
+        this.storageFactory = storageFactory;
     }
 
-    public BeanstalkApplication createApplication(String region, String name, String description,
+    @PostConstruct
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.applications = new StorageBackedMap<>(storageFactory.create("elasticbeanstalk",
+                "elasticbeanstalk-applications.json",
+                new TypeReference<Map<String, BeanstalkApplication>>() {}));
+        this.versions = new StorageBackedMap<>(storageFactory.create("elasticbeanstalk",
+                "elasticbeanstalk-versions.json",
+                new TypeReference<Map<String, BeanstalkApplicationVersion>>() {}));
+        this.environments = new StorageBackedMap<>(storageFactory.create("elasticbeanstalk",
+                "elasticbeanstalk-environments.json",
+                new TypeReference<Map<String, BeanstalkEnvironment>>() {}));
+    }
+
+    @Override
+    public void clear() {
+        applications.clear();
+        versions.clear();
+        environments.clear();
+    }
+
+    // Mutators are synchronized: StorageBackedMap has no atomic check-then-put, and
+    // persistent backends return fresh copies on get, so every in-place mutation must be
+    // re-put and the get-mutate-put sequences must not interleave.
+    public synchronized BeanstalkApplication createApplication(String region, String name, String description,
                                                   Map<String, String> tags) {
         requireName(name, "ApplicationName");
         String key = appKey(region, name);
@@ -78,16 +111,17 @@ public class ElasticBeanstalkService {
                 .toList();
     }
 
-    public BeanstalkApplication updateApplication(String region, String name, String description) {
+    public synchronized BeanstalkApplication updateApplication(String region, String name, String description) {
         BeanstalkApplication app = requireApplication(region, name);
         if (description != null) {
             app.setDescription(description);
         }
         app.setDateUpdated(Instant.now());
+        applications.put(appKey(region, name), app);
         return app;
     }
 
-    public void deleteApplication(String region, String name, boolean terminateEnvByForce) {
+    public synchronized void deleteApplication(String region, String name, boolean terminateEnvByForce) {
         requireApplication(region, name);
         List<BeanstalkEnvironment> activeEnvironments = environments.entrySet().stream()
                 .filter(e -> e.getKey().startsWith(region + "::"))
@@ -106,7 +140,7 @@ public class ElasticBeanstalkService {
         versions.entrySet().removeIf(e -> e.getKey().startsWith(versionPrefix(region, name)));
     }
 
-    public BeanstalkApplicationVersion createApplicationVersion(String region, String applicationName,
+    public synchronized BeanstalkApplicationVersion createApplicationVersion(String region, String applicationName,
                                                                String versionLabel, String description,
                                                                boolean autoCreateApplication,
                                                                String sourceBundleBucket,
@@ -141,6 +175,7 @@ public class ElasticBeanstalkService {
         versions.put(key, version);
         app.getVersions().add(versionLabel);
         app.setDateUpdated(now);
+        applications.put(appKey(region, applicationName), app);
         return version;
     }
 
@@ -157,7 +192,7 @@ public class ElasticBeanstalkService {
                 .toList();
     }
 
-    public void deleteApplicationVersion(String region, String applicationName, String versionLabel) {
+    public synchronized void deleteApplicationVersion(String region, String applicationName, String versionLabel) {
         requireName(applicationName, "ApplicationName");
         requireName(versionLabel, "VersionLabel");
         BeanstalkApplicationVersion removed = versions.remove(versionKey(region, applicationName, versionLabel));
@@ -169,10 +204,11 @@ public class ElasticBeanstalkService {
         if (app != null) {
             app.getVersions().remove(versionLabel);
             app.setDateUpdated(Instant.now());
+            applications.put(appKey(region, applicationName), app);
         }
     }
 
-    public BeanstalkEnvironment createEnvironment(String region, String applicationName, String environmentName,
+    public synchronized BeanstalkEnvironment createEnvironment(String region, String applicationName, String environmentName,
                                                   String description, String cnamePrefix, String solutionStackName,
                                                   String platformArn, String templateName, String versionLabel,
                                                   List<ConfigurationOptionSetting> optionSettings,
@@ -236,7 +272,7 @@ public class ElasticBeanstalkService {
                 .toList();
     }
 
-    public BeanstalkEnvironment updateEnvironment(String region, String environmentName, String environmentId,
+    public synchronized BeanstalkEnvironment updateEnvironment(String region, String environmentName, String environmentId,
                                                   String description, String versionLabel,
                                                   String solutionStackName, String platformArn,
                                                   List<ConfigurationOptionSetting> optionSettings) {
@@ -268,15 +304,17 @@ public class ElasticBeanstalkService {
         env.setHealth("Green");
         env.setHealthStatus("Ok");
         env.setDateUpdated(Instant.now());
+        environments.put(envKey(region, env.getEnvironmentName()), env);
         return env;
     }
 
-    public BeanstalkEnvironment terminateEnvironment(String region, String environmentName, String environmentId) {
+    public synchronized BeanstalkEnvironment terminateEnvironment(String region, String environmentName, String environmentId) {
         BeanstalkEnvironment env = requireEnvironment(region, environmentName, environmentId);
         env.setStatus("Terminated");
         env.setHealth("Grey");
         env.setHealthStatus("NoData");
         env.setDateUpdated(Instant.now());
+        environments.put(envKey(region, env.getEnvironmentName()), env);
         return env;
     }
 

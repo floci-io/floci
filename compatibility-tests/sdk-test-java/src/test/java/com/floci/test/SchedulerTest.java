@@ -6,6 +6,7 @@ import software.amazon.awssdk.services.scheduler.model.*;
 import software.amazon.awssdk.services.scheduler.model.Tag;
 
 import java.time.Instant;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -40,6 +41,10 @@ class SchedulerTest {
             try {
                 scheduler.deleteSchedule(DeleteScheduleRequest.builder()
                         .name("dated-schedule").build());
+            } catch (Exception ignored) {}
+            try {
+                scheduler.deleteSchedule(DeleteScheduleRequest.builder()
+                        .name("ecs-schedule").build());
             } catch (Exception ignored) {}
             try {
                 scheduler.deleteSchedule(DeleteScheduleRequest.builder()
@@ -327,6 +332,86 @@ class SchedulerTest {
 
     @Test
     @Order(20)
+    @DisplayName("CreateSchedule - with ECS target parameters")
+    void createScheduleWithEcsParameters() {
+        CreateScheduleResponse resp = scheduler.createSchedule(CreateScheduleRequest.builder()
+                .name("ecs-schedule")
+                .scheduleExpression("rate(1 day)")
+                .flexibleTimeWindow(FlexibleTimeWindow.builder().mode(FlexibleTimeWindowMode.OFF).build())
+                .state(ScheduleState.DISABLED)
+                .target(Target.builder()
+                        .arn("arn:aws:ecs:us-east-1:000000000000:cluster/proof")
+                        .roleArn("arn:aws:iam::000000000000:role/scheduler-role")
+                        .ecsParameters(EcsParameters.builder()
+                                .capacityProviderStrategy(CapacityProviderStrategyItem.builder()
+                                        .capacityProvider("FARGATE")
+                                        .base(0)
+                                        .weight(1)
+                                        .build())
+                                .enableECSManagedTags(true)
+                                .enableExecuteCommand(true)
+                                .group("batch-group")
+                                .taskDefinitionArn("arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1")
+                                .launchType(LaunchType.FARGATE)
+                                .placementConstraints(PlacementConstraint.builder()
+                                        .type(PlacementConstraintType.DISTINCT_INSTANCE)
+                                        .build())
+                                .placementStrategy(PlacementStrategy.builder()
+                                        .type(PlacementStrategyType.SPREAD)
+                                        .field("attribute:ecs.availability-zone")
+                                        .build())
+                                .platformVersion("1.4.0")
+                                .propagateTags(PropagateTags.TASK_DEFINITION)
+                                .referenceId("ref-123")
+                                .tags(Map.of("Key", "env", "Value", "test"))
+                                .taskCount(1)
+                                .networkConfiguration(NetworkConfiguration.builder()
+                                        .awsvpcConfiguration(AwsVpcConfiguration.builder()
+                                                .subnets("subnet-a")
+                                                .securityGroups("sg-a")
+                                                .assignPublicIp(AssignPublicIp.DISABLED)
+                                                .build())
+                                        .build())
+                                .build())
+                        .build())
+                .build());
+
+        assertThat(resp.scheduleArn()).isNotNull().contains("ecs-schedule");
+
+        GetScheduleResponse get = scheduler.getSchedule(GetScheduleRequest.builder()
+                .name("ecs-schedule").build());
+        assertThat(get.target().ecsParameters().taskDefinitionArn())
+                .isEqualTo("arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1");
+        assertThat(get.target().ecsParameters().capacityProviderStrategy()).hasSize(1);
+        assertThat(get.target().ecsParameters().capacityProviderStrategy().get(0).capacityProvider()).isEqualTo("FARGATE");
+        assertThat(get.target().ecsParameters().enableECSManagedTags()).isTrue();
+        assertThat(get.target().ecsParameters().enableExecuteCommand()).isTrue();
+        assertThat(get.target().ecsParameters().group()).isEqualTo("batch-group");
+        assertThat(get.target().ecsParameters().launchType()).isEqualTo(LaunchType.FARGATE);
+        assertThat(get.target().ecsParameters().placementConstraints()).hasSize(1);
+        assertThat(get.target().ecsParameters().placementConstraints().get(0).type())
+                .isEqualTo(PlacementConstraintType.DISTINCT_INSTANCE);
+        assertThat(get.target().ecsParameters().placementStrategy()).hasSize(1);
+        assertThat(get.target().ecsParameters().placementStrategy().get(0).type())
+                .isEqualTo(PlacementStrategyType.SPREAD);
+        assertThat(get.target().ecsParameters().platformVersion()).isEqualTo("1.4.0");
+        assertThat(get.target().ecsParameters().propagateTags()).isEqualTo(PropagateTags.TASK_DEFINITION);
+        assertThat(get.target().ecsParameters().referenceId()).isEqualTo("ref-123");
+        assertThat(get.target().ecsParameters().tags()).containsExactly(Map.of("Key", "env", "Value", "test"));
+        assertThat(get.target().ecsParameters().taskCount()).isEqualTo(1);
+        assertThat(get.target().ecsParameters().networkConfiguration().awsvpcConfiguration().subnets())
+                .containsExactly("subnet-a");
+        assertThat(get.target().ecsParameters().networkConfiguration().awsvpcConfiguration().securityGroups())
+                .containsExactly("sg-a");
+        assertThat(get.target().ecsParameters().networkConfiguration().awsvpcConfiguration().assignPublicIp())
+                .isEqualTo(AssignPublicIp.DISABLED);
+
+        scheduler.deleteSchedule(DeleteScheduleRequest.builder()
+                .name("ecs-schedule").build());
+    }
+
+    @Test
+    @Order(21)
     @DisplayName("CreateSchedule - with StartDate and EndDate")
     void createScheduleWithStartAndEndDate() {
         Instant start = Instant.parse("2026-06-01T00:00:00Z");

@@ -50,7 +50,7 @@ class EventBridgeSchedulerIntegrationTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
                 new ObjectMapper(), scheduler, invoker, replayDispatcher,
-                new ResourceGroupsTaggingService());
+                new ResourceGroupsTaggingService(null));
     }
 
     @AfterEach
@@ -321,6 +321,8 @@ class EventBridgeSchedulerIntegrationTest {
             public DockerConfig docker() { return null; }
             @Override
             public EmulatorConfig.InitHooksConfig initHooks() { return null; }
+            @Override
+            public ProtocolsConfig protocols() { return () -> false; }
             @Override
             public TlsConfig tls() {
                 return new TlsConfig() {

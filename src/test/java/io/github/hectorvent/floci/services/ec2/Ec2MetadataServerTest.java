@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
@@ -50,6 +51,25 @@ class Ec2MetadataServerTest {
         instance.setTags(List.of(new Tag("Environment", "dev")));
 
         assertTrue(Ec2MetadataServer.instanceTagValue(instance, "Missing").isEmpty());
+    }
+
+    @Test
+    void identityDocumentUsesInstanceArchitectureWithX8664Fallback() {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-arm");
+        instance.setArchitecture("arm64");
+        instance.setImageId("ami-arm");
+        instance.setInstanceType("t4g.medium");
+        instance.setPlacement(new Placement("us-west-2a"));
+        instance.setPrivateIpAddress("10.0.0.10");
+        instance.setRegion("us-west-2");
+
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000")
+                .contains("\"architecture\":\"arm64\""));
+
+        instance.setArchitecture(null);
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000")
+                .contains("\"architecture\":\"x86_64\""));
     }
 
     @Test

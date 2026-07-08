@@ -9,7 +9,9 @@ import io.github.hectorvent.floci.services.ses.model.GuardianOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
+import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -103,7 +105,8 @@ public class SesController {
 
             ObjectNode result = objectMapper.createObjectNode();
             result.put("IdentityType", toV2IdentityType(identity.getIdentityType()));
-            result.put("VerifiedForSendingStatus", true);
+            result.put("VerifiedForSendingStatus",
+                    "Success".equals(identity.getVerificationStatus()));
             result.set("DkimAttributes", buildDkimAttributes(identity));
 
             LOG.infov("SES V2 CreateEmailIdentity: {0}", emailIdentity);
@@ -1151,6 +1154,146 @@ public class SesController {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    // ─────────────────────────── Contact lists ───────────────────────────
+
+    @POST
+    @Path("/contact-lists")
+    public Response createContactList(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            if (body == null || body.isBlank()) {
+                throw new AwsException("BadRequestException", "Request body is required.", 400);
+            }
+            JsonNode request = objectMapper.readTree(body);
+            requireJsonObject(request);
+            // Read leniently; the service surfaces a missing ContactListName as the AWS Smithy
+            // validation error rather than a custom "required" message.
+            String name = request.path("ContactListName").asText(null);
+            List<Topic> topics = parseTopicsArray(request.path("Topics"));
+            List<Tag> tags = parseTagsArray(request.path("Tags"));
+            String description = request.path("Description").asText(null);
+            sesService.createContactList(name, description, topics, tags, region);
+            LOG.infov("SES V2 CreateContactList: {0}", name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/contact-lists")
+    public Response listContactLists(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode lists = result.putArray("ContactLists");
+        for (ContactList cl : sesService.listContactLists(region)) {
+            ObjectNode item = lists.addObject();
+            item.put("ContactListName", cl.getContactListName());
+            if (cl.getLastUpdatedTimestamp() != null) {
+                item.put("LastUpdatedTimestamp", cl.getLastUpdatedTimestamp().getEpochSecond());
+            }
+        }
+        return Response.ok(result).build();
+    }
+
+    @GET
+    @Path("/contact-lists/{contactListName}")
+    public Response getContactList(@Context HttpHeaders headers,
+                                   @PathParam("contactListName") String contactListName) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(contactListJson(sesService.getContactList(contactListName, region))).build();
+    }
+
+    @PUT
+    @Path("/contact-lists/{contactListName}")
+    public Response updateContactList(@Context HttpHeaders headers,
+                                      @PathParam("contactListName") String contactListName,
+                                      String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            JsonNode topicsNode = request.path("Topics");
+            // Treat absent or explicit-null Topics as "not provided" (keep existing), consistent
+            // with Description; clearing is done via an explicit empty array [].
+            List<Topic> topics = (topicsNode.isMissingNode() || topicsNode.isNull())
+                    ? null : parseTopicsArray(topicsNode);
+            JsonNode descNode = request.path("Description");
+            boolean descriptionPresent = !descNode.isMissingNode() && !descNode.isNull();
+            String description = descNode.asText(null);
+            sesService.updateContactList(contactListName, description, descriptionPresent, topics, region);
+            LOG.infov("SES V2 UpdateContactList: {0}", contactListName);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @DELETE
+    @Path("/contact-lists/{contactListName}")
+    public Response deleteContactList(@Context HttpHeaders headers,
+                                      @PathParam("contactListName") String contactListName) {
+        String region = regionResolver.resolveRegion(headers);
+        sesService.deleteContactList(contactListName, region);
+        LOG.infov("SES V2 DeleteContactList: {0}", contactListName);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private List<Topic> parseTopicsArray(JsonNode topicsNode) {
+        List<Topic> out = new ArrayList<>();
+        if (topicsNode == null || topicsNode.isMissingNode() || topicsNode.isNull()) {
+            return out;
+        }
+        if (!topicsNode.isArray()) {
+            throw new AwsException("BadRequestException", "Topics must be an array.", 400);
+        }
+        for (JsonNode t : topicsNode) {
+            out.add(new Topic(
+                    t.path("TopicName").asText(null),
+                    t.path("DisplayName").asText(null),
+                    t.path("DefaultSubscriptionStatus").asText(null),
+                    t.path("Description").asText(null)));
+        }
+        return out;
+    }
+
+    private ObjectNode contactListJson(ContactList cl) {
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("ContactListName", cl.getContactListName());
+        if (cl.getDescription() != null) {
+            result.put("Description", cl.getDescription());
+        }
+        ArrayNode topics = result.putArray("Topics");
+        for (Topic t : cl.getTopics()) {
+            ObjectNode to = topics.addObject();
+            to.put("TopicName", t.getTopicName());
+            to.put("DisplayName", t.getDisplayName());
+            to.put("DefaultSubscriptionStatus", t.getDefaultSubscriptionStatus());
+            if (t.getDescription() != null) {
+                to.put("Description", t.getDescription());
+            }
+        }
+        if (cl.getCreatedTimestamp() != null) {
+            result.put("CreatedTimestamp", cl.getCreatedTimestamp().getEpochSecond());
+        }
+        if (cl.getLastUpdatedTimestamp() != null) {
+            result.put("LastUpdatedTimestamp", cl.getLastUpdatedTimestamp().getEpochSecond());
+        }
+        ArrayNode tags = result.putArray("Tags");
+        for (Tag tag : cl.getTags()) {
+            ObjectNode tn = tags.addObject();
+            tn.put("Key", tag.key());
+            tn.put("Value", tag.value());
+        }
+        return result;
+    }
+
     // ──────────────────────────── Account ────────────────────────────
 
     @GET
@@ -1448,7 +1591,12 @@ public class SesController {
         ObjectNode dkim = objectMapper.createObjectNode();
         dkim.put("SigningEnabled", identity.isDkimEnabled());
         dkim.put("Status", toV2Status(identity.getDkimVerificationStatus()));
-        dkim.putArray("Tokens");
+        ArrayNode tokens = dkim.putArray("Tokens");
+        if (identity.getDkimTokens() != null) {
+            for (String token : identity.getDkimTokens()) {
+                tokens.add(token);
+            }
+        }
         return dkim;
     }
 
