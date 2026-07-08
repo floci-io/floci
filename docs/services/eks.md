@@ -79,6 +79,51 @@ services:
 | `FLOCI_SERVICES_EKS_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave k3s containers running after Floci stops |
 | `FLOCI_SERVICES_EKS_ENDPOINT_MODE` | `host` | `describe-cluster` endpoint: `host` (`localhost:<hostPort>`) or `network` (container DNS) |
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
+| `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
+
+### Pulling images from Floci ECR
+
+Images pushed to the [Floci ECR registry](ecr.md) use `localhost`-based repository URIs
+(for example `000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:tag`). Inside a k3s
+cluster that hostname would resolve to the k3s container itself, and containerd insists
+on HTTPS for anything it doesn't recognize as loopback — so, out of the box, k3s cannot
+pull from the registry even though `docker push` from the host works.
+
+Floci solves this at cluster creation: each new k3s container gets a generated
+`/etc/rancher/k3s/registries.yaml` that mirrors every repository hostname the emulator
+can mint — the default account across the full region catalog, plus the path-style
+`localhost:<port>` form used by `FLOCI_SERVICES_ECR_URI_STYLE=path` — to the registry
+container's in-network endpoint (`http://floci-ecr-registry:5000`). The same image
+reference then works for the host-side push and the in-cluster pull, with no retagging
+and no manual containerd configuration:
+
+```bash
+aws ecr create-repository --repository-name my-repo
+docker build -t 000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:v1 .
+docker push 000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:v1
+
+aws eks create-cluster --name demo ...
+helm install my-app ./chart \
+  --set image.repository=000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo \
+  --set image.tag=v1
+```
+
+Requirements and limits:
+
+- The k3s and registry containers must share a Docker network — set the global
+  `FLOCI_SERVICES_DOCKER_NETWORK` (as in the standard `docker-compose.yml`) or the
+  per-service network variables.
+- Only Floci-mintable hostnames are mirrored; public registries (docker.io, ghcr.io, …)
+  are never touched.
+- Repository URIs using a non-default `registryId` (account) are not covered.
+- The mirror set is snapshotted when the cluster is created. Clusters created before this
+  feature (or after the registry was re-created on a different port) can be fixed
+  manually — the k3s container filesystem survives a restart:
+
+  ```bash
+  docker cp registries.yaml floci-eks-<cluster>:/etc/rancher/k3s/registries.yaml
+  docker restart floci-eks-<cluster>
+  ```
 
 ### Mock mode (CI / tests)
 

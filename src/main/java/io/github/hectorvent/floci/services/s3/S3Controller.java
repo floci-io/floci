@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.s3;
 
 import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
@@ -29,6 +31,7 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
@@ -86,17 +89,20 @@ public class S3Controller {
     private final S3Service s3Service;
     private final S3SelectService s3SelectService;
     private final RegionResolver regionResolver;
+    private final SnsQueryHandler snsQueryHandler;
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
     private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
                         RegionResolver regionResolver,
+                        SnsQueryHandler snsQueryHandler,
                         io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
                         io.github.hectorvent.floci.services.floci.ui.UiPages uiPages) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
+        this.snsQueryHandler = snsQueryHandler;
         this.currentVertxRequest = currentVertxRequest;
         this.uiPages = uiPages;
     }
@@ -106,9 +112,25 @@ public class S3Controller {
     @GET
     @Produces({MediaType.APPLICATION_XML, MediaType.TEXT_HTML})
     public Response listBuckets(@HeaderParam("X-Amz-Target") String target,
-                                @HeaderParam("Accept") String accept) {
+                                @HeaderParam("Accept") String accept,
+                                @Context HttpHeaders httpHeaders,
+                                @Context UriInfo uriInfo) {
         if (target != null) {
             return null;
+        }
+        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        String action = queryParams.getFirst("Action");
+        // SNS emits SubscribeURL/UnsubscribeURL as plain GET links against the
+        // service root, which collides with the S3 ListBuckets endpoint. Delegate
+        // those confirmation/unsubscribe GETs to SNS before falling through to S3.
+        // The links are unsigned (no Authorization header), so the region must come
+        // from the region-bearing ARN they carry, not the request headers.
+        if ("ConfirmSubscription".equals(action) || "Unsubscribe".equals(action)) {
+            String snsArn = "Unsubscribe".equals(action)
+                    ? queryParams.getFirst("SubscriptionArn")
+                    : queryParams.getFirst("TopicArn");
+            String region = AwsArnUtils.regionOrDefault(snsArn, regionResolver.resolveRegion(httpHeaders));
+            return snsQueryHandler.handle(action, queryParams, region);
         }
         // A browser hitting the root endpoint (Accept: text/html) gets the Floci
         // landing page; SDK/CLI callers (no Accept, */*, or an XML/JSON Accept) fall
@@ -495,7 +517,7 @@ public class S3Controller {
                     return handleUploadPartCopy(copySource, bucket, key, uploadId, partNumber, httpHeaders);
                 }
                 byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
-                validateChecksumHeaders(httpHeaders, partData, httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm"));
+                validateChecksumHeaders(httpHeaders, partData, getChecksumAlgorithm(httpHeaders));
                 String eTag = s3Service.uploadPart(bucket, key, uploadId, partNumber, partData,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
@@ -519,7 +541,7 @@ public class S3Controller {
             Instant retainUntil = retainUntilStr != null ? Instant.parse(retainUntilStr) : null;
 
             byte[] data = decodeAwsChunked(body, contentEncoding, contentSha256);
-            String checksumAlgorithm = httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm");
+            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders);
             validateChecksumHeaders(httpHeaders, data, checksumAlgorithm);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
@@ -967,7 +989,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-acl"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
+                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
+                        getChecksumAlgorithm(httpHeaders));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -1782,6 +1805,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerAlgorithm(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-algorithm"))
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
+                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
                         .withAcl(cannedAcl));
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -1969,6 +1993,14 @@ public class S3Controller {
         checksum.setChecksumSHA256(sha256);
         checksum.setChecksumType("FULL_OBJECT");
         return checksum;
+    }
+
+    private String getChecksumAlgorithm(HttpHeaders httpHeaders) {
+        String algorithm = httpHeaders.getHeaderString("x-amz-checksum-algorithm");
+        if (algorithm == null || algorithm.isBlank()) {
+            algorithm = httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm");
+        }
+        return algorithm;
     }
 
     private void validateChecksumHeaders(HttpHeaders httpHeaders, byte[] data, String algorithm) {

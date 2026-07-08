@@ -5,8 +5,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
@@ -14,12 +17,14 @@ import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
+import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -65,10 +70,42 @@ class Ec2ServicePersistenceTest {
         assertEquals("10.0.1.0/24", subnets.get(0).getCidrBlock());
     }
 
+    @Test
+    void registeredImageAndSnapshotSurviveRestart(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        Image image = first.registerImage(REGION, "persisted-image", "persisted image", "x86_64",
+                "/dev/sda1", List.of(blockDeviceMapping("snap-persisted", 12)));
+
+        Ec2Service restarted = newService(dir);
+
+        List<Image> images = restarted.describeImages(REGION, List.of(image.getImageId()), List.of(), Map.of());
+        assertEquals(1, images.size(), "registered image must survive restart");
+        assertEquals("persisted-image", images.getFirst().getName());
+        assertEquals("snap-persisted",
+                images.getFirst().getBlockDeviceMappings().getFirst().getEbs().getSnapshotId());
+
+        List<Snapshot> snapshots = restarted.describeSnapshots(REGION, List.of("snap-persisted"), List.of(), Map.of());
+        assertEquals(1, snapshots.size(), "linked snapshot must survive restart");
+        assertEquals(12, snapshots.getFirst().getVolumeSize());
+    }
+
+    private BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId(snapshotId);
+        ebs.setVolumeSize(volumeSize);
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName("/dev/sda1");
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
     private Ec2Service newService(Path dir) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("000000000000");
-        return new Ec2Service(config, null, null, null, null, new Ec2InstanceTypeCatalog(),
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        return new Ec2Service(config, null, mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog,
+                new Ec2InstanceTypeCatalog(),
                 load(dir, "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 load(dir, "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
                 load(dir, "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
@@ -79,6 +116,8 @@ class Ec2ServicePersistenceTest {
                 load(dir, "ec2-addresses.json", new TypeReference<Map<String, Address>>() {}),
                 load(dir, "ec2-instances.json", new TypeReference<Map<String, Instance>>() {}),
                 load(dir, "ec2-volumes.json", new TypeReference<Map<String, Volume>>() {}),
+                load(dir, "ec2-registered-images.json", new TypeReference<Map<String, Image>>() {}),
+                load(dir, "ec2-snapshots.json", new TypeReference<Map<String, Snapshot>>() {}),
                 load(dir, "ec2-launch-templates.json", new TypeReference<Map<String, LaunchTemplate>>() {}),
                 load(dir, "ec2-vpc-endpoints.json", new TypeReference<Map<String, VpcEndpoint>>() {}),
                 load(dir, "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),

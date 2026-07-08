@@ -151,6 +151,7 @@ floci:
 
     rds:
       enabled: true
+      mock: false                             # true = clusters/instances created without Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"

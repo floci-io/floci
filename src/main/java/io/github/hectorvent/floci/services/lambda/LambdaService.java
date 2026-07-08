@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -61,8 +64,9 @@ public class LambdaService {
     private final SqsEventSourcePoller poller;
     private final KinesisEventSourcePoller kinesisPoller;
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
-    private final ConcurrentHashMap<String, Integer> versionCounters = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
+    private final StorageFactory storageFactory;
+    private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
+    private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     /**
      * Per-function locks covering PutFunctionConcurrency,
      * DeleteFunctionConcurrency, and deleteFunction itself. Serializing the
@@ -77,6 +81,7 @@ public class LambdaService {
      * emulator workload.
      */
     private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -100,6 +105,17 @@ public class LambdaService {
                   ZipExtractor zipExtractor,
                   EmulatorConfig config,
                   RegionResolver regionResolver) {
+        this(functionStore, warmPool, codeStore, zipExtractor, config, regionResolver, null);
+    }
+
+    /** Package-private constructor for persistence tests: supplies a real storage factory. */
+    LambdaService(LambdaFunctionStore functionStore,
+                  WarmPool warmPool,
+                  CodeStore codeStore,
+                  ZipExtractor zipExtractor,
+                  EmulatorConfig config,
+                  RegionResolver regionResolver,
+                  StorageFactory storageFactory) {
         this.functionStore = functionStore;
         this.executorService = null;
         this.concurrencyLimiter = new LambdaConcurrencyLimiter();
@@ -115,6 +131,7 @@ public class LambdaService {
         this.poller = null;
         this.kinesisPoller = null;
         this.dynamodbStreamsPoller = null;
+        this.storageFactory = storageFactory;
     }
 
     @Inject
@@ -132,7 +149,8 @@ public class LambdaService {
                           SqsService sqsService,
                           SqsEventSourcePoller poller,
                           KinesisEventSourcePoller kinesisPoller,
-                          DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller) {
+                          DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
+                          StorageFactory storageFactory) {
         this.functionStore = functionStore;
         this.executorService = executorService;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -148,6 +166,7 @@ public class LambdaService {
         this.poller = poller;
         this.kinesisPoller = kinesisPoller;
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
+        this.storageFactory = storageFactory;
     }
 
     /** Package-private accessor for tests that want to assert limiter state directly. */
@@ -155,12 +174,33 @@ public class LambdaService {
         return concurrencyLimiter;
     }
 
+    @PostConstruct
+    void init() {
+        initializeStorage();
+        rehydrateConcurrency();
+    }
+
+    /**
+     * Version counters and event-invoke configs are durable Lambda state: a counter
+     * lost on restart re-issues already-used version numbers from PublishVersion.
+     * Wrapped through the same "lambda" storage key as the function store.
+     */
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.versionCounters = new StorageBackedMap<>(storageFactory.create("lambda",
+                "lambda-version-counters.json", new TypeReference<Map<String, Integer>>() {}));
+        this.eventInvokeConfigs = new StorageBackedMap<>(storageFactory.create("lambda",
+                "lambda-event-invoke-configs.json",
+                new TypeReference<Map<String, FunctionEventInvokeConfig>>() {}));
+    }
+
     /**
      * Rehydrates reserved concurrency into the limiter from persisted function state.
      * Without this, restarts leave {@code totalReserved()=0} and allow validatePut /
      * unreserved-pool sizing to drift until each function is re-Put.
      */
-    @PostConstruct
     void rehydrateConcurrency() {
         if (concurrencyLimiter == null) {
             return;
@@ -810,10 +850,25 @@ public class LambdaService {
 
     // ──────────────────────────── Versions ────────────────────────────
 
+    /**
+     * Locked get-increment-put: StorageBackedMap has no atomic merge, so the
+     * sequence must not interleave or concurrent PublishVersion calls could issue
+     * duplicate version numbers. The lock is per counter key (same pattern as
+     * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
+     * serialize on the instance monitor for the storage round-trip.
+     */
+    private int nextVersionNumber(String counterKey) {
+        synchronized (versionCounterLocks.computeIfAbsent(counterKey, k -> new Object())) {
+            int next = versionCounters.getOrDefault(counterKey, 0) + 1;
+            versionCounters.put(counterKey, next);
+            return next;
+        }
+    }
+
     public LambdaFunction publishVersion(String region, String functionName, String description) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
-        int version = versionCounters.merge(region + "::" + functionName, 1, Integer::sum);
+        int version = nextVersionNumber(region + "::" + functionName);
         LambdaFunction snapshot = new LambdaFunction();
         snapshot.setFunctionName(fn.getFunctionName());
         snapshot.setVersion(String.valueOf(version));
@@ -1135,7 +1190,10 @@ public class LambdaService {
     }
 
     private void extractZipCode(LambdaFunction fn, String zipFileBase64) {
-        byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
+        extractZipCodeBytes(fn, Base64.getDecoder().decode(zipFileBase64));
+    }
+
+    private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes) {
         Path codePath = codeStore.getCodePath(fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
@@ -1191,7 +1249,7 @@ public class LambdaService {
             throw new AwsException("InvalidParameterValueException",
                     "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
         }
-        extractZipCode(fn, Base64.getEncoder().encodeToString(obj.getData()));
+        extractZipCodeBytes(fn, obj.getData());
     }
 
     private String resolveHandlerFilePath(LambdaFunction fn) {
@@ -1388,6 +1446,8 @@ public class LambdaService {
         }
         applyEventInvokeRequest(existing, request, false);
         existing.setLastModified(System.currentTimeMillis());
+        // Re-put so StorageBackedMap routes the mutation through the backend
+        eventInvokeConfigs.put(key, existing);
         return existing;
     }
 
@@ -1482,7 +1542,7 @@ public class LambdaService {
                         fn.getFunctionName(), event.bucketName(), event.key());
                 try {
                     S3Object obj = s3Service.getObject(event.bucketName(), event.key());
-                    extractZipCode(fn, Base64.getEncoder().encodeToString(obj.getData()));
+                    extractZipCodeBytes(fn, obj.getData());
                     fn.setLastModified(Instant.now().toEpochMilli());
                     fn.setRevisionId(UUID.randomUUID().toString());
                     functionStore.save(region, fn);

@@ -19,8 +19,9 @@ The proxy is a transparent byte relay, so the host-facing proxy port range is un
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|--------|-------------|
+| --- | --- |
 | `CreateDBCluster` | Create a Neptune cluster and start a Gremlin Server container |
 | `DescribeDBClusters` | List clusters and their connection details |
 | `DeleteDBCluster` | Stop and remove a cluster |
@@ -29,6 +30,7 @@ The proxy is a transparent byte relay, so the host-facing proxy port range is un
 | `DescribeDBInstances` | List instances |
 | `DeleteDBInstance` | Remove an instance from a cluster |
 | `ModifyDBInstance` | Update instance settings |
+<!-- floci:actions:end -->
 
 ## Configuration
 

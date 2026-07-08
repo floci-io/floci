@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.secretsmanager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -246,6 +247,146 @@ class SecretsManagerJsonHandlerTest {
         ObjectNode batchReq = MAPPER.createObjectNode();
         Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
         assertThat(response.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) response.getEntity()).message(), containsString("You must specify either SecretIdList or Filters"));
+    }
+
+    @Test
+    void batchGetSecretValueMutuallyExclusiveParameters() {
+        ObjectNode batchReq = MAPPER.createObjectNode();
+        batchReq.putArray("SecretIdList").add("secret1");
+        batchReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("secret1");
+        Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
+        assertThat(response.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) response.getEntity()).message(), containsString("You cannot specify both SecretIdList and Filters"));
+    }
+
+    @Test
+    void batchGetSecretValueWithFilters() {
+        // Create matching/non-matching secrets
+        ObjectNode createReq1 = MAPPER.createObjectNode();
+        createReq1.put("Name", "prod-db-url");
+        createReq1.put("Description", "Production Database URL");
+        createReq1.put("SecretString", "postgres://prod");
+        createReq1.putArray("Tags").addObject().put("Key", "Env").put("Value", "Production");
+        handler.handle("CreateSecret", createReq1, REGION);
+
+        ObjectNode createReq2 = MAPPER.createObjectNode();
+        createReq2.put("Name", "dev-db-url");
+        createReq2.put("Description", "Development Database URL");
+        createReq2.put("SecretString", "postgres://dev");
+        createReq2.putArray("Tags").addObject().put("Key", "Env").put("Value", "Development");
+        handler.handle("CreateSecret", createReq2, REGION);
+
+        // Filter by name (begins with)
+        ObjectNode filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("prod");
+        Response response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(1));
+        assertThat(body.get("SecretValues").get(0).get("Name").asText(), is("prod-db-url"));
+
+        // Filter by description (case-insensitive)
+        filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "description").putArray("Values").add("production");
+        response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(1));
+        assertThat(body.get("SecretValues").get(0).get("Name").asText(), is("prod-db-url"));
+
+        // Filter by tag-key
+        filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "tag-key").putArray("Values").add("Env");
+        response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(2));
+
+        // Filter by tag-value negation
+        filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "tag-value").putArray("Values").add("!Production");
+        response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(1));
+        assertThat(body.get("SecretValues").get(0).get("Name").asText(), is("dev-db-url"));
+    }
+
+    @Test
+    void batchGetSecretValueWithFiltersPagination() {
+        for (int i = 0; i < 5; i++) {
+            ObjectNode createReq = MAPPER.createObjectNode();
+            createReq.put("Name", "paged-secret-" + i);
+            createReq.put("SecretString", "val-" + i);
+            handler.handle("CreateSecret", createReq, REGION);
+        }
+
+        // Fetch page 1 (MaxResults = 2)
+        ObjectNode filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("paged-");
+        filterReq.put("MaxResults", 2);
+        Response response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(2));
+        assertThat(body.has("NextToken"), is(true));
+        String nextToken = body.get("NextToken").asText();
+
+        // Fetch page 2
+        filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("paged-");
+        filterReq.put("MaxResults", 2);
+        filterReq.put("NextToken", nextToken);
+        response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(2));
+        assertThat(body.has("NextToken"), is(true));
+        nextToken = body.get("NextToken").asText();
+
+        // Fetch page 3 (remaining 1)
+        filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("paged-");
+        filterReq.put("MaxResults", 2);
+        filterReq.put("NextToken", nextToken);
+        response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(1));
+        assertThat(body.has("NextToken"), is(false));
+    }
+
+    @Test
+    void batchGetSecretValueRejectsNegativeNextToken() {
+        // A negative offset is an invalid token, not a valid query with no results.
+        ObjectNode filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("any");
+        filterReq.put("NextToken", "-1");
+        Response response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) response.getEntity()).type(), containsString("InvalidNextTokenException"));
+    }
+
+    @Test
+    void listSecretsWithFilters() {
+        ObjectNode createReq1 = MAPPER.createObjectNode();
+        createReq1.put("Name", "test-secret-a");
+        createReq1.put("SecretString", "valA");
+        handler.handle("CreateSecret", createReq1, REGION);
+
+        ObjectNode createReq2 = MAPPER.createObjectNode();
+        createReq2.put("Name", "test-secret-b");
+        createReq2.put("SecretString", "valB");
+        handler.handle("CreateSecret", createReq2, REGION);
+
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("test-secret-a");
+        Response response = handler.handle("ListSecrets", listReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretList").size(), is(1));
+        assertThat(body.get("SecretList").get(0).get("Name").asText(), is("test-secret-a"));
     }
 
     @Test

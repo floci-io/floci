@@ -15,8 +15,11 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 /**
- * Tests the smithy-rpc-v2-cbor protocol for DynamoDB.
- * AWS SDK v2 sends DynamoDB requests as CBOR to /service/DynamoDB/operation/{op}.
+ * Tests the smithy-rpc-v2-cbor protocol for DynamoDB using the legacy
+ * /service/DynamoDB/... alias. The AWS SDKs actually send the service shape
+ * name (the target prefix without its trailing dot, i.e. DynamoDB_20120810) —
+ * that wire format is covered by SmithyRpcV2RoutingIntegrationTest; this alias
+ * remains supported via the explicit cborSdkServiceIds declaration.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

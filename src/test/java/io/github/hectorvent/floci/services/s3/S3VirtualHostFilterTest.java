@@ -65,6 +65,13 @@ class S3VirtualHostFilterTest {
             "localhost:4566, localhost",
             "localhost,      localhost",
             "plain-host,     plain-host",
+            // Bare S3 service hosts must NOT be treated as a bucket named s3
+            "s3.localhost:4566,                 localhost",
+            "s3.localhost,                      localhost",
+            "s3.localhost.localstack.cloud,     localhost",
+            "s3.localhost.localstack.cloud:4566, localhost",
+            "s3.localhost.floci.io,             localhost",
+            "s3.localhost.floci.io:4566,        localhost",
             // K8s service hostname used as endpoint (path-style) — must NOT be rewritten
             "floci.default.svc.cluster.local,           localhost",
             "floci-service.namespace.svc.cluster.local, localhost",

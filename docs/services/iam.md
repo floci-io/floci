@@ -194,9 +194,11 @@ environment:
 
 Policy evaluation follows the standard AWS precedence:
 
-1. An explicit **Deny** in any policy → request is denied (HTTP 403 `AccessDeniedException`)
-2. An explicit **Allow** in any policy → request is allowed
-3. No matching statement → implicit deny (HTTP 403)
+1. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
+2. An explicit **Allow** in an identity policy creates the base grant
+3. If a session policy is present, it must also explicitly allow the request
+4. If a permission boundary is present, it must also explicitly allow the request
+5. No matching effective allow → implicit deny (HTTP 403)
 
 ### Bypass rules
 

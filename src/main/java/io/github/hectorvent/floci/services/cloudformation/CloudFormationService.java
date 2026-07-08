@@ -301,6 +301,12 @@ public class CloudFormationService {
         if (stack == null) {
             return CompletableFuture.completedFuture(null); // Already gone — no-op
         }
+        if (stack.isEnableTerminationProtection()) {
+            // Real AWS rejects deletion of a protected stack and leaves it unchanged.
+            throw new AwsException("ValidationError",
+                    "Stack [" + stack.getStackId()
+                            + "] cannot be deleted while TerminationProtection is enabled", 400);
+        }
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);

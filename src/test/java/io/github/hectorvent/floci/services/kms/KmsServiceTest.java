@@ -525,6 +525,15 @@ class KmsServiceTest {
     }
 
     @Test
+    void resolveKeyByAliasCreatedWithArn() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/by-arn", key.getArn(), REGION);
+
+        KmsKey resolved = kmsService.describeKey("alias/by-arn", REGION);
+        assertEquals(key.getKeyId(), resolved.getKeyId());
+    }
+
+    @Test
     void encryptAndDecryptWithId() {
         KmsKey key = kmsService.createKey(null, REGION);
         byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);

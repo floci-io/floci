@@ -109,6 +109,10 @@ floci:
         flush-interval-ms: 5000
       codedeploy:
         flush-interval-ms: 5000
+      tagging:
+        flush-interval-ms: 5000
+      elasticbeanstalk:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
@@ -157,10 +161,14 @@ floci:
     self-signed: true                  # FLOCI_TLS_SELF_SIGNED — auto-generate a self-signed cert if no cert-path provided
     aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
 
+  protocols:
+    strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
 
   services:
@@ -208,6 +216,10 @@ floci:
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
+    amazonmq:
+      enabled: true
+      mock: false
+      default-image: "rabbitmq:3-management"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -222,6 +234,7 @@ floci:
       default-image: "valkey/valkey:8"
     rds:
       enabled: true
+      mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
@@ -342,6 +355,7 @@ floci:
       keep-running-on-shutdown: false
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
+      ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
     elbv2:
       enabled: true
       mock: false
@@ -384,6 +398,8 @@ floci:
       enabled: true
       emit-mode: synchronous
     cloudtrail:
+      enabled: true
+    cloudcontrol:
       enabled: true
     cloudfront:
       enabled: true

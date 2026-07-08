@@ -69,7 +69,7 @@ class GlueServiceTest {
                 partitionStore,
                 new InMemoryStorage<String, Map<String, Object>>(),
                 new InMemoryStorage<String, UserDefinedFunction>(),
-                schemaRegistryService, regionResolver, new ResourceGroupsTaggingService());
+                schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null));
         glueService.createDatabase(new Database("db1"));
     }
 

@@ -342,9 +342,10 @@ public class S3Service implements Resettable {
             object.getMetadata().putAll(metadata);
         }
         object.setStorageClass(ObjectAttributeName.normalizeStorageClass(effectiveOptions.getStorageClass()));
+        String validatedChecksumAlgorithm = validateAndNormalizeChecksumAlgorithm(effectiveOptions.getChecksumAlgorithm());
         S3Checksum resolvedChecksum = checksum != null ? copyChecksum(checksum)
                 : effectiveOptions.getClientChecksum() != null ? copyChecksum(effectiveOptions.getClientChecksum())
-                : buildChecksum(data, parts, false, effectiveOptions.getChecksumAlgorithm());
+                : buildChecksum(data, parts, false, validatedChecksumAlgorithm);
         object.setChecksum(resolvedChecksum);
         object.setParts(copyParts(parts));
         object.setContentEncoding(effectiveOptions.getContentEncoding());
@@ -1207,13 +1208,14 @@ public class S3Service implements Resettable {
                                                    Map<String, String> metadata, String storageClass,
                                                    String contentDisposition, String serverSideEncryption, String acl) {
         return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
-                serverSideEncryption, acl, null, null, null);
+                serverSideEncryption, acl, null, null, null, null);
     }
 
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
                                                    Map<String, String> metadata, String storageClass,
                                                    String contentDisposition, String serverSideEncryption, String acl,
-                                                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
+                                                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
+                                                   String checksumAlgorithm) {
         ensureBucketExists(bucket);
         if (acl != null && !acl.isBlank()) {
             cannedObjectAclXml(acl);
@@ -1233,6 +1235,7 @@ public class S3Service implements Resettable {
             upload.setSseCustomerKeyMd5(customerKey.keyMd5());
         }
         upload.setAcl(acl);
+        upload.setChecksumAlgorithm(validateAndNormalizeChecksumAlgorithm(checksumAlgorithm));
 
         if (inMemory) {
             memoryMultipartStore.put(upload.getUploadId(), new ConcurrentHashMap<>());
@@ -1279,7 +1282,7 @@ public class S3Service implements Resettable {
 
         String eTag = computeETag(data);
         Part part = new Part(partNumber, eTag, data.length);
-        part.setChecksum(buildChecksum(data, List.of(part), true));
+        part.setChecksum(buildChecksum(data, List.of(part), true, upload.getChecksumAlgorithm()));
         upload.getParts().put(partNumber, part);
         LOG.debugv("Uploaded part {0} for upload {1} ({2} bytes)", partNumber, uploadId, data.length);
         return eTag;
@@ -1357,7 +1360,7 @@ public class S3Service implements Resettable {
             List<Part> completedParts = partNumbers.stream()
                     .map(num -> copyPart(upload.getParts().get(num)))
                     .toList();
-            S3Checksum checksum = buildChecksum(allData, completedParts, true);
+            S3Checksum checksum = buildChecksum(allData, completedParts, true, upload.getChecksumAlgorithm());
             S3Object object = storeObject(bucket, key, allData, upload.getContentType(), upload.getMetadata(),
                     checksum, completedParts,
                     new PutObjectOptions()
@@ -2158,6 +2161,20 @@ public class S3Service implements Resettable {
         }
     }
 
+    public static String validateAndNormalizeChecksumAlgorithm(String algorithm) {
+        if (algorithm == null || algorithm.isBlank()) {
+            return null;
+        }
+        String normalized = algorithm.trim().toUpperCase(java.util.Locale.ROOT);
+        if (normalized.equals("CRC32") || normalized.equals("CRC32C") || normalized.equals("SHA1") || normalized.equals("SHA256") || normalized.equals("CRC64NVME")) {
+            return normalized;
+        }
+        if (normalized.equals("SHA512") || normalized.equals("MD5") || normalized.equals("XXHASH3") || normalized.equals("XXHASH64") || normalized.equals("XXHASH128")) {
+            throw new AwsException("InvalidRequest", "The checksum algorithm you specified is a valid AWS checksum algorithm, but is not currently supported by Floci (supported: CRC32, CRC32C, CRC64NVME, SHA1, SHA256).", 400);
+        }
+        throw new AwsException("InvalidArgument", "The checksum algorithm you specified is not supported.", 400);
+    }
+
     private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload) {
         return buildChecksum(data, parts, multipartUpload, null);
     }
@@ -2438,8 +2455,14 @@ public class S3Service implements Resettable {
                 ? effectiveOptions.getReplacementTagging()
                 : source.getTags();
 
+        S3Checksum effectiveChecksum = source.getChecksum();
+        String copyChecksumAlgorithm = validateAndNormalizeChecksumAlgorithm(effectiveOptions.getChecksumAlgorithm());
+        if (copyChecksumAlgorithm != null) {
+            effectiveChecksum = null;
+        }
+
         S3Object copy = storeObject(destBucket, destKey, source.getData(), effectiveContentType, metadata,
-                source.getChecksum(), source.getParts(),
+                effectiveChecksum, copyChecksumAlgorithm != null ? null : source.getParts(),
                 new PutObjectOptions()
                         .withStorageClass(effectiveStorageClass)
                         .withContentEncoding(effectiveContentEncoding)
@@ -2450,6 +2473,7 @@ public class S3Service implements Resettable {
                         .withSseCustomerKey(effectiveOptions.getSseCustomerKey())
                         .withSseCustomerKeyMd5(effectiveOptions.getSseCustomerKeyMd5())
                         .withAcl(effectiveOptions.getAcl())
+                        .withChecksumAlgorithm(copyChecksumAlgorithm)
                         .withTagging(effectiveTags));
         copy.setETag(source.getETag());
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);

@@ -12,7 +12,8 @@ name: Nightly
 
 on:
   schedule:
-    - cron: '0 4 * * *'   # 23:00 CT (CDT/UTC-5); shifts to 23:00 CST in winter
+    - cron: '0 23 * * *'
+      timezone: 'America/Chicago'
   workflow_dispatch:        # Allow maintainers to trigger manually
 
 permissions:
@@ -28,6 +29,7 @@ jobs:
   prepare:
     name: Prepare nightly version
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' || !github.event.repository.fork
     outputs:
       version: ${{ steps.date.outputs.version }}
 

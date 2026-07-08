@@ -5,20 +5,22 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `RequestCertificate` | Request a new certificate (auto-issued for emulation) |
 | `DescribeCertificate` | Get certificate details and validation status |
 | `GetCertificate` | Retrieve the certificate and chain in PEM format |
 | `ListCertificates` | List all certificates with optional status filtering |
 | `DeleteCertificate` | Delete a certificate |
-| `AddTagsToCertificate` | Add tags to a certificate |
-| `RemoveTagsFromCertificate` | Remove tags from a certificate |
-| `ListTagsForCertificate` | List tags for a certificate |
+| `ImportCertificate` | - |
 | `ExportCertificate` | Export certificate with encrypted private key (PRIVATE type only) |
+| `AddTagsToCertificate` | Add tags to a certificate |
+| `ListTagsForCertificate` | List tags for a certificate |
+| `RemoveTagsFromCertificate` | Remove tags from a certificate |
 | `GetAccountConfiguration` | Get account-level ACM settings |
 | `PutAccountConfiguration` | Update account-level ACM settings |
-| `RenewCertificate` | Trigger certificate renewal |
+<!-- floci:actions:end -->
 
 ## Emulation Behavior
 

@@ -8,32 +8,34 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `RunJobFlow` | Creates a new cluster (job flow) and returns its `JobFlowId` |
 | `DescribeCluster` | Returns the configuration and status of a cluster |
 | `ListClusters` | Lists clusters, filterable by state and creation time |
-| `ModifyCluster` | Updates cluster-level settings such as step concurrency |
 | `TerminateJobFlows` | Terminates one or more clusters |
 | `SetTerminationProtection` | Enables or disables termination protection |
-| `SetKeepJobFlowAliveWhenNoSteps` | Controls auto-termination when steps complete |
 | `SetVisibleToAllUsers` | Sets cluster visibility for the account |
+| `SetKeepJobFlowAliveWhenNoSteps` | Controls auto-termination when steps complete |
 | `SetUnhealthyNodeReplacement` | Toggles unhealthy-node replacement |
+| `ModifyCluster` | Updates cluster-level settings such as step concurrency |
+| `AddJobFlowSteps` | Adds one or more steps to a cluster |
+| `DescribeStep` | Returns the detail and status of a single step |
+| `ListSteps` | Lists the steps of a cluster, filterable by state |
+| `CancelSteps` | Cancels pending steps |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
 | `AddInstanceFleet` | Adds an instance fleet to a cluster |
 | `ListInstanceFleets` | Lists the instance fleets of a cluster |
 | `ListInstances` | Lists the EC2 instances of a cluster |
-| `AddJobFlowSteps` | Adds one or more steps to a cluster |
-| `ListSteps` | Lists the steps of a cluster, filterable by state |
-| `DescribeStep` | Returns the detail and status of a single step |
-| `CancelSteps` | Cancels pending steps |
 | `CreateSecurityConfiguration` | Creates a named security configuration |
 | `DescribeSecurityConfiguration` | Returns a security configuration |
 | `DeleteSecurityConfiguration` | Deletes a security configuration |
 | `ListSecurityConfigurations` | Lists all security configurations |
 | `AddTags` | Adds tags to a cluster |
 | `RemoveTags` | Removes tags from a cluster |
+<!-- floci:actions:end -->
 
 ## Example
 

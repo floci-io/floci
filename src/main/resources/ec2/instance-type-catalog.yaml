@@ -58,6 +58,7 @@ instanceTypes:
   - instanceType: m6gd.large
     vcpu: 2
     memoryMib: 8192
+    localStorageGiB: 118
     supportedArchitectures:
       - arm64
     currentGeneration: true
@@ -65,6 +66,7 @@ instanceTypes:
   - instanceType: m6gd.2xlarge
     vcpu: 8
     memoryMib: 32768
+    localStorageGiB: 474
     supportedArchitectures:
       - arm64
     currentGeneration: true
@@ -72,6 +74,7 @@ instanceTypes:
   - instanceType: m7gd.large
     vcpu: 2
     memoryMib: 8192
+    localStorageGiB: 118
     supportedArchitectures:
       - arm64
     currentGeneration: true
@@ -79,6 +82,7 @@ instanceTypes:
   - instanceType: m7gd.2xlarge
     vcpu: 8
     memoryMib: 32768
+    localStorageGiB: 474
     supportedArchitectures:
       - arm64
     currentGeneration: true
@@ -86,6 +90,7 @@ instanceTypes:
   - instanceType: m8gd.medium
     vcpu: 1
     memoryMib: 4096
+    localStorageGiB: 59
     supportedArchitectures:
       - arm64
     currentGeneration: true
@@ -93,6 +98,7 @@ instanceTypes:
   - instanceType: m8gd.large
     vcpu: 2
     memoryMib: 8192
+    localStorageGiB: 118
     supportedArchitectures:
       - arm64
     currentGeneration: true
@@ -100,6 +106,7 @@ instanceTypes:
   - instanceType: m8gd.2xlarge
     vcpu: 8
     memoryMib: 32768
+    localStorageGiB: 474
     supportedArchitectures:
       - arm64
     currentGeneration: true
