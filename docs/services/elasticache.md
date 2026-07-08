@@ -23,6 +23,8 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `CreateCacheCluster` | - |
 | `DescribeCacheClusters` | - |
 | `DeleteCacheCluster` | - |
+| `DescribeCacheSubnetGroups` | - |
+| `DescribeCacheParameterGroups` | - |
 <!-- floci:actions:end -->
 
 ## Configuration
