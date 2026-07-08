@@ -70,6 +70,9 @@ floci:
     timeout-seconds: 5
     shutdown-grace-period-seconds: 2
 
+  tui:
+    enabled: false
+
   tls:
     enabled: false
     self-signed: true

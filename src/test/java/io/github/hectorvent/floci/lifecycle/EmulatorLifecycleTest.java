@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.tui.FlociTui;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -77,6 +78,7 @@ class EmulatorLifecycleTest {
     @Mock private io.github.hectorvent.floci.services.floci.ui.FlociUiManager flociUiManager;
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
+    @Mock private FlociTui flociTui;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -96,7 +98,7 @@ class EmulatorLifecycleTest {
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState);
+                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState, flociTui);
     }
 
     private void stubStorageConfig() {

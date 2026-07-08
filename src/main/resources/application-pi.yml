@@ -1,0 +1,57 @@
+# Quarkus profile for Raspberry Pi deployment.
+# Activated via: -Dquarkus.profile=pi or QUARKUS_PROFILE=pi
+#
+# Disables Docker-dependent services (Lambda, RDS, ElastiCache, etc.)
+# since Docker-in-Docker is impractical on a 1GB RAM device.
+# All in-memory services remain fully functional.
+
+floci:
+  storage:
+    mode: memory
+  tui:
+    enabled: true
+    refresh-interval-seconds: 3
+  services:
+    lambda:
+      enabled: false
+    rds:
+      enabled: false
+    rds-data:
+      enabled: false
+    elasticache:
+      enabled: false
+    neptune:
+      enabled: false
+    msk:
+      enabled: false
+      mock: true
+    opensearch:
+      enabled: false
+      mock: true
+    ec2:
+      enabled: true
+      mock: true
+    ecs:
+      enabled: true
+      mock: true
+    eks:
+      enabled: false
+      mock: true
+    ecr:
+      enabled: false
+    codebuild:
+      enabled: false
+    batch:
+      enabled: false
+    athena:
+      enabled: true
+      mock: true
+    # The following in-memory services remain enabled:
+    # ssm, sqs, s3, dynamodb, sns, apigateway, apigatewayv2, iam,
+    # eventbridge, cloudwatchlogs, cloudwatchmetrics, secretsmanager,
+    # kinesis, firehose, kms, cognito, stepfunctions, cloudformation,
+    # acm, glue, ses, scheduler, cloudmap, emr, wafv2, route53,
+    # elbv2, codedeploy, autoscaling, backup, transfer, textract,
+    # pricing, transcribe, ce, cur, bcm-data-exports, cloudtrail,
+    # cloudfront, appconfig, appconfigdata, appsync, pipes,
+    # bedrock-runtime, tagging, configservice
