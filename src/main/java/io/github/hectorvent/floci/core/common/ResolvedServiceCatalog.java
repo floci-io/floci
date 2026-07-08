@@ -369,7 +369,11 @@ public class ResolvedServiceCatalog {
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class))
+                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class)),
+                descriptor("cloudhsmv2", "cloudhsmv2", config.services().cloudhsmv2().enabled(), true,
+                        "cloudhsmv2", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("BaldrApiService."), Set.of("cloudhsm"), Set.of(), Set.of())
         ));
     }
 
