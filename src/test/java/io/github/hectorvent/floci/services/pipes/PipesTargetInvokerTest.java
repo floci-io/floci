@@ -304,6 +304,41 @@ class PipesTargetInvokerTest {
     }
 
     @Test
+    void applyEnrichment_emptyObjectOrArrayResponseSkipsTarget() {
+        // AWS skips the target when the enrichment returns {} or [] (whitespace variants included).
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
+        for (String body : new String[]{"{}", "[]", "  { }  ", "[ ]"}) {
+            when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                    .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(
+                            200, null, body.getBytes(java.nio.charset.StandardCharsets.UTF_8), null, "req"));
+            assertNull(invoker.applyEnrichment(pipe, "[]", region),
+                    "enrichment response " + body + " should skip the target");
+        }
+    }
+
+    @Test
+    void applyEnrichment_singleElementArrayResponseInvokesTarget() {
+        // [{}] is the explicit "invoke the target with an empty-payload element" form — not skipped.
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
+        when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(
+                        200, null, "[{}]".getBytes(java.nio.charset.StandardCharsets.UTF_8), null, "req"));
+        assertEquals("[{}]", invoker.applyEnrichment(pipe, "[]", region));
+    }
+
+    @Test
+    void applyEnrichment_unsupportedTypeThrows() {
+        // Non-Lambda enrichment (e.g. an API destination) is not emulated — applyEnrichment must
+        // fail so the batch is routed to the DLQ rather than delivered unenriched.
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:events:" + region + ":000000000000:api-destination/foo");
+        assertThrows(RuntimeException.class, () -> invoker.applyEnrichment(pipe, "[{\"x\":1}]", region));
+        verifyNoInteractions(lambdaService);
+    }
+
+    @Test
     void applyEnrichment_lambdaFunctionErrorThrows() {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");

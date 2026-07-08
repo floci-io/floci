@@ -83,8 +83,8 @@ public class PipesTargetInvoker {
     /**
      * Applies a Pipe's enrichment step (AWS EventBridge Pipes: source → filter → ENRICHMENT → target).
      * The enrichment is invoked with the filtered events and its response becomes the target input.
-     * Only Lambda enrichments are supported (DPS uses one). Returns the response payload to forward,
-     * or {@code null} when the enrichment returns an empty response — AWS skips the target in that case.
+     * Only Lambda enrichments are emulated. Returns the response payload to forward, or {@code null}
+     * when the enrichment returns an empty response — AWS skips the target in that case.
      * Returns {@code payload} unchanged when no enrichment is configured.
      */
     public String applyEnrichment(Pipe pipe, String payload, String region) {
@@ -110,12 +110,26 @@ public class PipesTargetInvoker {
             if (resp.isEmpty() || "null".equals(resp)) {
                 return null;
             }
+            // AWS also skips the target when the enrichment returns an empty object {} or empty
+            // array []; only a non-empty array such as [{}] invokes the target (with an
+            // empty-payload element). Parse so whitespace variants ({ }, [ ]) are handled too.
+            try {
+                JsonNode node = objectMapper.readTree(resp);
+                if ((node.isObject() || node.isArray()) && node.isEmpty()) {
+                    return null;
+                }
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                // Non-JSON textual enrichment response — forward as-is.
+            }
             LOG.debugv("Pipe {0}: enrichment {1} produced target payload", pipe.getName(), enrichment);
             return resp;
         }
-        LOG.warnv("Pipe {0}: unsupported enrichment ARN type (only Lambda supported): {1}",
-                pipe.getName(), enrichment);
-        return payload;
+        // API destination, API Gateway and Step Functions Express enrichments are valid on AWS but
+        // not emulated here. Fail rather than silently delivering the unenriched payload — the
+        // caller routes the batch to the pipe's dead-letter queue.
+        throw new AwsException("InternalException",
+                "Pipe " + pipe.getName() + " uses an unsupported enrichment type (only Lambda is "
+                        + "emulated): " + enrichment, 500);
     }
 
     private void invokeLambda(String arn, String payload, String region) {

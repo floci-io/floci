@@ -502,6 +502,10 @@ public class PipesPoller implements Resettable {
     // ──────────────────────────── Invocation & DLQ ────────────────────────────
 
     private int deliverRecords(Pipe pipe, List<JsonNode> records, String region) {
+        // Enrichment (source → filter → ENRICHMENT → target) is currently applied only on the SQS
+        // source path (see deliverEnrichedBatch). Kinesis, DynamoDB Streams and Kafka sources
+        // deliver the filtered records straight to the target, so a pipe that configures an
+        // enrichment on those sources bypasses it — see docs/services/pipes.md.
         if (isLambdaTarget(pipe)) {
             return invokeWithDlq(pipe, wrapRecords(records), region) ? 0 : records.size();
         }
