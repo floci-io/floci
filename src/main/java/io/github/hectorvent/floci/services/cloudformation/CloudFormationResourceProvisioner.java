@@ -381,7 +381,7 @@ public class CloudFormationResourceProvisioner {
             String clusterName = resource.getAttributes().get("ClusterName");
             if (clusterName != null && !clusterName.isBlank()) {
                 try {
-                    eksService.deleteNodegroup(clusterName, resource.getPhysicalId());
+                    eksService.deleteNodeGroup(clusterName, resource.getPhysicalId());
                 } catch (Exception e) {
                     LOG.debugv("Error deleting nodegroup {0}: {1}", resource.getPhysicalId(), e.getMessage());
                 }
@@ -1099,7 +1099,7 @@ public class CloudFormationResourceProvisioner {
             }
         }
         request.setSubnets(subnets);
-        var nodegroup = eksService.createNodegroup(clusterName, request);
+        var nodegroup = eksService.createNodeGroup(clusterName, request);
         r.setPhysicalId(nodegroup.getNodegroupName());
         r.getAttributes().put("ClusterName", nodegroup.getClusterName());
         r.getAttributes().put("NodegroupName", nodegroup.getNodegroupName());
