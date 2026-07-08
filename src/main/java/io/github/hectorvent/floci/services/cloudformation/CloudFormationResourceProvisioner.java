@@ -3124,8 +3124,8 @@ public class CloudFormationResourceProvisioner {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
             event.put("ResponseURL", reachableEndpoint.baseUrl() + "/cfn-response/" + token);
-            event.put("StackId", "arn:aws:cloudformation:" + region + ":" + accountId + ":stack/"
-                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID());
+            event.put("StackId", AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/"
+                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID()).toString());
             event.put("RequestId", UUID.randomUUID().toString());
             event.put("ResourceType", resourceType);
             event.put("LogicalResourceId", logicalId);
@@ -3191,11 +3191,8 @@ public class CloudFormationResourceProvisioner {
     }
 
     private static String accountFromArn(String arn) {
-        if (arn == null) {
-            return "000000000000";
-        }
-        String[] parts = arn.split(":");
-        return parts.length >= 5 && parts[4].matches("\\d{12}") ? parts[4] : "000000000000";
+        String account = AwsArnUtils.accountOrDefault(arn, "000000000000");
+        return account.matches("\\d{12}") ? account : "000000000000";
     }
 
     // ── ECS ──────────────────────────────────────────────────────────────────

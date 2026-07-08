@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -696,11 +697,7 @@ public class ContainerLauncher {
     }
 
     private static String extractRegionFromArn(String arn, String defaultRegion) {
-        if (arn == null) {
-            return defaultRegion;
-        }
-        String[] parts = arn.split(":");
-        return parts.length >= 4 && !parts[3].isEmpty() ? parts[3] : defaultRegion;
+        return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 
     /**

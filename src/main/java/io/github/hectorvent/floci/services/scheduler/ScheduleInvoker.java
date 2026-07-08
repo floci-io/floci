@@ -217,10 +217,6 @@ public class ScheduleInvoker {
     }
 
     private static String extractRegion(String arn, String defaultRegion) {
-        if (arn == null) {
-            return defaultRegion;
-        }
-        String[] parts = arn.split(":");
-        return parts.length >= 4 && !parts[3].isEmpty() ? parts[3] : defaultRegion;
+        return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 }
