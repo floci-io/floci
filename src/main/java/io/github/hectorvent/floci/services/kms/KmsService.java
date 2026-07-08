@@ -576,12 +576,12 @@ public class KmsService {
         if (!aliasName.startsWith("alias/")) {
             throw new AwsException("InvalidAliasNameException", "Alias name must begin with 'alias/'", 400);
         }
-        resolveKey(targetKeyId, region); // Validate key exists
+        KmsKey key = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
-        KmsAlias alias = new KmsAlias(aliasName, aliasArn, targetKeyId);
+        KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
         aliasStore.put(region + "::" + aliasName, alias);
-        LOG.infov("Created KMS alias: {0} -> {1}", aliasName, targetKeyId);
+        LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());
     }
 
     public void deleteAlias(String aliasName, String region) {

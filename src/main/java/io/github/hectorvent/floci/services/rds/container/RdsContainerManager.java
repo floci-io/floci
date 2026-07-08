@@ -71,7 +71,7 @@ public class RdsContainerManager {
         LOG.infov("Starting RDS backend container for instance: {0} engine={1}", instanceId, engine);
 
         int enginePort = engine.defaultPort();
-        String containerName = "floci-rds-" + instanceId;
+        String containerName = ContainerStorageHelper.resourceName(config, "rds", volumeId, instanceId);
 
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);
@@ -153,14 +153,16 @@ public class RdsContainerManager {
                                       String volumeId, DatabaseEngine engine, String image) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
             ContainerStorageHelper.applyStorage(
-                    specBuilder, lifecycleManager, "rds", volumeId, instanceId,
+                    specBuilder, lifecycleManager, config, "rds", volumeId, instanceId,
                     engineDefaultDataPath(engine, image));
             return;
         }
 
         // Legacy host-path mode: host-persistent-path is an absolute path
-        String hostDataPath = Path.of(config.storage().hostPersistentPath(), "rds", instanceId).toString();
-        ContainerStorageHelper.ensureHostDir(hostDataPath);
+        String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "rds", instanceId).toString();
+        if (!containerDetector.isRunningInContainer()) {
+            ContainerStorageHelper.ensureHostDir(hostDataPath);
+        }
         specBuilder.withBind(hostDataPath, engineDefaultDataPath(engine, image));
     }
 

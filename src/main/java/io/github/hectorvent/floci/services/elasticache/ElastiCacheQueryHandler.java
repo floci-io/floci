@@ -62,6 +62,8 @@ public class ElastiCacheQueryHandler {
             case "CreateCacheCluster"         -> handleCreateCacheCluster(params);
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
+            case "DescribeCacheSubnetGroups"  -> handleDescribeCacheSubnetGroups(params);
+            case "DescribeCacheParameterGroups" -> handleDescribeCacheParameterGroups(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.EC, 400);
         };
@@ -276,6 +278,22 @@ public class ElastiCacheQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
+    }
+
+    // ── Subnet / Parameter Groups (read-only describes for resources not modeled) ────
+
+    private Response handleDescribeCacheSubnetGroups(MultivaluedMap<String, String> params) {
+        // Cache subnet groups are not modeled by the emulator; return the wire-accurate
+        // empty result so SDK clients get a valid 200 instead of an unsupported-action 400.
+        var xml = new XmlBuilder().start("CacheSubnetGroups").end("CacheSubnetGroups");
+        return Response.ok(AwsQueryResponse.envelope("DescribeCacheSubnetGroups", AwsNamespaces.EC, xml.build())).build();
+    }
+
+    private Response handleDescribeCacheParameterGroups(MultivaluedMap<String, String> params) {
+        // Cache parameter groups are not modeled by the emulator; return the wire-accurate
+        // empty result so SDK clients get a valid 200 instead of an unsupported-action 400.
+        var xml = new XmlBuilder().start("CacheParameterGroups").end("CacheParameterGroups");
+        return Response.ok(AwsQueryResponse.envelope("DescribeCacheParameterGroups", AwsNamespaces.EC, xml.build())).build();
     }
 
     // ── IAM Token Validation ──────────────────────────────────────────────────

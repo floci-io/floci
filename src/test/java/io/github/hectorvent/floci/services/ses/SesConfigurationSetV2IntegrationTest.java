@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -21,6 +23,75 @@ class SesConfigurationSetV2IntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
+
+    private static void verifyDomainIdentityViaRoute53(String domain, String callerReference) {
+        List<String> tokens = given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"EmailIdentity\": \"" + domain + "\"}")
+        .when()
+            .post("/v2/email/identities")
+        .then()
+            .statusCode(200)
+            .extract()
+            .jsonPath()
+            .getList("DkimAttributes.Tokens", String.class);
+
+        String locationHeader = given()
+            .contentType("application/xml")
+            .body("""
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>floci.test</Name>
+                  <CallerReference>""" + callerReference + """
+                  </CallerReference>
+                </CreateHostedZoneRequest>
+                """)
+        .when()
+            .post("/2013-04-01/hostedzone")
+        .then()
+            .statusCode(201)
+            .extract()
+            .header("Location");
+
+        String zoneId = locationHeader.substring(locationHeader.lastIndexOf('/') + 1);
+        StringBuilder body = new StringBuilder("""
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch>
+                    <Changes>
+                """);
+        for (String token : tokens) {
+            body.append("""
+                      <Change>
+                        <Action>CREATE</Action>
+                        <ResourceRecordSet>
+                          <Name>""").append(token).append("._domainkey.").append(domain).append(".</Name>\n")
+                    .append("""
+                          <Type>CNAME</Type>
+                          <TTL>300</TTL>
+                          <ResourceRecords>
+                            <ResourceRecord><Value>""").append(token).append(".dkim.amazonses.com.</Value></ResourceRecord>\n")
+                    .append("""
+                          </ResourceRecords>
+                        </ResourceRecordSet>
+                      </Change>
+                    """);
+        }
+        body.append("""
+                    </Changes>
+                  </ChangeBatch>
+                </ChangeResourceRecordSetsRequest>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body.toString())
+        .when()
+            .post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+        .then()
+            .statusCode(200);
+    }
 
     @Test
     @Order(1)
@@ -771,9 +842,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Test
     @Order(37)
     void putTrackingOptions_verifiedDomain_echoed() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
-            .body("{\"EmailIdentity\": \"track.floci.test\"}")
-        .when().post("/v2/email/identities").then().statusCode(200);
+        verifyDomainIdentityViaRoute53("track.floci.test", "v2-cs-tracking");
         putConfigSet("v2-cs-tracking");
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
             .body("{\"CustomRedirectDomain\": \"track.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
@@ -803,9 +872,7 @@ class SesConfigurationSetV2IntegrationTest {
     void putTrackingOptions_invalidHttpsPolicy_returns400() {
         // AWS validates the HttpsPolicy enum only after CustomRedirectDomain
         // presence and verification, so the domain must be verified to reach it.
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
-            .body("{\"EmailIdentity\": \"track-enum.floci.test\"}")
-        .when().post("/v2/email/identities").then().statusCode(200);
+        verifyDomainIdentityViaRoute53("track-enum.floci.test", "v2-cs-tracking-enum");
         putConfigSet("v2-cs-tracking-enum");
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
             .body("{\"CustomRedirectDomain\": \"track-enum.floci.test\", \"HttpsPolicy\": \"BOGUS\"}")
@@ -815,6 +882,21 @@ class SesConfigurationSetV2IntegrationTest {
             .body("message", equalTo("1 validation error detected: Value at "
                     + "'httpsPolicy' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]"));
+    }
+
+    @Test
+    @Order(100)
+    void putTrackingOptions_pendingDomain_returns400() {
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"EmailIdentity\": \"track-pending.floci.test\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+        putConfigSet("v2-cs-tracking-pending");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"track-pending.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-pending/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Domain <track-pending.floci.test> is not verified under this account."));
     }
 
     @Test
@@ -976,9 +1058,7 @@ class SesConfigurationSetV2IntegrationTest {
     void putTrackingOptions_emptyBody_clears() {
         // An empty PUT body clears tracking options rather than persisting an
         // empty block that GetConfigurationSet would echo as {}.
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
-            .body("{\"EmailIdentity\": \"clear.floci.test\"}")
-        .when().post("/v2/email/identities").then().statusCode(200);
+        verifyDomainIdentityViaRoute53("clear.floci.test", "v2-cs-tracking-clear");
         putConfigSet("v2-cs-tracking-clear");
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
             .body("{\"CustomRedirectDomain\": \"clear.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")

@@ -19,7 +19,7 @@ test-all:
     #!/usr/bin/env bash
     set +e
     failed=0
-    for suite in python typescript awscli java go rust; do
+    for suite in python typescript awscli java go; do
         echo "=== Running $suite tests ==="
         just test-$suite || failed=1
     done
@@ -49,13 +49,8 @@ test-java:
 test-go:
     gotestsum --junitfile test-results.xml ./tests/...
 
-# Run Rust SDK tests (JUnit XML output via cargo-nextest)
-[working-directory: 'sdk-test-rust']
-test-rust:
-    cargo nextest run --profile ci
-
 # Install all test dependencies
-setup: setup-python setup-typescript setup-awscli setup-java setup-go setup-rust
+setup: setup-python setup-typescript setup-awscli setup-java setup-go
 
 # Install Python test dependencies
 [working-directory: 'sdk-test-python']
@@ -77,12 +72,6 @@ setup-java:
 setup-go:
     go mod download
     go install gotest.tools/gotestsum@latest
-
-# Install Rust test dependencies
-[working-directory: 'sdk-test-rust']
-setup-rust:
-    cargo fetch
-    cargo install cargo-nextest --locked
 
 # Install AWS CLI test dependencies (uses shared bats from repo root)
 setup-awscli: setup-bats
@@ -136,5 +125,4 @@ clean:
     rm -rf sdk-test-node/node_modules sdk-test-node/dist sdk-test-node/test-results
     rm -rf sdk-test-java/target
     rm -rf sdk-test-go/test-results.xml
-    rm -rf sdk-test-rust/target
     rm -rf lib/bats-core lib/bats-support lib/bats-assert

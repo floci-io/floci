@@ -133,6 +133,22 @@ class SesIntegrationTest {
     }
 
     @Test
+    @Order(15)
+    void getIdentityVerificationAttributes_domainStartsPending() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", authorization("email"))
+            .formParam("Action", "GetIdentityVerificationAttributes")
+            .formParam("Identities.member.1", "example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("example.com"))
+            .body(containsString("<VerificationStatus>Pending</VerificationStatus>"));
+    }
+
+    @Test
     @Order(8)
     void listVerifiedEmailAddresses() {
         given()
@@ -313,7 +329,9 @@ class SesIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("example.com"))
-            .body(containsString("<DkimEnabled>"));
+            .body(containsString("<DkimEnabled>true</DkimEnabled>"))
+            .body(containsString("<DkimVerificationStatus>Pending</DkimVerificationStatus>"))
+            .body(containsString("<DkimTokens><member>"));
     }
 
     @Test

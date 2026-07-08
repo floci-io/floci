@@ -65,7 +65,7 @@ public class RedpandaManager {
         String image = config.services().msk().defaultImage();
         LOG.infov("Starting Redpanda container for MSK cluster: {0} using image {1}", cluster.getClusterName(), image);
 
-        String containerName = "floci-msk-" + cluster.getClusterName();
+        String containerName = ContainerStorageHelper.resourceName(config, "msk", cluster.getVolumeId(), cluster.getClusterName());
 
         // Cleanup stale container
         lifecycleManager.removeIfExists(containerName);
@@ -113,14 +113,16 @@ public class RedpandaManager {
 
         // Handle persistence mounting
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
+            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
                     "msk", cluster.getVolumeId(), cluster.getClusterName(),
                     "/var/lib/redpanda/data");
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
-            String hostDataPath = Path.of(config.storage().hostPersistentPath(), "msk", cluster.getClusterName())
+            String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "msk", cluster.getClusterName())
                     .toAbsolutePath().toString();
-            ContainerStorageHelper.ensureHostDir(hostDataPath);
+            if (!containerDetector.isRunningInContainer()) {
+                ContainerStorageHelper.ensureHostDir(hostDataPath);
+            }
             specBuilder.withBind(hostDataPath, "/var/lib/redpanda/data");
         }
 
