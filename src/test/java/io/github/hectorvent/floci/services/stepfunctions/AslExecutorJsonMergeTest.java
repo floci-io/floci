@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHan
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -23,8 +25,8 @@ import static org.mockito.Mockito.mock;
  * Regression + functionality coverage for the {@code States.JsonMerge} intrinsic. AWS Step Functions
  * supports only the shallow merge form {@code States.JsonMerge($.a, $.b, false)} where the second
  * object's top-level fields win on a key conflict; deep-merge ({@code true}) and non-object arguments
- * are rejected. DPS's provisioning state machine relies on this intrinsic, which the executor
- * previously failed with "Unsupported intrinsic function: States.JsonMerge".
+ * are rejected. A state machine using this intrinsic previously failed with
+ * "Unsupported intrinsic function: States.JsonMerge".
  */
 class AslExecutorJsonMergeTest {
 
@@ -43,6 +45,8 @@ class AslExecutorJsonMergeTest {
                 mock(CloudFormationQueryHandler.class),
                 mock(Ec2Service.class),
                 mock(S3Service.class),
+                mock(EcsService.class),
+                mock(EcsJsonHandler.class),
                 mapper,
                 new JsonataEvaluator(mapper),
                 mock(Instance.class));
