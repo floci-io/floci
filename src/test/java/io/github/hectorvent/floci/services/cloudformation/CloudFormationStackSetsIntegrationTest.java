@@ -53,7 +53,11 @@ class CloudFormationStackSetsIntegrationTest {
             .formParam("QueueName", queueName)
             .header("Authorization", auth(account, "sqs"))
         .when().post("/")
-        .then().body(containsString("QueueDoesNotExist"));
+        .then()
+            .statusCode(400)
+            // Query protocol renders the XML ErrorResponse with the legacy Query code;
+            // QueueDoesNotExist is its JSON-protocol __type equivalent (see AwsException).
+            .body(containsString("AWS.SimpleQueueService.NonExistentQueue"));
     }
 
     @Test

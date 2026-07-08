@@ -11,15 +11,10 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
 @Provider
 public class ServiceEnabledFilter implements ContainerRequestFilter {
 
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
-    private static final Pattern AUTH_SERVICE_PATTERN =
-            Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
 
     @Context
     ResourceInfo resourceInfo;
@@ -45,13 +40,16 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
     }
 
     private ResolvedRequest resolveService(ContainerRequestContext ctx) {
-        String target = ctx.getHeaderString("X-Amz-Target");
-        if (target != null) {
-            return catalog.byTarget(target)
-                    .map(descriptor -> new ResolvedRequest(
-                            descriptor.externalKey(),
-                            inferProtocol(ctx).orElse(ServiceProtocol.JSON)))
-                    .orElse(null);
+        ProtocolClaim claim = (ProtocolClaim) ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY);
+        if (claim != null && claim.service() != null) {
+            return new ResolvedRequest(claim.service().externalKey(), protocolFor(claim, claim.service()));
+        }
+        // A claimed RPC request whose service is unknown (unmatched X-Amz-Target
+        // or rpcv2 service name) stays unresolved so the protocol controllers
+        // keep producing their own not-found responses.
+        if (claim != null && claim.protocol() != WireProtocol.REST
+                && claim.protocol() != WireProtocol.AWS_QUERY) {
+            return null;
         }
 
         var resourceMatch = catalog.byResourceClass(resourceClass());
@@ -60,43 +58,22 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
             return new ResolvedRequest(descriptor.externalKey(), descriptor.defaultProtocol());
         }
 
-        String auth = ctx.getHeaderString("Authorization");
-        if (auth != null) {
-            Matcher m = AUTH_SERVICE_PATTERN.matcher(auth);
-            if (m.find()) {
-                return catalog.byCredentialScope(m.group(1).toLowerCase())
-                        .map(descriptor -> new ResolvedRequest(
-                                descriptor.externalKey(),
-                                inferProtocol(ctx).orElse(descriptor.defaultProtocol())))
-                        .orElse(null);
-            }
-        }
+        return SigV4CredentialScope.serviceName(ctx.getHeaderString("Authorization"))
+                .flatMap(catalog::byCredentialScope)
+                .map(descriptor -> new ResolvedRequest(
+                        descriptor.externalKey(), protocolFor(claim, descriptor)))
+                .orElse(null);
+    }
 
-        return null;
+    private ServiceProtocol protocolFor(ProtocolClaim claim, ServiceDescriptor descriptor) {
+        if (claim != null && claim.protocol().legacy() != null) {
+            return claim.protocol().legacy();
+        }
+        return descriptor.defaultProtocol();
     }
 
     private Class<?> resourceClass() {
         return resourceInfo != null ? resourceInfo.getResourceClass() : null;
-    }
-
-    private java.util.Optional<ServiceProtocol> inferProtocol(ContainerRequestContext ctx) {
-        // Use the raw header string to avoid IllegalArgumentException when Content-Type is empty.
-        String contentType = ctx.getHeaderString("Content-Type");
-        if (contentType == null) contentType = "";
-        if (contentType.contains("cbor")) {
-            return java.util.Optional.of(ServiceProtocol.CBOR);
-        }
-        if (contentType.contains("x-www-form-urlencoded")) {
-            return java.util.Optional.of(ServiceProtocol.QUERY);
-        }
-        if (ctx.getHeaderString("X-Amz-Target") != null) {
-            return java.util.Optional.of(ServiceProtocol.JSON);
-        }
-        String accept = ctx.getHeaderString("Accept");
-        if (accept != null && accept.contains("cbor")) {
-            return java.util.Optional.of(ServiceProtocol.CBOR);
-        }
-        return java.util.Optional.empty();
     }
 
     private Response disabledResponse(ResolvedRequest request) {

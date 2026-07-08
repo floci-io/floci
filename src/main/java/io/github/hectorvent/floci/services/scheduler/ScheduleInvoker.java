@@ -4,9 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -35,6 +38,7 @@ public class ScheduleInvoker {
     private final LambdaService lambdaService;
     private final SnsService snsService;
     private final EventBridgeService eventBridgeService;
+    private final EcsService ecsService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
 
@@ -43,12 +47,14 @@ public class ScheduleInvoker {
                            LambdaService lambdaService,
                            SnsService snsService,
                            EventBridgeService eventBridgeService,
+                           EcsService ecsService,
                            ObjectMapper objectMapper,
                            EmulatorConfig config) {
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
         this.snsService = snsService;
         this.eventBridgeService = eventBridgeService;
+        this.ecsService = ecsService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
     }
@@ -84,12 +90,59 @@ public class ScheduleInvoker {
         } else if (arn.contains(":sns:")) {
             snsService.publish(arn, null, payload, "Scheduler", targetRegion);
             LOG.debugv("Scheduler delivered to SNS: {0}", arn);
+        } else if (arn.contains(":ecs:") && target.getEcsParameters() != null) {
+            deliverToEcsRunTask(target, targetRegion);
+            LOG.debugv("Scheduler delivered to ECS RunTask: {0}", arn);
         } else if (isEventBridgePutEventsArn(arn)) {
             deliverToEventBridge(arn, payload, targetRegion);
             LOG.debugv("Scheduler delivered to EventBridge: {0}", arn);
         } else {
             LOG.warnv("Scheduler: unsupported target ARN type: {0}", arn);
         }
+    }
+
+    private void deliverToEcsRunTask(Target target, String region) {
+        EcsParameters ecs = target.getEcsParameters();
+        ecsService.runTask(
+                target.getArn(),
+                ecs.getTaskDefinitionArn(),
+                ecs.getTaskCount() != null ? ecs.getTaskCount() : 1,
+                parseLaunchType(ecs.getLaunchType()),
+                null,
+                ecs.getGroup() != null ? ecs.getGroup() : "scheduler",
+                List.of(),
+                ecsNetworkConfiguration(ecs.getNetworkConfiguration()),
+                region);
+    }
+
+    private static LaunchType parseLaunchType(String launchType) {
+        if (launchType == null || launchType.isBlank()) {
+            return null;
+        }
+        try {
+            return LaunchType.valueOf(launchType);
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Scheduler: unsupported ECS LaunchType: {0}", launchType);
+            return null;
+        }
+    }
+
+    private static io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration ecsNetworkConfiguration(
+            io.github.hectorvent.floci.services.scheduler.model.NetworkConfiguration source) {
+        if (source == null || source.getAwsvpcConfiguration() == null) {
+            return null;
+        }
+        io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration sourceVpc = source.getAwsvpcConfiguration();
+        io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration targetVpc =
+                new io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration();
+        targetVpc.setSubnets(sourceVpc.getSubnets());
+        targetVpc.setSecurityGroups(sourceVpc.getSecurityGroups());
+        targetVpc.setAssignPublicIp(sourceVpc.getAssignPublicIp());
+
+        io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration target =
+                new io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration();
+        target.setAwsvpcConfiguration(targetVpc);
+        return target;
     }
 
     /**

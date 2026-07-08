@@ -483,7 +483,10 @@ class SqsIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("QueueNameExists"));
+            // Query protocol renders the XML ErrorResponse with the legacy Query code;
+            // QueueNameExists is its JSON-protocol __type equivalent (see AwsException).
+            .contentType(containsString("xml"))
+            .body("ErrorResponse.Error.Code", equalTo("QueueAlreadyExists"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -610,6 +613,25 @@ class SqsIntegrationTest {
                 .formParam("QueueUrl", traceQueueUrl)
             .when().post("/");
         }
+    }
+
+    @Test
+    void queryProtocolErrorsAreXmlNotJson() {
+        // Regression: AwsExceptions escaping SqsQueryHandler used to reach the global
+        // JAX-RS mapper and render a JSON body on this XML protocol.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "does-not-exist-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType(containsString("xml"))
+            .body("ErrorResponse.Error.Type", equalTo("Sender"))
+            .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("The specified queue does not exist for this wsdl version."));
     }
 
     @Test

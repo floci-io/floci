@@ -29,6 +29,8 @@ public class AutoScalingService {
     static final String INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE =
             "Valid requests must contain either the InstanceID parameter "
                     + "or both the ImageId and InstanceType parameters.";
+    static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
+            "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
     @Inject
     RegionResolver regionResolver;
@@ -220,6 +222,12 @@ public class AutoScalingService {
                                         List<String> terminationPolicies) {
         AutoScalingGroup asg = requireGroup(region, name);
         validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+        if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
+            throw new AwsException("ValidationError",
+                    "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
+        }
+        rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
+                launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
         LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
                 launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
         validateEffectiveLaunchImage(region,
@@ -833,6 +841,37 @@ public class AutoScalingService {
                 || "Cancelling".equals(status)
                 || "RollbackInProgress".equals(status)
                 || "Baking".equals(status);
+    }
+
+    private void rejectDesiredConfigurationUpdateDuringActiveRefresh(String region, String asgName,
+                                                                     String launchConfigName,
+                                                                     String launchTemplateId,
+                                                                     String launchTemplateName,
+                                                                     String launchTemplateVersion,
+                                                                     MixedInstancesPolicy mixedInstancesPolicy) {
+        if (!updatesLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy)) {
+            return;
+        }
+        boolean activeDesiredConfigurationRefresh = instanceRefreshes.values().stream()
+                .filter(r -> region.equals(r.getRegion()))
+                .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
+                .filter(r -> isActiveRefreshStatus(r.getStatus()))
+                .anyMatch(InstanceRefresh::hasDesiredConfiguration);
+        if (activeDesiredConfigurationRefresh) {
+            throw new AwsException("ValidationError", ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE, 400);
+        }
+    }
+
+    private static boolean updatesLaunchSource(String launchConfigName,
+                                               String launchTemplateId,
+                                               String launchTemplateName,
+                                               String launchTemplateVersion,
+                                               MixedInstancesPolicy mixedInstancesPolicy) {
+        return launchConfigName != null
+                || launchTemplateId != null
+                || launchTemplateName != null
+                || launchTemplateVersion != null
+                || mixedInstancesPolicy != null;
     }
 
     private static String normalizeRefreshStrategy(String strategy) {

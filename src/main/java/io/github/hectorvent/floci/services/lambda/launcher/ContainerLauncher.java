@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -146,6 +147,15 @@ public class ContainerLauncher {
         // Start Runtime API server first so container can connect on boot
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
 
+        // Everything after the runtime-api server is allocated runs inside one try/catch: a failure
+        // ANYWHERE below — image/host resolve, the code-volume populate (ensureCodeVolume), the spec
+        // build, or the create/copy/start — must release that runtime-api port (and reap any
+        // half-built container). Otherwise a cold-start burst that trips the Docker daemon leaks one
+        // runtime-api port per failed attempt and eventually exhausts the pool, so launches keep
+        // failing even after the daemon recovers.
+        String containerId = null;
+        try {
+
         // Resolve image
         String image = "Image".equals(fn.getPackageType()) && fn.getImageUri() != null
                 ? fn.getImageUri()
@@ -160,7 +170,7 @@ public class ContainerLauncher {
 
         // Give the container a human-readable name (needed for log stream name below)
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        String containerName = "floci-" + fn.getFunctionName() + "-" + shortId;
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-" + fn.getFunctionName() + "-" + shortId);
 
         // CloudWatch log coordinates — computed here so they can be injected as env vars
         String cwLogGroup  = "/aws/lambda/" + fn.getFunctionName();
@@ -227,8 +237,26 @@ public class ContainerLauncher {
 
         specBuilder.withEmbeddedDns();
 
+        // Whether /var/task is served from a shared read-only volume (large code) or copied
+        // directly into this container (small code). Decided once here so both the spec (below)
+        // and the create->start copy block agree.
+        boolean useCodeVolume = false;
         if (fn.isHotReload()) {
             specBuilder.withBind(fn.getHotReloadHostPath(), TASK_DIR);
+        } else if (fn.getCodeLocalPath() != null) {
+            useCodeVolume = shouldUseCodeVolume(Path.of(fn.getCodeLocalPath()));
+            if (useCodeVolume) {
+                // Large code: mount /var/task from a read-only volume that is populated ONCE per
+                // code version, instead of tar-copying its code (e.g. ~34k node_modules files) into
+                // every container. That copy cost ~95s per cold start on Docker Desktop (small-file
+                // overlay I/O) and, run many-at-once, saturated the daemon so even `docker create`
+                // ballooned to ~80s. A pre-populated volume mounts in ~0.2s and is shared read-only
+                // by all containers of the function — matching AWS, where /var/task is read-only.
+                String codeVolume = ensureCodeVolume(fn, image);
+                specBuilder.withNamedVolume(codeVolume, TASK_DIR, true);
+            }
+            // Small code takes the original per-container direct copy below (no volume): it's fast
+            // enough that a shared volume's helper round-trip would only add cold-start latency.
         }
 
         // For Image package type use ImageConfig.Command/EntryPoint/WorkingDirectory if set, otherwise fall back to Handler (Zip-style)
@@ -259,7 +287,7 @@ public class ContainerLauncher {
 
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
-        String containerId = lifecycleManager.create(spec);
+        containerId = lifecycleManager.create(spec);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
 
         // Copy code into container via Docker API tar stream (works inside Docker too).
@@ -268,10 +296,15 @@ public class ContainerLauncher {
         if (!fn.isHotReload() && fn.getCodeLocalPath() != null) {
             Path codePath = Path.of(fn.getCodeLocalPath());
 
-            // 1. Always copy all code to /var/task (TASK_DIR)
-            copyDirToContainer(dockerClient, containerId, codePath, TASK_DIR, fn.getFunctionName());
+            // Large code (useCodeVolume): /var/task is supplied by the read-only named volume
+            // mounted on the spec above (populated once per code version) — no per-container copy.
+            // Small code: copy it directly into /var/task on this container (the original fast path,
+            // cheap enough that a shared volume's helper round-trip would only add cold-start latency).
+            if (!useCodeVolume) {
+                copyDirToContainer(dockerClient, containerId, codePath, TASK_DIR, fn.getFunctionName());
+            }
 
-            // 2. For provided runtimes, also copy the 'bootstrap' file to /var/runtime (RUNTIME_DIR)
+            // For provided runtimes, also copy the 'bootstrap' file to /var/runtime (RUNTIME_DIR)
             if (isProvidedRuntime(fn.getRuntime())) {
                 Path bootstrapPath = codePath.resolve("bootstrap");
                 if (Files.exists(bootstrapPath)) {
@@ -303,9 +336,12 @@ public class ContainerLauncher {
 
         // 4. Copy Floci's CA cert so the container trusts Floci's HTTPS endpoint (TLS mode).
         //    Placed before start so NODE_EXTRA_CA_CERTS et al. resolve at runtime init.
-        flociCaCert.ifPresent(certPath ->
-                copyFileToContainer(dockerClient, containerId, certPath,
-                        FLOCI_CA_DIR, FLOCI_CA_FILE_NAME, fn.getFunctionName()));
+        //    An if-block rather than ifPresent(...) because containerId is assigned along the
+        //    code-volume path and so is not effectively final for a lambda capture.
+        if (flociCaCert.isPresent()) {
+            copyFileToContainer(dockerClient, containerId, flociCaCert.get(),
+                    FLOCI_CA_DIR, FLOCI_CA_FILE_NAME, fn.getFunctionName());
+        }
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
@@ -318,6 +354,21 @@ public class ContainerLauncher {
         handle.setLogStream(logHandle);
 
         return handle;
+        } catch (RuntimeException e) {
+            // Launch failed somewhere after the runtime-api server was allocated — image/host
+            // resolve, the code-volume populate, the spec build, a create/copy/start under Docker
+            // load, or the log-stream attach. Free the runtime-api port (else a cold-start burst
+            // leaks one per attempt and exhausts the pool) and reap any half-built container (leaked
+            // "Created" containers bog the daemon and starve reuse). containerId is null when we
+            // failed before the container was created (e.g. an ensureCodeVolume populate failure).
+            LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
+                    fn.getFunctionName(), e.getMessage());
+            if (containerId != null) {
+                try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
+            }
+            try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
+            throw e;
+        }
     }
 
     public void stop(ContainerHandle handle) {
@@ -347,10 +398,170 @@ public class ContainerLauncher {
         return lifecycleManager.isContainerRunning(handle.getContainerId());
     }
 
+    // Cap concurrent code-volume POPULATES. Populating a large function's volume creates a helper
+    // container and streams ~90MB of node_modules into it; a burst of first-time populates run at
+    // once (e.g. a UI page-load firing 6-8 parallel API calls against never-before-seen functions)
+    // overwhelmed the Docker daemon, so copies hung/failed and left half-built "Created" containers.
+    // This gates ONLY the heavy populate — not every launch — so ordinary cold starts (volume mounts
+    // for already-populated large code, or the small-code direct copy) are never serialized.
+    private static final java.util.concurrent.Semaphore POPULATE_SEMAPHORE =
+            new java.util.concurrent.Semaphore(Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
+
+    private static void acquirePopulatePermit(String functionName) {
+        try {
+            POPULATE_SEMAPHORE.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting to populate code volume for " + functionName, ie);
+        }
+    }
+
+    // Per-function-version code volumes: populated once, then mounted read-only into every
+    // container so cold starts skip the ~95s node_modules copy. Tracks which volumes are already
+    // populated and a per-volume lock so a concurrent cold-start storm populates only once. The
+    // lock entry is dropped after a successful populate so this map only ever holds in-flight
+    // populates (see ensureCodeVolume) rather than growing across redeploys.
+    private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Returns the name of a read-only Docker volume holding this function's {@code /var/task} code,
+     * populating it once (per code version) on first use. Populating streams the code into a
+     * throwaway helper container that has the volume mounted read-write; every real container then
+     * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
+     */
+    private String ensureCodeVolume(LambdaFunction fn, String image) {
+        String volName = codeVolumeName(fn);
+        if (populatedCodeVolumes.contains(volName)) {
+            return volName;
+        }
+        Object lock = codeVolumeLocks.computeIfAbsent(volName, k -> new Object());
+        synchronized (lock) {
+            if (populatedCodeVolumes.contains(volName)) {
+                return volName;
+            }
+            long t0 = System.currentTimeMillis();
+            LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
+                    volName, fn.getFunctionName());
+            populateCodeVolume(volName, fn, image);
+            populatedCodeVolumes.add(volName);
+            // Bound codeVolumeLocks: drop the lock now that the volume is populated, so the map only
+            // ever holds in-flight populates rather than growing across redeploys. Safe under the
+            // lock: a late thread that computeIfAbsent's a fresh lock object will still hit the
+            // populatedCodeVolumes.contains check inside its synchronized block and return without
+            // re-populating.
+            codeVolumeLocks.remove(volName);
+            LOG.infov("Populated code volume {0} in {1}ms; future cold starts mount it instead of copying",
+                    volName, System.currentTimeMillis() - t0);
+        }
+        // We do NOT eagerly delete a function's previous code-version volume here: a concurrent
+        // in-flight launch may have already resolved that name and be about to mount it, so deleting
+        // it would give that container an empty /var/task. Stale volumes are labeled floci=true (see
+        // ContainerLifecycleManager.ensureVolume) and reclaimed by `docker volume prune --filter label=floci`.
+        return volName;
+    }
+
+    private void populateCodeVolume(String volName, LambdaFunction fn, String image) {
+        lifecycleManager.ensureVolume(volName);
+        String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
+        // tar-copy the code into it, then discard it — the data persists in the volume.
+        ContainerSpec helperSpec = containerBuilder.newContainer(image)
+                .withName("floci-codevol-" + fn.getFunctionName() + "-" + shortId)
+                .withEnv(java.util.List.of())
+                .withEntrypoint(java.util.List.of("sleep"))
+                .withCmd(java.util.List.of("3600"))
+                .withNamedVolume(volName, TASK_DIR, false)
+                .build();
+        // Gate the heavy work (helper create + ~90MB tar copy) so a burst of first-time populates
+        // doesn't thrash the Docker daemon. Only populates are serialized — plain cold starts aren't.
+        acquirePopulatePermit(fn.getFunctionName());
+        String helperId = null;
+        try {
+            helperId = lifecycleManager.create(helperSpec);
+            lifecycleManager.startCreated(helperId, helperSpec);
+            copyDirToContainer(lifecycleManager.getDockerClient(), helperId,
+                    Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
+        } finally {
+            if (helperId != null) {
+                try { lifecycleManager.stopAndRemove(helperId, null); } catch (Exception ignore) { /* best effort */ }
+            }
+            POPULATE_SEMAPHORE.release();
+        }
+    }
+
+    /**
+     * Total code size (bytes) at or above which a function's {@code /var/task} is served from a
+     * shared read-only volume rather than copied into every container. This is roughly the point
+     * where per-container small-file overlay copies get slow enough (many-file node_modules trees)
+     * that populating a volume once and mounting it read-only wins overall. Below it, the direct
+     * per-container copy is faster than the volume's populate-helper round-trip, so we keep it —
+     * which is what tiny handlers (e.g. WebSocket-route Lambdas) need to avoid cold-start latency.
+     * Non-final and package-private so tests can override it (restore it in a finally).
+     */
+    static long CODE_VOLUME_MIN_BYTES = 32L * 1024 * 1024;
+
+    /**
+     * Returns true iff the total size of files under {@code codeDir} meets or exceeds
+     * {@link #CODE_VOLUME_MIN_BYTES}. Walks the tree short-circuiting as soon as the running total
+     * crosses the threshold (so huge trees aren't fully summed). Any IO error returns false so the
+     * caller falls back to the direct per-container copy.
+     */
+    static boolean shouldUseCodeVolume(Path codeDir) {
+        final long threshold = CODE_VOLUME_MIN_BYTES;
+        final long[] total = {0L};
+        try (var stream = Files.walk(codeDir)) {
+            for (Path path : (Iterable<Path>) stream::iterator) {
+                if (Files.isRegularFile(path)) {
+                    total[0] += Files.size(path);
+                    if (total[0] >= threshold) {
+                        return true;
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            LOG.debugv("Could not size code dir {0} ({1}); using direct copy", codeDir, e.getMessage());
+            return false;
+        }
+        return false;
+    }
+
+    /**
+     * Docker-volume-safe name keyed by function + code version, so a redeploy yields a new volume.
+     * Prefers the code SHA-256; falls back to last-modified when the SHA is unavailable.
+     */
+    static String codeVolumeName(LambdaFunction fn) {
+        String key = fn.getCodeSha256();
+        if (key == null || key.isBlank()) {
+            key = Long.toString(fn.getLastModified());
+        }
+        String h = key.replaceAll("[^a-zA-Z0-9]", "");
+        if (h.length() > 20) {
+            h = h.substring(0, 20);
+        }
+        if (h.isEmpty()) {
+            h = "0";
+        }
+        String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
+        return "floci-code-" + fname + "-" + h;
+    }
+
+    /**
+     * Buffer for the tar-streaming pipe. The default {@link java.io.PipedInputStream} buffer is
+     * only 1KB, which forces a writer/reader thread hand-off (wait/notify) every 1KB. Streaming a
+     * ~90MB node_modules through that ran at ~0.5MB/s (≈3 min per cold start) — pure synchronization
+     * thrash, not I/O. A large buffer lets the tar writer stream ahead so throughput is bound by the
+     * Docker daemon, not the pipe.
+     */
+    private static final int TAR_PIPE_BUFFER_BYTES = 16 * 1024 * 1024;
+
     private void copyDirToContainer(DockerClient dockerClient, String containerId,
                                     Path sourceDir, String remotePath, String functionName) {
+        // No per-copy gating here: the heavy /var/task populate for large code already holds a
+        // POPULATE_SEMAPHORE permit; small-code direct copies and layer copies are light enough
+        // to run unthrottled.
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos)) {
+             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
             new Thread(() -> {
                 try (pos) {
@@ -366,14 +577,16 @@ public class ContainerLauncher {
                     .exec();
             LOG.debugv("Copied directory {0} into container {1} at {2}", sourceDir, containerId, remotePath);
         } catch (Exception e) {
-            LOG.warnv("Failed to copy directory {0} into container {1}: {2}", sourceDir, containerId, e.getMessage());
+            // Fail loudly so launch() cleans up the half-built container instead of leaking it.
+            throw new RuntimeException("Failed to copy directory " + sourceDir + " into container "
+                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
         }
     }
 
     private void copyFileToContainer(DockerClient dockerClient, String containerId,
                                      Path sourceFile, String remotePath, String entryName, String functionName) {
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos)) {
+             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
             new Thread(() -> {
                 try (TarArchiveOutputStream tar = newTarStream(pos)) {
@@ -396,7 +609,8 @@ public class ContainerLauncher {
                     .exec();
             LOG.debugv("Copied file {0} as {1} into container {2} at {3}", sourceFile, entryName, containerId, remotePath);
         } catch (Exception e) {
-            LOG.warnv("Failed to copy file {0} into container {1}: {2}", sourceFile, containerId, e.getMessage());
+            throw new RuntimeException("Failed to copy file " + sourceFile + " into container "
+                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
         }
     }
 

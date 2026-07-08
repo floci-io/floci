@@ -48,6 +48,7 @@ public class IamService implements SessionAccountLookup {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -452,6 +453,20 @@ public class IamService implements SessionAccountLookup {
                         "Policy " + policyArn + " does not exist.", 404));
     }
 
+    /**
+     * Resolves a policy by ARN without throwing, mirroring {@link #getPolicy} so that
+     * AWS-managed policies (arn:aws:iam::aws:policy/...) are served from the global catalog
+     * rather than the account-partitioned store. Attached-policy read paths must use this:
+     * a managed policy attached to a principal owned by a non-default account is absent from
+     * that account's {@link #policies} partition and would otherwise be silently dropped.
+     */
+    private Optional<IamPolicy> resolvePolicy(String arn) {
+        if (arn != null && arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            return Optional.ofNullable(awsManagedPolicies.get(arn));
+        }
+        return policies.get(arn);
+    }
+
     private void rejectIfAwsManaged(String policyArn) {
         if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
             throw new AwsException("AccessDenied",
@@ -628,7 +643,7 @@ public class IamService implements SessionAccountLookup {
 
     public List<IamPolicy> listAttachedUserPolicies(String userName, String pathPrefix) {
         return getUser(userName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -663,7 +678,7 @@ public class IamService implements SessionAccountLookup {
 
     public List<IamPolicy> listAttachedGroupPolicies(String groupName, String pathPrefix) {
         return getGroup(groupName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -698,7 +713,7 @@ public class IamService implements SessionAccountLookup {
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
         return getRole(roleName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -935,7 +950,7 @@ public class IamService implements SessionAccountLookup {
         if (fromAccessKey.isPresent()) {
             return fromAccessKey;
         }
-        return sessions.get(accessKeyId).map(SessionCredential::getSecretAccessKey);
+        return findSessionAnyAccount(accessKeyId).map(SessionCredential::getSecretAccessKey);
     }
 
     // =========================================================================
@@ -989,9 +1004,7 @@ public class IamService implements SessionAccountLookup {
      */
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
-        // STS issues only ASIA-prefixed temporary keys, so anything else cannot be a session.
-        // Short-circuit here to keep the per-request hot path off the session-store scan below.
-        if (accessKeyId == null || !accessKeyId.startsWith("ASIA")) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
@@ -1015,6 +1028,9 @@ public class IamService implements SessionAccountLookup {
      * across all accounts; the access key's global uniqueness keeps the result unambiguous.
      */
     private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             return Optional.ofNullable(aware.scanAllAccountsAsMap().get(accessKeyId));
         }
@@ -1037,12 +1053,13 @@ public class IamService implements SessionAccountLookup {
             return new CallerContext(identityPolicies, null, boundaryDoc);
         }
 
-        // Check assumed-role sessions
-        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        // Check assumed-role sessions. These can be stored under the account that minted the
+        // session, while request routing for temporary credentials uses the role's account.
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
-                sessions.delete(accessKeyId);
+                deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
 
@@ -1056,6 +1073,20 @@ public class IamService implements SessionAccountLookup {
 
         // Unknown key — bypass
         return null;
+    }
+
+    private Optional<SessionCredential> findSessionForCallerContext(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> session = sessions.get(accessKeyId);
+        if (session.isPresent()) {
+            return session;
+        }
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        return findSessionAnyAccount(accessKeyId);
     }
 
     /**
@@ -1083,11 +1114,11 @@ public class IamService implements SessionAccountLookup {
             return users.get(userName).map(IamUser::getArn);
         }
 
-        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
-                sessions.delete(accessKeyId);
+                deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
             String roleArn = session.getRoleArn();
@@ -1097,6 +1128,20 @@ public class IamService implements SessionAccountLookup {
         }
 
         return Optional.empty();
+    }
+
+    private static boolean isTemporaryAccessKey(String accessKeyId) {
+        return accessKeyId != null && accessKeyId.startsWith(TEMPORARY_ACCESS_KEY_PREFIX);
+    }
+
+    private void deleteSession(String accessKeyId, SessionCredential session) {
+        String originAccountId = session.getOriginAccountId();
+        if (originAccountId != null && !originAccountId.isBlank()
+                && sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.deleteForAccount(originAccountId, accessKeyId);
+            return;
+        }
+        sessions.delete(accessKeyId);
     }
 
     public CallerContext resolvePrincipalContext(String principalArn) {
@@ -1125,7 +1170,7 @@ public class IamService implements SessionAccountLookup {
     private String resolveUserBoundaryDocument(String userName) {
         return users.get(userName)
                 .map(IamUser::getPermissionsBoundaryArn)
-                .flatMap(arn -> policies.get(arn))
+                .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
@@ -1137,7 +1182,7 @@ public class IamService implements SessionAccountLookup {
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
         return roles.get(roleName)
                 .map(IamRole::getPermissionsBoundaryArn)
-                .flatMap(arn -> policies.get(arn))
+                .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
@@ -1196,7 +1241,7 @@ public class IamService implements SessionAccountLookup {
 
         // User attached managed policies
         for (String arn : user.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = policies.get(arn);
+            Optional<IamPolicy> p = resolvePolicy(arn);
             if (p.isPresent() && p.get().getDefaultDocument() != null) {
                 docs.add(p.get().getDefaultDocument());
             }
@@ -1209,7 +1254,7 @@ public class IamService implements SessionAccountLookup {
             IamGroup group = groupOpt.get();
             docs.addAll(group.getInlinePolicies().values());
             for (String arn : group.getAttachedPolicyArns()) {
-                Optional<IamPolicy> p = policies.get(arn);
+                Optional<IamPolicy> p = resolvePolicy(arn);
                 if (p.isPresent() && p.get().getDefaultDocument() != null) {
                     docs.add(p.get().getDefaultDocument());
                 }
@@ -1236,7 +1281,7 @@ public class IamService implements SessionAccountLookup {
 
         // Role attached managed policies
         for (String arn : role.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = policies.get(arn);
+            Optional<IamPolicy> p = resolvePolicy(arn);
             if (p.isPresent() && p.get().getDefaultDocument() != null) {
                 docs.add(p.get().getDefaultDocument());
             }

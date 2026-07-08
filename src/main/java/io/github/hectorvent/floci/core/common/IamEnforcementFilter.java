@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -15,7 +16,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
-import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -32,8 +32,9 @@ import java.util.regex.Pattern;
  *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
  * </ul>
  *
- * <p>Phase 1 evaluates identity-based policies only.
- * Resource-based policies (S3 bucket policy, Lambda resource policy, etc.) are Phase 2.
+ * <p>Evaluates the caller's identity policies, optional session policy, and optional
+ * permissions boundary. Resource-based policies (S3 bucket policy, Lambda resource
+ * policy, etc.) are not yet supplied to this filter.
  */
 @Provider
 @ApplicationScoped
@@ -51,6 +52,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final IamPolicyEvaluator evaluator;
     private final IamActionRegistry actionRegistry;
     private final ResourceArnBuilder arnBuilder;
+    private final RequestContext requestContext;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -58,13 +60,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 IamService iamService,
                                 IamPolicyEvaluator evaluator,
                                 IamActionRegistry actionRegistry,
-                                ResourceArnBuilder arnBuilder) {
+                                ResourceArnBuilder arnBuilder,
+                                RequestContext requestContext) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
         this.evaluator = evaluator;
         this.actionRegistry = actionRegistry;
         this.arnBuilder = arnBuilder;
+        this.requestContext = requestContext;
     }
 
     @Override
@@ -93,16 +97,18 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return; // unknown action → ALLOW (permissive)
         }
 
-        List<String> policies = iamService.resolveCallerPolicies(akid);
-        if (policies == null) {
+        CallerContext caller = iamService.resolveCallerContext(akid);
+        if (caller == null) {
             return; // unknown access key → bypass (backward-compat)
         }
 
-        String region = config.defaultRegion();
-        String accountId = accountResolver.resolve(auth);
+        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        String accountId = requestContext.getAccountId() == null
+                ? accountResolver.resolve(auth)
+                : requestContext.getAccountId();
         String resource = arnBuilder.build(credentialScope, ctx, region, accountId);
 
-        Decision decision = evaluator.evaluate(policies, action, resource);
+        Decision decision = evaluator.evaluate(caller, null, action, resource, null);
         if (decision == Decision.DENY) {
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
             ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));

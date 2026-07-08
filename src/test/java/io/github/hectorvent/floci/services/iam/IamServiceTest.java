@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
@@ -10,6 +12,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
+import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -33,6 +36,11 @@ class IamServiceTest {
     }
 
     private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys) {
+        return iamService(seedDeployerPrincipal, accessKeys, new InMemoryStorage<>());
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys,
+                                         StorageBackend<String, SessionCredential> sessions) {
         return new IamService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -40,7 +48,7 @@ class IamServiceTest {
                 new InMemoryStorage<>(),
                 accessKeys,
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                sessions,
                 new RegionResolver("us-east-1", "000000000000"),
                 seedDeployerPrincipal
         );
@@ -454,6 +462,31 @@ class IamServiceTest {
     }
 
     @Test
+    void resolveAccountIdDoesNotScanSessionsForLongTermAccessKey() {
+        CountingAccountAwareSessionStorage sessions = new CountingAccountAwareSessionStorage();
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        assertTrue(service.resolveAccountId("AKIAIOSFODNN7EXAMPLE").isEmpty());
+        assertEquals(0, sessions.scanAllAccountsAsMapCalls);
+    }
+
+    private static final class CountingAccountAwareSessionStorage
+            extends AccountAwareStorageBackend<SessionCredential> {
+
+        private int scanAllAccountsAsMapCalls;
+
+        private CountingAccountAwareSessionStorage() {
+            super(new InMemoryStorage<>(), null, "000000000000");
+        }
+
+        @Override
+        public Map<String, SessionCredential> scanAllAccountsAsMap() {
+            scanAllAccountsAsMapCalls++;
+            return super.scanAllAccountsAsMap();
+        }
+    }
+
+    @Test
     void resolveAccountIdEmptyForExpiredSession() {
         iamService.registerSession(
                 "ASIAEXPIRED",
@@ -465,6 +498,25 @@ class IamServiceTest {
         );
 
         assertTrue(iamService.resolveAccountId("ASIAEXPIRED").isEmpty());
+    }
+
+    @Test
+    void resolveCallerContextDeletesExpiredCrossAccountSessionFromOriginAccount() {
+        String accessKeyId = "ASIAEXPIREDCROSSACCOUNT";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "222233334444");
+        sessions.putForAccount("111122223333", accessKeyId, new SessionCredential(
+                accessKeyId,
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().minusSeconds(60),
+                null,
+                "111122223333"));
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        assertNull(service.resolveCallerContext(accessKeyId));
+
+        assertTrue(sessions.getForAccount("111122223333", accessKeyId).isEmpty());
     }
 
     // =========================================================================

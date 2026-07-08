@@ -661,6 +661,12 @@ public class ApiGatewayService {
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
 
+        Map<String, String> tags = new HashMap<>();
+        if (request.get("tags") instanceof Map<?, ?> rawTags) {
+            rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
+        }
+        apiKey.setTags(tags);
+
         apiKeyStore.put(apiKeyGlobalKey(region, apiKey.getId()), apiKey);
         LOG.infov("Created API Key {0}", apiKey.getId());
         return apiKey;
@@ -668,7 +674,7 @@ public class ApiGatewayService {
 
     public ApiKey getApiKey(String region, String apiKeyId) {
         return apiKeyStore.get(apiKeyGlobalKey(region, apiKeyId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "API Key not found", 404));
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API Key identifier specified", 404));
     }
 
     public List<ApiKey> getApiKeys(String region) {
