@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.elasticbeanstalk.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public class ConfigurationOptionSetting {
 
     private String namespace;

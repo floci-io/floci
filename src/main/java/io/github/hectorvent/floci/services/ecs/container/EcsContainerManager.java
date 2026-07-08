@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -99,7 +100,7 @@ public class EcsContainerManager {
         }
 
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
-            String containerName = "floci-ecs-" + taskId + "-" + def.getName();
+            String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
 
             // RunTask containerOverrides matched by container name: command replaces
             // the task-def command; environment is merged over the task-def environment.

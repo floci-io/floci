@@ -15,12 +15,15 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 @ApplicationScoped
 public class CloudWatchLogsService {
@@ -49,6 +52,22 @@ public class CloudWatchLogsService {
      * the highest sequence already in the store so ordering survives persistence reloads.
      */
     private final AtomicLong ingestionSequence;
+    private final long queryCompletionDelayMs;
+
+    // Wall-clock source of "now" for the query lifecycle, injected so tests can drive it deterministically.
+    // Non-monotonic: a backward NTP step could briefly flip a Complete query back to Running — a rare,
+    // self-healing emulator artifact we accept rather than complicate the injectable clock with nanoTime.
+    private final LongSupplier clock;
+
+    /** Cached Logs Insights queries keyed by queryId, bounded with LRU-style eviction. */
+    private static final int MAX_STORED_QUERIES = 100;
+    private final Map<String, QueryRecord> insightsQueries = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, QueryRecord> eldest) {
+                    return size() > MAX_STORED_QUERIES;
+                }
+            });
 
     @Inject
     public CloudWatchLogsService(StorageFactory storageFactory,
@@ -64,7 +83,9 @@ public class CloudWatchLogsService {
                 storageFactory.create("cloudwatchlogs", "cwlogs-subscription-filters.json",
                         new TypeReference<>() {}),
                 config.services().cloudwatchlogs().maxEventsPerQuery(),
-                regionResolver
+                regionResolver,
+                config.services().cloudwatchlogs().queryCompletionDelayMs(),
+                System::currentTimeMillis
         );
     }
 
@@ -74,6 +95,18 @@ public class CloudWatchLogsService {
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
                            int maxEventsPerQuery,
                            RegionResolver regionResolver) {
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore,
+                maxEventsPerQuery, regionResolver, 0L, System::currentTimeMillis);
+    }
+
+    CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
+                           StorageBackend<String, LogStream> streamStore,
+                           StorageBackend<String, LogEvent> eventStore,
+                           StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           int maxEventsPerQuery,
+                           RegionResolver regionResolver,
+                           long queryCompletionDelayMs,
+                           LongSupplier clock) {
         this.groupStore = groupStore;
         this.streamStore = streamStore;
         this.eventStore = eventStore;
@@ -85,6 +118,9 @@ public class CloudWatchLogsService {
                 .max()
                 .orElse(0L);
         this.ingestionSequence = new AtomicLong(maxSequence);
+        // A negative delay is meaningless; treat it as instant completion.
+        this.queryCompletionDelayMs = Math.max(0, queryCompletionDelayMs);
+        this.clock = clock;
     }
 
     // ──────────────────────────── Log Groups ────────────────────────────
@@ -380,6 +416,166 @@ public class CloudWatchLogsService {
 
         String nextToken = result.size() >= maxEvents ? UUID.randomUUID().toString() : null;
         return new FilteredLogEventsResult(result, nextToken);
+    }
+
+    // ──────────────────────────── Logs Insights Queries ────────────────────────────
+
+    /** A query's status and (once Complete) its projected rows — the AWS GetQueryResults shape. */
+    public record QueryState(String status, List<LinkedHashMap<String, String>> rows,
+                             long recordsScanned, long recordsMatched) {}
+
+    /** Lifecycle state of a stored Insights query; {@link #label()} is the AWS wire form. */
+    private enum InsightsQueryStatus {
+        RUNNING("Running"),
+        COMPLETE("Complete"),
+        CANCELLED("Cancelled");
+
+        private final String label;
+
+        InsightsQueryStatus(String label) {
+            this.label = label;
+        }
+
+        String label() {
+            return label;
+        }
+    }
+
+    /**
+     * A stored Insights query. Results are computed eagerly at StartQuery, but the query reports
+     * {@code Running} until {@code completeAtMs} (an artificial delay emulating AWS's asynchronous
+     * execution), then {@code Complete} — unless cancelled by StopQuery, after which it is
+     * {@code Cancelled}. State transitions are time-driven and computed on read. {@code recordsMatched}
+     * is captured at construction so it survives the Running/Cancelled row masking and the row-drop on cancel.
+     */
+    private static final class QueryRecord {
+        private List<LinkedHashMap<String, String>> rows;
+        private final long recordsScanned;
+        private final long recordsMatched;
+        private final long completeAtMs;
+        private boolean cancelled;
+
+        QueryRecord(List<LinkedHashMap<String, String>> rows, long recordsScanned, long completeAtMs) {
+            this.rows = rows;
+            this.recordsScanned = recordsScanned;
+            this.recordsMatched = rows.size();
+            this.completeAtMs = completeAtMs;
+        }
+
+        private InsightsQueryStatus status(long nowMs) {
+            if (cancelled) {
+                return InsightsQueryStatus.CANCELLED;
+            }
+            return nowMs >= completeAtMs ? InsightsQueryStatus.COMPLETE : InsightsQueryStatus.RUNNING;
+        }
+
+        /**
+         * Snapshot this query in the AWS GetQueryResults shape. Rows are exposed only once
+         * {@code Complete}, and always as a defensive copy (the cached list is never handed out); while
+         * Running or Cancelled the rows are masked empty, but {@code recordsMatched} still reports the
+         * full match count.
+         */
+        synchronized QueryState snapshot(long nowMs) {
+            InsightsQueryStatus status = status(nowMs);
+            List<LinkedHashMap<String, String>> visible =
+                    status == InsightsQueryStatus.COMPLETE ? List.copyOf(rows) : List.of();
+            return new QueryState(status.label(), visible, recordsScanned, recordsMatched);
+        }
+
+        /** Cancels the query iff still running, dropping its now-unreachable rows. Returns true if this call stopped it. */
+        synchronized boolean stopIfRunning(long nowMs) {
+            if (!cancelled && nowMs < completeAtMs) {
+                cancelled = true;
+                rows = List.of();
+                return true;
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Start a CloudWatch Logs Insights query and cache it under a new queryId. Results are computed
+     * eagerly (the scan is in-memory); the query then reports {@code Running} until the configured
+     * completion delay elapses (default 0 = immediate), emulating AWS's async execution.
+     * {@code startTimeSeconds}/{@code endTimeSeconds} are epoch <em>seconds</em> (the StartQuery
+     * contract); {@link LogEvent} timestamps are epoch millis, so they are scaled for comparison.
+     */
+    public String startQuery(List<String> logGroupNames, long startTimeSeconds, long endTimeSeconds,
+                             String queryString, Integer limit, String region) {
+        long startMs = startTimeSeconds * 1000L;
+        long endMs = endTimeSeconds * 1000L;
+
+        // De-duplicate the requested groups (the same group can arrive via multiple selectors, e.g.
+        // logGroupNames + logGroupIdentifiers) so it is scanned — and counted — once, not twice.
+        List<String> distinctGroups = logGroupNames.stream()
+                .filter(g -> g != null && !g.isBlank())
+                .distinct()
+                .toList();
+        if (distinctGroups.isEmpty()) {
+            // AWS StartQuery requires a log-group selector; an empty or all-blank one is an invalid
+            // request, not a valid query that happens to match nothing.
+            throw new AwsException("InvalidParameterException",
+                    "StartQuery must specify at least one log group.", 400);
+        }
+
+        List<LogEvent> gathered = new ArrayList<>();
+        for (String groupName : distinctGroups) {
+            // Real AWS StartQuery returns ResourceNotFoundException for a log group that does not exist,
+            // rather than a successful empty query; mirror that instead of silently scanning nothing.
+            groupStore.get(groupKey(region, groupName)).orElseThrow(() ->
+                    new AwsException("ResourceNotFoundException",
+                            "The specified log group does not exist: " + groupName, 400));
+            String prefix = region + "::" + groupName + "::";
+            for (LogEvent e : eventStore.scan(k -> k.startsWith(prefix))) {
+                if (e.getTimestamp() >= startMs && e.getTimestamp() <= endMs) {
+                    gathered.add(e);
+                }
+            }
+        }
+
+        int effectiveLimit = (limit != null && limit > 0) ? Math.min(limit, maxEventsPerQuery) : maxEventsPerQuery;
+        List<LinkedHashMap<String, String>> rows =
+                LogsInsightsQuery.parse(queryString).evaluate(gathered, effectiveLimit);
+
+        String queryId = UUID.randomUUID().toString();
+        long completeAtMs = clock.getAsLong() + queryCompletionDelayMs;
+        insightsQueries.put(queryId, new QueryRecord(rows, gathered.size(), completeAtMs));
+        LOG.infov("Logs Insights query {0}: scanned {1} event(s) across {2} group(s) -> {3} row(s)",
+                queryId, gathered.size(), distinctGroups.size(), rows.size());
+        return queryId;
+    }
+
+    /**
+     * Return a query's status and, once {@code Complete}, its rows. Mirrors AWS: while {@code Running}
+     * or after a StopQuery ({@code Cancelled}) the result set is empty (though {@code recordsMatched}
+     * still reports the full match count); only a Complete query exposes rows. An unknown queryId is an
+     * error on real AWS — and a query that has fallen out of the bounded LRU cache 404s the same way.
+     */
+    public QueryState getQueryResults(String queryId) {
+        QueryRecord rec = insightsQueries.get(queryId);
+        if (rec == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The specified query does not exist.", 400);
+        }
+        return rec.snapshot(clock.getAsLong());
+    }
+
+    /**
+     * Stop an in-progress query. Mirrors AWS StopQuery: a running query is cancelled and returns
+     * {@code success=true}; an already-ended query throws {@code InvalidParameterException} ("not
+     * running"); an unknown queryId throws {@code ResourceNotFoundException}.
+     */
+    public boolean stopQuery(String queryId) {
+        QueryRecord rec = insightsQueries.get(queryId);
+        if (rec == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The specified query does not exist.", 400);
+        }
+        if (rec.stopIfRunning(clock.getAsLong())) {
+            return true;
+        }
+        throw new AwsException("InvalidParameterException",
+                "The query you are trying to stop is not running.", 400);
     }
 
     // ──────────────────────────── Subscription Filters ────────────────────────────

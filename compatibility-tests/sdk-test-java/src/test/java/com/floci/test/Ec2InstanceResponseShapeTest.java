@@ -299,6 +299,44 @@ class Ec2InstanceResponseShapeTest {
                 .isTrue();
     }
 
+    // ── Security groups (issue #1644) ────────────────────────────────────────
+
+    @Test
+    @Order(17)
+    @DisplayName("instance and primary ENI expose security groups")
+    void securityGroupsOnInstanceAndEni() {
+        assertThat(instance.securityGroups())
+                .as("instance securityGroups must not be empty")
+                .isNotEmpty();
+        assertThat(instance.securityGroups().get(0).groupId()).isNotBlank();
+        assertThat(instance.securityGroups().get(0).groupName()).isNotBlank();
+
+        InstanceNetworkInterface primaryEni = instance.networkInterfaces().get(0);
+        assertThat(primaryEni.groups())
+                .as("primary ENI groups must not be empty")
+                .isNotEmpty();
+        assertThat(primaryEni.groups().get(0).groupId()).isNotBlank();
+    }
+
+    @Test
+    @Order(18)
+    @DisplayName("DescribeInstanceAttribute groupSet returns Groups (Ansible ec2_instance path)")
+    void describeInstanceAttributeGroupSet() {
+        DescribeInstanceAttributeResponse attr = ec2.describeInstanceAttribute(
+                DescribeInstanceAttributeRequest.builder()
+                        .instanceId(instanceId)
+                        .attribute(InstanceAttributeName.GROUP_SET)
+                        .build());
+
+        assertThat(attr.instanceId()).isEqualTo(instanceId);
+        assertThat(attr.groups())
+                .as("groupSet attribute must return the instance security groups"
+                        + " — amazon.aws ec2_instance reads value['Groups'] from this call")
+                .isNotEmpty();
+        assertThat(attr.groups().get(0).groupId()).isNotBlank();
+        assertThat(attr.groups().get(0).groupName()).isNotBlank();
+    }
+
     // ── TerminateInstances state transitions ─────────────────────────────────
 
     @Test

@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.elasticbeanstalk.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+@RegisterForReflection
 public class BeanstalkApplicationVersion {
 
     private String applicationName;

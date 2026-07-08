@@ -42,6 +42,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Handles the PostgreSQL wire protocol auth intercept.
@@ -628,10 +629,17 @@ public class PostgresProtocolHandler {
             closeQuietly(backend);
             return;
         }
+        AtomicBoolean closed = new AtomicBoolean();
+        Runnable closeBoth = () -> {
+            if (closed.compareAndSet(false, true)) {
+                closeQuietly(client);
+                closeQuietly(backend);
+            }
+        };
         Thread t1 = Thread.ofVirtual().name("rds-pg-c2b")
-                .start(() -> relay(clientIn, backendOut));
+                .start(() -> relay(clientIn, backendOut, closeBoth));
         Thread t2 = Thread.ofVirtual().name("rds-pg-b2c")
-                .start(() -> relay(backendIn, clientOut));
+                .start(() -> relay(backendIn, clientOut, closeBoth));
         try {
             t1.join();
             t2.join();
@@ -643,7 +651,7 @@ public class PostgresProtocolHandler {
         }
     }
 
-    private static void relay(InputStream from, OutputStream to) {
+    private static void relay(InputStream from, OutputStream to, Runnable onDone) {
         try {
             byte[] buf = new byte[8192];
             int n;
@@ -651,7 +659,10 @@ public class PostgresProtocolHandler {
                 to.write(buf, 0, n);
                 to.flush();
             }
-        } catch (IOException ignored) {}
+        } catch (IOException ignored) {
+        } finally {
+            onDone.run();
+        }
     }
 
     // ── Error response ────────────────────────────────────────────────────────

@@ -1,0 +1,52 @@
+name: Docs Action Tables
+
+# Keeps the generated "Supported Actions" tables in docs/services/*.md in sync with
+# handler source. Runs on handler changes (which can add/remove actions) and on doc or
+# tooling changes. Python-only, so it is fast and independent of the Java build job.
+
+on:
+  pull_request:
+    paths:
+      - 'src/main/**'
+      - 'docs/services/**'
+      - 'tools/docs/**'
+      - 'Makefile'
+      - '.github/workflows/docs-actions.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/main/**'
+      - 'docs/services/**'
+      - 'tools/docs/**'
+      - 'Makefile'
+      - '.github/workflows/docs-actions.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  action-tables:
+    name: Action tables in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install tooling deps
+        run: pip install -r tools/docs/requirements.txt
+
+      - name: Run action-table tests
+        run: make docs-test
+
+      - name: Check action tables are in sync
+        run: make docs-check
