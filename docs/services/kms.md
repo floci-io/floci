@@ -5,13 +5,19 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateKey` | Create a new KMS key |
 | `GenerateRandom` | Generate random bytes |
 | `GetPublicKey` | Get public key material for asymmetric keys |
 | `DescribeKey` | Get key metadata |
 | `ListKeys` | List all keys |
+| `CreateGrant` | Create a grant for a KMS key |
+| `ListGrants` | List grants for a KMS key |
+| `ListRetirableGrants` | List grants retirable by a principal |
+| `RevokeGrant` | Revoke (administratively delete) a grant |
+| `RetireGrant` | Retire a grant (token- or key+grant-based) |
 | `Encrypt` | Encrypt plaintext with a key |
 | `Decrypt` | Decrypt ciphertext |
 | `ReEncrypt` | Re-encrypt under a different key |
@@ -26,8 +32,6 @@
 | `ListAliases` | List all aliases |
 | `ScheduleKeyDeletion` | Mark a key for deletion |
 | `CancelKeyDeletion` | Cancel pending deletion |
-| `EnableKey` | Enable a key |
-| `DisableKey` | Disable a key |
 | `TagResource` | Tag a key |
 | `UntagResource` | Remove tags |
 | `ListResourceTags` | List tags |
@@ -37,12 +41,10 @@
 | `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
 | `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
 | `DisableKeyRotation` | Disable automatic key rotation |
+| `EnableKey` | Enable a key |
+| `DisableKey` | Disable a key |
 | `RotateKeyOnDemand` | Rotate key material on demand (symmetric keys only) |
-| `CreateGrant` | Create a grant for a KMS key |
-| `ListGrants` | List grants for a KMS key |
-| `ListRetirableGrants` | List grants retirable by a principal |
-| `RevokeGrant` | Revoke (administratively delete) a grant |
-| `RetireGrant` | Retire a grant (token- or key+grant-based) |
+<!-- floci:actions:end -->
 
 ## Grant Support Scope
 

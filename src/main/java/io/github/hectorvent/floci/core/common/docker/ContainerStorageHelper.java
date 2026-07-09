@@ -30,7 +30,52 @@ public final class ContainerStorageHelper {
      * this change.
      */
     public static String resourceName(String service, String volumeId, String fallbackId) {
-        return "floci-" + service + "-" + (volumeId != null ? volumeId : fallbackId);
+        return resourceName(null, service, volumeId, fallbackId);
+    }
+
+    public static String resourceName(EmulatorConfig config, String service, String volumeId, String fallbackId) {
+        return dockerName(config, "floci-" + service + "-" + (volumeId != null ? volumeId : fallbackId));
+    }
+
+    public static String dockerName(EmulatorConfig config, String baseName) {
+        String namespace = resourceNamespace(config);
+        if (namespace.isBlank()) {
+            return baseName;
+        }
+        if (baseName.startsWith("floci-")) {
+            return "floci-" + namespace + "-" + baseName.substring("floci-".length());
+        }
+        return "floci-" + namespace + "-" + baseName;
+    }
+
+    public static Path hostResourcePath(EmulatorConfig config, String service, String resourceId) {
+        String namespace = resourceNamespace(config);
+        Path base = Path.of(config.storage().hostPersistentPath());
+        if (namespace.isBlank()) {
+            return base.resolve(service).resolve(resourceId);
+        }
+        return base.resolve(namespace).resolve(service).resolve(resourceId);
+    }
+
+    private static String resourceNamespace(EmulatorConfig config) {
+        if (config == null || config.docker() == null || config.docker().resourceNamespace() == null) {
+            return "";
+        }
+        return sanitizeNamePart(config.docker().resourceNamespace().orElse(""));
+    }
+
+    private static String sanitizeNamePart(String value) {
+        String cleaned = value.trim().replaceAll("[^A-Za-z0-9_.-]+", "-");
+        while (cleaned.startsWith("-")) {
+            cleaned = cleaned.substring(1);
+        }
+        while (cleaned.endsWith("-")) {
+            cleaned = cleaned.substring(0, cleaned.length() - 1);
+        }
+        if (cleaned.equals(".") || cleaned.equals("..")) {
+            return "";
+        }
+        return cleaned;
     }
 
     /**
@@ -51,11 +96,12 @@ public final class ContainerStorageHelper {
     public static void applyStorage(
             ContainerBuilder.Builder builder,
             ContainerLifecycleManager lifecycleManager,
+            EmulatorConfig config,
             String service,
             String volumeId,
             String fallbackId,
             String internalMount) {
-        String volumeName = resourceName(service, volumeId, fallbackId);
+        String volumeName = resourceName(config, service, volumeId, fallbackId);
         lifecycleManager.ensureVolume(volumeName);
         builder.withNamedVolume(volumeName, internalMount);
     }
@@ -74,7 +120,7 @@ public final class ContainerStorageHelper {
             String service,
             String volumeId,
             String fallbackId) {
-        String volumeName = resourceName(service, volumeId, fallbackId);
+        String volumeName = resourceName(config, service, volumeId, fallbackId);
         boolean isMemory = "memory".equals(config.storage().mode());
         if (isMemory || config.storage().pruneVolumesOnDelete()) {
             lifecycleManager.removeVolume(volumeName);

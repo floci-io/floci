@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -123,7 +124,7 @@ public class Ec2ContainerManager {
         executor.submit(() -> {
             try {
                 String instanceId = instance.getInstanceId();
-                String containerName = "floci-ec2-" + instanceId;
+                String containerName = ContainerStorageHelper.resourceName(config, "ec2", null, instanceId);
 
                 // Allocate SSH host port
                 int sshHostPort = portAllocator.allocate(

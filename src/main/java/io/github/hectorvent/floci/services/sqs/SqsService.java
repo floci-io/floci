@@ -352,17 +352,17 @@ public class SqsService implements Resettable {
         return filtered;
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds, String region) {
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds, String region) {
         return sendMessage(queueUrl, body, delaySeconds, null, null, region);
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
                                String messageGroupId, String messageDeduplicationId,
                                String region) {
         return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, null, region);
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
                                String messageGroupId, String messageDeduplicationId,
                                Map<String, MessageAttributeValue> messageAttributes,
                                String region) {
@@ -370,7 +370,7 @@ public class SqsService implements Resettable {
                 messageAttributes, null, region);
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
                                String messageGroupId, String messageDeduplicationId,
                                Map<String, MessageAttributeValue> messageAttributes,
                                String awsTraceHeader,
@@ -393,15 +393,16 @@ public class SqsService implements Resettable {
         // Resolve the effective delay:
         //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
         //     so any per-message value is ignored and we always use the
-        //     queue attribute. Without this, FIFO silently dropped the
-        //     queue-level default (issue #475).
-        //   - Standard queues honor per-message DelaySeconds when provided
-        //     (> 0). Applying the queue-level default on the standard path
-        //     requires distinguishing "omitted" from "explicit 0" in the
-        //     handlers, which the current int-parameter API cannot express;
-        //     that's left as follow-up work -- this patch only addresses
-        //     the FIFO regression called out in the issue.
-        int effectiveDelaySeconds = queue.isFifo() ? queueDelaySeconds : delaySeconds;
+        //     queue attribute.
+        //   - Standard queues honor per-message DelaySeconds when explicitly
+        //     provided (non-null). When omitted (null), the queue-level
+        //     default applies.
+        int effectiveDelaySeconds;
+        if (queue.isFifo()) {
+            effectiveDelaySeconds = queueDelaySeconds;
+        } else {
+            effectiveDelaySeconds = (delaySeconds != null) ? delaySeconds : queueDelaySeconds;
+        }
 
         // FIFO queue validation
         if (queue.isFifo()) {
@@ -1132,7 +1133,7 @@ public class SqsService implements Resettable {
         ObjectNode principal = statement.putObject("Principal");
         ArrayNode awsArns = principal.putArray("AWS");
         for (String accountId : awsAccountIds) {
-            awsArns.add("arn:aws:iam::" + accountId + ":root");
+            awsArns.add(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         }
         ArrayNode actions = statement.putArray("Action");
         for (String action : actionNames) {

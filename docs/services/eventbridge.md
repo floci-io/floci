@@ -5,8 +5,9 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateEventBus` | Create a custom event bus |
 | `DeleteEventBus` | Delete an event bus |
 | `DescribeEventBus` | Get event bus details |
@@ -23,6 +24,21 @@
 | `ListTargetsByRule` | List targets for a rule |
 | `PutEvents` | Publish custom events to an event bus |
 | `TestEventPattern` | Test whether a sample event matches a given pattern (no targets fired) |
+| `ListTagsForResource` | - |
+| `TagResource` | - |
+| `UntagResource` | - |
+| `PutPermission` | - |
+| `RemovePermission` | - |
+| `CreateArchive` | - |
+| `DescribeArchive` | - |
+| `UpdateArchive` | - |
+| `DeleteArchive` | - |
+| `ListArchives` | - |
+| `StartReplay` | - |
+| `DescribeReplay` | - |
+| `CancelReplay` | - |
+| `ListReplays` | - |
+<!-- floci:actions:end -->
 
 ## Configuration
 

@@ -461,6 +461,38 @@ class SqsServiceTest {
                 "FIFO queues must ignore per-message DelaySeconds");
     }
 
+    // --- Queue-level DelaySeconds for standard queues ---
+
+    @Test
+    void queueLevelDelaySecondsAppliesToStandardQueue() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delay-standard",
+                Map.of("DelaySeconds", "1"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", null, region);
+
+        List<Message> immediate = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region);
+        assertTrue(immediate.isEmpty(),
+                "Standard queue should honor queue-level DelaySeconds");
+
+        try { Thread.sleep(1100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        List<Message> later = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region);
+        assertEquals(1, later.size(),
+                "Message should become visible once DelaySeconds elapses");
+    }
+
+    @Test
+    void explicitZeroDelayOverridesQueueDefault() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delay-override",
+                Map.of("DelaySeconds", "10"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+
+        List<Message> immediate = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region);
+        assertEquals(1, immediate.size(),
+                "Explicit DelaySeconds=0 must override queue-level default");
+    }
+
     // --- clearFifoDeduplicationCacheOnPurge tests ---
 
     @Test

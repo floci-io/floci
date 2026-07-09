@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.backup.model.*;
 import jakarta.inject.Inject;
@@ -85,6 +86,29 @@ public class BackupController {
         ArrayNode list = out.putArray("BackupVaultList");
         vaults.forEach(list::addPOJO);
         return Response.ok(out).build();
+    }
+
+    // Notification configuration is an optional, never-configured aspect of a vault in the
+    // emulator. Per the AWS Backup API, GetBackupVaultNotifications returns
+    // ResourceNotFoundException (HTTP 400) when no notification configuration exists for the
+    // vault. We mirror that exact error contract so SDK clients see the documented
+    // "not configured" signal rather than an empty 200 or a generic 400 they can't interpret.
+    @GET
+    @Path("/backup-vaults/{backupVaultName}/notification-configuration")
+    public Response getBackupVaultNotifications(@PathParam("backupVaultName") String vaultName) {
+        throw new AwsException("ResourceNotFoundException",
+                "No notification configuration found for backup vault: " + vaultName, 400);
+    }
+
+    // Access policy is an optional, never-configured aspect of a vault in the emulator. Per the
+    // AWS Backup API, GetBackupVaultAccessPolicy returns ResourceNotFoundException (HTTP 400)
+    // when no policy exists for the vault. We mirror that exact error contract so SDK clients
+    // see the documented "not configured" signal rather than an empty 200 or a generic 400.
+    @GET
+    @Path("/backup-vaults/{backupVaultName}/access-policy")
+    public Response getBackupVaultAccessPolicy(@PathParam("backupVaultName") String vaultName) {
+        throw new AwsException("ResourceNotFoundException",
+                "No access policy found for backup vault: " + vaultName, 400);
     }
 
     // ── Plan ───────────────────────────────────────────────────────────────────

@@ -212,6 +212,25 @@ Maintainers may request additional or more targeted test coverage before approvi
 
 CI runs automatically on every pull request, and build/test checks must pass before merge.
 
+## Documentation: Action Tables
+
+The **Supported Actions** tables in `docs/services/*.md` are generated from handler
+source, so they cannot drift from the code. The action list comes from the handler
+(`case "X" ->` arms or REST controller methods); the **Description** column is
+hand-written and preserved across regeneration, keyed by action name.
+
+- **Do not hand-edit** the action rows between the `<!-- floci:actions:start -->` and
+  `<!-- floci:actions:end -->` markers. Edit the handler, then regenerate.
+- After adding or changing a handler action, run `make docs-sync` and commit the
+  updated doc alongside your code. Fill in the `-` placeholder description for any new
+  row.
+- `make docs-check` (run in CI) fails if a registered service's table is out of date,
+  or if a new switch handler is neither registered in `tools/docs/services.yaml` nor
+  listed under `deferred_handlers`.
+- `make docs-test` runs the tooling's unit tests.
+
+Registering a new service is one entry in `tools/docs/services.yaml`.
+
 ## Reporting Security Issues
 
 Please do **not** open public issues for security vulnerabilities. Report them privately by emailing the maintainer or using [GitHub private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability).

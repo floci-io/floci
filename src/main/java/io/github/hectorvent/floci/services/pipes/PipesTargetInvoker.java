@@ -191,7 +191,6 @@ public class PipesTargetInvoker {
     }
 
     private static String extractRegionFromArn(String arn, String defaultRegion) {
-        String[] parts = arn.split(":");
-        return parts.length >= 4 && !parts[3].isEmpty() ? parts[3] : defaultRegion;
+        return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 }

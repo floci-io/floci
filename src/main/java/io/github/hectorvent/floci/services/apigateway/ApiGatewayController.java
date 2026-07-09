@@ -613,13 +613,33 @@ public class ApiGatewayController {
 
     @GET
     @Path("/apikeys")
-    public Response getApiKeys(@Context HttpHeaders headers) {
+    public Response getApiKeys(@Context HttpHeaders headers,
+                               @QueryParam("includeValues") boolean includeValues) {
         String region = regionResolver.resolveRegion(headers);
         List<ApiKey> keys = service.getApiKeys(region);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        keys.forEach(k -> items.add(toApiKeyNode(k)));
+        keys.forEach(k -> {
+            ObjectNode node = toApiKeyNode(k);
+            if (!includeValues) {
+                node.remove("value");
+            }
+            items.add(node);
+        });
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/apikeys/{apiKeyId}")
+    public Response getApiKey(@Context HttpHeaders headers,
+                              @PathParam("apiKeyId") String apiKeyId,
+                              @QueryParam("includeValue") boolean includeValue) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode node = toApiKeyNode(service.getApiKey(region, apiKeyId));
+        if (!includeValue) {
+            node.remove("value");
+        }
+        return Response.ok(node.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @POST
@@ -1642,6 +1662,10 @@ public class ApiGatewayController {
         node.put("name", k.getName());
         node.put("value", k.getValue());
         node.put("enabled", k.isEnabled());
+        if (k.getTags() != null && !k.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            k.getTags().forEach(tags::put);
+        }
         return node;
     }
 

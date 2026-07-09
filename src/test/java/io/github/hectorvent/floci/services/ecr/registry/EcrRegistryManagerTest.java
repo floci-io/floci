@@ -41,6 +41,7 @@ class EcrRegistryManagerTest {
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
     private CurrentContainerNetworkResolver currentContainerNetworkResolver;
+    private EmulatorConfig.DockerConfig docker;
     private EcrRegistryManager manager;
 
     @BeforeEach
@@ -63,10 +64,13 @@ class EcrRegistryManagerTest {
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         EmulatorConfig.EcrServiceConfig ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
+        docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
         EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
         when(config.services().ecr()).thenReturn(ecr);
+        when(config.docker()).thenReturn(docker);
         when(config.storage()).thenReturn(storage);
+        when(docker.resourceNamespace()).thenReturn(Optional.empty());
         // Empty host-persistent-path selects named-volume mode (no host bind-mount logic).
         when(storage.hostPersistentPath()).thenReturn("");
         when(ecr.registryContainerName()).thenReturn(REGISTRY_NAME);
@@ -135,5 +139,13 @@ class EcrRegistryManagerTest {
         manager.ensureStarted();
 
         assertEquals(BASE_PORT, manager.effectivePort());
+    }
+
+    @Test
+    void httpClient_usesNamespacedRegistryContainerDnsWhenConfigured() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(docker.resourceNamespace()).thenReturn(Optional.of("run/one"));
+
+        assertEquals("http://floci-run-one-test-ecr-registry:5000", manager.httpClient().baseUrl());
     }
 }

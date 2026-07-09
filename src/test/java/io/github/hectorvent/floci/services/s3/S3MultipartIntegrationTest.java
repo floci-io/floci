@@ -43,6 +43,7 @@ class S3MultipartIntegrationTest {
             .header("x-amz-storage-class", "STANDARD_IA")
             .header("Content-Disposition", "attachment; filename=\"multipart.bin\"")
             .header("x-amz-server-side-encryption", "AES256")
+            .header("x-amz-checksum-algorithm", "SHA256")
         .when()
             .post("/" + BUCKET + "/" + KEY + "?uploads")
         .then()
@@ -157,7 +158,7 @@ class S3MultipartIntegrationTest {
             .body(containsString("<StorageClass>STANDARD_IA</StorageClass>"))
             .body(containsString("<ObjectParts>"))
             .body(containsString("<PartsCount>2</PartsCount>"))
-            .body(containsString("<ChecksumCRC64NVME>"));
+            .body(containsString("<ChecksumSHA256>"));
     }
 
     @Test

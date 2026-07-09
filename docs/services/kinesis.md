@@ -5,8 +5,9 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateStream` | Create a stream |
 | `DeleteStream` | Delete a stream |
 | `ListStreams` | List all streams |
@@ -17,19 +18,24 @@
 | `DescribeStreamConsumer` | Get consumer details |
 | `ListStreamConsumers` | List consumers for a stream |
 | `SubscribeToShard` | Subscribe to a shard for enhanced fan-out |
+| `AddTagsToStream` | Tag a stream |
+| `RemoveTagsFromStream` | Remove tags |
+| `ListTagsForStream` | List tags |
+| `StartStreamEncryption` | Enable KMS encryption |
+| `StopStreamEncryption` | Disable encryption |
+| `SplitShard` | Split a shard into two |
+| `MergeShards` | Merge two adjacent shards |
 | `PutRecord` | Write a single record |
 | `PutRecords` | Write up to 500 records |
 | `GetShardIterator` | Get an iterator for reading |
 | `GetRecords` | Read records from a shard |
-| `SplitShard` | Split a shard into two |
-| `MergeShards` | Merge two adjacent shards |
-| `AddTagsToStream` | Tag a stream |
-| `RemoveTagsFromStream` | Remove tags |
-| `ListTagsForStream` | List tags |
+| `ListShards` | - |
 | `IncreaseStreamRetentionPeriod` | Increase retention up to 8760 hours (365 days) |
 | `DecreaseStreamRetentionPeriod` | Decrease retention down to 24 hours |
-| `StartStreamEncryption` | Enable KMS encryption |
-| `StopStreamEncryption` | Disable encryption |
+| `EnableEnhancedMonitoring` | - |
+| `DisableEnhancedMonitoring` | - |
+| `UpdateStreamMode` | - |
+<!-- floci:actions:end -->
 
 ## Stream Addressing
 

@@ -20,6 +20,7 @@ public class CopyObjectOptions {
     private String copySourceSseCustomerKey;
     private String copySourceSseCustomerKeyMd5;
     private String acl;
+    private String checksumAlgorithm;
 
     public String getMetadataDirective() { return metadataDirective; }
     public CopyObjectOptions withMetadataDirective(String metadataDirective) { this.metadataDirective = metadataDirective; return this; }
@@ -71,4 +72,7 @@ public class CopyObjectOptions {
 
     public String getAcl() { return acl; }
     public CopyObjectOptions withAcl(String acl) { this.acl = acl; return this; }
+
+    public String getChecksumAlgorithm() { return checksumAlgorithm; }
+    public CopyObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }
 }

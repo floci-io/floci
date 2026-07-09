@@ -508,8 +508,7 @@ public class MemoryDbService {
     }
 
     private String buildArn(String region, String resourceType, String name) {
-        return "arn:aws:memorydb:" + region + ":" + regionResolver.getAccountId()
-                + ":" + resourceType + "/" + name;
+        return regionResolver.buildArn("memorydb", region, resourceType + "/" + name);
     }
 
     private String resolveEndpointHost() {

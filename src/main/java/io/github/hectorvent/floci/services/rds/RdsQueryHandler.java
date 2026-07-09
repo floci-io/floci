@@ -69,6 +69,9 @@ public class RdsQueryHandler {
                 case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params);
                 case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params);
                 case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params);
+                case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
+                case "DescribeDBProxies" -> handleDescribeDbProxies(params);
+                case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
                 case "AddTagsToResource" -> handleAddTagsToResource(params);
                 case "ListTagsForResource" -> handleListTagsForResource(params);
                 case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params);
@@ -584,6 +587,32 @@ public class RdsQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
+    }
+
+    // ── Snapshots & Proxies (not modeled — empty lists) ───────────────────────
+
+    private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params) {
+        // DB snapshots are not modeled; return the RDS Query API's wire-accurate empty
+        // result (empty <DBSnapshots> wrapper, no <Marker>) so SDK clients complete the
+        // read instead of failing with UnsupportedOperation.
+        String result = new XmlBuilder().start("DBSnapshots").end("DBSnapshots").build();
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBSnapshots", AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleDescribeDbProxies(MultivaluedMap<String, String> params) {
+        // DB proxies are not modeled; return the RDS Query API's wire-accurate empty
+        // result (empty <DBProxies> wrapper, no <Marker>) so SDK clients complete the
+        // read instead of failing with UnsupportedOperation.
+        String result = new XmlBuilder().start("DBProxies").end("DBProxies").build();
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBProxies", AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
+        // DB cluster snapshots are not modeled; return the RDS Query API's wire-accurate
+        // empty result (empty <DBClusterSnapshots> wrapper, no <Marker>) so SDK clients
+        // complete the read instead of failing with UnsupportedOperation.
+        String result = new XmlBuilder().start("DBClusterSnapshots").end("DBClusterSnapshots").build();
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterSnapshots", AwsNamespaces.RDS, result)).build();
     }
 
     // ── XML builders ──────────────────────────────────────────────────────────

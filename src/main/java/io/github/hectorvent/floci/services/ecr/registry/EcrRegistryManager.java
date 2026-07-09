@@ -109,11 +109,18 @@ public class EcrRegistryManager {
         return accountId + "/" + region + "/" + repoName;
     }
 
+    /**
+     * The registry endpoint reachable from other containers on the Docker network:
+     * the container name plus the container-internal port (not the published host port).
+     */
+    public String internalEndpoint() {
+        return "http://" + registryContainerName() + ":" + CONTAINER_INTERNAL_PORT;
+    }
+
     /** Returns a {@link RegistryHttpClient} bound to the current registry endpoint. */
     public RegistryHttpClient httpClient() {
         if (containerDetector.isRunningInContainer()) {
-            return new RegistryHttpClient("http://" + config.services().ecr().registryContainerName()
-                    + ":" + CONTAINER_INTERNAL_PORT);
+            return new RegistryHttpClient(internalEndpoint());
         }
         return new RegistryHttpClient("http://localhost:" + effectivePort());
     }
@@ -135,7 +142,7 @@ public class EcrRegistryManager {
         if (started) {
             return;
         }
-        String name = config.services().ecr().registryContainerName();
+        String name = registryContainerName();
 
         // Check for existing container to adopt
         var existing = lifecycleManager.findByName(name);
@@ -192,10 +199,15 @@ public class EcrRegistryManager {
         runReconcileOnce();
     }
 
+    private String registryContainerName() {
+        return ContainerStorageHelper.dockerName(config, config.services().ecr().registryContainerName());
+    }
+
     private void addPersistenceMounts(ContainerBuilder.Builder specBuilder, List<String> env) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            lifecycleManager.ensureVolume(NAMED_VOLUME);
-            specBuilder.withNamedVolume(NAMED_VOLUME, "/var/lib/registry");
+            String volumeName = ContainerStorageHelper.dockerName(config, NAMED_VOLUME);
+            lifecycleManager.ensureVolume(volumeName);
+            specBuilder.withNamedVolume(volumeName, "/var/lib/registry");
             return;
         }
 

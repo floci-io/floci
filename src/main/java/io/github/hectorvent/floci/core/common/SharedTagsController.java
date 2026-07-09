@@ -242,13 +242,13 @@ public class SharedTagsController {
     }
 
     private TagHandler resolveHandler(String arn) {
-        // arn:aws:<service>:<region>:<account>:<resource>
-        String[] parts = arn.split(":", 6);
-        if (parts.length < 6 || !"arn".equals(parts[0])) {
+        String serviceKey;
+        try {
+            serviceKey = AwsArnUtils.parse(arn).service();
+        } catch (IllegalArgumentException e) {
             throw new AwsException("BadRequestException",
                     "Invalid resource ARN: " + arn, 400);
         }
-        String serviceKey = parts[2];
         TagHandler handler = handlersByServiceKey.get(serviceKey);
         if (handler == null) {
             // Surface an unregistered service as an invalid-ARN error so floci's

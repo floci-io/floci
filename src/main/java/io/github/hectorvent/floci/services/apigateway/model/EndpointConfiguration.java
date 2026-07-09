@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.apigateway.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.util.ArrayList;
 import java.util.List;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
+@RegisterForReflection
 public class EndpointConfiguration {
 
     private List<EndpointType> types = new ArrayList<>();

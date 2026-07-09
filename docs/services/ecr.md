@@ -124,6 +124,13 @@ aws ecr delete-repository  --repository-name floci-it/app --force \
     --endpoint-url $AWS_ENDPOINT
 ```
 
+!!! note "Pulling from other containers (EKS, same-network consumers)"
+    The `localhost`-based repository URI only works from the host. From other containers
+    on the Docker network, the registry is reachable at `http://floci-ecr-registry:5000`
+    (container name + container-internal port — not the published `5100+` host port).
+    [Floci EKS](eks.md#pulling-images-from-floci-ecr) clusters get a containerd mirror
+    for this automatically, so Helm charts can reference the pushed URI as-is.
+
 ## SDK Example (Java)
 
 ```java

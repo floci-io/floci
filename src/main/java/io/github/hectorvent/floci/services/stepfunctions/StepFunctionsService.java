@@ -49,6 +49,11 @@ public class StepFunctionsService implements Resettable {
     // creating a JSONata state machine with any of these fields returns SCHEMA_VALIDATION_FAILED.
     private static final Set<String> JSONPATH_ONLY_FIELDS = Set.of(
             "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath");
+    private static final Set<String> ITEM_READER_RESOURCES = Set.of(
+            "arn:aws:states:::s3:getObject",
+            "arn:aws:states:::s3:listObjectsV2");
+    private static final Set<String> ITEM_READER_INPUT_TYPES = Set.of(
+            "MANIFEST", "JSON", "CSV", "JSONL", "PARQUET");
 
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -417,10 +422,10 @@ public class StepFunctionsService implements Resettable {
     private static final int MAX_DEFINITION_LENGTH = 1_048_576;
     private static final String PARSE_ERROR_MARKER = "INVALID_JSON_DESCRIPTION:";
 
-    // Parse the structured location out of the validator's flat error strings,
-    // which currently encode it as "...field 'X' is only supported... at /States/Y".
+    // Parse the structured location out of validator flat error strings,
+    // which currently encode it as "...field 'X' ... at /States/Y".
     // AWS's published Diagnostic.location format is "/States/<StateName>/<FieldName>".
-    private static final Pattern FIELD_PATTERN = Pattern.compile("field '([^']+)' is only supported");
+    private static final Pattern FIELD_PATTERN = Pattern.compile("field '([^']+)'");
     private static final Pattern LOCATION_SUFFIX_PATTERN = Pattern.compile(" at (/States/\\S+)$");
 
     /**
@@ -492,7 +497,11 @@ public class StepFunctionsService implements Resettable {
             if (locM.find() && fieldM.find()) {
                 // Build the structured location and strip the redundant suffix
                 // from the message, matching AWS's wire format.
-                location = locM.group(1) + "/" + fieldM.group(1);
+                location = locM.group(1);
+                String field = fieldM.group(1);
+                if (!location.endsWith("/" + field)) {
+                    location = location + "/" + field;
+                }
                 message = message.substring(0, locM.start()).trim();
             }
         }
@@ -551,6 +560,27 @@ public class StepFunctionsService implements Resettable {
                             + "' is only supported for the 'JSONPath' QueryLanguage at /States/" + stateName);
                 }
             }
+        }
+
+        if ("Map".equals(stateDef.path("Type").asText()) && stateDef.has("ItemReader")) {
+            validateItemReader(stateName, stateDef, errors);
+        }
+    }
+
+    private void validateItemReader(String stateName, JsonNode stateDef, List<String> errors) {
+        JsonNode itemReader = stateDef.get("ItemReader");
+        String resource = itemReader.path("Resource").asText(null);
+        if (resource != null && !ITEM_READER_RESOURCES.contains(resource)) {
+            errors.add("The field 'Resource' does not match any of the allowed values. Examples: "
+                    + "[arn:<partition>:states:::s3:getObject, arn:<partition>:states:::s3:listObjectsV2]"
+                    + " at /States/" + stateName + "/ItemReader/Resource");
+        }
+
+        String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
+        if (inputType != null && !ITEM_READER_INPUT_TYPES.contains(inputType)) {
+            errors.add("The field 'InputType' should have one of these values: "
+                    + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
+                    + " at /States/" + stateName + "/ItemReader/ReaderConfig/InputType");
         }
     }
 }

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -71,7 +72,7 @@ public class ElastiCacheContainerManager {
     public ElastiCacheContainerHandle start(String groupId, String image) {
         LOG.infov("Starting ElastiCache backend container for group: {0}", groupId);
 
-        String containerName = "floci-valkey-" + groupId;
+        String containerName = ContainerStorageHelper.resourceName(config, "valkey", null, groupId);
 
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);

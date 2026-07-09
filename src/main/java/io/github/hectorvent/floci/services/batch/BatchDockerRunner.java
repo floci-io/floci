@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.batch.model.BatchJob;
 import io.github.hectorvent.floci.services.batch.model.BatchKeyValue;
 import io.github.hectorvent.floci.services.batch.model.BatchResourceRequirement;
@@ -51,7 +52,7 @@ public class BatchDockerRunner {
         long startedAt = System.currentTimeMillis();
         String logStreamName = logStreamer.generateLogStreamName(
                 job.getJobDefinitionName() + "/default/" + job.getJobId());
-        String containerName = "floci-batch-" + job.getJobId() + "-" + attemptNumber;
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-batch-" + job.getJobId() + "-" + attemptNumber);
         Closeable logHandle = null;
         String containerId = null;
 

@@ -1,13 +1,16 @@
 package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -15,8 +18,12 @@ import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -41,6 +48,9 @@ public class EksClusterManager {
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
     private static final String WEBHOOK_CONFIG_PATH = WEBHOOK_CONFIG_DIR + "/" + WEBHOOK_CONFIG_FILE;
+    // Tar entry extracted at /etc; the archive path creates /etc/rancher/k3s, which does not
+    // exist yet in a created-but-not-started k3s container.
+    private static final String REGISTRIES_TAR_ENTRY = "rancher/k3s/registries.yaml";
     private static final String ENDPOINT_MODE_NETWORK = "network";
 
     private final ContainerBuilder containerBuilder;
@@ -48,6 +58,7 @@ public class EksClusterManager {
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final DockerHostResolver dockerHostResolver;
+    private final EcrRegistryManager ecrRegistryManager;
     private final EmulatorConfig config;
 
     @Inject
@@ -56,12 +67,14 @@ public class EksClusterManager {
                              ContainerDetector containerDetector,
                              PortAllocator portAllocator,
                              DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
                              EmulatorConfig config) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
         this.dockerHostResolver = dockerHostResolver;
+        this.ecrRegistryManager = ecrRegistryManager;
         this.config = config;
     }
 
@@ -72,7 +85,7 @@ public class EksClusterManager {
      */
     public void startCluster(Cluster cluster) {
         String image = config.services().eks().defaultImage();
-        String containerName = "floci-eks-" + cluster.getName();
+        String containerName = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
 
         LOG.infov("Starting k3s container for EKS cluster: {0} using image {1}",
                 cluster.getName(), image);
@@ -96,7 +109,7 @@ public class EksClusterManager {
         // socket (kine.sock) on macOS APFS, which returns EINVAL on chmod — crashing
         // k3s before it can start. Named volumes live in the Docker VM's Linux
         // filesystem, so chmod works correctly and data persists across container restarts.
-        String volumeName = "floci-eks-" + cluster.getName();
+        String volumeName = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
 
         List<String> serverArgs = new ArrayList<>(List.of("server",
                 "--disable=traefik",
@@ -136,6 +149,7 @@ public class EksClusterManager {
         if (webhookLocalFile != null) {
             copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
         }
+        injectEcrRegistryMirror(containerId, cluster.getName());
         ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
         // Public endpoint: see floci.services.eks.endpoint-mode. `host` (default) is the host-reachable
@@ -230,7 +244,7 @@ public class EksClusterManager {
             return;
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
-        lifecycleManager.removeVolume("floci-eks-" + cluster.getName());
+        lifecycleManager.removeVolume(ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName()));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
     }
 
@@ -284,6 +298,99 @@ public class EksClusterManager {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
         }
+    }
+
+    /**
+     * Generates and injects {@code /etc/rancher/k3s/registries.yaml} into the (created,
+     * not-yet-started) k3s container so its containerd can pull images pushed to the Floci ECR
+     * registry. Mirrors every repository hostname the emulator can mint — default account across
+     * the full region catalog, plus the path-style {@code localhost:<port>} form — to the registry
+     * container's in-network endpoint. Public registries are never matched. A failure disables the
+     * mirror for this cluster but does not abort its startup, matching the webhook contract.
+     */
+    void injectEcrRegistryMirror(String containerId, String clusterName) {
+        if (!config.services().eks().ecrRegistryMirror() || !config.services().ecr().enabled()) {
+            return;
+        }
+        try {
+            ecrRegistryManager.ensureStarted();
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} gets no ECR registry mirror: registry unavailable: {1}",
+                    clusterName, e.getMessage());
+            return;
+        }
+        List<String> regions = new ArrayList<>(AwsRegions.ALL);
+        if (!regions.contains(config.defaultRegion())) {
+            regions.add(config.defaultRegion());
+        }
+        String content = buildRegistriesYaml(config.defaultAccountId(), regions,
+                ecrRegistryManager.effectivePort(), ecrRegistryManager.internalEndpoint());
+        writeRegistriesYaml(clusterName, content);
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(REGISTRIES_TAR_ENTRY, content)))
+                    .withRemotePath("/etc")
+                    .exec();
+            LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}",
+                    ecrRegistryManager.internalEndpoint(), clusterName);
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "
+                    + "into the k3s container: {1}", clusterName, e.getMessage());
+        }
+    }
+
+    /** Best-effort local copy for inspection/debugging; the container copy streams from memory. */
+    private void writeRegistriesYaml(String clusterName, String content) {
+        Path localFile = Paths.get(config.services().eks().dataPath(), "registries", clusterName, "registries.yaml")
+                .toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(localFile.getParent());
+            Files.writeString(localFile, content);
+        } catch (IOException e) {
+            LOG.debugv("Could not write local registries.yaml copy for cluster {0}: {1}",
+                    clusterName, e.getMessage());
+        }
+    }
+
+    private static byte[] tarSingleFile(String entryName, String content) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] data = content.getBytes(StandardCharsets.UTF_8);
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
+                TarArchiveEntry entry = new TarArchiveEntry(entryName);
+                entry.setSize(data.length);
+                entry.setMode(0644);
+                tar.putArchiveEntry(entry);
+                tar.write(data);
+                tar.closeArchiveEntry();
+            }
+            return out.toByteArray();
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not build in-memory tar for " + entryName, e);
+        }
+    }
+
+    /**
+     * Builds the k3s registries.yaml content. One mirror entry per hostname-style repository URI
+     * ({@code <account>.dkr.ecr.<region>.localhost:<port>}) plus one for the path-style form
+     * ({@code localhost:<port>}), all pointing at the registry's in-network endpoint. k3s supports
+     * no partial wildcards and a {@code "*"} catch-all would also intercept public registries,
+     * so the hostnames are enumerated explicitly.
+     */
+    static String buildRegistriesYaml(String accountId, List<String> regions, int hostPort, String endpoint) {
+        StringBuilder yaml = new StringBuilder("mirrors:\n");
+        for (String region : regions) {
+            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + hostPort, endpoint);
+        }
+        appendMirror(yaml, "localhost:" + hostPort, endpoint);
+        return yaml.toString();
+    }
+
+    private static void appendMirror(StringBuilder yaml, String host, String endpoint) {
+        yaml.append("  \"").append(host).append("\":\n")
+                .append("    endpoint:\n")
+                .append("      - \"").append(endpoint).append("\"\n");
     }
 
     /** The Floci token-webhook URL as reachable from inside the k3s container. */

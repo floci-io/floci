@@ -14,6 +14,7 @@ public class LaunchTemplateData {
     private String instanceType;
     private String keyName;
     private String userData;
+    private String encodedUserData;
     private String iamInstanceProfileArn;
     private List<String> securityGroupIds = new ArrayList<>();
     private List<Tag> instanceTags = new ArrayList<>();
@@ -25,6 +26,7 @@ public class LaunchTemplateData {
         this.instanceType = source.instanceType;
         this.keyName = source.keyName;
         this.userData = source.userData;
+        this.encodedUserData = source.encodedUserData;
         this.iamInstanceProfileArn = source.iamInstanceProfileArn;
         this.securityGroupIds = new ArrayList<>(source.securityGroupIds);
         this.instanceTags = new ArrayList<>(source.instanceTags);
@@ -41,6 +43,9 @@ public class LaunchTemplateData {
 
     public String getUserData() { return userData; }
     public void setUserData(String userData) { this.userData = userData; }
+
+    public String getEncodedUserData() { return encodedUserData; }
+    public void setEncodedUserData(String encodedUserData) { this.encodedUserData = encodedUserData; }
 
     public String getIamInstanceProfileArn() { return iamInstanceProfileArn; }
     public void setIamInstanceProfileArn(String iamInstanceProfileArn) { this.iamInstanceProfileArn = iamInstanceProfileArn; }

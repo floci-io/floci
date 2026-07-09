@@ -17,6 +17,7 @@ public class DbSubnetGroup {
     private String subnetGroupStatus = "Complete";
     private List<String> subnetIds = new ArrayList<>();
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public DbSubnetGroup() {}
 
@@ -61,4 +62,7 @@ public class DbSubnetGroup {
                 ? new LinkedHashMap<>(subnetAvailabilityZones)
                 : new LinkedHashMap<>();
     }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }
 }

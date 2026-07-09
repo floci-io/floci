@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.apigateway.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /**
@@ -14,6 +16,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
  * mean "no override").
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
+@RegisterForReflection
 public class MethodSetting {
 
     private static final int UNSET_THROTTLING_BURST_LIMIT = -1;

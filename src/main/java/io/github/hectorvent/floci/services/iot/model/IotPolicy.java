@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.iot.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
+@RegisterForReflection
 public class IotPolicy {
     private String policyName;
     private String policyArn;
@@ -30,6 +33,7 @@ public class IotPolicy {
     public Map<String, String> getTags() { return tags == null ? Map.of() : tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags == null ? new TreeMap<>() : new TreeMap<>(tags); }
 
+    @RegisterForReflection
     public static class PolicyVersion {
         private String versionId;
         private String document;

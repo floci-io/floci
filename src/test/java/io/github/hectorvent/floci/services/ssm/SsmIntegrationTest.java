@@ -316,6 +316,50 @@ class SsmIntegrationTest {
             .body("BaselineId", startsWith("pb-"));
     }
 
+    // ── Read-only list operations for resources not modeled (empty results) ──
+
+    @Test
+    void listDocuments_returnsEmptyList() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListDocuments")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentIdentifiers.size()", equalTo(0))
+            .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    void listAssociations_returnsEmptyList() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListAssociations")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Associations.size()", equalTo(0))
+            .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    void describeMaintenanceWindows_returnsEmptyList() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeMaintenanceWindows")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WindowIdentities.size()", equalTo(0))
+            .body("$", not(hasKey("NextToken")));
+    }
+
     @Test
     void unsupportedOperation() {
         given()

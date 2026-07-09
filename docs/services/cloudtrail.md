@@ -8,16 +8,19 @@ Floci emulates the AWS CloudTrail management API. Trails, their event selectors,
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateTrail` | Creates a trail and returns its ARN |
 | `UpdateTrail` | Updates the settings of an existing trail |
-| `DeleteTrail` | Deletes a trail |
 | `DescribeTrails` | Returns the settings for one or more trails |
-| `GetTrailStatus` | Returns the logging status of a trail |
 | `StartLogging` | Starts logging for a trail |
 | `StopLogging` | Stops logging for a trail |
+| `DeleteTrail` | Deletes a trail |
+| `GetTrailStatus` | Returns the logging status of a trail |
 | `PutEventSelectors` | Configures the event selectors for a trail |
+| `LookupEvents` | - |
+<!-- floci:actions:end -->
 
 ## Example
 

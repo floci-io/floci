@@ -7,14 +7,20 @@ Floci emulates Amazon Data Firehose for streaming data ingestion and delivery to
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateDeliveryStream` | Creates a new delivery stream |
+| `UpdateDestination` | - |
 | `DescribeDeliveryStream` | Returns metadata about a stream |
 | `ListDeliveryStreams` | Lists all delivery streams |
 | `DeleteDeliveryStream` | Deletes a delivery stream |
 | `PutRecord` | Writes a single data record to the stream |
 | `PutRecordBatch` | Writes multiple data records to the stream |
+| `TagDeliveryStream` | - |
+| `UntagDeliveryStream` | - |
+| `ListTagsForDeliveryStream` | - |
+<!-- floci:actions:end -->
 
 ## How it works
 

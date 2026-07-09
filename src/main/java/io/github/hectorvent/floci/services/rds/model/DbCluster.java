@@ -32,6 +32,7 @@ public class DbCluster {
     private String dbClusterArn;
     private Instant createdAt;
     private int proxyPort;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     private String dockerVolumeName;
     private String volumeId;
@@ -132,6 +133,9 @@ public class DbCluster {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }
 
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }

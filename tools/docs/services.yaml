@@ -1,0 +1,123 @@
+# Registry of services whose Supported Actions tables are auto-generated.
+#
+# The action LIST comes from handler source (mode: switch|rest); the Description
+# column is hand-written and PRESERVED across regen, keyed by action name.
+# Per-service overrides: rename_actions (method->canonical), exclude_actions.
+#
+# Phase 1 covers single-table switch-mode services. REST controllers, multi-table
+# docs, mixed-mode (ses), S3 query-string dispatch, and non-tabular docs are tracked
+# as follow-ups; their switch handlers are acknowledged in deferred_handlers below so
+# the new-service sentinel only fires on genuinely unregistered handlers.
+
+services:
+  - service: acm
+    doc: docs/services/acm.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/acm/AcmJsonHandler.java, mode: switch }
+  - service: athena
+    doc: docs/services/athena.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/athena/AthenaJsonHandler.java, mode: switch }
+  - service: cloudformation
+    doc: docs/services/cloudformation.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/cloudformation/CloudFormationQueryHandler.java, mode: switch }
+  - service: cloudtrail
+    doc: docs/services/cloudtrail.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailJsonHandler.java, mode: switch }
+  - service: docdb
+    doc: docs/services/docdb.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/docdb/DocDbQueryHandler.java, mode: switch }
+  - service: elasticache
+    doc: docs/services/elasticache.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/elasticache/ElastiCacheQueryHandler.java, mode: switch }
+  - service: emr
+    doc: docs/services/emr.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/emr/EmrHandler.java, mode: switch }
+  - service: eventbridge
+    doc: docs/services/eventbridge.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/eventbridge/EventBridgeHandler.java, mode: switch }
+  - service: firehose
+    doc: docs/services/firehose.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/firehose/FirehoseJsonHandler.java, mode: switch }
+  - service: kinesis
+    doc: docs/services/kinesis.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/kinesis/KinesisJsonHandler.java, mode: switch }
+  - service: kms
+    doc: docs/services/kms.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/kms/KmsJsonHandler.java, mode: switch }
+  - service: memorydb
+    doc: docs/services/memorydb.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/memorydb/MemoryDbHandler.java, mode: switch }
+  - service: neptune
+    doc: docs/services/neptune.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/neptune/NeptuneQueryHandler.java, mode: switch }
+  - service: rds
+    doc: docs/services/rds.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
+  - service: secretsmanager
+    doc: docs/services/secrets-manager.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/secretsmanager/SecretsManagerJsonHandler.java, mode: switch }
+  - service: sqs
+    doc: docs/services/sqs.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/sqs/SqsJsonHandler.java, mode: switch }
+      - { path: src/main/java/io/github/hectorvent/floci/services/sqs/SqsQueryHandler.java, mode: switch }
+  - service: stepfunctions
+    doc: docs/services/step-functions.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/stepfunctions/StepFunctionsJsonHandler.java, mode: switch }
+  - service: wafv2
+    doc: docs/services/wafv2.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/wafv2/WafV2Handler.java, mode: switch }
+
+# Switch handlers that exist but are intentionally not yet covered (see reasons).
+# A NEW switch handler not listed here and not registered above fails `--strict`.
+deferred_handlers:
+  - { path: src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2JsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/bcmdataexports/BcmDataExportsJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/ce/CostExplorerJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/cloudcontrol/CloudControlJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/cloudmap/CloudMapHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/logs/CloudWatchLogsHandler.java }  # multi-table doc (nested handler)
+  - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java }  # multi-table doc (nested handler)
+  - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java }  # multi-table doc (nested handler)
+  - { path: src/main/java/io/github/hectorvent/floci/services/codebuild/CodeBuildJsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/codedeploy/CodeDeployJsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java }  # non-tabular doc (grouped/inline); separate docs effort
+  - { path: src/main/java/io/github/hectorvent/floci/services/configservice/ConfigServiceJsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/cur/CurJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbStreamsJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/ec2/Ec2QueryHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/ecr/EcrJsonHandler.java }  # doc packs multiple actions per row (`A` / `B`) + REST endpoints; needs de-grouping
+  - { path: src/main/java/io/github/hectorvent/floci/services/ecs/EcsJsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/elasticbeanstalk/ElasticBeanstalkQueryHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/elbv2/ElbV2QueryHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/glue/GlueJsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/iam/IamQueryHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java }  # sts (lives in iam package); single-table, registerable next
+  - { path: src/main/java/io/github/hectorvent/floci/services/pricing/PricingJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/ses/SesQueryHandler.java }  # mixed-mode (Query + REST surface)
+  - { path: src/main/java/io/github/hectorvent/floci/services/sns/SnsJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/sns/SnsQueryHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/ssm/Ec2MessagesJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/ssm/SsmJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/textract/TextractJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/transcribe/TranscribeJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/transfer/TransferHandler.java }  # multi-table doc

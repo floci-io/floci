@@ -77,6 +77,40 @@ public class S3ControlController {
     }
 
     /**
+     * ListAccessPoints — returns the account's S3 access points.
+     *
+     * <p>The emulator has no access-point store. Per the S3 Control API, the only success
+     * response for ListAccessPoints is HTTP 200 with a {@code <ListAccessPointsResult>}
+     * carrying an {@code <AccessPointList>} — empty when the account has none — and an
+     * optional {@code <NextToken>}. 404 is not a documented outcome for this operation, so
+     * without this route an AWS SDK client cannot map the response to the expected result
+     * or to a known error and the read fails (and, depending on the client's retry config,
+     * may burn its retry budget on the unexpected status first). We therefore return the
+     * documented empty list: an {@code <AccessPointList/>} with no {@code <NextToken>},
+     * which ends pagination immediately.
+     *
+     * GET /v20180820/accesspoint
+     * Header: x-amz-account-id
+     */
+    @GET
+    @Path("/accesspoint")
+    public Response listAccessPoints(
+            @HeaderParam("x-amz-account-id") String accountId,
+            @QueryParam("bucket") String bucket,
+            @QueryParam("maxResults") String maxResults,
+            @QueryParam("nextToken") String nextToken) {
+
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("ListAccessPointsResult", AwsNamespaces.S3_CONTROL)
+                .start("AccessPointList")
+                .end("AccessPointList")
+                .end("ListAccessPointsResult")
+                .build();
+        return Response.ok(xml).build();
+    }
+
+    /**
      * TagResource — replaces all tags on the specified S3 bucket.
      *
      * POST /v20180820/tags/{resourceArn+}

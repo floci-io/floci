@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -864,13 +865,15 @@ public class ApiGatewayV2Service {
         if (resourceArn == null || resourceArn.isBlank()) {
             throw new AwsException("BadRequestException", "ResourceArn must not be blank", 400);
         }
-        String[] parts = resourceArn.split(":");
-        if (parts.length < 6) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
             throw new AwsException("BadRequestException",
                     "Invalid ResourceArn format: " + resourceArn, 400);
         }
-        String region = parts[3];
-        String resource = parts[5]; // e.g. "/apis/abc1234567"
+        String region = arn.region();
+        String resource = arn.resource(); // e.g. "/apis/abc1234567"
         int lastSlash = resource.lastIndexOf('/');
         if (lastSlash < 0 || lastSlash == resource.length() - 1) {
             throw new AwsException("BadRequestException",

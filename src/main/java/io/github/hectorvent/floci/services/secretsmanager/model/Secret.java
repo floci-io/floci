@@ -29,6 +29,7 @@ public class Secret {
     private Instant lastRotatedDate;
     private Instant nextRotationDate;
 
+    @RegisterForReflection
     public record RotationRules(
             @JsonProperty("AutomaticallyAfterDays") Integer automaticallyAfterDays,
             @JsonProperty("Duration") String duration,
@@ -38,6 +39,7 @@ public class Secret {
     public Secret() {
     }
 
+    @RegisterForReflection
     public record Tag(
             @JsonProperty("Key") String key,
             @JsonProperty("Value") String value) {

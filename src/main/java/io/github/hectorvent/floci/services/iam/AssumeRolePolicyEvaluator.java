@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -185,6 +186,6 @@ public class AssumeRolePolicyEvaluator {
      */
     private static String assumedRoleToRoleArn(String arn) {
         var m = ASSUMED_ROLE_ARN.matcher(arn);
-        return m.matches() ? "arn:aws:iam::" + m.group(1) + ":role/" + m.group(2) : null;
+        return m.matches() ? AwsArnUtils.Arn.of("iam", "", m.group(1), "role/" + m.group(2)).toString() : null;
     }
 }

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -67,7 +68,7 @@ public class MemoryDbContainerManager {
     public MemoryDbContainerHandle start(String clusterName, String image) {
         LOG.infov("Starting MemoryDB backend container for cluster: {0}", clusterName);
 
-        String containerName = "floci-memorydb-" + clusterName;
+        String containerName = ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
 
         lifecycleManager.removeIfExists(containerName);
 

@@ -168,6 +168,7 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
 
   services:
@@ -354,6 +355,7 @@ floci:
       keep-running-on-shutdown: false
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
+      ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
     elbv2:
       enabled: true
       mock: false

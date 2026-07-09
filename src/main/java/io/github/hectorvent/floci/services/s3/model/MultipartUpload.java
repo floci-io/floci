@@ -21,6 +21,7 @@ public class MultipartUpload {
     private String sseCustomerAlgorithm;
     private String sseCustomerKeyMd5;
     private String acl;
+    private String checksumAlgorithm;
     private Map<String, String> metadata;
     private Instant initiated;
     private final Map<Integer, Part> parts = new ConcurrentHashMap<>();
@@ -69,6 +70,9 @@ public class MultipartUpload {
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
+
+    public String getChecksumAlgorithm() { return checksumAlgorithm; }
+    public void setChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; }
 
     public Map<String, String> getMetadata() { return metadata; }
     public void setMetadata(Map<String, String> metadata) { this.metadata = metadata; }

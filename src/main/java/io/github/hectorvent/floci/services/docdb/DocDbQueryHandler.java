@@ -35,6 +35,7 @@ public class DocDbQueryHandler {
             return switch (action) {
                 case "CreateDBCluster"    -> handleCreateDbCluster(params);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
+                case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
                 case "DeleteDBCluster"    -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster"    -> handleModifyDbCluster(params);
                 case "CreateDBInstance"   -> handleCreateDbInstance(params);
@@ -92,6 +93,14 @@ public class DocDbQueryHandler {
         }
         xml.end("DBClusters").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
+        // Snapshots are not modeled by the emulator; return the wire-accurate empty result
+        // the DocDB/RDS Query API uses (empty <DBClusterSnapshots/>, no <Marker>) so SDK
+        // clients complete the read instead of failing on an unsupported action.
+        XmlBuilder xml = new XmlBuilder().start("DBClusterSnapshots").end("DBClusterSnapshots");
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterSnapshots", AwsNamespaces.RDS, xml.build())).build();
     }
 
     private Response handleDeleteDbCluster(MultivaluedMap<String, String> params) {
