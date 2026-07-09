@@ -145,8 +145,8 @@ public class EksClusterManager {
             // slave mount") — real EKS/kubeadm nodes don't hit this since they're VMs,
             // not nested containers. `mount --make-rshared /` before k3s starts fixes
             // it; kind's own node image runs the same fix in its entrypoint for the
-            // same reason. The image has no bash, only busybox sh — RSHARE_ENTRYPOINT
-            // is written against sh builtins only.
+            // same reason. RSHARE_ENTRYPOINT is POSIX sh-compatible (no bashisms) — the
+            // k3s image has no bash, only busybox sh.
             specBuilder.withEntrypoint(RSHARE_ENTRYPOINT);
             specBuilder.withCmd(buildRshareWrappedCmd(serverArgs));
         } else {
@@ -279,11 +279,13 @@ public class EksClusterManager {
     /**
      * Overrides the image's default {@code ["/bin/k3s"]} entrypoint so a {@code mount
      * --make-rshared /} can run immediately before k3s starts (see the disableCni branch
-     * in {@link #startCluster} for why). Written against sh builtins only — the k3s image
-     * has no bash.
+     * in {@link #startCluster} for why). POSIX sh-compatible — the k3s image has no bash.
+     * A failed mount is logged to stderr rather than silently ignored, since it means the
+     * external CNI's BPF filesystem mount will fail later in a much more confusing way.
      */
     static final List<String> RSHARE_ENTRYPOINT = List.of("sh", "-c",
-            "mount --make-rshared / 2>/dev/null; exec /bin/k3s \"$@\"");
+            "mount --make-rshared / || echo 'floci: WARN: mount --make-rshared / failed; "
+                    + "external CNI may not work' >&2; exec /bin/k3s \"$@\"");
 
     /**
      * Builds the CMD to pair with {@link #RSHARE_ENTRYPOINT}: an unused $0 placeholder

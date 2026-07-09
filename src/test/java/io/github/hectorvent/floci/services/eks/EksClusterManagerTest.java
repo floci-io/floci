@@ -125,13 +125,24 @@ class EksClusterManagerTest {
     }
 
     @Test
-    void rshareEntrypointUsesOnlyShBuiltins() {
+    void rshareEntrypointIsPosixShCompatible() {
         String script = EksClusterManager.RSHARE_ENTRYPOINT.get(2);
 
         assertEquals(List.of("sh", "-c"), EksClusterManager.RSHARE_ENTRYPOINT.subList(0, 2));
         assertTrue(script.contains("mount --make-rshared /"));
         assertTrue(script.contains("exec /bin/k3s"));
         assertFalse(script.contains("bash"), "the k3s image has no bash, only busybox sh");
+    }
+
+    @Test
+    void rshareEntrypointWarnsOnStderrWhenMountFails() {
+        String script = EksClusterManager.RSHARE_ENTRYPOINT.get(2);
+
+        // A failed mount must be surfaced, not silently swallowed, so a later CNI failure
+        // is traceable back to this step instead of looking unrelated.
+        assertTrue(script.contains("|| echo"));
+        assertTrue(script.contains(">&2"));
+        assertFalse(script.contains("2>/dev/null"));
     }
 
     @Test
