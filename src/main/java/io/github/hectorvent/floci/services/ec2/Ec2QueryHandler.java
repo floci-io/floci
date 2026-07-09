@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -207,6 +208,11 @@ public class Ec2QueryHandler {
             result.addAll(getList(p, prefix));
         }
         return result;
+    }
+
+    private String firstPresent(MultivaluedMap<String, String> p, String first, String second) {
+        String value = p.getFirst(first);
+        return value != null && !value.isBlank() ? value : p.getFirst(second);
     }
 
     private int parseIntParam(MultivaluedMap<String, String> p, String name, int defaultValue) {
@@ -1742,6 +1748,7 @@ public class Ec2QueryHandler {
     // ─── Launch Template handlers ─────────────────────────────────────────────
 
     private Response handleCreateLaunchTemplate(MultivaluedMap<String, String> p, String region) {
+        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
         LaunchTemplate launchTemplate = service.createLaunchTemplate(
                 region,
                 p.getFirst("LaunchTemplateName"),
@@ -1749,7 +1756,8 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.InstanceType"),
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                decodeUserData(encodedUserData),
+                encodedUserData,
                 resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseTagsForResource(p, "launch-template"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
@@ -1762,6 +1770,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleCreateLaunchTemplateVersion(MultivaluedMap<String, String> p, String region) {
+        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
         LaunchTemplate launchTemplate = service.createLaunchTemplateVersion(
                 region,
                 p.getFirst("LaunchTemplateId"),
@@ -1771,7 +1780,8 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.InstanceType"),
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                decodeUserData(encodedUserData),
+                encodedUserData,
                 resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
@@ -1822,7 +1832,7 @@ public class Ec2QueryHandler {
                 region,
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
-                p.getFirst("DefaultVersion"));
+                firstPresent(p, "SetDefaultVersion", "DefaultVersion"));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2082,7 +2092,7 @@ public class Ec2QueryHandler {
         if (name == null || name.isBlank()) {
             return null;
         }
-        return "arn:aws:iam::" + config.defaultAccountId() + ":instance-profile/" + name;
+        return AwsArnUtils.Arn.of("iam", "", config.defaultAccountId(), "instance-profile/" + name).toString();
     }
 
     private String vpcXml(Vpc vpc) {
@@ -2290,8 +2300,8 @@ public class Ec2QueryHandler {
         if (launchTemplate.getKeyName() != null) {
             xml.elem("keyName", launchTemplate.getKeyName());
         }
-        if (launchTemplate.getUserData() != null) {
-            xml.elem("userData", launchTemplate.getUserData());
+        if (launchTemplate.getEncodedUserData() != null) {
+            xml.elem("userData", launchTemplate.getEncodedUserData());
         }
         if (launchTemplate.getIamInstanceProfileArn() != null) {
             xml.start("iamInstanceProfile")

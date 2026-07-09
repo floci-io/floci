@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import com.github.dockerjava.api.exception.DockerClientException;
@@ -111,7 +112,7 @@ public class FlociUiManager {
         // Clear any error from a prior failed attempt so status() reports this retry
         // as in-progress rather than surfacing the stale failure.
         this.lastError = null;
-        String name = config.services().ui().containerName();
+        String name = ContainerStorageHelper.dockerName(config, config.services().ui().containerName());
 
         Optional<Container> existing = lifecycleManager.findByName(name);
         if (existing.isPresent()) {

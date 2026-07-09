@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
@@ -147,6 +149,39 @@ class Ec2Tests {
         DescribeImagesResponse resp = ec2.describeImages();
         assertThat(resp.images()).isNotEmpty();
         assertThat(resp.images()).allMatch(img -> img.imageId().startsWith("ami-"));
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeLaunchTemplateVersions - user data readback")
+    void describeLaunchTemplateVersionsReturnsEncodedUserData() {
+        String encodedUserData = Base64.getEncoder()
+                .encodeToString("#!/bin/sh\necho sdk-launch-template\n".getBytes(StandardCharsets.UTF_8));
+        String launchTemplateId = ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
+                .launchTemplateName("sdk-user-data-readback")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .userData(encodedUserData)
+                        .build())
+                .build()).launchTemplate().launchTemplateId();
+
+        try {
+            DescribeLaunchTemplateVersionsResponse described = ec2.describeLaunchTemplateVersions(
+                    DescribeLaunchTemplateVersionsRequest.builder()
+                            .launchTemplateId(launchTemplateId)
+                            .versions("$Latest")
+                            .build());
+
+            assertThat(described.launchTemplateVersions()).hasSize(1);
+            assertThat(described.launchTemplateVersions().get(0).launchTemplateData().userData())
+                    .isEqualTo(encodedUserData);
+        }
+        finally {
+            ec2.deleteLaunchTemplate(DeleteLaunchTemplateRequest.builder()
+                    .launchTemplateId(launchTemplateId)
+                    .build());
+        }
     }
 
     @Test

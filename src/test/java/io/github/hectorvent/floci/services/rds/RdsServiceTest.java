@@ -281,6 +281,93 @@ class RdsServiceTest {
     }
 
     @Test
+    void dbSubnetGroupTagsRoundTripAndMutateByArn() {
+        rdsService.createDbSubnetGroup(
+                "sample-db-subnets", "test", java.util.List.of("subnet-default-a", "subnet-default-b"));
+        String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:sample-db-subnets";
+
+        // A subnet group with no tags must list cleanly — previously this threw DBInstanceNotFound (404)
+        // because every ResourceName was resolved as a DB instance.
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(arn));
+
+        rdsService.addTagsToResource(arn, java.util.Map.of("Name", "sample-db-subnets"));
+        assertEquals(java.util.Map.of("Name", "sample-db-subnets"),
+                rdsService.listTagsForResource(arn));
+
+        rdsService.removeTagsFromResource(arn, java.util.List.of("Name"));
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(arn));
+    }
+
+    @Test
+    void dbSubnetGroupTagsSurviveModify() {
+        rdsService.createDbSubnetGroup(
+                "sample-db-subnets", "test", java.util.List.of("subnet-default-a", "subnet-default-b"));
+        String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:sample-db-subnets";
+        rdsService.addTagsToResource(arn, java.util.Map.of("Name", "sample-db-subnets"));
+
+        rdsService.modifyDbSubnetGroup("sample-db-subnets", java.util.List.of("subnet-default-a"));
+
+        assertEquals(java.util.Map.of("Name", "sample-db-subnets"),
+                rdsService.listTagsForResource(arn));
+    }
+
+    @Test
+    void listTagsForMissingSubnetGroupReturnsSubnetGroupNotFound() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:subgrp:missing"));
+
+        assertEquals("DBSubnetGroupNotFoundFault", exception.getErrorCode());
+    }
+
+    @Test
+    void dbClusterTagsRoundTripByArn() {
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "postgres", "13",
+                "admin", "password", "dbname", false, null);
+
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(cluster.getDbClusterArn()));
+
+        rdsService.addTagsToResource(cluster.getDbClusterArn(), java.util.Map.of("env", "test"));
+        assertEquals(java.util.Map.of("env", "test"),
+                rdsService.listTagsForResource(cluster.getDbClusterArn()));
+    }
+
+    @Test
+    void tagOperationsRejectUnsupportedResourceArn() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:og:some-option-group"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+        // The type is valid on real AWS; the message must present this as a Floci limitation.
+        assertTrue(exception.getMessage().contains("not yet implemented by Floci"));
+    }
+
+    @Test
+    void tagOperationsRejectTypelessRdsArn() {
+        // Real AWS rejects an RDS ARN whose resource part is not <type>:<id> with InvalidParameterValue;
+        // previously this fell back to a DB-instance lookup and returned DBInstanceNotFound.
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:mydb"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+    }
+
+    @Test
+    void tagOperationsRejectNonRdsArn() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:s3:::some-bucket"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+    }
+
+    @Test
+    void tagOperationsRejectMalformedArn() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:incomplete"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+    }
+
+    @Test
     void createDbInstanceRejectsMissingDbSubnetGroupBeforeStartingRuntime() {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.createDbInstance("mydb", "postgres", "13",

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ce.enumerator;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.ResourceUsageEnumerator;
 import io.github.hectorvent.floci.core.common.UsageLine;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -76,7 +77,7 @@ public class S3UsageEnumerator implements ResourceUsageEnumerator {
                     STANDARD_STORAGE_USAGE_TYPE, "StandardStorage",
                     UsageLine.RECORD_TYPE_USAGE,
                     "000000000000",
-                    "arn:aws:s3:::" + bucket.getName(),
+                    AwsArnUtils.Arn.of("s3", "", "", bucket.getName()).toString(),
                     tags,
                     gbMonths,
                     "GB-Mo"));

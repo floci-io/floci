@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.apigateway.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.util.HashMap;
 import java.util.Map;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
+@RegisterForReflection
 public class Integration {
 
     private String type;          // MOCK, HTTP, AWS, HTTP_PROXY, AWS_PROXY

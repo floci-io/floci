@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.memorydb;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -59,6 +60,9 @@ class MemoryDbServiceTest {
         when(mdbConfig.defaultImage()).thenReturn("valkey/valkey:8");
         when(config.hostname()).thenReturn(Optional.of("localhost"));
         when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(regionResolver.buildArn(anyString(), anyString(), anyString())).thenAnswer(inv ->
+                AwsArnUtils.Arn.of(inv.getArgument(0), inv.getArgument(1),
+                        "000000000000", inv.getArgument(2)).toString());
 
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
         when(containerManager.start(anyString(), anyString()))
