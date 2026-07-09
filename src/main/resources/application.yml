@@ -356,6 +356,13 @@ floci:
       keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
+      backend: stub
+      proxy:
+        passthrough: false
+        # url: http://localhost:11434/v1
+        # api-key: sk-...
+        # default-model: llama3
+        # model-mapping: "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"
     eks:
       enabled: true
       mock: false
