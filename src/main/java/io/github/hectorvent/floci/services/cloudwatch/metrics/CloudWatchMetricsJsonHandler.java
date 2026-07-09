@@ -194,7 +194,7 @@ public class CloudWatchMetricsJsonHandler {
             if (a.getStateValue() != null) node.put("StateValue", a.getStateValue());
             if (a.getStateReason() != null) node.put("StateReason", a.getStateReason());
             if (a.getStateReasonData() != null) node.put("StateReasonData", a.getStateReasonData());
-            if (a.getStateUpdatedTimestamp() >  0) node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+            node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
 
         }
         return Response.ok(response).build();
