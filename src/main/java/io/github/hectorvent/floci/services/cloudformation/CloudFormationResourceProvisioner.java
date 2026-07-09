@@ -272,6 +272,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
                 case "AWS::Events::EventBus" -> provisionEventBus(resource, properties, engine, region, stackName);
+                case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(resource, properties, engine, region);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
                 case "AWS::ApiGateway::Authorizer" -> provisionApiGatewayAuthorizer(resource, properties, engine, region);
@@ -427,6 +428,7 @@ public class CloudFormationResourceProvisioner {
             case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
+            case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
             case "AWS::ECR::Repository" ->
@@ -2214,6 +2216,45 @@ public class CloudFormationResourceProvisioner {
             eventBridgeService.deleteEventBus(name, region);
         } catch (Exception e) {
             LOG.debugv("Could not delete event bus {0}: {1}", name, e.getMessage());
+        }
+    }
+
+    private void provisionEventBusPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                         String region) {
+        String busName = resolveOrDefault(props, "EventBusName", engine, "default");
+        String statementId = resolveOptional(props, "StatementId", engine);
+        if (statementId == null || statementId.isBlank()) {
+            throw new AwsException("ValidationException", "EventBusPolicy StatementId is required.", 400);
+        }
+
+        // Individual form: Action + Principal (+ optional Condition {Type, Key, Value}).
+        String action = resolveOptional(props, "Action", engine);
+        String principal = resolveOptional(props, "Principal", engine);
+        String conditionJson = null;
+        if (props != null && props.has("Condition") && !props.get("Condition").isNull()) {
+            JsonNode c = engine.resolveNode(props.get("Condition"));
+            String type = c.path("Type").asText(null);
+            String key = c.path("Key").asText(null);
+            String value = c.path("Value").asText(null);
+            if (type != null && key != null) {
+                ObjectNode condition = objectMapper.createObjectNode();
+                condition.set(type, objectMapper.createObjectNode().put(key, value));
+                conditionJson = condition.toString();
+            }
+        }
+        eventBridgeService.putPermission(busName, action, principal, statementId, conditionJson, null, region);
+
+        r.setPhysicalId(busName + "|" + statementId);
+    }
+
+    private void removeEventBusPolicySafe(String physicalId, String region) {
+        try {
+            int sep = physicalId.lastIndexOf('|');
+            String busName = sep >= 0 ? physicalId.substring(0, sep) : "default";
+            String statementId = sep >= 0 ? physicalId.substring(sep + 1) : physicalId;
+            eventBridgeService.removePermission(busName, statementId, false, region);
+        } catch (Exception e) {
+            LOG.debugv("Could not remove event bus policy {0}: {1}", physicalId, e.getMessage());
         }
     }
 

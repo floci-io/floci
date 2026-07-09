@@ -6954,4 +6954,50 @@ class CloudFormationIntegrationTest {
             .body(containsString("hello"));
     }
 
+    @Test
+    void createStack_withEventBusPolicyIndividualForm_writesStatement() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-policy-bus" }
+                },
+                "MyPolicy": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "AllowAcct",
+                    "Action": "events:PutEvents",
+                    "Principal": "111122223333"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbuspolicy-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eventbuspolicy-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-policy-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Policy", containsString("AllowAcct"))
+            .body("Policy", containsString("111122223333"));
+    }
+
 }
