@@ -6629,6 +6629,69 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void rollbackStack_customBusWithRule_rollsBackBusAndRule() {
+        // RbBus provisions first, RbRule (on that custom bus) second, then BadSecret fails
+        // (SecretString + GenerateSecretString is invalid), forcing a CREATE rollback. The rule
+        // and its custom bus must both be cleaned up, not leaked.
+        String failingTemplate = """
+            {
+              "Resources": {
+                "RbBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-rb-bus" }
+                },
+                "RbRule": {
+                  "Type": "AWS::Events::Rule",
+                  "DependsOn": "RbBus",
+                  "Properties": {
+                    "Name": "cfn-rb-rule",
+                    "EventBusName": { "Ref": "RbBus" },
+                    "EventPattern": { "source": ["rb.test"] }
+                  }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "RbRule",
+                  "Properties": {
+                    "Name": "cfn-rb-secret",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-rb-stack")
+            .formParam("TemplateBody", failingTemplate)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-rb-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+
+        // The rule created on the custom bus was rolled back...
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-rb-rule\",\"EventBusName\":\"cfn-rb-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+
+        // ...and so was the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-rb-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
     void createStack_resourceFailure_setsRollbackComplete_singleResource() {
         // A lone failing resource still moves the stack to ROLLBACK_COMPLETE (no orphaned state).
         String template = """
