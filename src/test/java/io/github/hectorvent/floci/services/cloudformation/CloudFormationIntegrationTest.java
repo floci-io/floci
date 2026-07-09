@@ -6813,4 +6813,60 @@ class CloudFormationIntegrationTest {
         .then().body(containsString("ResourceNotFoundException"));
     }
 
+    @Test
+    void deleteStack_customBusWithRule_removesBusAndRule() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-teardown-bus" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-teardown-rule",
+                    "EventBusName": { "Ref": "MyBus" },
+                    "EventPattern": { "source": ["teardown.test"] }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-teardown-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        // Sanity: the rule exists on the custom bus before teardown.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-teardown-rule\",\"EventBusName\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().statusCode(200).body("Name", equalTo("cfn-teardown-rule"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-teardown-stack")
+        .when().post("/").then().statusCode(200);
+
+        // The rule is gone from the custom bus...
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-teardown-rule\",\"EventBusName\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+
+        // ...and so is the bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+    }
+
 }
