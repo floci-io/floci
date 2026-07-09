@@ -7000,4 +7000,70 @@ class CloudFormationIntegrationTest {
             .body("Policy", containsString("111122223333"));
     }
 
+    @Test
+    void createStack_withEventBusPolicyStatementForm_mergesMultipleStatements() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-stmt-bus" }
+                },
+                "PolicyA": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "StmtA",
+                    "Statement": {
+                      "Effect": "Allow",
+                      "Principal": { "AWS": "arn:aws:iam::111111111111:root" },
+                      "Action": "events:PutEvents",
+                      "Resource": { "Fn::GetAtt": ["MyBus", "Arn"] }
+                    }
+                  }
+                },
+                "PolicyB": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "StmtB",
+                    "Statement": {
+                      "Effect": "Allow",
+                      "Principal": { "AWS": "arn:aws:iam::222222222222:root" },
+                      "Action": "events:PutEvents",
+                      "Resource": { "Fn::GetAtt": ["MyBus", "Arn"] }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-stmt-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-stmt-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // Both statements must be present — a naive whole-policy replace would keep only one.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-stmt-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Policy", containsString("StmtA"))
+            .body("Policy", containsString("StmtB"))
+            .body("Policy", containsString("111111111111"))
+            .body("Policy", containsString("222222222222"));
+    }
+
 }

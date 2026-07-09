@@ -2227,6 +2227,43 @@ public class CloudFormationResourceProvisioner {
             throw new AwsException("ValidationException", "EventBusPolicy StatementId is required.", 400);
         }
 
+        if (props != null && props.has("Statement") && props.get("Statement").isObject()) {
+            // Statement form: merge the full statement into the bus policy, keyed by Sid,
+            // so multiple EventBusPolicy resources on the same bus coexist.
+            try {
+                ObjectNode statement = (ObjectNode) engine.resolveNode(props.get("Statement")).deepCopy();
+                statement.put("Sid", statementId);
+
+                EventBus bus = eventBridgeService.describeEventBus(busName, region);
+                ObjectNode policy;
+                String current = bus.getPolicy();
+                if (current != null && !current.isBlank()) {
+                    policy = (ObjectNode) objectMapper.readTree(current);
+                } else {
+                    policy = objectMapper.createObjectNode();
+                    policy.put("Version", "2012-10-17");
+                    policy.putArray("Statement");
+                }
+                ArrayNode statements = policy.withArray("Statement");
+                for (int i = 0; i < statements.size(); i++) {
+                    if (statementId.equals(statements.get(i).path("Sid").asText(null))) {
+                        statements.remove(i);
+                        break;
+                    }
+                }
+                statements.add(statement);
+                eventBridgeService.putPermission(busName, null, null, statementId, null,
+                        objectMapper.writeValueAsString(policy), region);
+            } catch (AwsException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new AwsException("ValidationException",
+                        "Invalid EventBusPolicy Statement: " + e.getMessage(), 400);
+            }
+            r.setPhysicalId(busName + "|" + statementId);
+            return;
+        }
+
         // Individual form: Action + Principal (+ optional Condition {Type, Key, Value}).
         String action = resolveOptional(props, "Action", engine);
         String principal = resolveOptional(props, "Principal", engine);
@@ -2236,7 +2273,7 @@ public class CloudFormationResourceProvisioner {
             String type = c.path("Type").asText(null);
             String key = c.path("Key").asText(null);
             String value = c.path("Value").asText(null);
-            if (type != null && key != null) {
+            if (type != null && key != null && value != null) {
                 ObjectNode condition = objectMapper.createObjectNode();
                 condition.set(type, objectMapper.createObjectNode().put(key, value));
                 conditionJson = condition.toString();
