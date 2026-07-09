@@ -439,31 +439,39 @@ public class Ec2Service {
         return true;
     }
 
-    public synchronized void createNetworkAclEntry(String region, String networkAclId, int ruleNumber, String protocol,
+    public void createNetworkAclEntry(String region, String networkAclId, int ruleNumber, String protocol,
                                       String ruleAction, boolean egress, String cidrBlock, Integer from, Integer to,
                                       boolean replace) {
-        NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
-        boolean exists = acl.getEntries().stream()
-                .anyMatch(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
-        if (!replace && exists) {
-            throw new AwsException("NetworkAclEntryAlreadyExists",
-                    "The network acl entry identified by " + ruleNumber + " already exists.", 400);
+        synchronized (lockFor(key(region, networkAclId))) {
+            NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+            boolean exists = acl.getEntries().stream()
+                    .anyMatch(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+            if (!replace && exists) {
+                throw new AwsException("NetworkAclEntryAlreadyExists",
+                        "The network acl entry identified by " + ruleNumber + " already exists.", 400);
+            }
+            List<NetworkAclEntry> next = new ArrayList<>(acl.getEntries());
+            next.removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+            NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock);
+            entry.setPortRangeFrom(from);
+            entry.setPortRangeTo(to);
+            next.add(entry);
+            acl.setEntries(next);
+            networkAcls.put(key(region, networkAclId), acl);
         }
-        acl.getEntries().removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
-        NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock);
-        entry.setPortRangeFrom(from);
-        entry.setPortRangeTo(to);
-        acl.getEntries().add(entry);
-        networkAcls.put(key(region, networkAclId), acl);
     }
 
-    public synchronized void deleteNetworkAclEntry(String region, String networkAclId, int ruleNumber, boolean egress) {
-        NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
-        acl.getEntries().removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
-        networkAcls.put(key(region, networkAclId), acl);
+    public void deleteNetworkAclEntry(String region, String networkAclId, int ruleNumber, boolean egress) {
+        synchronized (lockFor(key(region, networkAclId))) {
+            NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+            List<NetworkAclEntry> next = new ArrayList<>(acl.getEntries());
+            next.removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+            acl.setEntries(next);
+            networkAcls.put(key(region, networkAclId), acl);
+        }
     }
 
-    public synchronized NetworkAclAssociation replaceNetworkAclAssociation(String region, String associationId, String networkAclId) {
+    public NetworkAclAssociation replaceNetworkAclAssociation(String region, String associationId, String networkAclId) {
         NetworkAcl target = getRequiredNetworkAcl(region, networkAclId);
         for (NetworkAcl acl : networkAcls.scan(k -> true)) {
             if (!region.equals(acl.getRegion())) {
@@ -472,14 +480,22 @@ public class Ec2Service {
             for (NetworkAclAssociation existing : acl.getAssociations()) {
                 if (existing.getNetworkAclAssociationId().equals(associationId)) {
                     String subnetId = existing.getSubnetId();
-                    acl.getAssociations().remove(existing);
-                    networkAcls.put(key(region, acl.getNetworkAclId()), acl);
+                    synchronized (lockFor(key(region, acl.getNetworkAclId()))) {
+                        List<NetworkAclAssociation> next = new ArrayList<>(acl.getAssociations());
+                        next.remove(existing);
+                        acl.setAssociations(next);
+                        networkAcls.put(key(region, acl.getNetworkAclId()), acl);
+                    }
                     NetworkAclAssociation moved = new NetworkAclAssociation();
                     moved.setNetworkAclAssociationId("aclassoc-" + randomHex(17));
                     moved.setNetworkAclId(networkAclId);
                     moved.setSubnetId(subnetId);
-                    target.getAssociations().add(moved);
-                    networkAcls.put(key(region, networkAclId), target);
+                    synchronized (lockFor(key(region, networkAclId))) {
+                        List<NetworkAclAssociation> next = new ArrayList<>(target.getAssociations());
+                        next.add(moved);
+                        target.setAssociations(next);
+                        networkAcls.put(key(region, networkAclId), target);
+                    }
                     return moved;
                 }
             }
@@ -522,6 +538,16 @@ public class Ec2Service {
 
     private String key(String region, String id) {
         return region + "::" + id;
+    }
+
+    // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
+    // unsynchronized list mutations race under parallel clients (Terraform runs 10-wide) and
+    // drop entries. Mutators take the resource's stripe and swap collections copy-on-write so
+    // concurrent describes only ever see a complete list.
+    private final ConcurrentHashMap<String, Object> resourceLocks = new ConcurrentHashMap<>();
+
+    private Object lockFor(String storeKey) {
+        return resourceLocks.computeIfAbsent(storeKey, k -> new Object());
     }
 
     private String randomHex(int len) {
@@ -1326,28 +1352,34 @@ public class Ec2Service {
 
     public List<SecurityGroupRule> authorizeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
         List<SecurityGroupRule> rules = new ArrayList<>();
-        for (IpPermission perm : permissions) {
-            sg.getIpPermissions().add(perm);
-            rules.addAll(createRules(region, groupId, perm, false));
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
+            for (IpPermission perm : permissions) {
+                next.add(perm);
+                rules.addAll(createRules(region, groupId, perm, false));
+            }
+            sg.setIpPermissions(next);
+            securityGroups.put(key(region, groupId), sg);
         }
-        securityGroups.put(key(region, groupId), sg);
         reconcilePublishedPortsForGroup(region, groupId);
         return rules;
     }
 
     public List<SecurityGroupRule> authorizeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
         List<SecurityGroupRule> rules = new ArrayList<>();
-        for (IpPermission perm : permissions) {
-            sg.getIpPermissionsEgress().add(perm);
-            rules.addAll(createRules(region, groupId, perm, true));
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
+            for (IpPermission perm : permissions) {
+                next.add(perm);
+                rules.addAll(createRules(region, groupId, perm, true));
+            }
+            sg.setIpPermissionsEgress(next);
+            securityGroups.put(key(region, groupId), sg);
         }
-        securityGroups.put(key(region, groupId), sg);
         return rules;
     }
 
@@ -1386,19 +1418,25 @@ public class Ec2Service {
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
-        sg.getIpPermissions().removeIf(p -> matchesAnyPermission(p, permissions));
-        securityGroups.put(key(region, groupId), sg);
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
+            next.removeIf(p -> matchesAnyPermission(p, permissions));
+            sg.setIpPermissions(next);
+            securityGroups.put(key(region, groupId), sg);
+        }
         reconcilePublishedPortsForGroup(region, groupId);
     }
 
     public void revokeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
-        sg.getIpPermissionsEgress().removeIf(p -> matchesAnyPermission(p, permissions));
-        securityGroups.put(key(region, groupId), sg);
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
+            next.removeIf(p -> matchesAnyPermission(p, permissions));
+            sg.setIpPermissionsEgress(next);
+            securityGroups.put(key(region, groupId), sg);
+        }
     }
 
     private SecurityGroup getRequiredSecurityGroup(String region, String groupId) {
@@ -2027,28 +2065,33 @@ public class Ec2Service {
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
-            List<Tag> existing = tags.get(resourceId).orElse(new ArrayList<>());
-            for (Tag tag : tagList) {
-                existing.removeIf(t -> t.getKey().equals(tag.getKey()));
-                existing.add(tag);
+            synchronized (lockFor(key(region, resourceId))) {
+                List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElse(List.of()));
+                for (Tag tag : tagList) {
+                    existing.removeIf(t -> t.getKey().equals(tag.getKey()));
+                    existing.add(tag);
+                }
+                tags.put(resourceId, existing);
+                // Update resource objects
+                updateResourceTags(region, resourceId, existing);
             }
-            tags.put(resourceId, existing);
-            // Update resource objects
-            updateResourceTags(region, resourceId, existing);
         }
     }
 
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
-            List<Tag> existing = tags.get(resourceId).orElse(null);
-            if (existing != null) {
-                for (Tag tag : tagList) {
-                    existing.removeIf(t -> t.getKey().equals(tag.getKey())
-                            && (tag.getValue() == null || tag.getValue().equals(t.getValue())));
+            synchronized (lockFor(key(region, resourceId))) {
+                List<Tag> stored = tags.get(resourceId).orElse(null);
+                if (stored != null) {
+                    List<Tag> existing = new ArrayList<>(stored);
+                    for (Tag tag : tagList) {
+                        existing.removeIf(t -> t.getKey().equals(tag.getKey())
+                                && (tag.getValue() == null || tag.getValue().equals(t.getValue())));
+                    }
+                    tags.put(resourceId, existing);
+                    updateResourceTags(region, resourceId, existing);
                 }
-                tags.put(resourceId, existing);
-                updateResourceTags(region, resourceId, existing);
             }
         }
     }
@@ -2236,35 +2279,54 @@ public class Ec2Service {
         assoc.setSubnetId(subnetId);
         assoc.setMain(false);
         assoc.setAssociationState("associated");
-        rt.getAssociations().add(assoc);
-        routeTables.put(key(region, routeTableId), rt);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<RouteTableAssociation> next = new ArrayList<>(current.getAssociations());
+            next.add(assoc);
+            current.setAssociations(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
         return assoc;
     }
 
     public void disassociateRouteTable(String region, String associationId) {
         ensureDefaultResources(region);
         for (RouteTable rt : routeTables.scan(k -> true)) {
-            if (rt.getRegion().equals(region)) {
-                rt.getAssociations().removeIf(a -> a.getRouteTableAssociationId().equals(associationId));
-                routeTables.put(key(region, rt.getRouteTableId()), rt);
+            if (rt.getRegion().equals(region)
+                    && rt.getAssociations().stream()
+                            .anyMatch(a -> a.getRouteTableAssociationId().equals(associationId))) {
+                synchronized (lockFor(key(region, rt.getRouteTableId()))) {
+                    RouteTable current = getRequiredRouteTable(region, rt.getRouteTableId());
+                    List<RouteTableAssociation> next = new ArrayList<>(current.getAssociations());
+                    next.removeIf(a -> a.getRouteTableAssociationId().equals(associationId));
+                    current.setAssociations(next);
+                    routeTables.put(key(region, current.getRouteTableId()), current);
+                }
             }
         }
     }
 
     public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId) {
         ensureDefaultResources(region);
-        RouteTable rt = getRequiredRouteTable(region, routeTableId);
-
-        rt.getRoutes().add(new Route(destinationCidrBlock, gatewayId, "CreateRoute"));
-        routeTables.put(key(region, routeTableId), rt);
+        getRequiredRouteTable(region, routeTableId);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<Route> next = new ArrayList<>(current.getRoutes());
+            next.add(new Route(destinationCidrBlock, gatewayId, "CreateRoute"));
+            current.setRoutes(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
     }
 
     public void deleteRoute(String region, String routeTableId, String destinationCidrBlock) {
         ensureDefaultResources(region);
-        RouteTable rt = getRequiredRouteTable(region, routeTableId);
-
-        rt.getRoutes().removeIf(r -> r.getDestinationCidrBlock().equals(destinationCidrBlock));
-        routeTables.put(key(region, routeTableId), rt);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<Route> next = new ArrayList<>(current.getRoutes());
+            next.removeIf(r -> r.getDestinationCidrBlock().equals(destinationCidrBlock));
+            current.setRoutes(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
     }
 
     private RouteTable getRequiredRouteTable(String region, String routeTableId) {
