@@ -50,6 +50,7 @@ class EcsContainerManagerVolumesTest {
     private ContainerBuilder containerBuilder;
     private ContainerBuilder.Builder builder;
     private ContainerLifecycleManager lifecycleManager;
+    private LaunchedContainerAwsEnv awsEnv;
     private EcsContainerManager manager;
 
     @BeforeEach
@@ -66,7 +67,7 @@ class EcsContainerManagerVolumesTest {
         ContainerDetector containerDetector = mock(ContainerDetector.class);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         RegionResolver regionResolver = mock(RegionResolver.class);
-        LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
+        awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
@@ -159,7 +160,7 @@ class EcsContainerManagerVolumesTest {
         when(cfg.storage().efs().initImage()).thenReturn("busybox:stable");
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
-                mock(RegionResolver.class));
+                mock(RegionResolver.class), awsEnv);
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -192,7 +193,7 @@ class EcsContainerManagerVolumesTest {
         when(cfg.storage().efs().mountGroupAdd()).thenReturn(OptionalInt.of(2000));
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
-                mock(RegionResolver.class));
+                mock(RegionResolver.class), awsEnv);
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
