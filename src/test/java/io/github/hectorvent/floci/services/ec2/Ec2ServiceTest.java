@@ -324,10 +324,11 @@ class Ec2ServiceTest {
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
-        String instanceId = reservation.getInstances().getFirst().getInstanceId();
-        Volume volume = service.createVolume("us-east-1", "us-east-1a", "gp3", 8,
+        Instance inst = reservation.getInstances().getFirst();
+        String instanceId = inst.getInstanceId();
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
                 false, 0, null, null, List.of());
-
         VolumeAttachment response = service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
 
         assertEquals(volume.getVolumeId(), response.getVolumeId());
@@ -335,12 +336,34 @@ class Ec2ServiceTest {
         assertEquals("/dev/sdf", response.getDevice());
         assertEquals("attached", response.getState());
         assertFalse(response.isDeleteOnTermination());
-        assertEquals("in-use", volume.getState());
-        assertEquals(1, volume.getAttachments().size());
-        assertEquals(instanceId, volume.getAttachments().getFirst().getInstanceId());
-        assertEquals("/dev/sdf", volume.getAttachments().getFirst().getDevice());
-        assertEquals("attached", volume.getAttachments().getFirst().getState());
-        assertFalse(volume.getAttachments().getFirst().isDeleteOnTermination());
+        Volume attached = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("in-use", attached.getState());
+        assertEquals(1, attached.getAttachments().size());
+        assertEquals(instanceId, attached.getAttachments().getFirst().getInstanceId());
+        assertEquals("/dev/sdf", attached.getAttachments().getFirst().getDevice());
+        assertEquals("attached", attached.getAttachments().getFirst().getState());
+        assertFalse(attached.getAttachments().getFirst().isDeleteOnTermination());
+    }
+
+    @Test
+    void attachVolumeThrowsWithDifferentAZ() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        String volumeAz = List.of("us-east-1a", "us-east-1b", "us-east-1c").stream()
+                .filter(az -> !az.equals(instanceAz))
+                .findFirst()
+                .orElseThrow();
+        Volume volume = service.createVolume("us-east-1", volumeAz, "gp3", 8,
+                false, 0, null, null, List.of());
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.attachVolume("us-east-1", volume.getVolumeId(), inst.getInstanceId(), "/dev/sdf"));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
     }
 
     @Test
@@ -350,8 +373,10 @@ class Ec2ServiceTest {
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
-        String instanceId = reservation.getInstances().getFirst().getInstanceId();
-        Volume volume = service.createVolume("us-east-1", "us-east-1a", "gp3", 8,
+        Instance inst = reservation.getInstances().getFirst();
+        String instanceId = inst.getInstanceId();
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
                 false, 0, null, null, List.of());
         service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
 
@@ -362,8 +387,9 @@ class Ec2ServiceTest {
         assertEquals("/dev/sdf", response.getDevice());
         assertEquals("detached", response.getState());
         assertFalse(response.isDeleteOnTermination());
-        assertEquals("available", volume.getState());
-        assertTrue(volume.getAttachments().isEmpty());
+        Volume detached = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("available", detached.getState());
+        assertTrue(detached.getAttachments().isEmpty());
     }
 
     @Test

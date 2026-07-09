@@ -2773,8 +2773,14 @@ public class Ec2Service {
                     "The parameter Device is missing", 400);
         }
         Volume volume = getRequiredVolume(region, volumeId);
-        getRequiredInstance(region, instanceId);
-
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (!inst.getPlacement().getAvailabilityZone().equals(volume.getAvailabilityZone())) {
+            throw new AwsException(
+                    "InvalidParameterValue",
+                    "The volume '" + volume.getVolumeId() +
+                            "' and instance '" + inst.getInstanceId() +
+                            "' must be in the same Availability Zone", 400);
+        }
         if (!"available".equals(volume.getState())) {
             throw new AwsException("VolumeInUse",
                     "Volume '" + volumeId + "' is already attached", 400);
