@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
+import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
@@ -132,16 +133,19 @@ public class EcsContainerManager {
                 specBuilder.withMemoryMb(def.getMemory());
             }
 
-            // Add port mappings. An explicit hostPort is always published to the
-            // Docker host so the service is reachable at localhost:<hostPort>,
-            // matching AWS bridge mode (mirrors the ECR registry's fixed-port
-            // publishing). When no hostPort is requested, publish a dynamic host
-            // port in native mode; in Docker mode only expose the port, since ECS
+            // Add port mappings. In bridge/host mode an explicit hostPort is
+            // published to the Docker host literally, matching AWS bridge mode
+            // (mirrors the ECR registry's fixed-port publishing). In awsvpc mode
+            // every AWS task gets its own ENI, so a literal hostPort carries no
+            // host-binding semantics and would collide across tasks on the single
+            // local Docker host (#1778) — awsvpc mappings always get a dynamic
+            // host port in native mode, or expose-only in Docker mode where ECS
             // consumers reach containers via the docker network IP.
             if (def.getPortMappings() != null) {
+                boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
                 boolean publishToHost = !containerDetector.isRunningInContainer();
                 for (PortMapping pm : def.getPortMappings()) {
-                    if (pm.hostPort() > 0) {
+                    if (!awsvpc && pm.hostPort() > 0) {
                         specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
                     } else if (publishToHost) {
                         specBuilder.withDynamicPort(pm.containerPort());
