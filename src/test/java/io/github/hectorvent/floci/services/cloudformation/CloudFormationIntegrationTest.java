@@ -6732,4 +6732,85 @@ class CloudFormationIntegrationTest {
                 .body("endpointConfiguration.vpcEndpointIds", contains("vpce-12345678"));
     }
 
+    @Test
+    void createStack_withEventBus_createsRealBusAndResolvesRefAndGetAtt() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": {
+                    "Name": "cfn-custom-bus",
+                    "Description": "Custom bus created via CloudFormation",
+                    "Tags": [ { "Key": "env", "Value": "test" } ]
+                  }
+                }
+              },
+              "Outputs": {
+                "BusRef":  { "Value": { "Ref": "MyBus" } },
+                "BusArn":  { "Value": { "Fn::GetAtt": ["MyBus", "Arn"] } },
+                "BusName": { "Value": { "Fn::GetAtt": ["MyBus", "Name"] } }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbus-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eventbus-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .body(containsString("<OutputKey>BusRef</OutputKey>"))
+            .body(containsString("<OutputValue>cfn-custom-bus</OutputValue>"))
+            .body(containsString("event-bus/cfn-custom-bus"));
+
+        // The bus really exists in EventBridge, not a stub.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-custom-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Name", equalTo("cfn-custom-bus"))
+            .body("Arn", containsString("event-bus/cfn-custom-bus"));
+    }
+
+    @Test
+    void deleteStack_withEventBus_removesBus() {
+        String template = """
+            { "Resources": { "MyBus": { "Type": "AWS::Events::EventBus",
+              "Properties": { "Name": "cfn-bus-to-delete" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbus-delete-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-eventbus-delete-stack")
+        .when().post("/").then().statusCode(200);
+
+        // The bus is gone.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-bus-to-delete\"}")
+        .when().post("/")
+        .then().body(containsString("ResourceNotFoundException"));
+    }
+
 }
