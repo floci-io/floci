@@ -130,6 +130,7 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals(true, alarmData.path("OKActions").isArray());
         assertEquals(true, alarmData.path("InsufficientDataActions").isArray());
         assertEquals(true, alarmData.path("StateUpdatedTimestamp").asLong() > 0);
+    }
 
     @Test
     void getMetricStatistics_decimalEpochStartEndTime_filtersOutOfRangeDatapoints() {
