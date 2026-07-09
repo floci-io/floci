@@ -18,6 +18,8 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.Volume;
+import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -313,6 +315,85 @@ class Ec2ServiceTest {
         mapping.setDeviceName("/dev/sda1");
         mapping.setEbs(ebs);
         return mapping;
+    }
+
+    @Test
+    void attachVolumeMarksVolumeInUseWithAttachmentDetails() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        String instanceId = reservation.getInstances().getFirst().getInstanceId();
+        Volume volume = service.createVolume("us-east-1", "us-east-1a", "gp3", 8,
+                false, 0, null, null, List.of());
+
+        VolumeAttachment response = service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
+
+        assertEquals(volume.getVolumeId(), response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals("/dev/sdf", response.getDevice());
+        assertEquals("attached", response.getState());
+        assertFalse(response.isDeleteOnTermination());
+        assertEquals("in-use", volume.getState());
+        assertEquals(1, volume.getAttachments().size());
+        assertEquals(instanceId, volume.getAttachments().getFirst().getInstanceId());
+        assertEquals("/dev/sdf", volume.getAttachments().getFirst().getDevice());
+        assertEquals("attached", volume.getAttachments().getFirst().getState());
+        assertFalse(volume.getAttachments().getFirst().isDeleteOnTermination());
+    }
+
+    @Test
+    void detachVolumeMarksVolumeAvailableAndClearsAttachment() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        String instanceId = reservation.getInstances().getFirst().getInstanceId();
+        Volume volume = service.createVolume("us-east-1", "us-east-1a", "gp3", 8,
+                false, 0, null, null, List.of());
+        service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
+
+        VolumeAttachment response = service.detachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf", false);
+
+        assertEquals(volume.getVolumeId(), response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals("/dev/sdf", response.getDevice());
+        assertEquals("detached", response.getState());
+        assertFalse(response.isDeleteOnTermination());
+        assertEquals("available", volume.getState());
+        assertTrue(volume.getAttachments().isEmpty());
+    }
+
+    @Test
+    void detachRootVolumeRequiresForce() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        String instanceId = reservation.getInstances().getFirst().getInstanceId();
+        String rootVolumeId = reservation.getInstances().getFirst().getRootVolumeId();
+        String rootDeviceName = reservation.getInstances().getFirst().getRootDeviceName();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, false));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        AwsException errorWithoutInstanceId = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, null, null, false));
+        assertEquals("InvalidParameterCombination", errorWithoutInstanceId.getErrorCode());
+
+        VolumeAttachment response = service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, true);
+        assertEquals(rootVolumeId, response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals(rootDeviceName, response.getDevice());
+        assertEquals("detached", response.getState());
+        assertTrue(response.isDeleteOnTermination());
+
+        Volume detached = service.describeVolumes("us-east-1", List.of(rootVolumeId), Map.of()).getFirst();
+        assertEquals("available", detached.getState());
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
