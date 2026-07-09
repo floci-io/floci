@@ -113,18 +113,23 @@ class CloudWatchMetricsJsonHandlerTest {
         alarmReq.put("AlarmName", "TestAlarm");
         alarmReq.put("StateValue", "ALARM");
         alarmReq.put("StateReason", "Test reason");
+        alarmReq.put("StateReasonData", "{\"k\":\"v\"}");
         Response resp = handler.handle("SetAlarmState", alarmReq, REGION);
         assertEquals(200, resp.getStatus());
 
         // Verify that the alarm state is reflected in the metrics service
         ObjectNode getAlarmReq = MAPPER.createObjectNode();
-        getAlarmReq.put("AlarmName", "TestAlarm");
+        getAlarmReq.putArray("AlarmNames").add("TestAlarm");
         Response getResp = handler.handle("DescribeAlarms", getAlarmReq, REGION);
         assertEquals(200, getResp.getStatus());
         ObjectNode alarmData = (ObjectNode) ((ObjectNode) getResp.getEntity()).get("MetricAlarms").get(0);
         assertEquals("ALARM", alarmData.get("StateValue").asText());
         assertEquals("Test reason", alarmData.get("StateReason").asText());
-    }
+        assertEquals("{\"k\":\"v\"}", alarmData.get("StateReasonData").asText());
+        assertEquals(true, alarmData.path("AlarmActions").isArray());
+        assertEquals(true, alarmData.path("OKActions").isArray());
+        assertEquals(true, alarmData.path("InsufficientDataActions").isArray());
+        assertEquals(true, alarmData.path("StateUpdatedTimestamp").asLong() > 0);
 
     @Test
     void getMetricStatistics_decimalEpochStartEndTime_filtersOutOfRangeDatapoints() {
