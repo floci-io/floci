@@ -711,6 +711,11 @@ public class ContainerLauncher {
                     .map(String::trim)
                     .filter(s -> !s.isEmpty())
                     .toList();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("Interrupted while listing {0} for function {1}; assuming no extensions",
+                    EXTENSIONS_DIR, functionName);
+            return List.of();
         } catch (Exception e) {
             LOG.debugv("Could not list {0} for function {1} ({2}); assuming no extensions",
                     EXTENSIONS_DIR, functionName, e.getMessage());
