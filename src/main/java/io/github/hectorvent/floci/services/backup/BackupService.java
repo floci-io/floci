@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.backup;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -444,10 +445,8 @@ public class BackupService {
     }
 
     private static String vaultKey(BackupVault vault) {
-        String arn = vault.getBackupVaultArn();
-        // arn:aws:backup:{region}:{account}:backup-vault:{name}
-        String[] parts = arn.split(":");
-        return parts[3] + ":" + vault.getBackupVaultName();
+        String region = AwsArnUtils.parse(vault.getBackupVaultArn()).region();
+        return region + ":" + vault.getBackupVaultName();
     }
 
     private static String shortId() {

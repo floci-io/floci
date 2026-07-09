@@ -21,6 +21,7 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 | --- | --- |
 | `CreateDBCluster` | Create a DocumentDB cluster and start a MongoDB container |
 | `DescribeDBClusters` | List clusters and their connection details |
+| `DescribeDBClusterSnapshots` | - |
 | `DeleteDBCluster` | Stop and remove a cluster (must have no instances) |
 | `ModifyDBCluster` | Update engine version or IAM auth setting |
 | `CreateDBInstance` | Add an instance to a cluster |
@@ -138,6 +139,6 @@ print(cluster["DBCluster"]["Endpoint"])
 
 - IAM database authentication for MongoDB connections (the flag is stored and echoed back, but connections are not SigV4-proxied).
 - TLS / `--tls` enforced connections.
-- Snapshot and restore operations.
+- Snapshot creation and restore (`DescribeDBClusterSnapshots` returns an empty stub result; snapshots are not modeled).
 - Global clusters, replicas, and read-scaling beyond a single MongoDB container per cluster.
 - Parameter groups, subnet groups, and maintenance windows.

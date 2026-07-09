@@ -2061,16 +2061,15 @@ public class S3Service implements Resettable {
     }
 
     private String sqsUrlFromArn(String arn) {
-        if (arn.split(":").length < 6) return arn;
-        return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
+        try {
+            return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
+        } catch (IllegalArgumentException e) {
+            return arn;
+        }
     }
 
     private static String extractRegionFromArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:aws:")) {
-            return null;
-        }
-        String[] parts = arn.split(":");
-        return parts.length >= 4 ? parts[3] : null;
+        return AwsArnUtils.regionOrDefault(arn, null);
     }
 
     private static String extractLambdaFunctionName(String functionArn) {

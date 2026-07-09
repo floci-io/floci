@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
@@ -310,11 +311,16 @@ public class CognitoService {
             throw new AwsException("InvalidParameterException", "ResourceArn is required", 400);
         }
         // arn:aws:cognito-idp:<region>:<account>:userpool/<pool-id>
-        String[] parts = resourceArn.split(":", 6);
-        if (parts.length < 6 || !"cognito-idp".equals(parts[2])) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "Invalid resource ARN: " + resourceArn, 400);
         }
-        String resource = parts[5];
+        if (!"cognito-idp".equals(arn.service())) {
+            throw new AwsException("InvalidParameterException", "Invalid resource ARN: " + resourceArn, 400);
+        }
+        String resource = arn.resource();
         if (!resource.startsWith("userpool/")) {
             throw new AwsException("InvalidParameterException", "Invalid resource ARN: " + resourceArn, 400);
         }

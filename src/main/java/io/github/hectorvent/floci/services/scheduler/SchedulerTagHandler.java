@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.scheduler;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -67,11 +68,12 @@ public class SchedulerTagHandler implements TagHandler {
     }
 
     private static String groupNameFromArn(String arn) {
-        String[] parts = arn.split(":", 6);
-        if (parts.length < 6) {
+        String resource;
+        try {
+            resource = AwsArnUtils.parse(arn).resource();
+        } catch (IllegalArgumentException e) {
             throw new AwsException("ValidationException", "Invalid resource ARN: " + arn, 400);
         }
-        String resource = parts[5];
         String prefix = "schedule-group/";
         if (!resource.startsWith(prefix)) {
             throw new AwsException("ValidationException",

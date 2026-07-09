@@ -1133,7 +1133,7 @@ public class SqsService implements Resettable {
         ObjectNode principal = statement.putObject("Principal");
         ArrayNode awsArns = principal.putArray("AWS");
         for (String accountId : awsAccountIds) {
-            awsArns.add("arn:aws:iam::" + accountId + ":root");
+            awsArns.add(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         }
         ArrayNode actions = statement.putArray("Action");
         for (String action : actionNames) {

@@ -755,8 +755,7 @@ public class PipesPoller implements Resettable {
     }
 
     private static String extractRegionFromArn(String arn) {
-        String[] parts = arn.split(":");
-        return parts.length >= 4 ? parts[3] : "us-east-1";
+        return AwsArnUtils.regionOrDefault(arn, "us-east-1");
     }
 
     private static String extractResourceName(String arn) {

@@ -1642,7 +1642,7 @@ public class Ec2Service {
         launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
         launchTemplate.setLaunchTemplateName(name);
         launchTemplate.setCreateTime(Instant.now());
-        launchTemplate.setCreatedBy("arn:aws:iam::" + accountId + ":root");
+        launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         launchTemplate.setRegion(region);
         launchTemplate.setImageId(imageId);
         launchTemplate.setInstanceType(instanceType);

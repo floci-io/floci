@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -1342,24 +1343,24 @@ public class IotService {
     }
 
     private String regionFromArn(String resourceArn) {
-        String[] parts = arnParts(resourceArn);
-        return parts[3];
+        return parseIotArn(resourceArn).region();
     }
 
     private String resourceFromArn(String resourceArn) {
-        String[] parts = arnParts(resourceArn);
-        return parts[5];
+        return parseIotArn(resourceArn).resource();
     }
 
-    private String[] arnParts(String resourceArn) {
-        if (resourceArn == null || resourceArn.isBlank()) {
+    private AwsArnUtils.Arn parseIotArn(String resourceArn) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidRequestException", "Invalid resource ARN: " + resourceArn, 400);
         }
-        String[] parts = resourceArn.split(":", 6);
-        if (parts.length != 6 || !"arn".equals(parts[0]) || !"iot".equals(parts[2]) || parts[3].isBlank() || parts[5].isBlank()) {
+        if (!"iot".equals(arn.service()) || arn.region().isBlank() || arn.resource().isBlank()) {
             throw new AwsException("InvalidRequestException", "Invalid resource ARN: " + resourceArn, 400);
         }
-        return parts;
+        return arn;
     }
 
     private record ReservedShadowTopic(String thingName, String shadowName, String operation) {
