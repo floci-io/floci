@@ -1400,6 +1400,11 @@ public class AslExecutor {
         JsonNode mapInput = applyInputPath(stateDef, input);
 
         ArrayNode results = objectMapper.createArrayNode();
+        // When a ResultWriter exports results, AWS records each child execution's input and timing
+        // (Transformation NONE); capture them alongside the outputs so the export is faithful.
+        boolean hasResultWriter = stateDef.has("ResultWriter");
+        ArrayNode childInputs = hasResultWriter ? objectMapper.createArrayNode() : null;
+        List<long[]> childTimings = hasResultWriter ? new ArrayList<>() : null;
         int index = 0;
         for (JsonNode item : items) {
             ObjectNode iterContext = ((ObjectNode) context).deepCopy();
@@ -1420,22 +1425,220 @@ public class AslExecutor {
                 // $ in ItemSelector resolves against the Map state's effective input, not the item.
                 iterInput = resolveParameters(itemTransform, mapInput, iterContext);
             }
-            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, iterContext));
+            long startMs = hasResultWriter ? System.currentTimeMillis() : 0L;
+            JsonNode branchOutput =
+                    executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, iterContext);
+            if (hasResultWriter) {
+                childInputs.add(iterInput);
+                childTimings.add(new long[]{startMs, System.currentTimeMillis()});
+            }
+            results.add(branchOutput);
             index++;
         }
 
+        // A distributed Map's ResultWriter formats the per-child results and, when an S3 Resource is
+        // given, exports them and yields a reference to the manifest instead of the inline array.
+        JsonNode mapResult = results;
+        if (hasResultWriter) {
+            mapResult = applyResultWriter(name, stateDef, input, results, childInputs, childTimings,
+                    sm, context, jsonata);
+        }
+
         if (jsonata) {
-            JsonNode output = applyJsonataOutput(stateDef, input, results, context);
+            JsonNode output = applyJsonataOutput(stateDef, input, mapResult, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
         // ResultSelector transforms the raw iteration results before ResultPath merges them in.
         JsonNode selected = stateDef.has("ResultSelector")
-                ? resolveParameters(stateDef.get("ResultSelector"), results, context)
-                : results;
+                ? resolveParameters(stateDef.get("ResultSelector"), mapResult, context)
+                : mapResult;
         JsonNode output = mergeResult(stateDef, input, selected);
         output = applyOutputPath(stateDef, input, output);
         return new StateResult(output, stateDef.path("Next").asText(null));
+    }
+
+    /**
+     * Emulates a Distributed Map state's {@code ResultWriter}
+     * (<a href="https://docs.aws.amazon.com/step-functions/latest/dg/input-output-resultwriter.html">AWS docs</a>).
+     * The child results are formatted per {@code WriterConfig.Transformation} ({@code NONE} /
+     * {@code COMPACT} / {@code FLATTEN}); then:
+     * <ul>
+     *   <li>if a {@code Resource} + {@code Parameters}/{@code Arguments} (an S3 bucket/prefix) are
+     *       given, the formatted results are exported to S3 as {@code SUCCEEDED_n.json} plus a
+     *       {@code manifest.json}, and the Map state returns
+     *       {@code {MapRunArn, ResultWriterDetails:{Bucket, Key}}};</li>
+     *   <li>if only a {@code WriterConfig} is given (no S3 {@code Resource}), the formatted results
+     *       are returned directly to the next state (preview) with no S3 write.</li>
+     * </ul>
+     *
+     * <p>By construction every child branch here has already succeeded (a failed branch throws and
+     * fails the Map before this point, since inline Maps here do not implement tolerated-failure),
+     * so {@code ResultFiles.FAILED} / {@code PENDING} are empty and all results go to a single
+     * {@code SUCCEEDED_0.json}.
+     */
+    // Package-private for unit testing of the ResultWriter export/format behaviour.
+    JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
+                                       ArrayNode results, ArrayNode childInputs, List<long[]> childTimings,
+                                       StateMachine sm, JsonNode context, boolean jsonata) throws Exception {
+        JsonNode writer = stateDef.get("ResultWriter");
+        JsonNode writerConfig = writer.path("WriterConfig");
+        boolean export = writer.hasNonNull("Resource");
+        // When exporting without an explicit WriterConfig, AWS defaults the transformation to NONE
+        // (child results plus execution metadata); COMPACT is the default only when no ResultWriter
+        // is present at all, which is handled by returning the inline array elsewhere.
+        String transformation = writerConfig.path("Transformation").asText("NONE");
+        String outputType = writerConfig.path("OutputType").asText("JSON");
+
+        String region = extractRegionFromArn(sm.getStateMachineArn());
+        String account = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
+        String smName = context.path("StateMachine").path("Name").asText(sm.getName());
+
+        JsonNode formatted = formatMapResults(transformation, results, childInputs, childTimings,
+                region, account, smName, mapStateName);
+
+        if (!export) {
+            // WriterConfig only: return the formatted results to the next state (no S3 write).
+            return formatted;
+        }
+
+        // Resolve the destination bucket/prefix: JSONata states carry them under Arguments, JSONPath
+        // states under Parameters (with optional reference paths into the Map state input).
+        JsonNode loc;
+        if (jsonata && writer.has("Arguments")) {
+            loc = jsonataEvaluator.resolveTemplate(writer.get("Arguments"), buildStatesVar(input, null, context));
+        } else if (writer.has("Parameters")) {
+            loc = resolveParameters(writer.get("Parameters"), input, context);
+        } else {
+            loc = objectMapper.createObjectNode();
+        }
+        String bucket = loc.path("Bucket").asText(null);
+        String prefix = loc.path("Prefix").asText("");
+        if (bucket == null || bucket.isBlank()) {
+            // No destination resolved; fall back to returning the formatted results inline.
+            return formatted;
+        }
+
+        // A Map Run id keys this run's exported result set; the same uuid appears in the MapRunArn
+        // and in the S3 key path (<Prefix>/<mapRunId>/...), matching AWS.
+        String mapRunId = java.util.UUID.randomUUID().toString();
+        String mapRunArn = "arn:aws:states:" + region + ":" + account + ":mapRun:"
+                + smName + "/" + mapRunId;
+        String base = prefix.isBlank() ? mapRunId + "/" : trimSlashes(prefix) + "/" + mapRunId + "/";
+
+        String ext = "JSONL".equalsIgnoreCase(outputType) ? ".jsonl" : ".json";
+        String succeededKey = base + "SUCCEEDED_0" + ext;
+        String manifestKey = base + "manifest.json";
+
+        byte[] succeededBytes = serializeResultFile(formatted, outputType);
+        s3Service.putObject(bucket, succeededKey, succeededBytes, "application/json", new HashMap<>());
+
+        ObjectNode manifest = objectMapper.createObjectNode();
+        manifest.put("DestinationBucket", bucket);
+        manifest.put("MapRunArn", mapRunArn);
+        ObjectNode resultFiles = manifest.putObject("ResultFiles");
+        resultFiles.putArray("FAILED");
+        resultFiles.putArray("PENDING");
+        ObjectNode succeededEntry = resultFiles.putArray("SUCCEEDED").addObject();
+        succeededEntry.put("Key", succeededKey);
+        succeededEntry.put("Size", succeededBytes.length);
+        s3Service.putObject(bucket, manifestKey, objectMapper.writeValueAsBytes(manifest),
+                "application/json", new HashMap<>());
+
+        ObjectNode mapResult = objectMapper.createObjectNode();
+        mapResult.put("MapRunArn", mapRunArn);
+        ObjectNode details = mapResult.putObject("ResultWriterDetails");
+        details.put("Bucket", bucket);
+        details.put("Key", manifestKey);
+        return mapResult;
+    }
+
+    /**
+     * Formats a Distributed Map's child results per {@code WriterConfig.Transformation}:
+     * <ul>
+     *   <li>{@code NONE} — an array of per-child execution records (output plus execution metadata),
+     *       as AWS writes when exporting without a WriterConfig;</li>
+     *   <li>{@code COMPACT} — the child outputs in their original array structure;</li>
+     *   <li>{@code FLATTEN} — the child outputs with any array outputs flattened into one array.</li>
+     * </ul>
+     */
+    private ArrayNode formatMapResults(String transformation, ArrayNode results, ArrayNode childInputs,
+                                       List<long[]> childTimings, String region, String account,
+                                       String smName, String mapStateName) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if ("FLATTEN".equalsIgnoreCase(transformation)) {
+            for (JsonNode r : results) {
+                if (r.isArray()) {
+                    r.forEach(out::add);
+                } else {
+                    out.add(r);
+                }
+            }
+            return out;
+        }
+        if ("COMPACT".equalsIgnoreCase(transformation)) {
+            out.addAll(results);
+            return out;
+        }
+        // NONE: emit an execution record per child, mirroring the AWS export format. The child
+        // executions run under a derived state machine "<parentName>/<mapStateName>".
+        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
+                + smName + "/" + mapStateName;
+        for (int i = 0; i < results.size(); i++) {
+            String childId = java.util.UUID.randomUUID().toString();
+            long start = childTimings != null && i < childTimings.size() ? childTimings.get(i)[0] : 0L;
+            long stop = childTimings != null && i < childTimings.size() ? childTimings.get(i)[1] : 0L;
+            ObjectNode rec = out.addObject();
+            rec.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
+                    + smName + "/" + mapStateName + ":" + childId);
+            rec.put("Input", stringifyResult(childInputs != null && i < childInputs.size()
+                    ? childInputs.get(i) : NullNode.getInstance()));
+            rec.putObject("InputDetails").put("Included", true);
+            rec.put("Name", childId);
+            rec.put("Output", stringifyResult(results.get(i)));
+            rec.putObject("OutputDetails").put("Included", true);
+            rec.put("RedriveCount", 0);
+            rec.put("RedriveStatus", "NOT_REDRIVABLE");
+            rec.put("RedriveStatusReason", "Execution is SUCCEEDED and cannot be redriven");
+            rec.put("StartDate", java.time.Instant.ofEpochMilli(start).toString());
+            rec.put("StateMachineArn", childSmArn);
+            rec.put("Status", "SUCCEEDED");
+            rec.put("StopDate", java.time.Instant.ofEpochMilli(stop).toString());
+        }
+        return out;
+    }
+
+    /** AWS records a child execution's Input/Output as a JSON string; scalars keep their text form. */
+    private String stringifyResult(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return "null";
+        }
+        return node.isValueNode() ? node.asText() : node.toString();
+    }
+
+    /** Serializes a formatted result array as a JSON array or as JSON Lines per {@code OutputType}. */
+    private byte[] serializeResultFile(JsonNode formatted, String outputType) throws Exception {
+        if ("JSONL".equalsIgnoreCase(outputType) && formatted.isArray()) {
+            StringBuilder sb = new StringBuilder();
+            for (JsonNode element : formatted) {
+                sb.append(objectMapper.writeValueAsString(element)).append('\n');
+            }
+            return sb.toString().getBytes(StandardCharsets.UTF_8);
+        }
+        return objectMapper.writeValueAsBytes(formatted);
+    }
+
+    /** Strips leading and trailing '/' so a configured Prefix composes into a clean S3 key. */
+    private static String trimSlashes(String s) {
+        int start = 0;
+        int end = s.length();
+        while (start < end && s.charAt(start) == '/') {
+            start++;
+        }
+        while (end > start && s.charAt(end - 1) == '/') {
+            end--;
+        }
+        return s.substring(start, end);
     }
 
     private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input,
