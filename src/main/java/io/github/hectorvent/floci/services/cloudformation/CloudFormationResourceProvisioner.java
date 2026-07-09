@@ -2215,7 +2215,10 @@ public class CloudFormationResourceProvisioner {
         try {
             eventBridgeService.deleteEventBus(name, region);
         } catch (Exception e) {
-            LOG.debugv("Could not delete event bus {0}: {1}", name, e.getMessage());
+            // Warn (not debug): the stack still records the resource as DELETE_COMPLETE, so a bus
+            // left alive here (e.g. rules deleted out of dependency order) is a silent divergence
+            // that must stay diagnosable.
+            LOG.warnv("Could not delete event bus {0}: {1}", name, e.getMessage());
         }
     }
 
