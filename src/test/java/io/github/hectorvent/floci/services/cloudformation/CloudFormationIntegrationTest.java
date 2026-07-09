@@ -6869,4 +6869,89 @@ class CloudFormationIntegrationTest {
         .when().post("/").then().body(containsString("ResourceNotFoundException"));
     }
 
+    @Test
+    void createStack_customBusRuleDeliversEventToSqs() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-e2e-bus" }
+                },
+                "TargetQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": { "QueueName": "cfn-e2e-queue" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-e2e-rule",
+                    "EventBusName": { "Ref": "MyBus" },
+                    "EventPattern": { "source": ["my.e2e.app"] },
+                    "Targets": [
+                      { "Id": "Target0", "Arn": { "Fn::GetAtt": ["TargetQueue", "Arn"] } }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-e2e-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-e2e-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The rule is attached to the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-e2e-rule\",\"EventBusName\":\"cfn-e2e-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Targets[0].Arn", equalTo("arn:aws:sqs:us-east-1:000000000000:cfn-e2e-queue"));
+
+        // Send a matching event to the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.PutEvents")
+            .body("""
+                {"Entries":[{"Source":"my.e2e.app","DetailType":"t",
+                 "Detail":"{\\"hello\\":\\"world\\"}","EventBusName":"cfn-e2e-bus"}]}
+                """)
+        .when().post("/")
+        .then().statusCode(200).body("FailedEntryCount", equalTo(0));
+
+        // Resolve the queue URL, then confirm the message was delivered.
+        String getUrlXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "cfn-e2e-queue")
+        .when().post("/")
+        .then().statusCode(200).extract().body().asString();
+        String queueUrl = getUrlXml.substring(
+                getUrlXml.indexOf("<QueueUrl>") + "<QueueUrl>".length(),
+                getUrlXml.indexOf("</QueueUrl>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("my.e2e.app"))
+            .body(containsString("hello"));
+    }
+
 }
