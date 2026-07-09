@@ -10,14 +10,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
-import org.jboss.logging.Logger;
-
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.jboss.logging.Logger;
 
 @ApplicationScoped
 public class CloudWatchMetricsQueryHandler {
@@ -408,11 +407,28 @@ public class CloudWatchMetricsQueryHandler {
     private void toAlarmXml(XmlBuilder xml, MetricAlarm a) {
         xml.start("member")
                 .elem("AlarmName", a.getAlarmName())
+                .elem("AlarmDescription", a.getAlarmDescription());
+        xml.start("AlarmActions");
+        a.getAlarmActions().forEach(act -> xml.elem("member", act));
+        xml.end("AlarmActions");
+        xml.elem("EvaluationPeriods", a.getEvaluationPeriods())
                 .elem("AlarmArn", a.getAlarmArn())
-                .elem("AlarmDescription", a.getAlarmDescription())
                 .elem("AlarmConfigurationUpdatedTimestamp", Instant.ofEpochSecond(a.getAlarmConfigurationUpdatedTimestamp()).toString())
-                .elem("ActionsEnabled", String.valueOf(a.isActionsEnabled()))
-                .elem("StateValue", a.getStateValue())
+                .elem("ActionsEnabled", String.valueOf(a.isActionsEnabled()));
+
+        xml.start("OKActions");
+        a.getOkActions().forEach(act -> xml.elem("member", act));
+        xml.end("OKActions");
+        xml.start("InsufficientDataActions");
+        a.getInsufficientDataActions().forEach(act -> xml.elem("member", act));
+        xml.end("InsufficientDataActions");
+        xml.start("Dimensions");
+        for (Dimension d : a.getDimensions()) {
+            xml.start("member").elem("Name", d.name()).elem("Value", d.value()).end("member");
+        }
+        xml.end("Dimensions");
+
+        xml.elem("StateValue", a.getStateValue())
                 .elem("StateReason", a.getStateReason())
                 .elem("StateReasonData", a.getStateReasonData())
                 .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString())
@@ -427,29 +443,6 @@ public class CloudWatchMetricsQueryHandler {
                 .elem("ComparisonOperator", a.getComparisonOperator())
                 .elem("TreatMissingData", a.getTreatMissingData());
 
-        if (!a.getOkActions().isEmpty()) {
-            xml.start("OKActions");
-            a.getOkActions().forEach(act -> xml.elem("member", act));
-            xml.end("OKActions");
-        }
-        if (!a.getAlarmActions().isEmpty()) {
-            xml.start("AlarmActions");
-            a.getAlarmActions().forEach(act -> xml.elem("member", act));
-            xml.end("AlarmActions");
-        }
-        if (!a.getInsufficientDataActions().isEmpty()) {
-            xml.start("InsufficientDataActions");
-            a.getInsufficientDataActions().forEach(act -> xml.elem("member", act));
-            xml.end("InsufficientDataActions");
-        }
-
-        if (!a.getDimensions().isEmpty()) {
-            xml.start("Dimensions");
-            for (Dimension d : a.getDimensions()) {
-                xml.start("member").elem("Name", d.name()).elem("Value", d.value()).end("member");
-            }
-            xml.end("Dimensions");
-        }
         xml.end("member");
     }
 

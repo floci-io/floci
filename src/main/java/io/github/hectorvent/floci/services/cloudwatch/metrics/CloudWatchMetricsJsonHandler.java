@@ -11,13 +11,12 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
-import org.jboss.logging.Logger;
-
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.jboss.logging.Logger;
 
 /**
  * Handles CloudWatch Metrics requests via the JSON 1.0 protocol.
@@ -178,6 +177,12 @@ public class CloudWatchMetricsJsonHandler {
             node.put("AlarmName", a.getAlarmName());
             if (a.getAlarmArn() != null) node.put("AlarmArn", a.getAlarmArn());
             if (a.getAlarmDescription() != null) node.put("AlarmDescription", a.getAlarmDescription());
+            ArrayNode alarmActions = node.putArray("AlarmActions");
+            a.getAlarmActions().forEach(alarmActions::add);
+            ArrayNode okActions = node.putArray("OKActions");
+            a.getOkActions().forEach(okActions::add);
+            ArrayNode insufficientDataActions = node.putArray("InsufficientDataActions");
+            a.getInsufficientDataActions().forEach(insufficientDataActions::add);
             if (a.getMetricName() != null) node.put("MetricName", a.getMetricName());
             if (a.getNamespace() != null) node.put("Namespace", a.getNamespace());
             if (a.getStatistic() != null) node.put("Statistic", a.getStatistic());
@@ -187,6 +192,10 @@ public class CloudWatchMetricsJsonHandler {
             if (a.getComparisonOperator() != null) node.put("ComparisonOperator", a.getComparisonOperator());
             node.put("ActionsEnabled", a.isActionsEnabled());
             if (a.getStateValue() != null) node.put("StateValue", a.getStateValue());
+            if (a.getStateReason() != null) node.put("StateReason", a.getStateReason());
+            if (a.getStateReasonData() != null) node.put("StateReasonData", a.getStateReasonData());
+            if (a.getStateUpdatedTimestamp() >  0) node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+
         }
         return Response.ok(response).build();
     }
