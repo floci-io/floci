@@ -229,13 +229,17 @@ public class RuntimeApiServer {
                         .end("{\"errorMessage\":\"Unknown or missing Lambda-Extension-Identifier\"}");
                 return;
             }
-            if (stopped) {
-                ctx.response().setStatusCode(204).end();
-                return;
-            }
+            // Poll before checking stopped: stop() offers a SHUTDOWN event to pendingEvents for any
+            // extension it doesn't find already parked, so a request arriving just after stopped is
+            // set (but after that offer landed) must still see it — otherwise it gets a bare 204 and
+            // the queued SHUTDOWN is orphaned, never delivered.
             ExtensionEvent event = extension.getPendingEvents().poll();
             if (event != null) {
                 sendExtensionEvent(ctx, event);
+                return;
+            }
+            if (stopped) {
+                ctx.response().setStatusCode(204).end();
                 return;
             }
             extension.setWaitingContext(ctx);
@@ -246,8 +250,16 @@ public class RuntimeApiServer {
                 return;
             }
             ExtensionEvent raced = extension.getPendingEvents().poll();
-            if (raced != null && extension.takeWaitingContext() != null) {
-                sendExtensionEvent(ctx, raced);
+            if (raced != null) {
+                if (extension.takeWaitingContext() != null) {
+                    sendExtensionEvent(ctx, raced);
+                } else {
+                    // A concurrent notifyExtensionsOfInvoke/stop() already consumed the waiting
+                    // context (dispatching directly via runOnContext rather than the queue) between
+                    // our poll() and this check — raced is a real event we already removed from the
+                    // queue, so it must go back or it's silently lost for this extension.
+                    extension.getPendingEvents().offer(raced);
+                }
             }
         });
 
