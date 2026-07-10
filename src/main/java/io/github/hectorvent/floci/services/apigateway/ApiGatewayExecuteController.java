@@ -712,7 +712,9 @@ public class ApiGatewayExecuteController {
         headers.getRequestHeaders().forEach((name, values) -> {
             // AWS collapses duplicate request headers to the LAST value in the single-value `headers`
             // map (multiValueHeaders keeps every value). Taking the first value diverged from AWS.
-            if (!values.isEmpty()) headersNode.put(name, values.get(values.size() - 1));
+            if (!values.isEmpty()) {
+                headersNode.put(name, values.get(values.size() - 1));
+            }
         });
     }
 
