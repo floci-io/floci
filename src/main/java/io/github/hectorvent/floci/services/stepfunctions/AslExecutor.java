@@ -60,7 +60,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -1436,34 +1437,43 @@ public class AslExecutor {
             // a correctness requirement, not just a speed-up: a Map whose iterations coordinate (e.g. one
             // child blocks until a sibling completes, as a dependency-ordered fan-out does) would
             // DEADLOCK if the iterations were serialised. Each iteration runs on a worker thread under
-            // the execution's account, capped by a MaxConcurrency permit.
-            int permits = maxConcurrency > 0 ? Math.min(maxConcurrency, itemCount) : itemCount;
-            Semaphore gate = new Semaphore(permits);
-            List<Future<Void>> futures = new ArrayList<>();
-            for (int i = 0; i < itemCount; i++) {
-                Callable<Void> task = makeTask.apply(i);
-                futures.add(executor.submit(() -> callUnderExecutionAccount(sm, () -> {
-                    gate.acquire();
-                    try {
-                        return task.call();
-                    } finally {
-                        gate.release();
-                    }
-                })));
-            }
+            // the execution's account, capped at MaxConcurrency by a bounded, per-Map thread pool.
+            //
+            // A fixed-size, per-Map pool caps live threads at MaxConcurrency: submitting every item to
+            // the shared cached pool up front would spawn one thread per item (most parked on a permit),
+            // so a large Map (e.g. 1000 items, MaxConcurrency=5) would create ~1000 threads. The pool
+            // runs at most MaxConcurrency iterations at once and queues the rest.
+            int poolSize = maxConcurrency > 0 ? Math.min(maxConcurrency, itemCount) : itemCount;
+            ExecutorService mapExecutor = new ThreadPoolExecutor(poolSize, poolSize, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(), r -> {
+                        Thread t = new Thread(r, "sfn-map");
+                        t.setDaemon(true);
+                        return t;
+                    });
             try {
+                List<Future<Void>> futures = new ArrayList<>();
+                for (int i = 0; i < itemCount; i++) {
+                    Callable<Void> task = makeTask.apply(i);
+                    futures.add(mapExecutor.submit(() -> callUnderExecutionAccount(sm, task)));
+                }
                 for (Future<Void> f : futures) {
                     f.get();
                 }
             } catch (ExecutionException e) {
-                // Fail fast: cancel the remaining iterations and surface the failure, as AWS fails the
-                // Map when an iteration errors (ToleratedFailureCount defaults to 0).
-                futures.forEach(f -> f.cancel(true));
+                // Fail fast: AWS fails the Map when an iteration errors (ToleratedFailureCount defaults
+                // to 0). shutdownNow() in finally cancels queued and interrupts running iterations.
                 Throwable cause = e.getCause();
                 if (cause instanceof Exception ex) {
                     throw ex;
                 }
                 throw e;
+            } catch (InterruptedException e) {
+                // The Map driver itself was interrupted (e.g. a parent state cancelled this nested Map):
+                // preserve the interrupt status and surface it; shutdownNow() below stops the iterations.
+                Thread.currentThread().interrupt();
+                throw e;
+            } finally {
+                mapExecutor.shutdownNow();
             }
         } else {
             // MaxConcurrency=1 (or a single item): run strictly sequentially in array order.
