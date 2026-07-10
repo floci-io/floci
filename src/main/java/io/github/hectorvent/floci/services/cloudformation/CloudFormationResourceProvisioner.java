@@ -64,6 +64,7 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
@@ -3847,6 +3848,12 @@ public class CloudFormationResourceProvisioner {
             String region = secretId.startsWith("arn:") ? secretId.split(":")[3] : "us-east-1";
             String secretString = secretsManagerService
                     .getSecretValue(secretId, versionId, versionStage, region).getSecretString();
+            if (secretString == null) {
+                // A binary-only secret has no SecretString to substitute; fail loudly rather than
+                // silently returning null (which the caller would leave as the literal {{resolve:...}}).
+                throw new IllegalStateException(
+                        "secret " + secretId + " has no SecretString value to resolve");
+            }
             if (jsonKey.isBlank()) {
                 return secretString;
             }
@@ -3855,9 +3862,19 @@ public class CloudFormationResourceProvisioner {
         }
         if ("ssm".equals(service) || "ssm-secure".equals(service)) {
             // body = <parameter-name>[:<version>]. SSM parameter names cannot contain ':', so an
-            // optional trailing ':<version>' selects a specific version. ssm-secure resolves the
-            // decrypted SecureString value (values are stored in plaintext regardless of type).
-            String parameterName = body.split(":", 2)[0];
+            // optional trailing ':<version>' selects a specific version (latest when omitted, or when
+            // that version is no longer retained). ssm-secure resolves the decrypted SecureString value
+            // (values are stored in plaintext regardless of type).
+            String[] segments = body.split(":", 2);
+            String parameterName = segments[0];
+            if (segments.length > 1 && !segments[1].isBlank()) {
+                long wantedVersion = Long.parseLong(segments[1].trim());
+                return ssmService.getParameterHistory(parameterName, "us-east-1").stream()
+                        .filter(h -> h.getVersion() == wantedVersion)
+                        .findFirst()
+                        .map(ParameterHistory::getValue)
+                        .orElseGet(() -> ssmService.getParameter(parameterName, "us-east-1").getValue());
+            }
             return ssmService.getParameter(parameterName, "us-east-1").getValue();
         }
         // Other dynamic-reference services are not resolved here; leave verbatim.
