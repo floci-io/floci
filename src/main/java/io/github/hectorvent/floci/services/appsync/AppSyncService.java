@@ -213,18 +213,20 @@ public class AppSyncService {
 
     // ──────────────────────────── Schema ────────────────────────────
 
-    public void startSchemaCreation(String apiId, String definition) {
+    public SchemaCreationStatus startSchemaCreation(String apiId, String definition) {
         getGraphqlApi(apiId);
         String accountId = currentAccountId();
+        SchemaCreationStatus status;
         synchronized (this) {
             assertSchemaNotBusy(apiId);
-            SchemaCreationStatus status = new SchemaCreationStatus();
+            status = new SchemaCreationStatus();
             status.setStatus(SchemaCreationStatusType.PROCESSING);
             status.setAccountId(accountId);
             schemaStatusStore.putForAccount(accountId, apiId, status);
         }
         schemaCreationWorker.submit(apiId, definition, accountId);
         LOG.infov("Schema creation submitted for API {0}", apiId);
+        return status;
     }
 
     public SchemaCreationStatus getSchemaCreationStatus(String apiId) {

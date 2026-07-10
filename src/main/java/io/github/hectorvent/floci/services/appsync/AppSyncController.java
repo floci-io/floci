@@ -111,8 +111,7 @@ public class AppSyncController {
                 // Not base64, use as-is
             }
         }
-        service.startSchemaCreation(apiId, definition);
-        return Response.ok(service.getSchemaCreationStatus(apiId)).build();
+        return Response.ok(service.startSchemaCreation(apiId, definition)).build();
     }
 
     @GET
