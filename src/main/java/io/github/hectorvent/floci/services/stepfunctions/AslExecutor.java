@@ -60,6 +60,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -1400,12 +1401,18 @@ public class AslExecutor {
         JsonNode mapInput = applyInputPath(stateDef, input);
 
         ArrayNode results = objectMapper.createArrayNode();
-        int index = 0;
-        for (JsonNode item : items) {
+        int itemCount = items.size();
+        int maxConcurrency = stateDef.path("MaxConcurrency").asInt(0); // 0 = unlimited (AWS default)
+        JsonNode[] itemOutputs = new JsonNode[itemCount];
+
+        // One unit of Map-iteration work. Results are written into per-index slots so the final
+        // results array preserves item order regardless of completion order.
+        java.util.function.IntFunction<Callable<Void>> makeTask = (i) -> () -> {
+            JsonNode item = items.get(i);
             ObjectNode iterContext = ((ObjectNode) context).deepCopy();
             ObjectNode mapCtx = objectMapper.createObjectNode();
             ObjectNode mapItem = objectMapper.createObjectNode();
-            mapItem.put("Index", index);
+            mapItem.put("Index", i);
             if (resolvedItems.source() == MapItemsSource.ITEM_READER_OBJECT) {
                 mapItem.put("Key", item.path("Key").asText());
                 mapItem.set("Value", item.get("Value"));
@@ -1420,8 +1427,53 @@ public class AslExecutor {
                 // $ in ItemSelector resolves against the Map state's effective input, not the item.
                 iterInput = resolveParameters(itemTransform, mapInput, iterContext);
             }
-            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, iterContext));
-            index++;
+            itemOutputs[i] = executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, iterContext);
+            return null;
+        };
+
+        if (itemCount > 1 && maxConcurrency != 1) {
+            // AWS runs Map iterations concurrently up to MaxConcurrency (default/0 = unlimited). This is
+            // a correctness requirement, not just a speed-up: a Map whose iterations coordinate (e.g. one
+            // child blocks until a sibling completes, as a dependency-ordered fan-out does) would
+            // DEADLOCK if the iterations were serialised. Each iteration runs on a worker thread under
+            // the execution's account, capped by a MaxConcurrency permit.
+            int permits = maxConcurrency > 0 ? Math.min(maxConcurrency, itemCount) : itemCount;
+            Semaphore gate = new Semaphore(permits);
+            List<Future<Void>> futures = new ArrayList<>();
+            for (int i = 0; i < itemCount; i++) {
+                Callable<Void> task = makeTask.apply(i);
+                futures.add(executor.submit(() -> callUnderExecutionAccount(sm, () -> {
+                    gate.acquire();
+                    try {
+                        return task.call();
+                    } finally {
+                        gate.release();
+                    }
+                })));
+            }
+            try {
+                for (Future<Void> f : futures) {
+                    f.get();
+                }
+            } catch (ExecutionException e) {
+                // Fail fast: cancel the remaining iterations and surface the failure, as AWS fails the
+                // Map when an iteration errors (ToleratedFailureCount defaults to 0).
+                futures.forEach(f -> f.cancel(true));
+                Throwable cause = e.getCause();
+                if (cause instanceof Exception ex) {
+                    throw ex;
+                }
+                throw e;
+            }
+        } else {
+            // MaxConcurrency=1 (or a single item): run strictly sequentially in array order.
+            for (int i = 0; i < itemCount; i++) {
+                makeTask.apply(i).call();
+            }
+        }
+
+        for (int i = 0; i < itemCount; i++) {
+            results.add(itemOutputs[i]);
         }
 
         if (jsonata) {
