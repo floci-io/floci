@@ -754,8 +754,10 @@ public class RdsService implements Resettable {
         }
         boolean mock = config.services().rds().mock();
         // Real RDS Proxy listens on the engine's default port and exposes a bare hostname; the local
-        // relay does the same so clients that split host/port (defaulting to 5432/3306) connect cleanly.
-        int proxyPort = defaultPortForEngineFamily(engineFamily);
+        // relay prefers that default port so clients that split host/port (defaulting to 5432/3306)
+        // connect cleanly. If the default port is already taken (e.g. a second proxy for the same
+        // engine family) it falls back to an allocated pool port so the relay can still bind.
+        int proxyPort = reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
         DbProxy proxy = new DbProxy();
         proxy.setDbProxyName(dbProxyName);
         proxy.setEngineFamily(engineFamily);

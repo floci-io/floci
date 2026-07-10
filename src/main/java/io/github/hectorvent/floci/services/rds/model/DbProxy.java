@@ -21,7 +21,7 @@ public class DbProxy {
     private String dbProxyArn;           // GetAtt "DBProxyArn"
     private String dbProxyResourceId;    // "prx-XXXX..."
     private String endpointHost;         // proxy endpoint hostname
-    private int proxyPort;               // relay port (the engine family's default DB port)
+    private int proxyPort;               // relay port (engine family default, or a pool port if taken)
     private String engineFamily;         // POSTGRESQL | MYSQL | SQLSERVER (as sent by the client)
     private boolean requireTls = true;
     private boolean iamAuth;             // true if any Auth[].IAMAuth == REQUIRED

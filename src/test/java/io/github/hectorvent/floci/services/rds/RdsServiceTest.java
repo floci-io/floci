@@ -806,6 +806,19 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbProxyFallsBackToPoolPortWhenEngineDefaultIsTaken() {
+        // Two proxies for the same engine family cannot share the engine's default port — the second
+        // must get a distinct port so its relay can still bind (real RDS Proxy gives each a unique host).
+        DbProxy first = rdsService.createDbProxy("proxy-a", "POSTGRESQL", true, false, null,
+                List.of(), List.of(), List.of(), Map.of());
+        DbProxy second = rdsService.createDbProxy("proxy-b", "POSTGRESQL", true, false, null,
+                List.of(), List.of(), List.of(), Map.of());
+
+        assertEquals(5432, first.getProxyPort());   // first proxy keeps the clean engine default
+        assertNotEquals(first.getProxyPort(), second.getProxyPort());
+    }
+
+    @Test
     void registerDbProxyTargetsCreatesDefaultTargetGroupForCluster() {
         when(config.services().rds().mock()).thenReturn(true);
         rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
