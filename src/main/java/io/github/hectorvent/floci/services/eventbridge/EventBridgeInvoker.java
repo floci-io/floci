@@ -18,7 +18,9 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @ApplicationScoped
@@ -26,11 +28,15 @@ public class EventBridgeInvoker {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeInvoker.class);
 
+    private static final int MAX_BUS_TO_BUS_DEPTH = 5;
+    private static final ThreadLocal<Integer> BUS_TO_BUS_DEPTH = ThreadLocal.withInitial(() -> 0);
+
     private final LambdaService lambdaService;
     private final SqsService sqsService;
     private final SnsService snsService;
     private final BatchService batchService;
     private final FirehoseService firehoseService;
+    private final EventBridgeService eventBridgeService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
 
@@ -40,6 +46,7 @@ public class EventBridgeInvoker {
                               SnsService snsService,
                               BatchService batchService,
                               FirehoseService firehoseService,
+                              EventBridgeService eventBridgeService,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
         this.lambdaService = lambdaService;
@@ -47,6 +54,7 @@ public class EventBridgeInvoker {
         this.snsService = snsService;
         this.batchService = batchService;
         this.firehoseService = firehoseService;
+        this.eventBridgeService = eventBridgeService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
     }
@@ -56,7 +64,7 @@ public class EventBridgeInvoker {
                        SnsService snsService,
                        ObjectMapper objectMapper,
                        EmulatorConfig config) {
-        this(lambdaService, sqsService, snsService, null, null, objectMapper, config);
+        this(lambdaService, sqsService, snsService, null, null, null, objectMapper, config);
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
@@ -114,6 +122,65 @@ public class EventBridgeInvoker {
                 // without appending a newline; the delivery-side NDJSON flush handles separation.
                 firehoseService.putRecord(streamName, new Record(payload.getBytes(StandardCharsets.UTF_8)));
                 LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
+            } else if (arn.contains(":events:") && arn.contains(":event-bus/")) {
+                if (eventBridgeService == null) {
+                    LOG.warnv("EventBridge event-bus target missing EventBridge service: {0}", arn);
+                    return;
+                }
+                // Fixed ceiling breaks bus-to-bus cycles; relies on putEvents delivering targets synchronously.
+                int depth = BUS_TO_BUS_DEPTH.get();
+                if (depth >= MAX_BUS_TO_BUS_DEPTH) {
+                    LOG.warnv("EventBridge bus-to-bus depth {0} exceeded at target {1}; dropping", depth, arn);
+                    return;
+                }
+                String targetRegion = extractRegionFromArn(arn, region);
+                // Input overrides shape only Detail; the rest of the entry comes from the original
+                // event envelope, matching AWS event-bus target semantics.
+                JsonNode envelope = objectMapper.readTree(eventJson);
+                boolean inputOverridden = target.getInput() != null
+                        || target.getInputPath() != null
+                        || target.getInputTransformer() != null;
+                String detailBody;
+                if (inputOverridden) {
+                    try {
+                        objectMapper.readTree(payload);
+                    } catch (Exception e) {
+                        LOG.warnv("EventBridge event-bus target {0} requires JSON Detail; dropping non-JSON input: {1}",
+                                arn, e.getMessage());
+                        return;
+                    }
+                    detailBody = payload;
+                } else {
+                    JsonNode detail = envelope.get("detail");
+                    detailBody = detail != null ? detail.toString() : "{}";
+                }
+                Map<String, Object> entry = new HashMap<>();
+                // putEvents accepts a full event-bus ARN as EventBusName and validates it.
+                entry.put("EventBusName", arn);
+                entry.put("Source", envelope.path("source").asText(""));
+                entry.put("DetailType", envelope.path("detail-type").asText(""));
+                entry.put("Detail", detailBody);
+                // AWS keeps the originating account/region; blank falls back inside putEvents.
+                entry.put("Region", envelope.path("region").asText(""));
+                entry.put("Account", envelope.path("account").asText(""));
+                if (envelope.has("resources")) {
+                    entry.put("Resources", envelope.get("resources"));
+                }
+                BUS_TO_BUS_DEPTH.set(depth + 1);
+                try {
+                    var result = eventBridgeService.putEvents(List.of(entry), targetRegion);
+                    if (result.failedCount() > 0) {
+                        LOG.warnv("EventBridge event-bus target {0} rejected event: {1}", arn, result.entries());
+                    } else {
+                        LOG.debugv("EventBridge delivered to EventBus: {0}", arn);
+                    }
+                } finally {
+                    if (depth == 0) {
+                        BUS_TO_BUS_DEPTH.remove();
+                    } else {
+                        BUS_TO_BUS_DEPTH.set(depth);
+                    }
+                }
             } else {
                 LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
             }
