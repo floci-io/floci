@@ -485,6 +485,30 @@ public class IamService implements SessionAccountLookup {
         LOG.infov("Deleted IAM policy: {0}", policyArn);
     }
 
+    /** The roles, users and groups a managed policy is currently attached to. */
+    public record PolicyEntities(List<String> roles, List<String> users, List<String> groups) {}
+
+    /**
+     * Lists the entities (roles, users, groups) a managed policy is attached to — the read behind
+     * IAM's ListEntitiesForPolicy and what a caller must detach before {@link #deletePolicy} will
+     * succeed. Attachments are tracked on the principals, so this scans them for the given ARN.
+     */
+    public PolicyEntities listEntitiesForPolicy(String policyArn) {
+        List<String> attachedRoles = roles.scan(k -> true).stream()
+                .filter(r -> r.getAttachedPolicyArns().contains(policyArn))
+                .map(IamRole::getRoleName)
+                .toList();
+        List<String> attachedUsers = users.scan(k -> true).stream()
+                .filter(u -> u.getAttachedPolicyArns().contains(policyArn))
+                .map(IamUser::getUserName)
+                .toList();
+        List<String> attachedGroups = groups.scan(k -> true).stream()
+                .filter(g -> g.getAttachedPolicyArns().contains(policyArn))
+                .map(IamGroup::getGroupName)
+                .toList();
+        return new PolicyEntities(attachedRoles, attachedUsers, attachedGroups);
+    }
+
     public List<IamPolicy> listPolicies(String scope, String pathPrefix) {
         if (scope != null && !scope.isBlank()
                 && !"All".equalsIgnoreCase(scope)

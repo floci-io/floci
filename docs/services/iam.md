@@ -51,6 +51,7 @@
 | GetPolicy | - |
 | DeletePolicy | - |
 | ListPolicies | - |
+| ListEntitiesForPolicy | Roles, users and groups a managed policy is attached to |
 | CreatePolicyVersion | - |
 | GetPolicyVersion | - |
 | DeletePolicyVersion | - |
