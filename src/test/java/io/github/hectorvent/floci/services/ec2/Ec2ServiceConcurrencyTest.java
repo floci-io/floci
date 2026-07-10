@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -21,6 +22,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -153,6 +155,69 @@ class Ec2ServiceConcurrencyTest {
             assertEquals(N, service.describeTags(region, filters).size(),
                     "trial " + trial + ": lost tags");
         }
+    }
+
+    @Test
+    void concurrentReplaceNetworkAclAssociationMovesTheSubnetOnce() throws Exception {
+        for (int trial = 0; trial < TRIALS; trial++) {
+            String region = "race-aclassoc-" + trial;
+            Ec2Service service = newService();
+            String vpcId = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+            String subnetId = service.createSubnet(region, vpcId, "10.0.1.0/24", null).getSubnetId();
+            String targetAclId = service.createNetworkAcl(region, vpcId).getNetworkAclId();
+            String associationId = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                    .flatMap(a -> a.getAssociations().stream())
+                    .filter(a -> subnetId.equals(a.getSubnetId()))
+                    .findFirst()
+                    .orElseThrow()
+                    .getNetworkAclAssociationId();
+
+            AtomicInteger replaced = new AtomicInteger();
+            AtomicInteger notFound = new AtomicInteger();
+            runRaceAllowing(i -> {
+                try {
+                    service.replaceNetworkAclAssociation(region, associationId, targetAclId);
+                    replaced.incrementAndGet();
+                } catch (AwsException e) {
+                    assertEquals("InvalidAssociationID.NotFound", e.getErrorCode());
+                    notFound.incrementAndGet();
+                }
+            });
+
+            assertEquals(1, replaced.get(), "trial " + trial + ": exactly one caller may claim the association");
+            assertEquals(N - 1, notFound.get(), "trial " + trial + ": losers must see InvalidAssociationID.NotFound");
+
+            NetworkAcl target = service.describeNetworkAcls(region, List.of(targetAclId), Map.of()).getFirst();
+            assertEquals(1, target.getAssociations().size(),
+                    "trial " + trial + ": subnet must be associated to the target ACL exactly once");
+            assertEquals(subnetId, target.getAssociations().getFirst().getSubnetId());
+            long subnetAssociations = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                    .flatMap(a -> a.getAssociations().stream())
+                    .filter(a -> subnetId.equals(a.getSubnetId()))
+                    .count();
+            assertEquals(1, subnetAssociations, "trial " + trial + ": a subnet has exactly one NACL association");
+        }
+    }
+
+    /** Runs N concurrent invocations of the same op; the op absorbs its own expected failures. */
+    private static void runRaceAllowing(java.util.function.IntConsumer op) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+        CountDownLatch start = new CountDownLatch(1);
+        List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+        for (int i = 0; i < N; i++) {
+            int idx = i;
+            futures.add(pool.submit(() -> {
+                start.await();
+                op.accept(idx);
+                return null;
+            }));
+        }
+        start.countDown();
+        for (var f : futures) {
+            f.get(30, TimeUnit.SECONDS);
+        }
+        pool.shutdownNow();
+        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
     }
 
     /** Runs N indexed mutations across THREADS with a common start gate; returns their results. */

@@ -474,28 +474,41 @@ public class Ec2Service {
     public NetworkAclAssociation replaceNetworkAclAssociation(String region, String associationId, String networkAclId) {
         NetworkAcl target = getRequiredNetworkAcl(region, networkAclId);
         for (NetworkAcl acl : networkAcls.scan(k -> true)) {
-            if (!region.equals(acl.getRegion())) {
+            if (!region.equals(acl.getRegion())
+                    || acl.getAssociations().stream()
+                            .noneMatch(a -> a.getNetworkAclAssociationId().equals(associationId))) {
                 continue;
             }
-            for (NetworkAclAssociation existing : acl.getAssociations()) {
-                if (existing.getNetworkAclAssociationId().equals(associationId)) {
-                    String subnetId = existing.getSubnetId();
-                    synchronized (lockFor(key(region, acl.getNetworkAclId()))) {
-                        List<NetworkAclAssociation> next = new ArrayList<>(acl.getAssociations());
-                        next.remove(existing);
-                        acl.setAssociations(next);
-                        networkAcls.put(key(region, acl.getNetworkAclId()), acl);
+            String sourceKey = key(region, acl.getNetworkAclId());
+            String targetKey = key(region, networkAclId);
+            // The move must be atomic across both ACLs, or a describe could observe the subnet
+            // associated with neither. Locks are taken in stripe order so two callers moving
+            // associations in opposite directions cannot deadlock; one stripe re-enters.
+            synchronized (lowerLockOf(sourceKey, targetKey)) {
+                synchronized (higherLockOf(sourceKey, targetKey)) {
+                    List<NetworkAclAssociation> remaining = new ArrayList<>(acl.getAssociations());
+                    NetworkAclAssociation claimed = remaining.stream()
+                            .filter(a -> a.getNetworkAclAssociationId().equals(associationId))
+                            .findFirst()
+                            .orElse(null);
+                    // The scan above ran unlocked, so a concurrent replace of the same association
+                    // may already have moved it. That caller minted the new id; this one sees the
+                    // requested id no longer exist.
+                    if (claimed == null) {
+                        break;
                     }
+                    remaining.remove(claimed);
+                    acl.setAssociations(remaining);
+                    networkAcls.put(sourceKey, acl);
+
                     NetworkAclAssociation moved = new NetworkAclAssociation();
                     moved.setNetworkAclAssociationId("aclassoc-" + randomHex(17));
                     moved.setNetworkAclId(networkAclId);
-                    moved.setSubnetId(subnetId);
-                    synchronized (lockFor(key(region, networkAclId))) {
-                        List<NetworkAclAssociation> next = new ArrayList<>(target.getAssociations());
-                        next.add(moved);
-                        target.setAssociations(next);
-                        networkAcls.put(key(region, networkAclId), target);
-                    }
+                    moved.setSubnetId(claimed.getSubnetId());
+                    List<NetworkAclAssociation> next = new ArrayList<>(target.getAssociations());
+                    next.add(moved);
+                    target.setAssociations(next);
+                    networkAcls.put(targetKey, target);
                     return moved;
                 }
             }
@@ -543,11 +556,37 @@ public class Ec2Service {
     // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
     // unsynchronized list mutations race under parallel clients (Terraform runs 10-wide) and
     // drop entries. Mutators take the resource's stripe and swap collections copy-on-write so
-    // concurrent describes only ever see a complete list.
-    private final ConcurrentHashMap<String, Object> resourceLocks = new ConcurrentHashMap<>();
+    // concurrent describes only ever see a complete list. A fixed stripe array keeps this
+    // bounded — a lock per storage key would never evict — at the cost of unrelated resources
+    // sharing a monitor on hash collision.
+    private static final int LOCK_STRIPES = 512;
+    private final Object[] resourceLocks = newLockStripes();
+
+    private static Object[] newLockStripes() {
+        Object[] stripes = new Object[LOCK_STRIPES];
+        for (int i = 0; i < stripes.length; i++) {
+            stripes[i] = new Object();
+        }
+        return stripes;
+    }
+
+    private int stripeOf(String storeKey) {
+        return Math.floorMod(storeKey.hashCode(), LOCK_STRIPES);
+    }
 
     private Object lockFor(String storeKey) {
-        return resourceLocks.computeIfAbsent(storeKey, k -> new Object());
+        return resourceLocks[stripeOf(storeKey)];
+    }
+
+    // Stripe index, not key order, is the total order two-lock callers must agree on: distinct
+    // keys can share a stripe, so ordering by key could have two callers take the same pair of
+    // monitors in opposite orders.
+    private Object lowerLockOf(String keyA, String keyB) {
+        return resourceLocks[Math.min(stripeOf(keyA), stripeOf(keyB))];
+    }
+
+    private Object higherLockOf(String keyA, String keyB) {
+        return resourceLocks[Math.max(stripeOf(keyA), stripeOf(keyB))];
     }
 
     private String randomHex(int len) {
@@ -2308,7 +2347,6 @@ public class Ec2Service {
 
     public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId) {
         ensureDefaultResources(region);
-        getRequiredRouteTable(region, routeTableId);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
