@@ -390,6 +390,14 @@ public class CloudFormationResourceProvisioner {
             }
             return;
         }
+        // A Rule on a custom bus is keyed by that bus; the physical id is only the rule name, so the
+        // type/physicalId path resolves to the "default" bus and never finds it — leaving the rule (and
+        // then its bus) undeletable. Pass the bus name captured at provision time.
+        if ("AWS::Events::Rule".equals(resourceType)) {
+            deleteEventBridgeRuleSafe(resource.getPhysicalId(),
+                    resource.getAttributes().get("EventBusName"), region);
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
@@ -417,7 +425,8 @@ public class CloudFormationResourceProvisioner {
             } // KMS keys can't be immediately deleted; skip
             case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
             case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
-            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
+            // No bus context on the type/physicalId path (e.g. CREATE-rollback); targets the default bus.
+            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
@@ -2098,6 +2107,11 @@ public class CloudFormationResourceProvisioner {
                 state, description, roleArn, Map.of(), region);
         r.setPhysicalId(ruleName);
         r.getAttributes().put("Arn", rule.getArn());
+        // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
+        // the right bus (the physical id is only the rule name, which resolves to the default bus).
+        if (busName != null && !busName.isBlank()) {
+            r.getAttributes().put("EventBusName", busName);
+        }
 
         // Provision inline targets
         if (props != null && props.has("Targets")) {
@@ -2172,15 +2186,15 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("Name", busName);
     }
 
-    private void deleteEventBridgeRuleSafe(String ruleName, String region) {
+    private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
         try {
-            // Remove all targets before deleting the rule
-            var targets = eventBridgeService.listTargetsByRule(ruleName, null, region);
+            // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
+            var targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {
                 List<String> targetIds = targets.stream().map(Target::getId).toList();
-                eventBridgeService.removeTargets(ruleName, null, targetIds, region);
+                eventBridgeService.removeTargets(ruleName, busName, targetIds, region);
             }
-            eventBridgeService.deleteRule(ruleName, null, region);
+            eventBridgeService.deleteRule(ruleName, busName, region);
         } catch (Exception e) {
             LOG.debugv("Could not delete EventBridge rule {0}: {1}", ruleName, e.getMessage());
         }

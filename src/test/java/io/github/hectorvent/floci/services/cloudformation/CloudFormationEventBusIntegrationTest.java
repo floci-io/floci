@@ -96,7 +96,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
-    void customEventBusIsRegisteredSoRuleReferencingItSucceeds() {
+    void customEventBusIsRegisteredSoRuleReferencingItSucceeds() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "domain-events-" + suffix;
         String stackName = "eventbus-stack-" + suffix;
@@ -131,7 +131,36 @@ class CloudFormationEventBusIntegrationTest {
             .statusCode(200)
             .body(containsString(busName));
 
+        // Deleting the stack must remove the bus (and its rule) from EventBridge, not leak it: the
+        // rule lives on the custom bus, so its cleanup must target that bus or the bus delete fails.
         deleteStack(stackName);
+        awaitStackDeleted(stackName);
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("ResourceNotFoundException"));
+    }
+
+    private void awaitStackDeleted(String stackName) throws InterruptedException {
+        for (int i = 0; i < 100; i++) {
+            String body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when().post("/").then().extract().asString();
+            if (body.contains("does not exist")
+                    || body.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
+                return;
+            }
+            Thread.sleep(50);
+        }
     }
 
     @Test
