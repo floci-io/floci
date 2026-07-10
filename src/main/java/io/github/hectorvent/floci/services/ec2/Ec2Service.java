@@ -1497,11 +1497,11 @@ public class Ec2Service {
         return false;
     }
 
-    public List<SecurityGroupRule> describeSecurityGroupRules(String region, String groupId, List<String> ruleIds) {
+    public List<SecurityGroupRule> describeSecurityGroupRules(String region, List<String> groupIds, List<String> ruleIds) {
         ensureDefaultResources(region);
         String regionPrefix = region + "::";
         return securityGroupRules.scan(k -> k.startsWith(regionPrefix)).stream()
-                .filter(r -> groupId.isEmpty() || groupId.equals(r.getGroupId()))
+                .filter(r -> groupIds.isEmpty() || groupIds.contains(r.getGroupId()))
                 .filter(r -> ruleIds.isEmpty() || ruleIds.contains(r.getSecurityGroupRuleId()))
                 .collect(Collectors.toList());
     }
@@ -2145,6 +2145,8 @@ public class Ec2Service {
         if (subnet != null) { subnet.setTags(new ArrayList<>(tagList)); subnets.put(storeKey, subnet); return; }
         SecurityGroup sg = securityGroups.get(storeKey).orElse(null);
         if (sg != null) { sg.setTags(new ArrayList<>(tagList)); securityGroups.put(storeKey, sg); return; }
+        SecurityGroupRule sgRule = securityGroupRules.get(storeKey).orElse(null);
+        if (sgRule != null) { sgRule.setTags(new ArrayList<>(tagList)); securityGroupRules.put(storeKey, sgRule); return; }
         InternetGateway igw = internetGateways.get(storeKey).orElse(null);
         if (igw != null) { igw.setTags(new ArrayList<>(tagList)); internetGateways.put(storeKey, igw); return; }
         RouteTable rt = routeTables.get(storeKey).orElse(null);
@@ -2158,7 +2160,9 @@ public class Ec2Service {
         NatGateway natGateway = natGateways.get(storeKey).orElse(null);
         if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); natGateways.put(storeKey, natGateway); return; }
         NetworkAcl networkAcl = networkAcls.get(storeKey).orElse(null);
-        if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); }
+        if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); return; }
+        Address address = addresses.get(storeKey).orElse(null);
+        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -2345,12 +2349,14 @@ public class Ec2Service {
         }
     }
 
-    public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId) {
+    public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
-            next.add(new Route(destinationCidrBlock, gatewayId, "CreateRoute"));
+            Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
+            route.setNatGatewayId(natGatewayId);
+            next.add(route);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
         }
