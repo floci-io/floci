@@ -512,6 +512,16 @@ public class S3Service implements Resettable {
         return getObjectMetadata(bucketName, key, versionId);
     }
 
+    /** Returns true when the (latest-version) object exists, without throwing on a miss. */
+    public boolean objectExists(String bucketName, String key) {
+        try {
+            getObjectMetadata(bucketName, key, null);
+            return true;
+        } catch (AwsException e) {
+            return false;
+        }
+    }
+
     public InputStream openObjectStream(String bucketName, String key, String versionId) {
         getObjectMetadata(bucketName, key, versionId);
         if (inMemory) {

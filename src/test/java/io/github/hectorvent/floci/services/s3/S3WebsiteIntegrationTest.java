@@ -182,7 +182,84 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(14)
+    void uploadSubdirectoryIndex() {
+        given()
+            .contentType("text/html")
+            .body("<html><body>Docs Home</body></html>")
+        .when()
+            .put("/" + BUCKET + "/docs/index.html")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(15)
+    void directoryRequestServesIndexDocument() {
+        // GET /docs/ on the website endpoint serves docs/index.html (AWS index-document resolution),
+        // not the error document.
+        given()
+            .header("Host", websiteHost())
+        .when()
+            .get("/docs/")
+        .then()
+            .statusCode(200)
+            .contentType("text/html")
+            .body(equalTo("<html><body>Docs Home</body></html>"));
+    }
+
+    @Test
+    @Order(16)
+    void directoryWithoutTrailingSlashRedirects() {
+        // GET /docs (a folder, not an object) 302-redirects to /docs/ so the page's relative asset
+        // URLs resolve against the correct base — matching real S3 website behavior.
+        given()
+            .header("Host", websiteHost())
+            .redirects().follow(false)
+        .when()
+            .get("/docs")
+        .then()
+            .statusCode(302)
+            .header("Location", equalTo("/docs/"));
+    }
+
+    @Test
+    @Order(17)
+    void nestedDirectoryServesIndexDocument() {
+        given()
+            .contentType("text/html")
+            .body("<html><body>Nested</body></html>")
+        .when()
+            .put("/" + BUCKET + "/a/b/index.html")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Host", websiteHost())
+        .when()
+            .get("/a/b/")
+        .then()
+            .statusCode(200)
+            .body(equalTo("<html><body>Nested</body></html>"));
+    }
+
+    @Test
+    @Order(18)
+    void directoryWithoutIndexServesErrorDocument() {
+        // A trailing-slash request whose prefix has no index document falls back to the error document.
+        given()
+            .header("Host", websiteHost())
+        .when()
+            .get("/no-such-dir/")
+        .then()
+            .statusCode(404)
+            .contentType("text/html")
+            .header("x-amz-error-code", "NoSuchKey")
+            .body(equalTo("<html><body>Custom Error</body></html>"));
+    }
+
+    @Test
+    @Order(22)
     void deleteWebsiteConfiguration() {
         given()
             .queryParam("website", "")
@@ -200,10 +277,12 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(23)
     void cleanup() {
         given().delete("/" + BUCKET + "/index.html");
         given().delete("/" + BUCKET + "/error.html");
+        given().delete("/" + BUCKET + "/docs/index.html");
+        given().delete("/" + BUCKET + "/a/b/index.html");
         given().delete("/" + BUCKET);
     }
 }
