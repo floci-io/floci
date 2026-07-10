@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbProxy;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -682,6 +685,141 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DescribeDBClusterSnapshotsResult>"));
         assertTrue(body.contains("<DBClusterSnapshots></DBClusterSnapshots>"));
         assertFalse(body.contains("<Marker>"));
+    }
+
+    // ──────────────────────────── DBProxy wire shapes ──────────────────────────
+
+    @Test
+    void createDbProxy_mapsParamsAndReturnsProxyEnvelope() {
+        DbProxy proxy = new DbProxy();
+        proxy.setDbProxyName("app-proxy");
+        proxy.setEngineFamily("POSTGRESQL");
+        proxy.setEndpointHost("app-proxy.host");
+        proxy.setDbProxyArn("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc");
+        when(service.createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(true), eq(true),
+                eq("arn:aws:iam::000000000000:role/proxy"), anyList(), anyList(), anyList(), any()))
+                .thenReturn(proxy);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
+        p.add("EngineFamily", "POSTGRESQL");
+        p.add("RequireTLS", "true");
+        p.add("RoleArn", "arn:aws:iam::000000000000:role/proxy");
+        p.add("VpcSubnetIds.member.1", "subnet-a");
+        p.add("Auth.member.1.AuthScheme", "SECRETS");
+        p.add("Auth.member.1.SecretArn", "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf");
+        p.add("Auth.member.1.IAMAuth", "REQUIRED");
+        Response response = handler.handle("CreateDBProxy", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CreateDBProxyResult>"));
+        assertTrue(body.contains("<DBProxy>"));
+        assertTrue(body.contains("<DBProxyName>app-proxy</DBProxyName>"));
+        assertTrue(body.contains("<Endpoint>app-proxy.host</Endpoint>"));
+        assertTrue(body.contains("<DBProxyArn>arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc</DBProxyArn>"));
+        // A single Auth entry with IAMAuth=REQUIRED flips the proxy to IAM-enabled.
+        verify(service).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(true), eq(true),
+                eq("arn:aws:iam::000000000000:role/proxy"), anyList(), anyList(), anyList(), any());
+    }
+
+    @Test
+    void describeDbProxies_rendersProxyMembers() {
+        DbProxy proxy = new DbProxy();
+        proxy.setDbProxyName("app-proxy");
+        proxy.setEndpointHost("app-proxy.host");
+        proxy.setDbProxyArn("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc");
+        when(service.listDbProxies("app-proxy")).thenReturn(List.of(proxy));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
+        Response response = handler.handle("DescribeDBProxies", p);
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DescribeDBProxiesResult>"));
+        assertTrue(body.contains("<DBProxies><member>"));
+        assertTrue(body.contains("<DBProxyName>app-proxy</DBProxyName>"));
+        verify(service).listDbProxies("app-proxy");
+    }
+
+    @Test
+    void registerDbProxyTargets_mapsClusterIdsAndRendersTargets() {
+        DbProxyTargetGroup tg = new DbProxyTargetGroup();
+        tg.setDbProxyName("app-proxy");
+        tg.getTargets().add(new DbProxyTarget("TRACKED_CLUSTER", "cluster1",
+                "arn:aws:rds:us-east-1:000000000000:cluster:cluster1", "cluster1.host", 5432));
+        when(service.registerDbProxyTargets(any(), any(), anyList(), anyList(), anyInt(), anyInt()))
+                .thenReturn(tg);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
+        p.add("DBClusterIdentifiers.member.1", "cluster1");
+        Response response = handler.handle("RegisterDBProxyTargets", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<RegisterDBProxyTargetsResult>"));
+        assertTrue(body.contains("<DBProxyTargets><member>"));
+        assertTrue(body.contains("<Type>TRACKED_CLUSTER</Type>"));
+        assertTrue(body.contains("<RdsResourceId>cluster1</RdsResourceId>"));
+        verify(service).registerDbProxyTargets("app-proxy", null, List.of("cluster1"), List.of(), 0, 0);
+    }
+
+    @Test
+    void describeDbProxyTargetGroups_rendersTargetGroupMembers() {
+        DbProxyTargetGroup tg = new DbProxyTargetGroup();
+        tg.setDbProxyName("app-proxy");
+        tg.setTargetGroupName("default");
+        tg.setTargetGroupArn("arn:aws:rds:us-east-1:000000000000:target-group:app-proxy/default");
+        when(service.describeDbProxyTargetGroups("app-proxy")).thenReturn(List.of(tg));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
+        Response response = handler.handle("DescribeDBProxyTargetGroups", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DescribeDBProxyTargetGroupsResult>"));
+        assertTrue(body.contains("<TargetGroups><member>"));
+        assertTrue(body.contains("<TargetGroupName>default</TargetGroupName>"));
+        assertTrue(body.contains("<ConnectionPoolConfig>"));
+    }
+
+    @Test
+    void describeDbProxyTargets_rendersTargetMembers() {
+        when(service.describeDbProxyTargets("app-proxy", null)).thenReturn(List.of(
+                new DbProxyTarget("RDS_INSTANCE", "inst1",
+                        "arn:aws:rds:us-east-1:000000000000:db:inst1", "inst1.host", 5432)));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
+        Response response = handler.handle("DescribeDBProxyTargets", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DescribeDBProxyTargetsResult>"));
+        assertTrue(body.contains("<Targets><member>"));
+        assertTrue(body.contains("<Type>RDS_INSTANCE</Type>"));
+        assertTrue(body.contains("<RdsResourceId>inst1</RdsResourceId>"));
+    }
+
+    @Test
+    void deleteDbProxy_delegatesToServiceAndReturnsProxy() {
+        DbProxy proxy = new DbProxy();
+        proxy.setDbProxyName("app-proxy");
+        proxy.setDbProxyArn("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc");
+        when(service.getDbProxy("app-proxy")).thenReturn(proxy);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
+        Response response = handler.handle("DeleteDBProxy", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DeleteDBProxyResult>"));
+        assertTrue(body.contains("<DBProxyName>app-proxy</DBProxyName>"));
+        verify(service).deleteDbProxy("app-proxy");
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

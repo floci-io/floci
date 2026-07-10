@@ -11,6 +11,10 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbProxy;
+import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -71,6 +75,11 @@ public class RdsQueryHandler {
                 case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
                 case "DescribeDBProxies" -> handleDescribeDbProxies(params);
+                case "CreateDBProxy" -> handleCreateDbProxy(params);
+                case "DeleteDBProxy" -> handleDeleteDbProxy(params);
+                case "RegisterDBProxyTargets" -> handleRegisterDbProxyTargets(params);
+                case "DescribeDBProxyTargetGroups" -> handleDescribeDbProxyTargetGroups(params);
+                case "DescribeDBProxyTargets" -> handleDescribeDbProxyTargets(params);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
                 case "AddTagsToResource" -> handleAddTagsToResource(params);
                 case "ListTagsForResource" -> handleListTagsForResource(params);
@@ -600,11 +609,140 @@ public class RdsQueryHandler {
     }
 
     private Response handleDescribeDbProxies(MultivaluedMap<String, String> params) {
-        // DB proxies are not modeled; return the RDS Query API's wire-accurate empty
-        // result (empty <DBProxies> wrapper, no <Marker>) so SDK clients complete the
-        // read instead of failing with UnsupportedOperation.
-        String result = new XmlBuilder().start("DBProxies").end("DBProxies").build();
-        return Response.ok(AwsQueryResponse.envelope("DescribeDBProxies", AwsNamespaces.RDS, result)).build();
+        XmlBuilder xml = new XmlBuilder().start("DBProxies");
+        for (DbProxy p : service.listDbProxies(params.getFirst("DBProxyName"))) {
+            xml.start("member").raw(dbProxyInnerXml(p)).end("member");
+        }
+        xml.end("DBProxies");
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBProxies", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleCreateDbProxy(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBProxyName");
+        String engineFamily = params.getFirst("EngineFamily");
+        boolean requireTls = "true".equalsIgnoreCase(params.getFirst("RequireTLS"));
+        String roleArn = params.getFirst("RoleArn");
+        List<String> subnetIds = memberList(params, "VpcSubnetIds");
+        List<String> sgIds = memberList(params, "VpcSecurityGroupIds");
+        List<DbProxyAuth> auth = new java.util.ArrayList<>();
+        for (int idx = 1; ; idx++) {
+            String secretArn = params.getFirst("Auth.member." + idx + ".SecretArn");
+            String authScheme = params.getFirst("Auth.member." + idx + ".AuthScheme");
+            String iamAuth = params.getFirst("Auth.member." + idx + ".IAMAuth");
+            if (secretArn == null && authScheme == null && iamAuth == null) {
+                break;
+            }
+            auth.add(new DbProxyAuth(authScheme, secretArn, iamAuth,
+                    params.getFirst("Auth.member." + idx + ".ClientPasswordAuthType"),
+                    params.getFirst("Auth.member." + idx + ".Description")));
+        }
+        boolean iamEnabled = auth.stream().anyMatch(a -> "REQUIRED".equalsIgnoreCase(a.getIamAuth()));
+        DbProxy proxy = service.createDbProxy(name, engineFamily, requireTls, iamEnabled, roleArn,
+                subnetIds, sgIds, auth, new LinkedHashMap<>());
+        String result = new XmlBuilder().start("DBProxy").raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
+        return Response.ok(AwsQueryResponse.envelope("CreateDBProxy", AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleDeleteDbProxy(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBProxyName");
+        DbProxy proxy = service.getDbProxy(name);
+        String result = new XmlBuilder().start("DBProxy").raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
+        service.deleteDbProxy(name);
+        return Response.ok(AwsQueryResponse.envelope("DeleteDBProxy", AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleRegisterDbProxyTargets(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBProxyName");
+        String tgName = params.getFirst("TargetGroupName");
+        List<String> clusterIds = memberList(params, "DBClusterIdentifiers");
+        List<String> instanceIds = memberList(params, "DBInstanceIdentifiers");
+        DbProxyTargetGroup tg = service.registerDbProxyTargets(name, tgName, clusterIds, instanceIds, 0, 0);
+        XmlBuilder xml = new XmlBuilder().start("DBProxyTargets");
+        for (DbProxyTarget t : tg.getTargets()) {
+            xml.start("member").raw(dbProxyTargetInnerXml(t)).end("member");
+        }
+        xml.end("DBProxyTargets");
+        return Response.ok(AwsQueryResponse.envelope("RegisterDBProxyTargets", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeDbProxyTargetGroups(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBProxyName");
+        XmlBuilder xml = new XmlBuilder().start("TargetGroups");
+        for (DbProxyTargetGroup tg : service.describeDbProxyTargetGroups(name)) {
+            xml.start("member").raw(dbProxyTargetGroupInnerXml(tg)).end("member");
+        }
+        xml.end("TargetGroups");
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBProxyTargetGroups", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeDbProxyTargets(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBProxyName");
+        String tgName = params.getFirst("TargetGroupName");
+        XmlBuilder xml = new XmlBuilder().start("Targets");
+        for (DbProxyTarget t : service.describeDbProxyTargets(name, tgName)) {
+            xml.start("member").raw(dbProxyTargetInnerXml(t)).end("member");
+        }
+        xml.end("Targets");
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBProxyTargets", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private String dbProxyInnerXml(DbProxy p) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DBProxyName", p.getDbProxyName())
+                .elem("DBProxyArn", p.getDbProxyArn())
+                .elem("Status", p.getStatus())
+                .elem("EngineFamily", p.getEngineFamily())
+                .elem("Endpoint", p.getEndpoint())
+                .elem("RequireTLS", String.valueOf(p.isRequireTls()))
+                .elem("IdleClientTimeout", p.getIdleClientTimeout())
+                .elem("DebugLogging", String.valueOf(p.isDebugLogging()));
+        if (p.getRoleArn() != null) {
+            xml.elem("RoleArn", p.getRoleArn());
+        }
+        xml.start("Auth");
+        for (DbProxyAuth a : p.getAuth()) {
+            xml.start("member")
+               .elem("AuthScheme", a.getAuthScheme())
+               .elem("SecretArn", a.getSecretArn())
+               .elem("IAMAuth", a.getIamAuth())
+               .end("member");
+        }
+        xml.end("Auth");
+        xml.start("VpcSubnetIds");
+        for (String s : p.getVpcSubnetIds()) {
+            xml.elem("member", s);
+        }
+        xml.end("VpcSubnetIds");
+        if (p.getCreatedAt() != null) {
+            xml.elem("CreatedDate", p.getCreatedAt().toString());
+        }
+        return xml.build();
+    }
+
+    private String dbProxyTargetGroupInnerXml(DbProxyTargetGroup tg) {
+        return new XmlBuilder()
+                .elem("DBProxyName", tg.getDbProxyName())
+                .elem("TargetGroupName", tg.getTargetGroupName())
+                .elem("TargetGroupArn", tg.getTargetGroupArn())
+                .elem("Status", tg.getStatus())
+                .start("ConnectionPoolConfig")
+                  .elem("MaxConnectionsPercent", tg.getMaxConnectionsPercent())
+                  .elem("MaxIdleConnectionsPercent", tg.getMaxIdleConnectionsPercent())
+                .end("ConnectionPoolConfig")
+                .build();
+    }
+
+    private String dbProxyTargetInnerXml(DbProxyTarget t) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("Type", t.getType())
+                .elem("RdsResourceId", t.getRdsResourceId())
+                .elem("Endpoint", t.getEndpoint())
+                .elem("Port", t.getPort())
+                .start("TargetHealth").elem("State", t.getTargetHealth()).end("TargetHealth");
+        if (t.getTargetArn() != null) {
+            xml.elem("TargetArn", t.getTargetArn());
+        }
+        return xml.build();
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {

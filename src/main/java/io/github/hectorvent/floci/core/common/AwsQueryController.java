@@ -347,7 +347,9 @@ public class AwsQueryController {
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
-            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters"
+            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
+            "DescribeDBProxies", "CreateDBProxy", "DeleteDBProxy",
+            "RegisterDBProxyTargets", "DescribeDBProxyTargetGroups", "DescribeDBProxyTargets"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(

@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbProxy;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +23,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -147,6 +150,53 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void provisionsDbProxyWithEndpointAndArnAttributes() {
+        DbProxy proxy = mock(DbProxy.class);
+        when(proxy.getDbProxyName()).thenReturn("app-proxy");
+        // RDS Proxy endpoint is a bare hostname (clients connect on the engine's default port).
+        when(proxy.getEndpoint()).thenReturn("host.docker.internal");
+        when(proxy.getDbProxyArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc");
+        when(rdsService.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(),
+                anyList(), anyList(), anyList(), any())).thenReturn(proxy);
+
+        StackResource r = provision("Proxy", "AWS::RDS::DBProxy", """
+                {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL","RequireTLS":true,
+                 "RoleArn":"arn:aws:iam::000000000000:role/proxy",
+                 "VpcSubnetIds":["subnet-a","subnet-b"],
+                 "Auth":[{"AuthScheme":"SECRETS","SecretArn":"arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf","IAMAuth":"DISABLED"}]}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        assertEquals("app-proxy", r.getPhysicalId());
+        // GetAtt "Endpoint" is the (bare-host) proxy endpoint, passed through from the model.
+        assertEquals("host.docker.internal", r.getAttributes().get("Endpoint"));
+        assertEquals("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc", r.getAttributes().get("DBProxyArn"));
+        verify(rdsService).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(true), eq(false),
+                eq("arn:aws:iam::000000000000:role/proxy"), eq(List.of("subnet-a", "subnet-b")),
+                anyList(), anyList(), any());
+    }
+
+    @Test
+    void provisionsDbProxyTargetGroupRegistersClusterTarget() {
+        DbProxyTargetGroup tg = mock(DbProxyTargetGroup.class);
+        when(tg.getDbProxyName()).thenReturn("app-proxy");
+        when(tg.getTargetGroupArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:target-group:app-proxy/default");
+        when(rdsService.registerDbProxyTargets(any(), any(), anyList(), anyList(), anyInt(), anyInt()))
+                .thenReturn(tg);
+
+        StackResource r = provision("Tg", "AWS::RDS::DBProxyTargetGroup", """
+                {"DBProxyName":"app-proxy","TargetGroupName":"default",
+                 "DBClusterIdentifiers":["mycluster"],
+                 "ConnectionPoolConfigurationInfo":{"MaxConnectionsPercent":90,"MaxIdleConnectionsPercent":40}}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        assertEquals("app-proxy", r.getPhysicalId());
+        verify(rdsService).registerDbProxyTargets("app-proxy", "default",
+                List.of("mycluster"), List.of(), 90, 40);
+    }
+
+    @Test
     void deleteDelegatesToRdsServiceForEachRdsType() {
         // Stack deletion tears down RDS resources via the physical id set at provision time.
         provisioner.delete("AWS::RDS::DBInstance", "mydb", "us-east-1");
@@ -163,5 +213,8 @@ class RdsCfnProvisionerTest {
 
         provisioner.delete("AWS::RDS::DBClusterParameterGroup", "my-cpg", "us-east-1");
         verify(rdsService).deleteDbClusterParameterGroup("my-cpg");
+
+        provisioner.delete("AWS::RDS::DBProxy", "app-proxy", "us-east-1");
+        verify(rdsService).deleteDbProxy("app-proxy");
     }
 }

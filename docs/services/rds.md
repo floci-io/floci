@@ -38,7 +38,12 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBClusterParameterGroup` | - |
 | `DescribeDBClusterParameters` | - |
 | `DescribeDBSnapshots` | - |
-| `DescribeDBProxies` | - |
+| `DescribeDBProxies` | List DB proxies |
+| `CreateDBProxy` | Create a DB proxy |
+| `DeleteDBProxy` | Delete a DB proxy |
+| `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
+| `DescribeDBProxyTargetGroups` | List a proxy's target groups |
+| `DescribeDBProxyTargets` | List a proxy target group's registered targets |
 | `DescribeDBClusterSnapshots` | - |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |

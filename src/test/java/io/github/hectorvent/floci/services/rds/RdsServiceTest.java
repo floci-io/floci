@@ -16,6 +16,9 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbProxy;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -772,6 +775,98 @@ class RdsServiceTest {
                 eq("admin"), eq("secret"), eq("app"), any());
         verify(restoredProxyManager).startProxy(eq("member1"), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(member.getProxyPort()), eq("127.0.0.1"), eq(15432),
+                eq("admin"), eq("secret"), eq("app"), any());
+    }
+
+    @Test
+    void createDbProxyPopulatesEndpointArnAndDefaultPort() {
+        DbProxy proxy = rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
+                List.of("subnet-a"), List.of("sg-a"), List.of(), Map.of());
+
+        assertEquals("app-proxy", proxy.getDbProxyName());
+        assertEquals("available", proxy.getStatus());
+        assertEquals(5432, proxy.getProxyPort());   // POSTGRESQL default listener port
+        assertNotNull(proxy.getDbProxyResourceId());
+        assertTrue(proxy.getDbProxyResourceId().startsWith("prx-"));
+        assertEquals("arn:aws:rds:us-east-1:123456789012:db-proxy:" + proxy.getDbProxyResourceId(),
+                proxy.getDbProxyArn());
+        assertEquals(1, rdsService.listDbProxies("app-proxy").size());
+    }
+
+    @Test
+    void createDbProxyRejectsDuplicate() {
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
+                List.of(), List.of(), List.of(), Map.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
+                        List.of(), List.of(), List.of(), Map.of()));
+
+        assertEquals("DBProxyAlreadyExistsFault", exception.getErrorCode());
+    }
+
+    @Test
+    void registerDbProxyTargetsCreatesDefaultTargetGroupForCluster() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
+                List.of(), List.of(), List.of(), Map.of());
+
+        DbProxyTargetGroup tg = rdsService.registerDbProxyTargets("app-proxy", null,
+                List.of("cluster1"), List.of(), 90, 40);
+
+        assertEquals("app-proxy", tg.getDbProxyName());
+        assertEquals("default", tg.getTargetGroupName());   // blank TargetGroupName defaults to "default"
+        assertEquals(90, tg.getMaxConnectionsPercent());
+        assertEquals(40, tg.getMaxIdleConnectionsPercent());
+        assertEquals(1, tg.getTargets().size());
+        DbProxyTarget target = tg.getTargets().get(0);
+        assertEquals("TRACKED_CLUSTER", target.getType());
+        assertEquals("cluster1", target.getRdsResourceId());
+        // The registered target group and target are read back through the describe APIs.
+        assertEquals(1, rdsService.describeDbProxyTargetGroups("app-proxy").size());
+        assertEquals(1, rdsService.describeDbProxyTargets("app-proxy", "default").size());
+    }
+
+    @Test
+    void restorePersistedRuntimeReArmsDbProxyRelayAcrossRestart() {
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        StorageBackend<String, DbParameterGroup> parameterGroups = new InMemoryStorage<>();
+        StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups = new InMemoryStorage<>();
+        StorageBackend<String, DbSubnetGroup> subnetGroups = new InMemoryStorage<>();
+        // Shared across the two RdsService instances: this is what persists a proxy over a "restart".
+        StorageBackend<String, DbProxy> proxies = new InMemoryStorage<>();
+        StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups = new InMemoryStorage<>();
+
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("initial-container", "cluster1", "localhost", 5432));
+
+        RdsService initialService = new RdsService(containerManager, proxyManager, ec2Service,
+                regionResolver, config, instances, clusters, parameterGroups, clusterParameterGroups,
+                subnetGroups, null, null, proxies, proxyTargetGroups);
+        initialService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        initialService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
+                List.of(), List.of(), List.of(), Map.of());
+        initialService.registerDbProxyTargets("app-proxy", null, List.of("cluster1"), List.of(), 0, 0);
+
+        RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
+        RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
+        when(restoredContainerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("restored-container", "cluster1", "127.0.0.1", 15432));
+
+        RdsService restoredService = new RdsService(restoredContainerManager, restoredProxyManager, ec2Service,
+                regionResolver, config, instances, clusters, parameterGroups, clusterParameterGroups,
+                subnetGroups, null, null, proxies, proxyTargetGroups);
+        restoredService.restorePersistedRuntime();
+
+        // The proxy survives the restart and its relay is re-armed against the restored backend.
+        DbProxy restored = restoredService.getDbProxy("app-proxy");
+        assertEquals("app-proxy", restored.getDbProxyName());
+        verify(restoredProxyManager).startProxy(eq("app-proxy"), eq(DatabaseEngine.POSTGRES),
+                eq(false), anyInt(), eq("127.0.0.1"), eq(15432),
                 eq("admin"), eq("secret"), eq("app"), any());
     }
 

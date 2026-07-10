@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
@@ -332,6 +333,9 @@ public class CloudFormationResourceProvisioner {
                         provisionDbClusterParameterGroup(resource, properties, engine, stackName);
                 case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName);
                 case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName);
+                case "AWS::RDS::DBProxy" -> provisionDbProxy(resource, properties, engine, stackName);
+                case "AWS::RDS::DBProxyTargetGroup" ->
+                        provisionDbProxyTargetGroup(resource, properties, engine, stackName);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
@@ -438,6 +442,9 @@ public class CloudFormationResourceProvisioner {
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
             case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
             case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
+            case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId);
+            // The target group lives and dies with its proxy; deleting it alone is a no-op.
+            case "AWS::RDS::DBProxyTargetGroup" -> { }
             case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
             case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
             case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
@@ -1051,6 +1058,74 @@ public class CloudFormationResourceProvisioner {
         }
         if (cluster.getDbClusterArn() != null) {
             r.getAttributes().put("DBClusterArn", cluster.getDbClusterArn());
+        }
+    }
+
+    private void provisionDbProxy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                  String stackName) {
+        String name = resolveOptional(props, "DBProxyName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
+        }
+        String engineFamily = resolveOptional(props, "EngineFamily", engine);
+        boolean requireTls = parseBoolProp(props, "RequireTLS", engine);
+        String roleArn = resolveOptional(props, "RoleArn", engine);
+        List<String> subnetIds = resolveStringList(props, "VpcSubnetIds", engine);
+        List<String> sgIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
+        List<DbProxyAuth> auth = parseProxyAuth(props, engine);
+        boolean iamAuth = auth.stream().anyMatch(a -> "REQUIRED".equalsIgnoreCase(a.getIamAuth()));
+        var proxy = rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth, roleArn,
+                subnetIds, sgIds, auth, Map.of());
+        r.setPhysicalId(proxy.getDbProxyName());              // Ref -> DBProxyName
+        r.getAttributes().put("Endpoint", proxy.getEndpoint());   // GetAtt "Endpoint" (bare host)
+        r.getAttributes().put("DBProxyArn", proxy.getDbProxyArn());
+    }
+
+    private void provisionDbProxyTargetGroup(StackResource r, JsonNode props,
+                                             CloudFormationTemplateEngine engine, String stackName) {
+        String dbProxyName = resolveOptional(props, "DBProxyName", engine);
+        String targetGroupName = firstNonBlank(resolveOptional(props, "TargetGroupName", engine), "default");
+        List<String> clusterIds = resolveStringList(props, "DBClusterIdentifiers", engine);
+        List<String> instanceIds = resolveStringList(props, "DBInstanceIdentifiers", engine);
+        int maxConn = 0;
+        int maxIdle = 0;
+        if (props != null && props.has("ConnectionPoolConfigurationInfo")) {
+            JsonNode cpc = props.get("ConnectionPoolConfigurationInfo");
+            maxConn = parseIntProp(cpc, "MaxConnectionsPercent", engine, 0);
+            maxIdle = parseIntProp(cpc, "MaxIdleConnectionsPercent", engine, 0);
+        }
+        // Registering the target starts the relay (target backend host/port are now known).
+        var tg = rdsService.registerDbProxyTargets(dbProxyName, targetGroupName,
+                clusterIds, instanceIds, maxConn, maxIdle);
+        r.setPhysicalId(tg.getDbProxyName());                 // Ref -> DBProxyName
+        r.getAttributes().put("TargetGroupArn", tg.getTargetGroupArn());
+        r.getAttributes().put("DBProxyName", tg.getDbProxyName());
+    }
+
+    private List<DbProxyAuth> parseProxyAuth(JsonNode props, CloudFormationTemplateEngine engine) {
+        List<DbProxyAuth> auth = new ArrayList<>();
+        if (props != null && props.has("Auth") && props.get("Auth").isArray()) {
+            for (JsonNode a : props.get("Auth")) {
+                DbProxyAuth entry = new DbProxyAuth();
+                entry.setAuthScheme(resolveOptional(a, "AuthScheme", engine));
+                entry.setSecretArn(resolveOptional(a, "SecretArn", engine));
+                entry.setIamAuth(resolveOptional(a, "IAMAuth", engine));
+                entry.setClientPasswordAuthType(resolveOptional(a, "ClientPasswordAuthType", engine));
+                entry.setDescription(resolveOptional(a, "Description", engine));
+                auth.add(entry);
+            }
+        }
+        return auth;
+    }
+
+    private void deleteDbProxySafe(String name) {
+        try {
+            rdsService.deleteDbProxy(name);
+        } catch (AwsException e) {
+            if (!"DBProxyNotFoundFault".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("DB proxy already gone, treating as deleted: {0}", name);
         }
     }
 
