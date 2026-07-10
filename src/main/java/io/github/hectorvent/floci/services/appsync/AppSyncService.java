@@ -448,6 +448,7 @@ public class AppSyncService {
     }
 
     public void deleteResolver(String apiId, String typeName, String fieldName) {
+        assertSchemaNotBusy(apiId);
         getResolver(apiId, typeName, fieldName);
         resolverStore.delete(resolverKey(apiId, typeName, fieldName));
     }
@@ -504,6 +505,7 @@ public class AppSyncService {
     }
 
     public void deleteFunction(String apiId, String functionId) {
+        assertSchemaNotBusy(apiId);
         getFunction(apiId, functionId);
         functionStore.delete(apiKey(apiId, functionId));
     }
@@ -558,6 +560,7 @@ public class AppSyncService {
     }
 
     public void deleteType(String apiId, String typeName) {
+        assertSchemaNotBusy(apiId);
         getType(apiId, typeName);
         typeStore.delete(apiKey(apiId, typeName));
     }
