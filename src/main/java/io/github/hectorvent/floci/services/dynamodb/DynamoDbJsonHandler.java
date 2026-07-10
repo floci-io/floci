@@ -1193,6 +1193,25 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        JsonNode replicaUpdates = request.path("ReplicaUpdates");
+        if (!replicaUpdates.isMissingNode() && replicaUpdates.isArray()) {
+            List<String> addRegions = new ArrayList<>();
+            List<String> removeRegions = new ArrayList<>();
+            for (JsonNode update : replicaUpdates) {
+                JsonNode create = update.path("Create");
+                if (create.isObject() && create.hasNonNull("RegionName")) {
+                    addRegions.add(create.get("RegionName").asText());
+                }
+                JsonNode delete = update.path("Delete");
+                if (delete.isObject() && delete.hasNonNull("RegionName")) {
+                    removeRegions.add(delete.get("RegionName").asText());
+                }
+            }
+            if (!addRegions.isEmpty() || !removeRegions.isEmpty()) {
+                table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, region);
+            }
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
@@ -1859,6 +1878,22 @@ public class DynamoDbJsonHandler {
         warmThroughput.put("ReadUnitsPerSecond", 0);
         warmThroughput.put("WriteUnitsPerSecond", 0);
         node.set("WarmThroughput", warmThroughput);
+
+        // Global-table replicas. In a single-process emulator every region is served by this same
+        // table, so a replica is metadata; AWS reports each as an ACTIVE Replica and marks the table
+        // a 2019.11.21 global table.
+        List<String> replicaRegions = table.getReplicaRegions();
+        if (replicaRegions != null && !replicaRegions.isEmpty()) {
+            ArrayNode replicas = objectMapper.createArrayNode();
+            for (String replicaRegion : replicaRegions) {
+                ObjectNode replica = objectMapper.createObjectNode();
+                replica.put("RegionName", replicaRegion);
+                replica.put("ReplicaStatus", "ACTIVE");
+                replicas.add(replica);
+            }
+            node.set("Replicas", replicas);
+            node.put("GlobalTableVersion", "2019.11.21");
+        }
 
         ArrayNode keySchemaArray = objectMapper.createArrayNode();
         for (var ks : table.getKeySchema()) {
