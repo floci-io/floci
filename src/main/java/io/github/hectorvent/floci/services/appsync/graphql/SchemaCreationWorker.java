@@ -89,7 +89,7 @@ public class SchemaCreationWorker {
         try {
             schemaRegistry.register(apiId, sdl);
             schemaStore.put(apiId, sdl);
-            markStatus(accountId, apiId, SchemaCreationStatusType.ACTIVE, null);
+            markStatus(accountId, apiId, SchemaCreationStatusType.SUCCESS, null);
             LOG.infov("Schema creation completed for API {0}", apiId);
         } catch (AwsException e) {
             String details = serializeExtendedData(e);

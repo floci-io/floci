@@ -107,11 +107,11 @@ class AppSyncTest {
     @Test
     @Order(11)
     void getSchemaCreationStatus() {
-        // Schema creation is async in real AWS: poll until terminal (ACTIVE
+        // Schema creation is async in real AWS: poll until terminal (SUCCESS
         // or FAILED). All subsequent tests in this class depend on the
         // schema being ACTIVE because the 409 gate fires while PROCESSING.
         SchemaStatus status = pollSchemaStatusToTerminal();
-        assertThat(status).isEqualTo(SchemaStatus.ACTIVE);
+        assertThat(status).isEqualTo(SchemaStatus.SUCCESS);
     }
 
     // ── API Keys ────────────────────────────────────────────────────────

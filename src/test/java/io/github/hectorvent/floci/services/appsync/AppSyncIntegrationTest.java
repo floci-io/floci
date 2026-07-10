@@ -183,20 +183,20 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        assertTerminalStatus(apiId, "ACTIVE");
+        assertTerminalStatus(apiId, "SUCCESS");
     }
 
     @Test
     @Order(21)
     void getSchemaCreationStatus() {
-        assertTerminalStatus(apiId, "ACTIVE");
+        assertTerminalStatus(apiId, "SUCCESS");
         given()
             .header("Authorization", AUTH)
         .when()
             .get("/v1/apis/" + apiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("SUCCESS"));
     }
 
     @Test
@@ -2713,7 +2713,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        assertTerminalStatus(tempApiId, "ACTIVE");
+        assertTerminalStatus(tempApiId, "SUCCESS");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2746,7 +2746,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        assertTerminalStatus(tempApiId, "ACTIVE");
+        assertTerminalStatus(tempApiId, "SUCCESS");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2779,7 +2779,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        assertTerminalStatus(tempApiId, "ACTIVE");
+        assertTerminalStatus(tempApiId, "SUCCESS");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2812,7 +2812,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        assertTerminalStatus(tempApiId, "ACTIVE");
+        assertTerminalStatus(tempApiId, "SUCCESS");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2845,7 +2845,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        assertTerminalStatus(tempApiId, "ACTIVE");
+        assertTerminalStatus(tempApiId, "SUCCESS");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2882,7 +2882,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        assertTerminalStatus(tempApiId, "ACTIVE");
+        assertTerminalStatus(tempApiId, "SUCCESS");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
