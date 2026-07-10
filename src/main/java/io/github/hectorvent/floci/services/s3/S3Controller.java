@@ -314,6 +314,12 @@ public class S3Controller {
                 s3Service.deleteBucketOwnershipControls(bucket);
                 return Response.noContent().build();
             }
+            if (hasQueryParam(uriInfo, "replication")) {
+                // Floci does not model bucket replication; DeleteBucketReplication is a
+                // no-op that always returns 204, matching real S3. Crucially it must be
+                // handled here so it does NOT fall through to deleting the whole bucket.
+                return Response.noContent().build();
+            }
             s3Service.deleteBucket(bucket);
             return Response.noContent().build();
         } catch (AwsException e) {
