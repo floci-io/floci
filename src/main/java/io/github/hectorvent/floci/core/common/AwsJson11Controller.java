@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsT
 import io.github.hectorvent.floci.services.bcmdataexports.BcmDataExportsJsonHandler;
 import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailJsonHandler;
+import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
@@ -54,6 +55,7 @@ import org.jboss.logging.Logger;
 @Path("/")
 public class AwsJson11Controller {
 
+    public static final String CONTENT_TYPE_AWS_JSON_1_1 = "application/x-amz-json-1.1";
     private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
 
     private final ObjectMapper objectMapper;
@@ -92,6 +94,7 @@ public class AwsJson11Controller {
     private final ConfigServiceJsonHandler configServiceJsonHandler;
     private final CloudTrailJsonHandler cloudTrailJsonHandler;
     private final LightsailJsonHandler lightsailJsonHandler;
+    private final CloudControlJsonHandler cloudControlJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -124,7 +127,8 @@ public class AwsJson11Controller {
                                BcmDataExportsJsonHandler bcmDataExportsJsonHandler,
                                ConfigServiceJsonHandler configServiceJsonHandler,
                                CloudTrailJsonHandler cloudTrailJsonHandler,
-                               LightsailJsonHandler lightsailJsonHandler) {
+                               LightsailJsonHandler lightsailJsonHandler,
+                               CloudControlJsonHandler cloudControlJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -161,11 +165,12 @@ public class AwsJson11Controller {
         this.configServiceJsonHandler = configServiceJsonHandler;
         this.cloudTrailJsonHandler = cloudTrailJsonHandler;
         this.lightsailJsonHandler = lightsailJsonHandler;
+        this.cloudControlJsonHandler = cloudControlJsonHandler;
     }
 
     @POST
-    @Consumes("application/x-amz-json-1.1")
-    @Produces("application/x-amz-json-1.1")
+    @Consumes(CONTENT_TYPE_AWS_JSON_1_1)
+    @Produces(CONTENT_TYPE_AWS_JSON_1_1)
     public Response handle(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,
@@ -223,6 +228,7 @@ public class AwsJson11Controller {
                 case "config" -> configServiceJsonHandler.handle(action, request, region);
                 case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
+                case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

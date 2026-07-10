@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -96,6 +97,71 @@ class SsmCommandServiceDirectExecutionTest {
         CommandInvocation invocation = service.getCommandInvocation(command.getCommandId(), "i-agent", "us-west-2");
         assertEquals("Pending", invocation.getStatus());
         assertEquals(1, service.getMessages("i-agent", "request-id", 30).size());
+    }
+
+    @Test
+    void unavailableInstanceFailsQueuedCommandInvocation() throws Exception {
+        SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
+        when(executor.supports(eq("i-stale"), eq("AWS-RunShellScript"))).thenReturn(false);
+
+        SsmCommandService service = new SsmCommandService(
+                new InMemoryStorageFactory(),
+                objectMapper,
+                regionResolver,
+                executor);
+
+        Command command = service.sendCommand(objectMapper.readTree("""
+                {
+                  "InstanceIds": ["i-stale"],
+                  "DocumentName": "AWS-RunShellScript",
+                  "Parameters": {
+                    "commands": ["echo hello"]
+                  },
+                  "TimeoutSeconds": 60
+                }
+                """), "us-west-2");
+
+        assertEquals(1, service.failActiveInvocationsForInstance("us-west-2", "i-stale", "Undeliverable"));
+
+        CommandInvocation invocation = service.getCommandInvocation(command.getCommandId(), "i-stale", "us-west-2");
+        assertEquals("Failed", invocation.getStatus());
+        assertEquals("Undeliverable", invocation.getStatusDetails());
+        assertEquals(-1, invocation.getResponseCode());
+        assertEquals("Failed", service.listCommands(command.getCommandId(), null, "us-west-2").getFirst().getStatus());
+        assertTrue(service.getMessages("i-stale", "request-id", 30).isEmpty());
+    }
+
+    @Test
+    void unavailableInstancesFailQueuedCommandInvocationsInBulk() throws Exception {
+        SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
+        when(executor.supports(any(), eq("AWS-RunShellScript"))).thenReturn(false);
+
+        SsmCommandService service = new SsmCommandService(
+                new InMemoryStorageFactory(),
+                objectMapper,
+                regionResolver,
+                executor);
+
+        Command command = service.sendCommand(objectMapper.readTree("""
+                {
+                  "InstanceIds": ["i-stale-a", "i-stale-b", "i-active"],
+                  "DocumentName": "AWS-RunShellScript",
+                  "Parameters": {
+                    "commands": ["echo hello"]
+                  },
+                  "TimeoutSeconds": 60
+                }
+                """), "us-west-2");
+
+        assertEquals(2, service.failActiveInvocationsForInstances(
+                "us-west-2", Set.of("i-stale-a", "i-stale-b"), "Undeliverable"));
+
+        assertEquals("Failed", service.getCommandInvocation(command.getCommandId(), "i-stale-a", "us-west-2").getStatus());
+        assertEquals("Failed", service.getCommandInvocation(command.getCommandId(), "i-stale-b", "us-west-2").getStatus());
+        assertEquals("Pending", service.getCommandInvocation(command.getCommandId(), "i-active", "us-west-2").getStatus());
+        assertTrue(service.getMessages("i-stale-a", "request-id", 30).isEmpty());
+        assertTrue(service.getMessages("i-stale-b", "request-id", 30).isEmpty());
+        assertEquals(1, service.getMessages("i-active", "request-id", 30).size());
     }
 
     @Test

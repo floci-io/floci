@@ -5,41 +5,136 @@
 ## Supported Actions
 
 ### Users
-`CreateUser` · `GetUser` · `DeleteUser` · `ListUsers` · `UpdateUser` · `TagUser` · `UntagUser` · `ListUserTags`
+
+| Action | Description |
+|--------|-------------|
+| CreateUser | - |
+| GetUser | - |
+| DeleteUser | - |
+| ListUsers | - |
+| UpdateUser | - |
+| TagUser | - |
+| UntagUser | - |
+| ListUserTags | - |
 
 ### Groups
-`CreateGroup` · `GetGroup` · `DeleteGroup` · `ListGroups` · `AddUserToGroup` · `RemoveUserFromGroup` · `ListGroupsForUser`
+
+| Action | Description |
+|--------|-------------|
+| CreateGroup | - |
+| GetGroup | - |
+| DeleteGroup | - |
+| ListGroups | - |
+| AddUserToGroup | - |
+| RemoveUserFromGroup | - |
+| ListGroupsForUser | - |
 
 ### Roles
-`CreateRole` · `GetRole` · `DeleteRole` · `ListRoles` · `UpdateRole` · `UpdateAssumeRolePolicy` · `TagRole` · `UntagRole` · `ListRoleTags`
+
+| Action | Description |
+|--------|-------------|
+| CreateRole | - |
+| GetRole | - |
+| DeleteRole | - |
+| ListRoles | - |
+| UpdateRole | - |
+| UpdateAssumeRolePolicy | - |
+| TagRole | - |
+| UntagRole | - |
+| ListRoleTags | - |
 
 ### Policies
-`CreatePolicy` · `GetPolicy` · `DeletePolicy` · `ListPolicies` · `CreatePolicyVersion` · `GetPolicyVersion` · `DeletePolicyVersion` · `ListPolicyVersions` · `SetDefaultPolicyVersion` · `TagPolicy` · `UntagPolicy` · `ListPolicyTags`
+
+| Action | Description |
+|--------|-------------|
+| CreatePolicy | - |
+| GetPolicy | - |
+| DeletePolicy | - |
+| ListPolicies | - |
+| CreatePolicyVersion | - |
+| GetPolicyVersion | - |
+| DeletePolicyVersion | - |
+| ListPolicyVersions | - |
+| SetDefaultPolicyVersion | - |
+| TagPolicy | - |
+| UntagPolicy | - |
+| ListPolicyTags | - |
 
 ### Permission Boundaries
-`PutUserPermissionsBoundary` · `DeleteUserPermissionsBoundary` · `PutRolePermissionsBoundary` · `DeleteRolePermissionsBoundary`
+
+| Action | Description |
+|--------|-------------|
+| PutUserPermissionsBoundary | - |
+| DeleteUserPermissionsBoundary | - |
+| PutRolePermissionsBoundary | - |
+| DeleteRolePermissionsBoundary | - |
 
 ### Policy Attachments
-`AttachUserPolicy` · `DetachUserPolicy` · `ListAttachedUserPolicies`
-`AttachGroupPolicy` · `DetachGroupPolicy` · `ListAttachedGroupPolicies`
-`AttachRolePolicy` · `DetachRolePolicy` · `ListAttachedRolePolicies`
+
+| Action | Description |
+|--------|-------------|
+| AttachUserPolicy | - |
+| DetachUserPolicy | - |
+| ListAttachedUserPolicies | - |
+| AttachGroupPolicy | - |
+| DetachGroupPolicy | - |
+| ListAttachedGroupPolicies | - |
+| AttachRolePolicy | - |
+| DetachRolePolicy | - |
+| ListAttachedRolePolicies | - |
 
 ### Inline Policies
-`PutUserPolicy` · `GetUserPolicy` · `DeleteUserPolicy` · `ListUserPolicies`
-`PutGroupPolicy` · `GetGroupPolicy` · `DeleteGroupPolicy` · `ListGroupPolicies`
-`PutRolePolicy` · `GetRolePolicy` · `DeleteRolePolicy` · `ListRolePolicies`
+
+| Action | Description |
+|--------|-------------|
+| PutUserPolicy | - |
+| GetUserPolicy | - |
+| DeleteUserPolicy | - |
+| ListUserPolicies | - |
+| PutGroupPolicy | - |
+| GetGroupPolicy | - |
+| DeleteGroupPolicy | - |
+| ListGroupPolicies | - |
+| PutRolePolicy | - |
+| GetRolePolicy | - |
+| DeleteRolePolicy | - |
+| ListRolePolicies | - |
 
 ### Instance Profiles
-`CreateInstanceProfile` · `GetInstanceProfile` · `DeleteInstanceProfile` · `ListInstanceProfiles` · `AddRoleToInstanceProfile` · `RemoveRoleFromInstanceProfile` · `ListInstanceProfilesForRole`
+
+| Action | Description |
+|--------|-------------|
+| CreateInstanceProfile | - |
+| GetInstanceProfile | - |
+| DeleteInstanceProfile | - |
+| ListInstanceProfiles | - |
+| AddRoleToInstanceProfile | - |
+| RemoveRoleFromInstanceProfile | - |
+| ListInstanceProfilesForRole | - |
 
 ### Access Keys
-`CreateAccessKey` · `GetAccessKeyLastUsed` · `ListAccessKeys` · `UpdateAccessKey` · `DeleteAccessKey`
+
+| Action | Description |
+|--------|-------------|
+| CreateAccessKey | - |
+| GetAccessKeyLastUsed | - |
+| ListAccessKeys | - |
+| UpdateAccessKey | - |
+| DeleteAccessKey | - |
 
 ### Login Profiles
-`CreateLoginProfile` · `DeleteLoginProfile` · `UpdateLoginProfile`
+
+| Action | Description |
+|--------|-------------|
+| CreateLoginProfile | - |
+| DeleteLoginProfile | - |
+| UpdateLoginProfile | - |
 
 ### Policy Simulation
-`SimulatePrincipalPolicy`
+
+| Action | Description |
+|--------|-------------|
+| SimulatePrincipalPolicy | - |
 
 ## AWS Managed Policies
 
@@ -99,9 +194,11 @@ environment:
 
 Policy evaluation follows the standard AWS precedence:
 
-1. An explicit **Deny** in any policy → request is denied (HTTP 403 `AccessDeniedException`)
-2. An explicit **Allow** in any policy → request is allowed
-3. No matching statement → implicit deny (HTTP 403)
+1. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
+2. An explicit **Allow** in an identity policy creates the base grant
+3. If a session policy is present, it must also explicitly allow the request
+4. If a permission boundary is present, it must also explicitly allow the request
+5. No matching effective allow → implicit deny (HTTP 403)
 
 ### Bypass rules
 

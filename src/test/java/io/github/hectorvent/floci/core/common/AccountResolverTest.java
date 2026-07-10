@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class AccountResolverTest {
 
@@ -55,5 +56,19 @@ class AccountResolverTest {
     @Test
     void fallsBackToDefaultWhenPresignedCredentialEmpty() {
         assertEquals(DEFAULT_ACCOUNT, resolver.resolveFromPresignedCredential(""));
+    }
+
+    // --- extractPresignedAccessKeyId(String credentialValue) tests ---
+
+    @Test
+    void extractsAccessKeyIdFromPresignedCredential() {
+        assertEquals("ASIAEXAMPLE",
+                resolver.extractPresignedAccessKeyId("ASIAEXAMPLE/20260617/us-east-1/s3/aws4_request"));
+    }
+
+    @Test
+    void extractPresignedAccessKeyIdReturnsNullWhenAbsent() {
+        assertNull(resolver.extractPresignedAccessKeyId(null));
+        assertNull(resolver.extractPresignedAccessKeyId(""));
     }
 }

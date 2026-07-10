@@ -12,13 +12,16 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
+import io.github.hectorvent.floci.services.ssm.SsmCommandService;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -68,6 +71,10 @@ class AutoScalingReconcilerTest {
         asg.setDesiredCapacity(1);
         asg.setLaunchTemplateId("lt-123");
         asg.setLaunchTemplateVersion("1");
+        asg.getTags().put("job-id", "2001");
+        asg.getTags().put("control-plane-only", "true");
+        asg.getTagPropagateAtLaunch().put("job-id", true);
+        asg.getTagPropagateAtLaunch().put("control-plane-only", false);
 
         LaunchTemplate launchTemplate = new LaunchTemplate();
         launchTemplate.setLaunchTemplateId("lt-123");
@@ -75,7 +82,9 @@ class AutoScalingReconcilerTest {
         version.setLatestVersionNumber("1");
         version.setImageId("ami-version-1");
         version.setInstanceType("t3.micro");
+        version.setIamInstanceProfileArn("arn:aws:iam::000000000000:instance-profile/app-profile");
         List<Tag> instanceTags = List.of(new Tag("app.ClusterId", "development"));
+        List<Tag> propagatedTags = List.of(new Tag("app.ClusterId", "development"), new Tag("job-id", "2001"));
         version.setInstanceTags(instanceTags);
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
@@ -87,7 +96,7 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(instanceTags), eq(null), eq(null))).thenReturn(reservation);
+                anyList(), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"))).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -95,9 +104,15 @@ class AutoScalingReconcilerTest {
         assertEquals("i-launched", asg.getInstances().getFirst().getInstanceId());
         assertEquals("lt-123", asg.getInstances().getFirst().getLaunchTemplateId());
         assertEquals("1", asg.getInstances().getFirst().getLaunchTemplateVersion());
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.captor();
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(instanceTags), eq(null), eq(null));
+                tags.capture(), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"));
+        assertEquals(propagatedTags.size(), tags.getValue().size());
+        assertEquals("app.ClusterId", tags.getValue().get(0).getKey());
+        assertEquals("development", tags.getValue().get(0).getValue());
+        assertEquals("job-id", tags.getValue().get(1).getKey());
+        assertEquals("2001", tags.getValue().get(1).getValue());
     }
 
     @Test
@@ -290,6 +305,36 @@ class AutoScalingReconcilerTest {
                 eq("Removing stale EC2 instance reference(s): [i-dead]"),
                 eq("Persisted Auto Scaling state referenced instance containers that are no longer running."),
                 eq("Successful"));
+    }
+
+    @Test
+    void reconcileFailsActiveSsmInvocationsBeforePruningStaleInstance() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        SsmCommandService ssmCommandService = mock(SsmCommandService.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(
+                asgService, ec2Service, elbV2Service, ssmCommandService);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-dead", "Pending"));
+
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-dead");
+        ec2Instance.setState(InstanceState.terminated());
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.describeInstances("us-east-1", List.of("i-dead"), null))
+                .thenReturn(List.of(reservation));
+        when(ssmCommandService.failActiveInvocationsForInstances("us-east-1", Set.of("i-dead"), "Undeliverable"))
+                .thenReturn(1);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(ssmCommandService).failActiveInvocationsForInstances("us-east-1", Set.of("i-dead"), "Undeliverable");
     }
 
     @Test

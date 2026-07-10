@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.cloudfront.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 
+@RegisterForReflection
 public class PublicKey {
 
     private String id;

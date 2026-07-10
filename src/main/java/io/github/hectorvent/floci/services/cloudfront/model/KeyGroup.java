@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.cloudfront.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.List;
 
+@RegisterForReflection
 public class KeyGroup {
 
     private String id;

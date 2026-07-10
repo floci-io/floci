@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
@@ -151,11 +153,57 @@ class Ec2Tests {
 
     @Test
     @Order(7)
+    @DisplayName("DescribeLaunchTemplateVersions - user data readback")
+    void describeLaunchTemplateVersionsReturnsEncodedUserData() {
+        String encodedUserData = Base64.getEncoder()
+                .encodeToString("#!/bin/sh\necho sdk-launch-template\n".getBytes(StandardCharsets.UTF_8));
+        String launchTemplateId = ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
+                .launchTemplateName("sdk-user-data-readback")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .userData(encodedUserData)
+                        .build())
+                .build()).launchTemplate().launchTemplateId();
+
+        try {
+            DescribeLaunchTemplateVersionsResponse described = ec2.describeLaunchTemplateVersions(
+                    DescribeLaunchTemplateVersionsRequest.builder()
+                            .launchTemplateId(launchTemplateId)
+                            .versions("$Latest")
+                            .build());
+
+            assertThat(described.launchTemplateVersions()).hasSize(1);
+            assertThat(described.launchTemplateVersions().get(0).launchTemplateData().userData())
+                    .isEqualTo(encodedUserData);
+        }
+        finally {
+            ec2.deleteLaunchTemplate(DeleteLaunchTemplateRequest.builder()
+                    .launchTemplateId(launchTemplateId)
+                    .build());
+        }
+    }
+
+    @Test
+    @Order(7)
     @DisplayName("DescribeInstanceTypes - non-empty list")
     void describeInstanceTypes() {
         DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(
                 DescribeInstanceTypesRequest.builder().build());
         assertThat(resp.instanceTypes()).isNotEmpty();
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - processor architectures")
+    void describeInstanceTypeProcessorArchitectures() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.fromValue("m6gd.2xlarge"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(1);
+        assertThat(resp.instanceTypes().get(0).processorInfo().supportedArchitecturesAsStrings())
+                .containsExactly("arm64");
     }
 
     @Test

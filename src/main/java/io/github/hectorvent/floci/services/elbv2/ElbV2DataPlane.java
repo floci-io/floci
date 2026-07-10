@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
+import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
 import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
@@ -68,12 +69,16 @@ public class ElbV2DataPlane {
     @Inject
     ObjectMapper objectMapper;
 
-    private final Map<String, HttpServer> servers = new ConcurrentHashMap<>();
+    private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
+    private final Map<Integer, Map<String, String>> listenersByHostAndPort = new ConcurrentHashMap<>();
+    private final Map<String, ListenerBinding> listenerBindings = new ConcurrentHashMap<>();
     private final Map<String, AtomicReference<List<CompiledRule>>> ruleChains = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> rrCounters = new ConcurrentHashMap<>();
     private final Map<String, String> listenerRegions = new ConcurrentHashMap<>();
 
     private HttpClient proxyClient;
+
+    private record ListenerBinding(int port, String host) {}
 
     @PostConstruct
     void init() {
@@ -85,10 +90,12 @@ public class ElbV2DataPlane {
 
     @PreDestroy
     void shutdown() {
-        for (Map.Entry<String, HttpServer> e : servers.entrySet()) {
+        for (Map.Entry<Integer, HttpServer> e : servers.entrySet()) {
             e.getValue().close();
         }
         servers.clear();
+        listenersByHostAndPort.clear();
+        listenerBindings.clear();
         ruleChains.clear();
         rrCounters.clear();
         listenerRegions.clear();
@@ -102,40 +109,47 @@ public class ElbV2DataPlane {
         List<CompiledRule> compiled = compileRules(rules);
         ruleChains.put(listenerArn, new AtomicReference<>(compiled));
         listenerRegions.put(listenerArn, region);
-
-        HttpServer server = vertx.createHttpServer(new HttpServerOptions()
-                .setHost("0.0.0.0")
-                .setPort(listener.getPort()));
-
-        server.requestHandler(req -> handleRequest(req, listenerArn, region));
-        server.listen()
-                .onSuccess(s -> {
-                    servers.put(listenerArn, s);
-                    LOG.infov("ELBv2 listener started on port {0} for {1}", String.valueOf(listener.getPort()), listenerArn);
-                })
-                .onFailure(err -> {
-                    ruleChains.remove(listenerArn);
-                    listenerRegions.remove(listenerArn);
-                    LOG.warnv("ELBv2 listener failed to start on port {0}: {1}", String.valueOf(listener.getPort()), err.getMessage());
-                });
+        ListenerBinding binding = binding(listener, region);
+        listenerBindings.put(listenerArn, binding);
+        listenersByHostAndPort.computeIfAbsent(binding.port(), ignored -> new ConcurrentHashMap<>())
+                .put(binding.host(), listenerArn);
+        servers.computeIfAbsent(binding.port(), this::startPortServer);
     }
 
     public void restartListener(Listener listener, String region, List<Rule> rules) {
         if (config.services().elbv2().mock()) {
             return;
         }
-        HttpServer server = servers.remove(listener.getListenerArn());
-        if (server == null) {
-            startListener(listener, region, rules);
+        String listenerArn = listener.getListenerArn();
+        ListenerBinding newBinding = binding(listener, region);
+        ListenerBinding oldBinding = listenerBindings.get(listenerArn);
+        if (newBinding.equals(oldBinding)) {
+            ruleChains.put(listenerArn, new AtomicReference<>(compileRules(rules)));
+            listenerRegions.put(listenerArn, region);
+            listenersByHostAndPort.computeIfAbsent(newBinding.port(), ignored -> new ConcurrentHashMap<>())
+                    .put(newBinding.host(), listenerArn);
+            servers.computeIfAbsent(newBinding.port(), this::startPortServer);
             return;
         }
-        server.close().onComplete(ignored -> startListener(listener, region, rules));
+        oldBinding = listenerBindings.remove(listenerArn);
+        if (oldBinding != null) {
+            Map<String, String> listenersByHost = listenersByHostAndPort.get(oldBinding.port());
+            if (listenersByHost != null) {
+                listenersByHost.remove(oldBinding.host(), listenerArn);
+                closePortServerIfUnused(oldBinding.port(), listenersByHost);
+            }
+        }
+        startListener(listener, region, rules);
     }
 
     public void stopListener(String listenerArn) {
-        HttpServer server = servers.remove(listenerArn);
-        if (server != null) {
-            server.close();
+        ListenerBinding binding = listenerBindings.remove(listenerArn);
+        if (binding != null) {
+            Map<String, String> listenersByHost = listenersByHostAndPort.get(binding.port());
+            if (listenersByHost != null) {
+                listenersByHost.remove(binding.host(), listenerArn);
+                closePortServerIfUnused(binding.port(), listenersByHost);
+            }
         }
         ruleChains.remove(listenerArn);
         listenerRegions.remove(listenerArn);
@@ -148,7 +162,62 @@ public class ElbV2DataPlane {
         }
     }
 
-    private void handleRequest(io.vertx.core.http.HttpServerRequest req, String listenerArn, String region) {
+    private HttpServer startPortServer(int port) {
+        HttpServer server = vertx.createHttpServer(new HttpServerOptions()
+                .setHost("0.0.0.0")
+                .setPort(port));
+        server.requestHandler(req -> handleRequest(req, port));
+        server.listen()
+                .onSuccess(s -> LOG.infov("ELBv2 listener port started on {0}", String.valueOf(port)))
+                .onFailure(err -> {
+                    servers.remove(port);
+                    clearPortBindings(port);
+                    server.close();
+                    LOG.warnv("ELBv2 listener port failed to start on {0}: {1}", String.valueOf(port), err.getMessage());
+                });
+        return server;
+    }
+
+    private void closePortServerIfUnused(int port, Map<String, String> listenersByHost) {
+        if (!listenersByHost.isEmpty()) {
+            return;
+        }
+        listenersByHostAndPort.remove(port, listenersByHost);
+        HttpServer server = servers.remove(port);
+        if (server != null) {
+            server.close();
+        }
+    }
+
+    private void clearPortBindings(int port) {
+        Map<String, String> listenersByHost = listenersByHostAndPort.remove(port);
+        if (listenersByHost == null) {
+            return;
+        }
+        for (String listenerArn : listenersByHost.values()) {
+            listenerBindings.remove(listenerArn);
+            ruleChains.remove(listenerArn);
+            listenerRegions.remove(listenerArn);
+        }
+    }
+
+    private ListenerBinding binding(Listener listener, String region) {
+        LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, listener.getLoadBalancerArn());
+        String host = loadBalancer != null ? normalizeHost(loadBalancer.getDnsName()) : listener.getLoadBalancerArn();
+        return new ListenerBinding(listener.getPort(), host);
+    }
+
+    private void handleRequest(io.vertx.core.http.HttpServerRequest req, int port) {
+        String listenerArn = resolveListenerArn(port, req.host());
+        if (listenerArn == null) {
+            req.response().setStatusCode(502).end("No listener for host");
+            return;
+        }
+        String region = listenerRegions.get(listenerArn);
+        if (region == null) {
+            req.response().setStatusCode(502).end("No listener region");
+            return;
+        }
         AtomicReference<List<CompiledRule>> ref = ruleChains.get(listenerArn);
         if (ref == null) {
             req.response().setStatusCode(502).end("No rule chain");
@@ -162,6 +231,35 @@ public class ElbV2DataPlane {
             }
         }
         req.response().setStatusCode(502).end("No matching rule");
+    }
+
+    private String resolveListenerArn(int port, String hostHeader) {
+        Map<String, String> listenersByHost = listenersByHostAndPort.get(port);
+        if (listenersByHost == null || listenersByHost.isEmpty()) {
+            return null;
+        }
+        String host = normalizeHost(hostHeader);
+        String listenerArn = listenersByHost.get(host);
+        if (listenerArn != null) {
+            return listenerArn;
+        }
+        if (listenersByHost.size() == 1) {
+            return listenersByHost.values().iterator().next();
+        }
+        return null;
+    }
+
+    private static String normalizeHost(String host) {
+        if (host == null) {
+            return "";
+        }
+        String normalized = host.trim().toLowerCase();
+        int colon = normalized.lastIndexOf(':');
+        int bracket = normalized.lastIndexOf(']');
+        if (colon > -1 && colon > bracket) {
+            normalized = normalized.substring(0, colon);
+        }
+        return normalized;
     }
 
     private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region) {

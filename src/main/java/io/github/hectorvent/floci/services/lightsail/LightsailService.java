@@ -240,6 +240,11 @@ public class LightsailService {
 
     public ObjectNode detachDisk(String region, String name) {
         ObjectNode disk = requireResource(region, RESOURCE_DISK, name);
+        if (!disk.path("isAttached").asBoolean(false)) {
+            throw new AwsException("InvalidInputException",
+                    "Disk " + name + " is not attached to any instance.",
+                    400);
+        }
         disk.remove("attachedTo");
         disk.put("isAttached", false);
         disk.put("attachmentState", "detached");

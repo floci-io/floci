@@ -465,6 +465,11 @@ class AutoScalingIntegrationTest {
                 .formParam("Tags.member.1.Key", "owner")
                 .formParam("Tags.member.1.Value", "sample-app")
                 .formParam("Tags.member.1.PropagateAtLaunch", "true")
+                .formParam("Tags.member.2.ResourceId", "my-lt-asg")
+                .formParam("Tags.member.2.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.2.Key", "control-plane-only")
+                .formParam("Tags.member.2.Value", "true")
+                .formParam("Tags.member.2.PropagateAtLaunch", "false")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -489,7 +494,10 @@ class AutoScalingIntegrationTest {
                 .body(containsString("<Version>$Latest</Version>"))
                 .body(containsString("<VPCZoneIdentifier>subnet-12345678,subnet-87654321</VPCZoneIdentifier>"))
                 .body(containsString("owner"))
-                .body(containsString("sample-app"));
+                .body(containsString("sample-app"))
+                .body(containsString("<PropagateAtLaunch>true</PropagateAtLaunch>"))
+                .body(containsString("control-plane-only"))
+                .body(containsString("<PropagateAtLaunch>false</PropagateAtLaunch>"));
 
         given()
                 .formParam("Action", "DeleteTags")
@@ -745,7 +753,7 @@ class AutoScalingIntegrationTest {
                 .statusCode(200)
                 .body(containsString("UpdateAutoScalingGroupResponse"));
 
-        given()
+        String describeBody = given()
                 .formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", "my-mixed-asg")
                 .header("Authorization", AUTH)
@@ -755,10 +763,17 @@ class AutoScalingIntegrationTest {
                 .statusCode(200)
                 .body(containsString("<Version>5</Version>"))
                 .body(containsString("<InstanceType>r7g.large</InstanceType>"))
-                .body(not(containsString("<InstanceType>t4g.medium</InstanceType>")))
                 .body(containsString("<OnDemandBaseCapacity>2</OnDemandBaseCapacity>"))
                 .body(containsString("<OnDemandPercentageAboveBaseCapacity>50</OnDemandPercentageAboveBaseCapacity>"))
-                .body(containsString("<SpotAllocationStrategy>price-capacity-optimized</SpotAllocationStrategy>"));
+                .body(containsString("<SpotAllocationStrategy>price-capacity-optimized</SpotAllocationStrategy>"))
+                .extract().asString();
+
+        // Scope the negative check to the policy overrides: a previously launched
+        // instance keeps its original instance type after a policy update (matching
+        // AWS), so t4g.medium may still appear under <Instances>.
+        String overrides = describeBody.substring(
+                describeBody.indexOf("<Overrides>"), describeBody.indexOf("</Overrides>"));
+        assertThat(overrides, not(containsString("<InstanceType>t4g.medium</InstanceType>")));
     }
 
     @Test

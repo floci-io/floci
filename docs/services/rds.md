@@ -10,8 +10,9 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 
 ## Supported Management Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateDBInstance` | Start a new database instance |
 | `DescribeDBInstances` | List instances and their connection info |
 | `DeleteDBInstance` | Stop and remove an instance |
@@ -22,9 +23,6 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
-| `AddTagsToResource` | Add tags to a DB resource |
-| `ListTagsForResource` | List tags for a DB resource |
-| `RemoveTagsFromResource` | Remove tags from a DB resource |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters |
 | `DeleteDBCluster` | Delete a cluster |
@@ -34,12 +32,25 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBParameterGroup` | Delete a parameter group |
 | `ModifyDBParameterGroup` | Update parameter group settings |
 | `DescribeDBParameters` | List parameters in a group |
+| `CreateDBClusterParameterGroup` | - |
+| `DescribeDBClusterParameterGroups` | - |
+| `DeleteDBClusterParameterGroup` | - |
+| `ModifyDBClusterParameterGroup` | - |
+| `DescribeDBClusterParameters` | - |
+| `DescribeDBSnapshots` | - |
+| `DescribeDBProxies` | - |
+| `DescribeDBClusterSnapshots` | - |
+| `AddTagsToResource` | Add tags to a DB resource |
+| `ListTagsForResource` | List tags for a DB resource |
+| `RemoveTagsFromResource` | Remove tags from a DB resource |
+<!-- floci:actions:end -->
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_RDS_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_RDS_MOCK` | `false` | `true` = metadata only (no Docker container or auth proxy) |
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7000` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
@@ -63,6 +74,27 @@ services:
       FLOCI_SERVICES_DOCKER_NETWORK: my-project_default
       FLOCI_SERVICES_RDS_PROXY_BASE_PORT: "7001"
 ```
+
+### Mock mode (CI / tests)
+
+Set `FLOCI_SERVICES_RDS_MOCK=true` when you only need the management API shape: clusters and
+instances are registered as `available` immediately, with no Docker container or auth proxy behind
+them. Each resource still gets a unique endpoint port, but nothing listens on it.
+
+```yaml
+# docker-compose.yml — CI / test environment
+services:
+  floci:
+    image: floci/floci:latest
+    environment:
+      FLOCI_SERVICES_RDS_MOCK: "true"
+```
+
+!!! note "Switching modes over persisted state"
+    With a persistent storage mode, changing `FLOCI_SERVICES_RDS_MOCK` between restarts is
+    best-effort, as with the other mock-capable services: resources created in real mode and
+    deleted under mock leave their containers and volumes behind, and resources created in mock
+    mode are restored with fresh, empty containers when loaded in real mode.
 
 ## Examples
 

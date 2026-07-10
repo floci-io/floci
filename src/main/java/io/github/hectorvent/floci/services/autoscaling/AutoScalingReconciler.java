@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
+import io.github.hectorvent.floci.services.ssm.SsmCommandService;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -18,6 +19,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import io.quarkus.runtime.StartupEvent;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -34,15 +36,22 @@ public class AutoScalingReconciler {
     private final AutoScalingService asgService;
     private final Ec2Service ec2Service;
     private final ElbV2Service elbV2Service;
+    private final SsmCommandService ssmCommandService;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
             r -> new Thread(r, "asg-reconciler"));
 
     @Inject
     AutoScalingReconciler(AutoScalingService asgService, Ec2Service ec2Service,
-                          ElbV2Service elbV2Service) {
+                          ElbV2Service elbV2Service, SsmCommandService ssmCommandService) {
         this.asgService = asgService;
         this.ec2Service = ec2Service;
         this.elbV2Service = elbV2Service;
+        this.ssmCommandService = ssmCommandService;
+    }
+
+    AutoScalingReconciler(AutoScalingService asgService, Ec2Service ec2Service,
+                          ElbV2Service elbV2Service) {
+        this(asgService, ec2Service, elbV2Service, null);
     }
 
     @PostConstruct
@@ -138,6 +147,7 @@ public class AutoScalingReconciler {
         List<String> instanceIds = staleInstances.stream()
                 .map(AsgInstance::getInstanceId)
                 .collect(Collectors.toList());
+        failActiveSsmInvocations(asg, instanceIds);
         asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
         asgService.saveAutoScalingGroup(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
@@ -146,6 +156,20 @@ public class AutoScalingReconciler {
                 "Successful");
         LOG.infov("ASG {0}: removed stale instance reference(s) {1}",
                 asg.getAutoScalingGroupName(), instanceIds);
+    }
+
+    private void failActiveSsmInvocations(AutoScalingGroup asg, List<String> instanceIds) {
+        if (ssmCommandService == null) {
+            return;
+        }
+        int failed = ssmCommandService.failActiveInvocationsForInstances(
+                asg.getRegion(),
+                Set.copyOf(instanceIds),
+                "Undeliverable");
+        if (failed > 0) {
+            LOG.infov("ASG {0}: marked {1} active SSM command invocation(s) failed for stale instances {2}",
+                    asg.getAutoScalingGroupName(), failed, instanceIds);
+        }
     }
 
     private boolean isStaleInstance(AutoScalingGroup asg, AsgInstance instance) {
@@ -270,7 +294,7 @@ public class AutoScalingReconciler {
                     launchSource.securityGroupIds(),
                     subnetId,
                     null,
-                    launchSource.instanceTags(),
+                    propagatedInstanceTags(asg, launchSource),
                     launchSource.userData(),
                     launchSource.iamInstanceProfile());
 
@@ -294,6 +318,23 @@ public class AutoScalingReconciler {
             LOG.warnv("ASG {0}: failed to launch instances: {1}",
                     asg.getAutoScalingGroupName(), e.getMessage());
         }
+    }
+
+    private static List<io.github.hectorvent.floci.services.ec2.model.Tag> propagatedInstanceTags(
+            AutoScalingGroup asg,
+            LaunchSource launchSource) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (io.github.hectorvent.floci.services.ec2.model.Tag tag : launchSource.instanceTags()) {
+            tags.put(tag.getKey(), tag.getValue());
+        }
+        asg.getTags().forEach((key, value) -> {
+            if (asg.getTagPropagateAtLaunch().getOrDefault(key, false)) {
+                tags.put(key, value);
+            }
+        });
+        return tags.entrySet().stream()
+                .map(entry -> new io.github.hectorvent.floci.services.ec2.model.Tag(entry.getKey(), entry.getValue()))
+                .toList();
     }
 
     private void scaleIn(AutoScalingGroup asg, int count) {
@@ -394,7 +435,7 @@ public class AutoScalingReconciler {
                     version.getSecurityGroupIds(),
                     version.getInstanceTags(),
                     version.getUserData(),
-                    null,
+                    version.getIamInstanceProfileArn(),
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
                     resolvedVersion);
@@ -423,7 +464,7 @@ public class AutoScalingReconciler {
                         version.getSecurityGroupIds(),
                         version.getInstanceTags(),
                         version.getUserData(),
-                        null,
+                        version.getIamInstanceProfileArn(),
                         specification.getLaunchTemplateId() == null
                                 ? mixedLaunchTemplate.getLaunchTemplateId()
                                 : specification.getLaunchTemplateId(),

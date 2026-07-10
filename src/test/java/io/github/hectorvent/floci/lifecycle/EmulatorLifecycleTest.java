@@ -65,6 +65,7 @@ class EmulatorLifecycleTest {
     @Mock private DocDbContainerManager docDbContainerManager;
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
+    @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
     @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -92,7 +93,8 @@ class EmulatorLifecycleTest {
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
-                docDbContainerManager, neptuneContainerManager, neptuneProxyManager, rdsService,
+                docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
+                rabbitMqManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState);
     }
@@ -263,6 +265,22 @@ class EmulatorLifecycleTest {
         verify(storageFactory).shutdownAll();
         // Hooks are handled by onPreShutdown, never from ShutdownEvent.
         verify(initializationHooksRunner, never()).run(InitializationHook.STOP);
+    }
+
+    @Test
+    @DisplayName("onStop flushes storage BEFORE the slow container teardown, and shuts it down last")
+    void shouldFlushStorageBeforeContainerTeardown() {
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        // The disk flush must run before the blocking Docker container teardown so a graceful
+        // shutdown can't be cut off by the SIGTERM grace window before data is persisted
+        // (regression guard for issue #1521). shutdownAll() still runs last to stop the flush
+        // schedulers and capture any shutdown-time writes.
+        var inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
+        inOrder.verify(storageFactory).flushAll();
+        inOrder.verify(elastiCacheContainerManager).stopAll();
+        inOrder.verify(rdsContainerManager).stopAll();
+        inOrder.verify(storageFactory).shutdownAll();
     }
 
     @Test

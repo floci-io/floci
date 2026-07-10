@@ -29,6 +29,9 @@ final class AwsManagedPolicies {
                 "Provides full access to AWS services and resources, but does not allow management of Users and groups."),
         new ManagedPolicyDef("ReadOnlyAccess", "/",
                 "Provides read-only access to AWS services and resources."),
+        new ManagedPolicyDef("SecurityAudit", "/",
+                "The security audit template grants access to read security configuration metadata. "
+                + "It is useful for software that audits the configuration of an AWS account."),
         new ManagedPolicyDef("IAMFullAccess", "/",
                 "Provides full access to IAM."),
         new ManagedPolicyDef("AmazonS3FullAccess", "/",
@@ -94,6 +97,10 @@ final class AwsManagedPolicies {
                 "This policy allows Amazon EKS worker nodes to connect to Amazon EKS Clusters."),
         new ManagedPolicyDef("AmazonEKS_CNI_Policy", "/",
                 "Provides the Amazon VPC CNI Plugin the permissions it requires to modify the IP address configuration on your EKS worker nodes."),
+
+        // RDS execution role policy
+        new ManagedPolicyDef("AmazonRDSEnhancedMonitoringRole", "/service-role/",
+                "Provides permissions required for Amazon RDS Enhanced Monitoring."),
 
         // S3 Object Lambda execution role policy
         new ManagedPolicyDef("AmazonS3ObjectLambdaExecutionRolePolicy", "/service-role/",

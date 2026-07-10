@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -31,7 +32,7 @@ import java.util.concurrent.Executors;
  * to avoid a circular CDI dependency.
  */
 @ApplicationScoped
-public class SqsEventSourcePoller {
+public class SqsEventSourcePoller implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SqsEventSourcePoller.class);
 
@@ -87,6 +88,12 @@ public class SqsEventSourcePoller {
         timerIds.values().forEach(vertx::cancelTimer);
         timerIds.clear();
         LOG.info("SqsEventSourcePoller shut down, all timers cancelled");
+    }
+
+    public void clear() {
+        timerIds.values().forEach(vertx::cancelTimer);
+        timerIds.clear();
+        activePolls.clear();
     }
 
     public void startPolling(EventSourceMapping esm) {

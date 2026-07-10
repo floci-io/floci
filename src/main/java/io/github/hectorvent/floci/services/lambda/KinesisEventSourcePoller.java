@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
@@ -27,7 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @ApplicationScoped
-public class KinesisEventSourcePoller {
+public class KinesisEventSourcePoller implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(KinesisEventSourcePoller.class);
 
@@ -75,6 +76,12 @@ public class KinesisEventSourcePoller {
         pollExecutor.shutdownNow();
         timerIds.values().forEach(vertx::cancelTimer);
         timerIds.clear();
+    }
+
+    public void clear() {
+        timerIds.values().forEach(vertx::cancelTimer);
+        timerIds.clear();
+        activePolls.clear();
     }
 
     public void startPolling(EventSourceMapping esm) {

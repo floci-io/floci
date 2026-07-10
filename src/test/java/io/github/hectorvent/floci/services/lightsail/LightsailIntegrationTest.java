@@ -407,6 +407,29 @@ class LightsailIntegrationTest {
                 .body("__type", equalTo("InvalidInputException"));
 
         given()
+                .header("X-Amz-Target", TARGET_PREFIX + "DetachDisk")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {"diskName": "review-data"}
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "DetachDisk")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {"diskName": "review-data"}
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidInputException"));
+
+        given()
                 .header("X-Amz-Target", TARGET_PREFIX + "AllocateStaticIp")
                 .contentType(CONTENT_TYPE)
                 .body("""

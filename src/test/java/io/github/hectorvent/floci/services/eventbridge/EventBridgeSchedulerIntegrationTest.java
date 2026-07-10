@@ -50,7 +50,7 @@ class EventBridgeSchedulerIntegrationTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
                 new ObjectMapper(), scheduler, invoker, replayDispatcher,
-                new ResourceGroupsTaggingService());
+                new ResourceGroupsTaggingService(null));
     }
 
     @AfterEach
@@ -322,12 +322,15 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public EmulatorConfig.InitHooksConfig initHooks() { return null; }
             @Override
+            public ProtocolsConfig protocols() { return () -> false; }
+            @Override
             public TlsConfig tls() {
                 return new TlsConfig() {
                     @Override public boolean enabled() { return false; }
                     @Override public Optional<String> certPath() { return Optional.empty(); }
                     @Override public Optional<String> keyPath() { return Optional.empty(); }
                     @Override public boolean selfSigned() { return true; }
+                    @Override public int awsHttpsPort() { return 443; }
                 };
             }
         };

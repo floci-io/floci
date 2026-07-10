@@ -8,6 +8,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -168,6 +170,335 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackName>test-stack</StackName>"))
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+    }
+
+    @Test
+    void updateTerminationProtection_togglesFlagAndReflectsInDescribeStacks() {
+        String template = """
+            { "Resources": { "Q": { "Type": "AWS::SQS::Queue",
+              "Properties": { "QueueName": "cf-tp-queue" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "tp-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        // DescribeStacks reports protection off by default.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>false</EnableTerminationProtection>"));
+
+        // Enable termination protection — returns the StackId.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateTerminationProtection")
+            .formParam("StackName", "tp-stack")
+            .formParam("EnableTerminationProtection", "true")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackId>"))
+            .body(containsString("</UpdateTerminationProtectionResult>"));
+
+        // DescribeStacks now reflects it.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>true</EnableTerminationProtection>"));
+    }
+
+    @Test
+    void deleteStack_protectedStackIsRejectedAndStackRemains() {
+        String template = """
+            { "Resources": { "Q": { "Type": "AWS::SQS::Queue",
+              "Properties": { "QueueName": "cf-tp-del-queue" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "tp-del-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        // Enable termination protection.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateTerminationProtection")
+            .formParam("StackName", "tp-del-stack")
+            .formParam("EnableTerminationProtection", "true")
+        .when().post("/")
+        .then().statusCode(200);
+
+        // DeleteStack is rejected with a 400 ValidationError (XML error body, Query protocol).
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "tp-del-stack")
+        .when().post("/")
+        .then().statusCode(400)
+            .contentType(containsString("xml"))
+            .body(containsString("<Code>ValidationError</Code>"))
+            .body(containsString("cannot be deleted while TerminationProtection is enabled"));
+
+        // The stack still exists and is not in a DELETE state.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-del-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackName>tp-del-stack</StackName>"))
+            .body(not(containsString("DELETE_IN_PROGRESS")))
+            .body(not(containsString("DELETE_COMPLETE")));
+    }
+
+    @Test
+    void createStack_withTerminationProtectionEnabled() {
+        String template = """
+            { "Resources": { "Q": { "Type": "AWS::SQS::Queue",
+              "Properties": { "QueueName": "cf-tp-create-queue" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "tp-create-stack")
+            .formParam("TemplateBody", template)
+            .formParam("EnableTerminationProtection", "true")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        // The CreateStackInput flag is honored — DescribeStacks reports protection on.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-create-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>true</EnableTerminationProtection>"));
+    }
+
+    @Test
+    void createStack_s3BucketWithCorsConfiguration() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-cors-test-bucket",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "Id": "allow-app",
+                          "AllowedHeaders": ["*"],
+                          "AllowedMethods": ["GET", "PUT"],
+                          "AllowedOrigins": ["https://app.example.com"],
+                          "ExposedHeaders": ["x-amz-request-id"],
+                          "MaxAge": 3000
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-cors-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // The bucket's ?cors subresource should reflect the CloudFormation CorsConfiguration.
+        given()
+        .when()
+            .get("/cfn-cors-test-bucket?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CORSRule>"))
+            .body(containsString("<ID>allow-app</ID>"))
+            .body(containsString("<AllowedMethod>GET</AllowedMethod>"))
+            .body(containsString("<AllowedMethod>PUT</AllowedMethod>"))
+            .body(containsString("<AllowedOrigin>https://app.example.com</AllowedOrigin>"))
+            .body(containsString("<AllowedHeader>*</AllowedHeader>"))
+            .body(containsString("<ExposeHeader>x-amz-request-id</ExposeHeader>"))
+            .body(containsString("<MaxAgeSeconds>3000</MaxAgeSeconds>"));
+    }
+
+    @Test
+    void createStack_s3BucketCorsConfigurationSkipsBlankListValues() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-cors-blank-bucket",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "AllowedHeaders": ["x-real-header", ""],
+                          "AllowedMethods": ["GET"],
+                          "AllowedOrigins": ["https://app.example.com"]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-cors-blank-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // A blank list entry must be skipped rather than emitted as an empty (invalid) element.
+        given()
+        .when()
+            .get("/cfn-cors-blank-bucket?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<AllowedHeader>x-real-header</AllowedHeader>"))
+            .body(not(containsString("<AllowedHeader></AllowedHeader>")));
+    }
+
+    @Test
+    void updateStack_s3BucketCorsConfigurationIsReconciled() {
+        String stackName = "cfn-cors-update-stack";
+        String bucketName = "cfn-cors-update-bucket";
+        String withCors = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "AllowedMethods": ["GET"],
+                          "AllowedOrigins": ["https://old.example.com"]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        String changedCors = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "CorsConfiguration": {
+                      "CorsRules": [
+                        {
+                          "AllowedMethods": ["POST"],
+                          "AllowedOrigins": ["https://new.example.com"]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        String withoutCors = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s"
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", withCors)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<AllowedOrigin>https://old.example.com</AllowedOrigin>"));
+
+        // Update: rules change → CORS document is replaced, no stale rule left behind.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", changedCors)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?cors")
+        .then()
+            .statusCode(200)
+            .body(containsString("<AllowedOrigin>https://new.example.com</AllowedOrigin>"))
+            .body(not(containsString("https://old.example.com")));
+
+        // Update: property dropped → CORS is cleared, ?cors returns NoSuchCORSConfiguration.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", withoutCors)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?cors")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchCORSConfiguration"));
     }
 
     @Test
@@ -1225,6 +1556,95 @@ class CloudFormationIntegrationTest {
             .get("/")
         .then()
             .statusCode(200);
+    }
+
+    // Regression: issue #1668. Deleting a stack that owns an AWS::SecretsManager::Secret which
+    // no longer exists (e.g. dropped by a persistent-state restore) must reach DELETE_COMPLETE,
+    // not DELETE_FAILED. A missing secret is already gone — AWS treats it as deleted.
+    @Test
+    void deleteStack_withAlreadyDeletedSecret_reachesDeleteComplete() throws Exception {
+        String secretName = "cfn-1668-already-deleted-secret";
+        String template = """
+            {
+              "Resources": {
+                "TestSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "Properties": {
+                    "Name": "%s",
+                    "SecretString": "{\\"key\\":\\"value\\"}"
+                  }
+                }
+              }
+            }
+            """.formatted(secretName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-1668-delete-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // Wait for CREATE_COMPLETE before deleting the secret out of band.
+        long createDeadline = System.currentTimeMillis() + 10_000;
+        String createStatus = "";
+        while (System.currentTimeMillis() < createDeadline) {
+            String xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", "cfn-1668-delete-stack")
+            .when().post("/").then().statusCode(200).extract().asString();
+            if (xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")) {
+                createStatus = "CREATE_COMPLETE";
+                break;
+            }
+            Thread.sleep(200);
+        }
+        assertEquals("CREATE_COMPLETE", createStatus, "Stack did not reach CREATE_COMPLETE within timeout");
+
+        // Simulate a persistent-state restore dropping the secret while the stack still tracks it.
+        given()
+            .contentType(SM_CONTENT_TYPE)
+            .header("X-Amz-Target", "secretsmanager.DeleteSecret")
+            .body("{\"SecretId\":\"" + secretName + "\",\"ForceDeleteWithoutRecovery\":true}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-1668-delete-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            String statusXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", "cfn-1668-delete-stack")
+            .when()
+                .post("/")
+            .then()
+                .extract().body().asString();
+
+            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+
+            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")
+                    || statusXml.contains("does not exist")) {
+                return;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError("Stack did not reach DELETE_COMPLETE within timeout");
     }
 
     @Test
@@ -5574,7 +5994,7 @@ class CloudFormationIntegrationTest {
         String albArn = cfnOutputValue(describeXml, "AlbRef");
         assertThat(albArn, startsWith(
                 "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/cfn-alb/"));
-        assertThat(cfnOutputValue(describeXml, "AlbDns"), containsString(".elb.localhost"));
+        assertThat(cfnOutputValue(describeXml, "AlbDns"), containsString(".elb.localhost.floci.io"));
         assertThat(cfnOutputValue(describeXml, "AlbFullName"), startsWith("app/cfn-alb/"));
         assertThat(cfnOutputValue(describeXml, "AlbCanonical"), notNullValue());
         String tgArn = cfnOutputValue(describeXml, "TgRef");

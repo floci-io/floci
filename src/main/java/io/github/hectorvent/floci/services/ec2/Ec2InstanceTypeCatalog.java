@@ -120,6 +120,7 @@ public class Ec2InstanceTypeCatalog {
         public String instanceType;
         public int vcpu;
         public int memoryMib;
+        public int localStorageGiB;
         public List<String> supportedArchitectures = List.of();
         public Boolean currentGeneration;
 
@@ -128,6 +129,8 @@ public class Ec2InstanceTypeCatalog {
             type.put("instanceType", instanceType);
             type.put("vcpu", vcpu);
             type.put("memoryMib", memoryMib);
+            type.put("instanceStorageSupported", localStorageGiB > 0);
+            type.put("localStorageGiB", localStorageGiB);
             type.put("supportedArchitectures", List.copyOf(supportedArchitectures));
             type.put("currentGeneration", currentGeneration == null || currentGeneration);
             return type;
