@@ -263,6 +263,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::KMS::Key" -> provisionKmsKey(resource, properties, engine, region, accountId);
                 case "AWS::KMS::Alias" -> provisionKmsAlias(resource, properties, engine, region);
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
+                case "AWS::SecretsManager::SecretTargetAttachment" ->
+                        provisionSecretTargetAttachment(resource, properties, engine, region);
                 case "AWS::CDK::Metadata" -> provisionCdkMetadata(resource);
                 case "AWS::S3::BucketPolicy" -> provisionS3BucketPolicy(resource, properties, engine);
                 case "AWS::SQS::QueuePolicy" -> provisionSqsQueuePolicy(resource, properties, engine);
@@ -415,6 +417,9 @@ public class CloudFormationResourceProvisioner {
             } // KMS keys can't be immediately deleted; skip
             case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
             case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
+            // A SecretTargetAttachment only augments its secret; its physical id IS the secret's ARN.
+            // Deleting the attachment must NOT delete the secret — AWS treats it as a detach no-op.
+            case "AWS::SecretsManager::SecretTargetAttachment" -> { }
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
@@ -2001,6 +2006,34 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(secret.getArn());
         r.getAttributes().put("Arn", secret.getArn());
         r.getAttributes().put("Name", name);
+    }
+
+    /**
+     * Provisions an {@code AWS::SecretsManager::SecretTargetAttachment}. In AWS this resource finalizes a
+     * secret by writing the target's connection details into it; crucially, its {@code Ref} returns the ARN
+     * of the secret named in {@code SecretId} (see the CloudFormation resource reference "Return values").
+     * Consumers such as {@code Secret.fromSecretCompleteArn(...)} therefore expect a complete secret ARN
+     * (with the trailing {@code -6char} suffix). Resolve {@code SecretId} (a Ref to the Secret, or a raw
+     * name/ARN) to the canonical complete ARN and expose it as this resource's physical id.
+     */
+    private void provisionSecretTargetAttachment(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine, String region) {
+        String secretId = resolveOptional(props, "SecretId", engine);
+        String arn = secretId;
+        if (secretId != null && !secretId.isBlank()) {
+            try {
+                arn = secretsManagerService.describeSecret(secretId, region).getArn();
+            } catch (Exception e) {
+                // SecretId is normally already the complete ARN (a Ref to the Secret resolves to its
+                // physical id, which provisionSecret sets to the ARN); fall back to it as-is.
+                LOG.debugv("SecretTargetAttachment: could not resolve secret {0}: {1}", secretId, e.getMessage());
+            }
+        }
+        if (arn == null || arn.isBlank()) {
+            arn = r.getLogicalId();
+        }
+        r.setPhysicalId(arn);
+        r.getAttributes().put("Arn", arn);
     }
 
     /**
