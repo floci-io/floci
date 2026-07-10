@@ -1362,6 +1362,72 @@ class ApiGatewayOpenApiImportTest {
         given().delete("/restapis/" + apiId);
     }
 
+    // ──────────────────────────── Security scheme / authorizer import ────────────────────────────
+
+    @Test
+    @Order(90)
+    void importRestApi_lambdaAuthorizerFromSecurityScheme() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "SecuredAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "MyLambdaAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:authz/invocations",
+                          "authorizerResultTtlInSeconds": 300
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/secure": {
+                      "get": {
+                        "security": [{"MyLambdaAuth": []}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        // The security scheme became an Authorizer (previously dropped on import).
+        String authId = given()
+                .when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200)
+                .body("item", hasSize(1))
+                .body("item[0].type", equalTo("TOKEN"))
+                .body("item[0].authorizerUri", containsString("function:authz"))
+                .body("item[0].identitySource", equalTo("method.request.header.Authorization"))
+                .extract().body().jsonPath().getString("item[0].id");
+
+        // The GET /secure method is wired to that authorizer (CUSTOM) — not silently left NONE/open.
+        String resourceId = given()
+                .when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200)
+                .extract().body().jsonPath().getString("item.find { it.path == '/secure' }.id");
+
+        given()
+                .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("authorizationType", equalTo("CUSTOM"))
+                .body("authorizerId", equalTo(authId));
+
+        given().delete("/restapis/" + apiId);
+    }
+
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test
