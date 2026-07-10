@@ -9,6 +9,10 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -34,13 +39,17 @@ class RdsCfnProvisionerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RdsService rdsService;
+    private SecretsManagerService secretsManagerService;
+    private SsmService ssmService;
     private CloudFormationResourceProvisioner provisioner;
 
     @BeforeEach
     void setUp() {
         rdsService = mock(RdsService.class);
+        secretsManagerService = mock(SecretsManagerService.class);
+        ssmService = mock(SsmService.class);
         provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, ssmService, null, secretsManagerService, null,
                 null, null, null, null, null, null,
                 mapper,
                 null, null, null, null, null, null, null,
@@ -112,6 +121,55 @@ class RdsCfnProvisionerTest {
         assertEquals("5432", r.getAttributes().get("Endpoint.Port"));
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", "16.3",
                 "admin", "secret", "appdb", false, null);
+    }
+
+    @Test
+    void resolvesSecretsManagerDynamicReferenceInMasterPassword() {
+        SecretVersion version = mock(SecretVersion.class);
+        when(version.getSecretString()).thenReturn("{\"password\":\"resolved-secret\"}");
+        when(secretsManagerService.getSecretValue(any(), any(), any(), any())).thenReturn(version);
+
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","EngineVersion":"16.3",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:secretsmanager:my-secret:SecretString:password}}",
+                 "DatabaseName":"appdb"}
+                """);
+
+        // The {{resolve:secretsmanager:...}} dynamic reference is substituted with the live secret
+        // value (the JSON key extracted) before the password reaches RdsService.
+        verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
+                eq("admin"), eq("resolved-secret"), eq("appdb"), anyBoolean(), any());
+    }
+
+    @Test
+    void resolvesSsmDynamicReferenceInMasterPassword() {
+        Parameter param = mock(Parameter.class);
+        when(param.getValue()).thenReturn("resolved-ssm");
+        when(ssmService.getParameter(eq("/db/password"), any())).thenReturn(param);
+
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","EngineVersion":"16.3",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:ssm:/db/password}}",
+                 "DatabaseName":"appdb"}
+                """);
+
+        // The {{resolve:ssm:<name>}} dynamic reference is substituted with the parameter value.
+        verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
+                eq("admin"), eq("resolved-ssm"), eq("appdb"), anyBoolean(), any());
     }
 
     @Test

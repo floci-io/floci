@@ -92,6 +92,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -1006,7 +1008,7 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
                 resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine)),
                 resolveOptional(props, "DBName", engine),
                 firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
                 parseIntProp(props, "AllocatedStorage", engine, 20),
@@ -1036,7 +1038,7 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
                 resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine)),
                 resolveOptional(props, "DatabaseName", engine),
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                 resolveOptional(props, "DBClusterParameterGroupName", engine));
@@ -3799,6 +3801,67 @@ public class CloudFormationResourceProvisioner {
             return null;
         }
         return engine.resolve(props.get(name));
+    }
+
+    private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.+?)\\}\\}");
+
+    /**
+     * Resolves CloudFormation dynamic references embedded in a string. Supports
+     * {@code {{resolve:secretsmanager:<secret-id-or-arn>:SecretString:<json-key>:<stage>:<version>}}}
+     * and {@code {{resolve:ssm:<name>:<version>}}} / {@code {{resolve:ssm-secure:<name>:<version>}}},
+     * which CloudFormation substitutes with the live value at deploy time (e.g. an RDS
+     * MasterUserPassword sourced from a generated secret). Unsupported services are left verbatim.
+     */
+    private String resolveDynamicReferences(String value) {
+        if (value == null || !value.contains("{{resolve:")) {
+            return value;
+        }
+        Matcher m = DYNAMIC_REF.matcher(value);
+        StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            String replacement;
+            try {
+                replacement = resolveDynamicRef(m.group(1), m.group(2));
+            } catch (Exception e) {
+                LOG.warnv("Could not resolve dynamic reference {0}: {1}", m.group(0), e.getMessage());
+                replacement = m.group(0);
+            }
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String resolveDynamicRef(String service, String body) throws Exception {
+        if ("secretsmanager".equals(service)) {
+            // body = <secret-id-or-arn>:SecretString:<json-key>:<version-stage>:<version-id>. The
+            // secret id may be an ARN (which itself contains colons), so split on the ":SecretString"
+            // marker rather than on ":".
+            int marker = body.indexOf(":SecretString");
+            String secretId = marker >= 0 ? body.substring(0, marker) : body;
+            String rest = marker >= 0 ? body.substring(marker + ":SecretString".length()) : "";
+            String[] parts = rest.startsWith(":") ? rest.substring(1).split(":", -1) : new String[0];
+            String jsonKey = parts.length > 0 ? parts[0] : "";
+            String versionStage = parts.length > 1 && !parts[1].isBlank() ? parts[1] : null;
+            String versionId = parts.length > 2 && !parts[2].isBlank() ? parts[2] : null;
+            String region = secretId.startsWith("arn:") ? secretId.split(":")[3] : "us-east-1";
+            String secretString = secretsManagerService
+                    .getSecretValue(secretId, versionId, versionStage, region).getSecretString();
+            if (jsonKey.isBlank()) {
+                return secretString;
+            }
+            JsonNode json = objectMapper.readTree(secretString);
+            return json.has(jsonKey) ? json.get(jsonKey).asText() : "";
+        }
+        if ("ssm".equals(service) || "ssm-secure".equals(service)) {
+            // body = <parameter-name>[:<version>]. SSM parameter names cannot contain ':', so an
+            // optional trailing ':<version>' selects a specific version. ssm-secure resolves the
+            // decrypted SecureString value (values are stored in plaintext regardless of type).
+            String parameterName = body.split(":", 2)[0];
+            return ssmService.getParameter(parameterName, "us-east-1").getValue();
+        }
+        // Other dynamic-reference services are not resolved here; leave verbatim.
+        return "{{resolve:" + service + ":" + body + "}}";
     }
 
     private String resolveOrDefault(JsonNode props, String name,
