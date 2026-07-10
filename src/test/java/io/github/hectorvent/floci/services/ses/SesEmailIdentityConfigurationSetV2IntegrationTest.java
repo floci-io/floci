@@ -349,15 +349,31 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
 
     @Test
     @Order(14)
-    void createEmailIdentity_withBlankConfigurationSet_createsWithoutDefault() {
-        // AWS stores a blank name verbatim; Floci treats blank as no default configuration set.
-        String id = "cs-attr-blankcs@floci.test";
+    void createEmailIdentity_withEmptyConfigurationSet_createsWithoutDefault() {
+        // Only the empty string means "no default configuration set" (consistent with the
+        // PutEmailIdentityConfigurationSetAttributes path); AWS stores it verbatim.
+        String id = "cs-attr-emptycs@floci.test";
         given().contentType("application/json").header("Authorization", SES_AUTH)
                 .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
         given().header("Authorization", SES_AUTH)
         .when().get("/v2/email/identities/" + id).then().statusCode(200)
                 .body("$", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasKey("ConfigurationSetName")));
+    }
+
+    @Test
+    @Order(15)
+    void createEmailIdentity_withWhitespaceConfigurationSet_returns400AndDoesNotCreate() {
+        // A whitespace-only name is not "absent": it flows through name validation and is rejected
+        // as invalid input (the same 400 the Put path yields), rather than being silently ignored.
+        String id = "cs-attr-wscs@floci.test";
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"   \"}")
+        .when().post("/v2/email/identities").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("ConfigurationSetName is required."));
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/" + id).then().statusCode(404);
     }
 
     private void drainQueue() {
