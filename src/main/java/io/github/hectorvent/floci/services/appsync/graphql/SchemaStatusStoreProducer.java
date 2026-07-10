@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -11,7 +11,7 @@ import jakarta.inject.Inject;
 import java.util.Map;
 
 /**
- * Produces the shared {@link StorageBackend} used to track schema creation
+ * Produces the shared {@link AccountAwareStorageBackend} used to track schema creation
  * status. Lives as a CDI bean so both {@code AppSyncService} (which mutates
  * the status from request threads) and {@code SchemaCreationWorker} (which
  * transitions the status from background worker threads) see the same
@@ -20,17 +20,17 @@ import java.util.Map;
 @ApplicationScoped
 public class SchemaStatusStoreProducer {
 
-    private final StorageBackend<String, SchemaCreationStatus> store;
+    private final AccountAwareStorageBackend<SchemaCreationStatus> store;
 
     @Inject
     public SchemaStatusStoreProducer(StorageFactory storageFactory) {
-        this.store = storageFactory.create("appsync", "appsync-schema-status.json",
+        this.store = (AccountAwareStorageBackend<SchemaCreationStatus>) storageFactory.create("appsync", "appsync-schema-status.json",
                 new TypeReference<Map<String, SchemaCreationStatus>>() {});
     }
 
     @Produces
     @ApplicationScoped
-    public StorageBackend<String, SchemaCreationStatus> produce() {
+    public AccountAwareStorageBackend<SchemaCreationStatus> produce() {
         return store;
     }
 }

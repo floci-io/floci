@@ -118,8 +118,6 @@ floci:
         # mode: memory
       appsync:
         flush-interval-ms: 5000
-        schema-worker-threads: 4
-        schema-worker-shutdown-timeout-seconds: 30
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -387,6 +385,8 @@ floci:
       enabled: true
     appsync:
       enabled: true
+      schema-worker-threads: 4
+      schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
     iot:

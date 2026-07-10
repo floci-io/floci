@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
@@ -13,6 +14,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,7 +32,8 @@ public class SchemaCreationWorker {
     private static final Logger LOG = Logger.getLogger(SchemaCreationWorker.class);
 
     private final SchemaRegistry schemaRegistry;
-    private final StorageBackend<String, SchemaCreationStatus> schemaStatusStore;
+    private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
+    private final StorageBackend<String, String> schemaStore;
     private final EmulatorConfig config;
     private final ObjectMapper objectMapper;
 
@@ -38,18 +41,20 @@ public class SchemaCreationWorker {
 
     @Inject
     public SchemaCreationWorker(SchemaRegistry schemaRegistry,
-                                StorageBackend<String, SchemaCreationStatus> schemaStatusStore,
+                                AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
+                                StorageBackend<String, String> schemaStore,
                                 EmulatorConfig config,
                                 ObjectMapper objectMapper) {
         this.schemaRegistry = schemaRegistry;
         this.schemaStatusStore = schemaStatusStore;
+        this.schemaStore = schemaStore;
         this.config = config;
         this.objectMapper = objectMapper;
     }
 
     @PostConstruct
     void init() {
-        int threads = config.storage().services().appsync().schemaWorkerThreads();
+        int threads = config.services().appsync().schemaWorkerThreads();
         executor = Executors.newFixedThreadPool(threads, r -> {
             Thread t = new Thread(r, "appsync-schema-worker");
             t.setDaemon(true);
@@ -63,7 +68,7 @@ public class SchemaCreationWorker {
         if (executor == null) {
             return;
         }
-        int timeout = config.storage().services().appsync().schemaWorkerShutdownTimeoutSeconds();
+        int timeout = config.services().appsync().schemaWorkerShutdownTimeoutSeconds();
         executor.shutdown();
         try {
             if (!executor.awaitTermination(timeout, TimeUnit.SECONDS)) {
@@ -76,32 +81,34 @@ public class SchemaCreationWorker {
         }
     }
 
-    public void submit(String apiId, String sdl) {
-        executor.submit(() -> process(apiId, sdl));
+    public void submit(String apiId, String sdl, String accountId) {
+        executor.submit(() -> process(apiId, sdl, accountId));
     }
 
-    private void process(String apiId, String sdl) {
+    private void process(String apiId, String sdl, String accountId) {
         try {
             schemaRegistry.register(apiId, sdl);
-            markStatus(apiId, SchemaCreationStatusType.ACTIVE, null);
+            schemaStore.put(apiId, sdl);
+            markStatus(accountId, apiId, SchemaCreationStatusType.ACTIVE, null);
             LOG.infov("Schema creation completed for API {0}", apiId);
         } catch (AwsException e) {
             String details = serializeExtendedData(e);
-            markStatus(apiId, SchemaCreationStatusType.FAILED, details);
+            markStatus(accountId, apiId, SchemaCreationStatusType.FAILED, details);
             LOG.warnv("Schema creation failed for API {0}: {1}", apiId, e.getMessage());
         } catch (RuntimeException e) {
-            markStatus(apiId, SchemaCreationStatusType.FAILED, e.getMessage());
+            markStatus(accountId, apiId, SchemaCreationStatusType.FAILED, e.getMessage());
             LOG.errorv(e, "Unexpected error during schema creation for API {0}", apiId);
         }
     }
 
-    private void markStatus(String apiId, SchemaCreationStatusType status, String details) {
+    private void markStatus(String accountId, String apiId, SchemaCreationStatusType status, String details) {
         SchemaCreationStatus s = new SchemaCreationStatus();
         s.setStatus(status);
+        s.setAccountId(accountId);
         if (details != null) {
             s.setDetails(details);
         }
-        schemaStatusStore.put(apiId, s);
+        schemaStatusStore.putForAccount(accountId, apiId, s);
     }
 
     private String serializeExtendedData(AwsException e) {
@@ -120,15 +127,20 @@ public class SchemaCreationWorker {
      */
     public void recoverOrphans() {
         int recovered = 0;
-        for (String apiId : schemaStatusStore.keys()) {
-            Optional<SchemaCreationStatus> opt = schemaStatusStore.get(apiId);
-            if (opt.isPresent() && opt.get().getStatus() == SchemaCreationStatusType.PROCESSING) {
-                SchemaCreationStatus s = opt.get();
+        Map<String, SchemaCreationStatus> allEntries = schemaStatusStore.scanAllAccountsAsMap();
+        for (Map.Entry<String, SchemaCreationStatus> entry : allEntries.entrySet()) {
+            SchemaCreationStatus s = entry.getValue();
+            if (s.getStatus() == SchemaCreationStatusType.PROCESSING) {
+                String apiId = entry.getKey();
+                String accountId = s.getAccountId();
+                if (accountId == null) {
+                    accountId = "000000000000";
+                }
                 s.setStatus(SchemaCreationStatusType.FAILED);
                 if (s.getDetails() == null) {
                     s.setDetails("{\"reason\":\"ORPHAN_PROCESSING\",\"message\":\"Recovered from orphan PROCESSING on emulator startup\"}");
                 }
-                schemaStatusStore.put(apiId, s);
+                schemaStatusStore.putForAccount(accountId, apiId, s);
                 recovered++;
                 LOG.warnv("Marked orphan schema creation for API {0} as FAILED", apiId);
             }

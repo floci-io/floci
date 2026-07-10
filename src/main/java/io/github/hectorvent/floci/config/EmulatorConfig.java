@@ -323,14 +323,6 @@ public interface EmulatorConfig {
 
         @WithDefault("5000")
         long flushIntervalMs();
-
-        /** Worker threads for async schema creation. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_THREADS */
-        @WithDefault("4")
-        int schemaWorkerThreads();
-
-        /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
-        @WithDefault("30")
-        int schemaWorkerShutdownTimeoutSeconds();
     }
 
     interface BatchStorageConfig {
@@ -1065,6 +1057,14 @@ public interface EmulatorConfig {
     interface AppSyncServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Worker threads for async schema creation. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_THREADS */
+        @WithDefault("4")
+        int schemaWorkerThreads();
+
+        /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
+        @WithDefault("30")
+        int schemaWorkerShutdownTimeoutSeconds();
     }
 
     interface BcmDataExportsServiceConfig {

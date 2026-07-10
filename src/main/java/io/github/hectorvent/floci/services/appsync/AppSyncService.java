@@ -5,12 +5,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
-import io.github.hectorvent.floci.services.appsync.graphql.SchemaStatusStoreProducer;
 import io.github.hectorvent.floci.services.appsync.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -23,7 +26,7 @@ public class AppSyncService {
 
     private final StorageBackend<String, GraphqlApi> apiStore;
     private final StorageBackend<String, String> schemaStore;
-    private final StorageBackend<String, SchemaCreationStatus> schemaStatusStore;
+    private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     private final StorageBackend<String, DataSource> dataSourceStore;
     private final StorageBackend<String, Resolver> resolverStore;
     private final StorageBackend<String, FunctionConfiguration> functionStore;
@@ -35,14 +38,18 @@ public class AppSyncService {
     private final StorageBackend<String, SourceApiAssociation> mergedApiAssociationStore;
     private final RegionResolver regionResolver;
     private final SchemaRegistry schemaRegistry;
+    private final SchemaCreationWorker schemaCreationWorker;
+    private final Instance<RequestContext> requestContextInstance;
     private final ObjectMapper objectMapper;
 
     @Inject
     public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                          SchemaRegistry schemaRegistry, ObjectMapper objectMapper,
-                          StorageBackend<String, SchemaCreationStatus> schemaStatusStore) {
+                          SchemaRegistry schemaRegistry, SchemaCreationWorker schemaCreationWorker,
+                          Instance<RequestContext> requestContextInstance, ObjectMapper objectMapper,
+                          AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
+                          StorageBackend<String, String> schemaStore) {
         this.apiStore = storageFactory.create("appsync", "appsync-apis.json", new TypeReference<>() {});
-        this.schemaStore = storageFactory.create("appsync", "appsync-schemas.json", new TypeReference<>() {});
+        this.schemaStore = schemaStore;
         this.schemaStatusStore = schemaStatusStore;
         this.dataSourceStore = storageFactory.create("appsync", "appsync-datasources.json", new TypeReference<>() {});
         this.resolverStore = storageFactory.create("appsync", "appsync-resolvers.json", new TypeReference<>() {});
@@ -55,6 +62,8 @@ public class AppSyncService {
         this.mergedApiAssociationStore = storageFactory.create("appsync", "appsync-merged-api-associations.json", new TypeReference<>() {});
         this.regionResolver = regionResolver;
         this.schemaRegistry = schemaRegistry;
+        this.schemaCreationWorker = schemaCreationWorker;
+        this.requestContextInstance = requestContextInstance;
         this.objectMapper = objectMapper;
     }
 
@@ -206,20 +215,21 @@ public class AppSyncService {
 
     public void startSchemaCreation(String apiId, String definition) {
         getGraphqlApi(apiId);
+        String accountId = currentAccountId();
         synchronized (this) {
             assertSchemaNotBusy(apiId);
-            schemaStore.put(apiId, definition);
             SchemaCreationStatus status = new SchemaCreationStatus();
             status.setStatus(SchemaCreationStatusType.PROCESSING);
-            schemaStatusStore.put(apiId, status);
+            status.setAccountId(accountId);
+            schemaStatusStore.putForAccount(accountId, apiId, status);
         }
-        schemaRegistry.submitSchemaCreation(apiId, definition);
+        schemaCreationWorker.submit(apiId, definition, accountId);
         LOG.infov("Schema creation submitted for API {0}", apiId);
     }
 
     public SchemaCreationStatus getSchemaCreationStatus(String apiId) {
         getGraphqlApi(apiId);
-        return schemaStatusStore.get(apiId).orElseThrow(() ->
+        return schemaStatusStore.getForAccount(currentAccountId(), apiId).orElseThrow(() ->
                 new AwsException("NotFoundException", "Schema creation status not found for API: " + apiId, 404));
     }
 
@@ -237,7 +247,7 @@ public class AppSyncService {
      * creation is in flight.
      */
     void assertSchemaNotBusy(String apiId) {
-        schemaStatusStore.get(apiId).ifPresent(s -> throwIfProcessing(s.getStatus()));
+        schemaStatusStore.getForAccount(currentAccountId(), apiId).ifPresent(s -> throwIfProcessing(s.getStatus()));
     }
 
     /**
@@ -247,8 +257,8 @@ public class AppSyncService {
      * creation is in flight.
      */
     void assertNoSchemaBusyAnywhere() {
-        for (String apiId : schemaStatusStore.keys()) {
-            schemaStatusStore.get(apiId).ifPresent(s -> throwIfProcessing(s.getStatus()));
+        for (String apiId : schemaStatusStore.keysForAccount(currentAccountId())) {
+            schemaStatusStore.getForAccount(currentAccountId(), apiId).ifPresent(s -> throwIfProcessing(s.getStatus()));
         }
     }
 
@@ -257,6 +267,14 @@ public class AppSyncService {
             throw new AwsException("ConcurrentModificationException",
                     "Another modification is in progress at this time and it must complete before you can make your change.",
                     409);
+        }
+    }
+
+    private String currentAccountId() {
+        try {
+            return requestContextInstance.get().getAccountId();
+        } catch (Exception e) {
+            return "000000000000";
         }
     }
 
