@@ -457,16 +457,19 @@ public class IamQueryHandler {
     private Response handleListEntitiesForPolicy(MultivaluedMap<String, String> params) {
         IamService.PolicyEntities entities = iamService.listEntitiesForPolicy(getParam(params, "PolicyArn"));
         var xml = new XmlBuilder().start("PolicyGroups");
-        for (String group : entities.groups()) {
-            xml.start("member").elem("GroupName", group).end("member");
+        for (IamGroup group : entities.groups()) {
+            xml.start("member").elem("GroupName", group.getGroupName())
+                    .elem("GroupId", group.getGroupId()).end("member");
         }
         xml.end("PolicyGroups").start("PolicyUsers");
-        for (String user : entities.users()) {
-            xml.start("member").elem("UserName", user).end("member");
+        for (IamUser user : entities.users()) {
+            xml.start("member").elem("UserName", user.getUserName())
+                    .elem("UserId", user.getUserId()).end("member");
         }
         xml.end("PolicyUsers").start("PolicyRoles");
-        for (String role : entities.roles()) {
-            xml.start("member").elem("RoleName", role).end("member");
+        for (IamRole role : entities.roles()) {
+            xml.start("member").elem("RoleName", role.getRoleName())
+                    .elem("RoleId", role.getRoleId()).end("member");
         }
         xml.end("PolicyRoles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListEntitiesForPolicy", AwsNamespaces.IAM, xml.build())).build();

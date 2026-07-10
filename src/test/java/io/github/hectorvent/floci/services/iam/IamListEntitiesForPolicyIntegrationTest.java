@@ -83,6 +83,24 @@ class IamListEntitiesForPolicyIntegrationTest {
         assertContainsInSection(entities, "PolicyRoles", "RoleName", roleName);
         assertContainsInSection(entities, "PolicyUsers", "UserName", userName);
         assertContainsInSection(entities, "PolicyGroups", "GroupName", groupName);
+
+        // AWS returns the entity id alongside each name; SDK callers read groupId()/userId()/roleId().
+        org.junit.jupiter.api.Assertions.assertTrue(
+                entities.contains("<RoleId>") && entities.contains("<UserId>") && entities.contains("<GroupId>"),
+                "each member should carry its entity id, was: " + entities);
+    }
+
+    @Test
+    void unknownPolicyArnReturnsNoSuchEntity() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListEntitiesForPolicy")
+            .formParam("PolicyArn", "arn:aws:iam::000000000000:policy/does-not-exist-"
+                    + Long.toString(System.nanoTime(), 36))
+        .when().post("/").then()
+            .statusCode(404)
+            .body(containsString("NoSuchEntity"));
     }
 
     private static void assertContainsInSection(String xml, String section, String elem, String value) {
