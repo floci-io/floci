@@ -3858,7 +3858,13 @@ public class CloudFormationResourceProvisioner {
                 return secretString;
             }
             JsonNode json = objectMapper.readTree(secretString);
-            return json.has(jsonKey) ? json.get(jsonKey).asText() : "";
+            if (!json.has(jsonKey)) {
+                // A missing key would otherwise resolve to "" — silently provisioning e.g. a blank
+                // MasterUserPassword. Fail so the caller leaves the literal reference and warns.
+                throw new IllegalStateException(
+                        "JSON key '" + jsonKey + "' not found in secret " + secretId);
+            }
+            return json.get(jsonKey).asText();
         }
         if ("ssm".equals(service) || "ssm-secure".equals(service)) {
             // body = <parameter-name>[:<version>]. SSM parameter names cannot contain ':', so an
