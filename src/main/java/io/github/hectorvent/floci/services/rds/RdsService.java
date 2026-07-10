@@ -1280,10 +1280,6 @@ public class RdsService implements Resettable {
                 new LinkedHashMap<>(subnetAvailabilityZones));
     }
 
-    private DbSubnetGroup buildDefaultSubnetGroup() {
-        return buildDefaultSubnetGroup(regionResolver.getDefaultRegion());
-    }
-
     private DbSubnetGroup buildDefaultSubnetGroup(String region) {
         List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(), Map.of("vpc-id", List.of("vpc-default")));
         if (subnets.isEmpty()) {
@@ -1291,10 +1287,6 @@ public class RdsService implements Resettable {
                     "No subnets available for DB subnet group default.", 400);
         }
         return buildSubnetGroup("default", "default subnet group", extractSubnetIds(subnets), region);
-    }
-
-    private DbSubnetGroup buildSubnetGroup(String name, String description, List<String> subnetIds) {
-        return buildSubnetGroup(name, description, subnetIds, regionResolver.getDefaultRegion());
     }
 
     private DbSubnetGroup buildSubnetGroup(String name, String description, List<String> subnetIds, String region) {

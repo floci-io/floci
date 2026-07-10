@@ -43,8 +43,6 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
-| `SubnetIds` | - |
-| `VpcSecurityGroupIds` | - |
 <!-- floci:actions:end -->
 
 ## Configuration

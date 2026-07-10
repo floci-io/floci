@@ -66,6 +66,7 @@ services:
     doc: docs/services/rds.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds]
   - service: secretsmanager
     doc: docs/services/secrets-manager.md
     sources:

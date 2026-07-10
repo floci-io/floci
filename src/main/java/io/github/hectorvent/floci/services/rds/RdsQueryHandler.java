@@ -181,9 +181,8 @@ public class RdsQueryHandler {
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         try {
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
-            DbInstance instance = vpcSecurityGroupIds.isEmpty()
-                    ? service.modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName)
-                    : service.modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName, vpcSecurityGroupIds);
+            DbInstance instance = service.modifyDbInstance(
+                    id, newPassword, iamEnabled, dbSubnetGroupName, vpcSecurityGroupIds);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -256,9 +255,7 @@ public class RdsQueryHandler {
         String description = params.getFirst("DBSubnetGroupDescription");
         List<String> subnetIds = memberList(params, "SubnetIds");
         try {
-            DbSubnetGroup group = region == null
-                    ? service.createDbSubnetGroup(name, description, subnetIds)
-                    : service.createDbSubnetGroup(name, description, subnetIds, region);
+            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, region);
             return Response.ok(AwsQueryResponse.envelope("CreateDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -289,9 +286,7 @@ public class RdsQueryHandler {
         }
         List<String> subnetIds = memberList(params, "SubnetIds");
         try {
-            DbSubnetGroup group = region == null
-                    ? service.modifyDbSubnetGroup(name, subnetIds)
-                    : service.modifyDbSubnetGroup(name, subnetIds, region);
+            DbSubnetGroup group = service.modifyDbSubnetGroup(name, subnetIds, region);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -351,13 +346,9 @@ public class RdsQueryHandler {
         }
 
         try {
-            DbCluster cluster = region == null
-                    ? service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz)
-                    : service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz, region);
+            DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
+                    masterPassword, databaseName, iamEnabled, paramGroupName,
+                    dbSubnetGroupName, availabilityZone, multiAz, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -847,25 +838,9 @@ public class RdsQueryHandler {
     private DbSubnetGroup dbSubnetGroupForInstance(DbInstance instance) {
         String groupName = instance.getDbSubnetGroupName();
         if (groupName == null || groupName.isBlank() || "default".equalsIgnoreCase(groupName)) {
-            return fallbackSubnetGroup(instance, "default", "default");
+            return fallbackSubnetGroup(instance, "default", "default subnet group");
         }
-        if (groupName != null && !groupName.isBlank()) {
-            try {
-                DbSubnetGroup group = service.getDbSubnetGroup(groupName);
-                if (group != null) {
-                    return group;
-                }
-            } catch (AwsException ignored) {
-            }
-        }
-        try {
-            DbSubnetGroup group = service.resolveDbSubnetGroupView(groupName);
-            if (group != null) {
-                return group;
-            }
-        } catch (AwsException ignored) {
-        }
-        return fallbackSubnetGroup(instance, groupName, "DB subnet group " + groupName);
+        return service.getDbSubnetGroup(groupName);
     }
 
     private DbSubnetGroup fallbackSubnetGroup(DbInstance instance, String name, String description) {
