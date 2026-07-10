@@ -1428,6 +1428,146 @@ class ApiGatewayOpenApiImportTest {
         given().delete("/restapis/" + apiId);
     }
 
+    @Test
+    @Order(92)
+    void importRestApi_cognitoProviderArnsAndTokenDefault() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "MixedAuthAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "CognitoAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "cognito_user_pools",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "cognito_user_pools",
+                          "providerARNs": ["arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_ABC123"]
+                        }
+                      },
+                      "BearerAuth": {
+                        "type": "http", "scheme": "bearer",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:bearerAuthz/invocations"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/cog": {
+                      "get": {
+                        "security": [{"CognitoAuth": []}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    },
+                    "/tok": {
+                      "get": {
+                        "security": [{"BearerAuth": []}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        given()
+                .when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200)
+                .body("item", hasSize(2))
+                // Cognito authorizer keeps its user-pool ARNs (previously dropped on import).
+                .body("item.find { it.name == 'CognitoAuth' }.type", equalTo("COGNITO_USER_POOLS"))
+                .body("item.find { it.name == 'CognitoAuth' }.providerARNs[0]",
+                        containsString("userpool/us-east-1_ABC123"))
+                // A TOKEN authorizer whose scheme has no derivable header defaults identitySource
+                // to the Authorization header, as AWS does (rather than leaving it null).
+                .body("item.find { it.name == 'BearerAuth' }.type", equalTo("TOKEN"))
+                .body("item.find { it.name == 'BearerAuth' }.identitySource",
+                        equalTo("method.request.header.Authorization"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(93)
+    void importRestApi_firstDeclaredAuthorizerWins() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "MultiAuthAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "AuthA": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:authA/invocations"
+                        }
+                      },
+                      "AuthB": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:authB/invocations"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/multi": {
+                      "get": {
+                        "security": [{"AuthA": [], "AuthB": []}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        // The first declared scheme (AuthA) binds the method — not the last (AuthB).
+        String authAId = given()
+                .when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200)
+                .body("item", hasSize(2))
+                .extract().body().jsonPath().getString("item.find { it.name == 'AuthA' }.id");
+
+        String resourceId = given()
+                .when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200)
+                .extract().body().jsonPath().getString("item.find { it.path == '/multi' }.id");
+
+        given()
+                .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("authorizationType", equalTo("CUSTOM"))
+                .body("authorizerId", equalTo(authAId));
+
+        given().delete("/restapis/" + apiId);
+    }
+
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test

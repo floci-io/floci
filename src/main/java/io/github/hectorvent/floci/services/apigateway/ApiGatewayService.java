@@ -630,6 +630,14 @@ public class ApiGatewayService {
         authorizer.setAuthorizerUri((String) request.get("authorizerUri"));
         authorizer.setIdentitySource((String) request.get("identitySource"));
         authorizer.setAuthorizerResultTtlInSeconds(String.valueOf(request.getOrDefault("authorizerResultTtlInSeconds", "300")));
+        // COGNITO_USER_POOLS authorizers carry the pool ARNs; keep them so get-authorizer reflects them.
+        if (request.get("providerARNs") instanceof List<?> arns) {
+            List<String> providerArns = new ArrayList<>();
+            for (Object arn : arns) {
+                if (arn != null) providerArns.add(arn.toString());
+            }
+            authorizer.setProviderARNs(providerArns);
+        }
 
         authorizerStore.put(authorizerKey(region, apiId, authorizer.getId()), authorizer);
         LOG.infov("Created authorizer {0} for API {1}", authorizer.getId(), apiId);
@@ -1199,9 +1207,18 @@ public class ApiGatewayService {
                             && "header".equalsIgnoreCase(scheme.getIn().toString())) {
                         idSource = "method.request.header." + scheme.getName();
                     }
+                    // AWS requires an identity source for TOKEN authorizers; when none can be derived
+                    // from the spec it defaults to the Authorization header.
+                    if (idSource == null && (t == null || "token".equalsIgnoreCase(t))) {
+                        idSource = "method.request.header.Authorization";
+                    }
                     req.put("identitySource", idSource);
                     if ("cognito_user_pools".equalsIgnoreCase(t)) {
                         req.put("type", "COGNITO_USER_POOLS");
+                        // Cognito user-pool authorizers carry the pool ARNs in the authorizer extension.
+                        if (authDef.get("providerARNs") != null) {
+                            req.put("providerARNs", authDef.get("providerARNs"));
+                        }
                         schemeToAuthType.put(schemeName, "COGNITO_USER_POOLS");
                     } else {
                         req.put("type", t == null ? "TOKEN" : t.toUpperCase());
@@ -1253,6 +1270,9 @@ public class ApiGatewayService {
                 String authType = "NONE";
                 String authorizerId = null;
                 if (secReqs != null) {
+                    // AWS resolves the OR-list of security requirements to the first declared
+                    // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
+                    resolveAuth:
                     for (SecurityRequirement secReq : secReqs) {
                         for (String schemeName : secReq.keySet()) {
                             String mapped = schemeToAuthType.get(schemeName);
@@ -1261,6 +1281,7 @@ public class ApiGatewayService {
                             }
                             authType = mapped;
                             authorizerId = schemeToAuthorizerId.get(schemeName);
+                            break resolveAuth;
                         }
                     }
                 }
