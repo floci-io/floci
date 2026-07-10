@@ -166,4 +166,98 @@ class CloudFormationIamInlinePolicyIntegrationTest {
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
             .body(containsString(":policy/" + managedName));
     }
+
+    @Test
+    void deletingStackDetachesInlinePolicyFromSurvivingRole() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String roleName = "ext-role-" + suffix;
+        String policyName = "InlinePolicy" + suffix;
+        String stackName = "cfn-iam-inline-del-" + suffix;
+
+        // Role owned OUTSIDE the stack, so it survives DeleteStack — this isolates the inline-policy
+        // detach (deleteInlinePolicySafe/detachInline) from a cascade role delete.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", roleName)
+            .formParam("AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ecs-tasks.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}")
+        .when().post("/").then().statusCode(200);
+
+        String template = """
+                {
+                  "Resources": {
+                    "DefaultPolicy": {
+                      "Type": "AWS::IAM::Policy",
+                      "Properties": {
+                        "PolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+                        },
+                        "Roles": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, roleName);
+
+        createStack(stackName, template);
+        assertStackComplete(stackName);
+
+        // The inline policy is embedded in the pre-existing role.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", roleName)
+            .formParam("PolicyName", policyName)
+        .when().post("/").then().statusCode(200).body(containsString("s3:GetObject"));
+
+        // Deleting the stack must detach the inline policy from the surviving role (async delete).
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200);
+
+        awaitInlinePolicyGone(roleName, policyName);
+
+        // The role still exists ...
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", roleName)
+        .when().post("/").then().statusCode(200).body(containsString(roleName));
+
+        // ... but its inline policy is gone (NoSuchEntity, HTTP 404).
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", roleName)
+            .formParam("PolicyName", policyName)
+        .when().post("/").then().statusCode(404).body(containsString("NoSuchEntity"));
+    }
+
+    /** DeleteStack runs asynchronously; poll until the inline policy has been detached (404) or time out. */
+    private static void awaitInlinePolicyGone(String roleName, String policyName) throws InterruptedException {
+        for (int i = 0; i < 100; i++) {
+            int sc = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "GetRolePolicy")
+                .formParam("RoleName", roleName)
+                .formParam("PolicyName", policyName)
+            .when().post("/").then().extract().statusCode();
+            if (sc == 404) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+    }
 }

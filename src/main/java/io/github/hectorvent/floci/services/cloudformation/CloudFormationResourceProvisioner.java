@@ -1944,8 +1944,10 @@ public class CloudFormationResourceProvisioner {
     }
 
     /**
-     * Applies {@code op} to each principal name listed under {@code propName}, returning a comma-joined
-     * list of the resolved names for later cleanup.
+     * Applies {@code op} to each principal name listed under {@code propName}, returning a
+     * newline-joined list of the resolved names for later cleanup. A newline is used because IAM
+     * role/user/group names may contain commas ({@code [\w+=,.@-]+}) but never newlines, so it is an
+     * unambiguous separator.
      */
     private String putInlinePolicy(JsonNode props, String propName,
                                    CloudFormationTemplateEngine engine, java.util.function.Consumer<String> op) {
@@ -1960,7 +1962,7 @@ public class CloudFormationResourceProvisioner {
                 names.add(name);
             }
         }
-        return String.join(",", names);
+        return String.join("\n", names);
     }
 
     /**
@@ -3908,16 +3910,17 @@ public class CloudFormationResourceProvisioner {
                 (name) -> iamService.deleteGroupPolicy(name, policyName));
     }
 
-    private void detachInline(String csvTargets, java.util.function.Consumer<String> op) {
-        if (csvTargets == null || csvTargets.isBlank()) {
+    private void detachInline(String targets, java.util.function.Consumer<String> op) {
+        if (targets == null || targets.isBlank()) {
             return;
         }
-        for (String name : csvTargets.split(",")) {
+        for (String name : targets.split("\n")) {
             if (!name.isBlank()) {
-                // The principal may already be gone (deleted earlier in the same teardown) — ignore.
                 try {
                     op.accept(name);
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    // The principal may already be gone (deleted earlier in the same teardown).
+                    LOG.debugv("Could not detach inline policy from principal {0}: {1}", name, e.getMessage());
                 }
             }
         }
