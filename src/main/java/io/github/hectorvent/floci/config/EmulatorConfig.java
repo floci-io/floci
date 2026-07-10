@@ -555,6 +555,7 @@ public interface EmulatorConfig {
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
+        RumServiceConfig rum();
     }
 
     interface IotServiceConfig {
@@ -579,6 +580,11 @@ public interface EmulatorConfig {
     }
 
     interface IotDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RumServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
