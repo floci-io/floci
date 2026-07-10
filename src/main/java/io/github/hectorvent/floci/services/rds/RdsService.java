@@ -829,9 +829,21 @@ public class RdsService implements Resettable {
     }
 
     public DbClusterParameterGroup getDbClusterParameterGroup(String name) {
-        return clusterParameterGroups.get(name).orElseThrow(() ->
-                new AwsException("DBClusterParameterGroupNotFound",
-                        "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404));
+        return clusterParameterGroups.get(name).orElseGet(() -> {
+            // AWS ships a managed default DB cluster parameter group per engine family that always
+            // exists (e.g. default.aurora-postgresql16), so a cluster that uses the engine default —
+            // and a DescribeDBClusterParameterGroups that looks one up — should resolve it rather than
+            // 404. Materialize the default group on first reference; the family is the segment after
+            // "default." (e.g. aurora-postgresql16).
+            if (name != null && name.startsWith("default.")) {
+                DbClusterParameterGroup dflt = new DbClusterParameterGroup(
+                        name, name.substring("default.".length()), "Default cluster parameter group");
+                clusterParameterGroups.put(name, dflt);
+                return dflt;
+            }
+            throw new AwsException("DBClusterParameterGroupNotFound",
+                    "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
+        });
     }
 
     public Collection<DbClusterParameterGroup> listDbClusterParameterGroups(String filterName) {

@@ -541,6 +541,20 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbClusterAcceptsAwsDefaultClusterParameterGroup() {
+        // AWS provides a default DB cluster parameter group per engine family
+        // (e.g. default.aurora-postgresql16). A cluster that references the engine default — as the
+        // CDK does when none is specified — must provision; previously this threw
+        // "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group."
+        DbCluster cluster = rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.4",
+                "admin", "password", "coredb", false, "default.aurora-postgresql16");
+        assertEquals("aurora-cluster", cluster.getDbClusterIdentifier());
+        // The default group is materialised on reference, its family derived from the name.
+        assertEquals("aurora-postgresql16",
+                rdsService.getDbClusterParameterGroup("default.aurora-postgresql16").getDbParameterGroupFamily());
+    }
+
+    @Test
     void createDbClusterRejectsIncompatibleClusterParameterGroupFamily() {
         rdsService.createDbClusterParameterGroup("cpg1", "aurora-mysql8.0", "test group");
 
