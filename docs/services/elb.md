@@ -43,7 +43,7 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 
 | Action | Description |
 |--------|-------------|
-| CreateListener | Creates a listener and its immutable default rule. |
+| CreateListener | Creates a listener and its non-deletable default rule. |
 | DescribeListeners | Lists or returns stored listeners. |
 | ModifyListener | Updates a listener's configuration and default actions. |
 | ModifyListenerAttributes | Updates persisted listener attributes. |
