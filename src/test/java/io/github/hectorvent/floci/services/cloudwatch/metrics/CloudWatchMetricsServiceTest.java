@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
@@ -227,6 +228,15 @@ class CloudWatchMetricsServiceTest {
         MetricAlarm updated = service.describeAlarms(List.of("my-alarm"), null, REGION).getFirst();
         assertEquals("ALARM", updated.getStateValue());
         assertEquals("Threshold breached", updated.getStateReason());
+    }
+
+    @Test
+    void setAlarmStateOnNonexistentAlarmThrowsResourceNotFound() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.setAlarmState("missing-alarm", "ALARM", "reason", null, REGION));
+
+        assertEquals(404, ex.getHttpStatus());
+        assertEquals("ResourceNotFound", ex.getErrorCode());
     }
 
     @Test

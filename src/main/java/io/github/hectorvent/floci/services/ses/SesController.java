@@ -127,10 +127,20 @@ public class SesController {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode items = result.putArray("EmailIdentities");
         for (Identity id : identities) {
+            // Only a not-yet-verified domain can still transition (via its DKIM records),
+            // so refresh just those; refreshing every identity would scan Route53 per call.
+            Identity current = id;
+            if ("Domain".equals(id.getIdentityType()) && !"Success".equals(id.getVerificationStatus())) {
+                Identity refreshed = sesService.getIdentityVerificationAttributes(id.getIdentity(), region);
+                if (refreshed != null) {
+                    current = refreshed;
+                }
+            }
             ObjectNode item = objectMapper.createObjectNode();
-            item.put("IdentityType", toV2IdentityType(id.getIdentityType()));
-            item.put("IdentityName", id.getIdentity());
-            item.put("SendingEnabled", true);
+            item.put("IdentityType", toV2IdentityType(current.getIdentityType()));
+            item.put("IdentityName", current.getIdentity());
+            item.put("SendingEnabled", "Success".equals(current.getVerificationStatus()));
+            item.put("VerificationStatus", toV2Status(current.getVerificationStatus()));
             items.add(item);
         }
         return Response.ok(result).build();
@@ -255,6 +265,44 @@ public class SesController {
             throw remapV1Exception(e);
         } catch (Exception e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    // ──────────────── Identity Configuration Set ────────────────────
+
+    @PUT
+    @Path("/identities/{emailIdentity}/configuration-set")
+    public Response putEmailIdentityConfigurationSetAttributes(@Context HttpHeaders headers,
+                                                               @PathParam("emailIdentity") String emailIdentity,
+                                                               String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            String configurationSetName = null;
+            if (body != null && !body.isEmpty()) {
+                // Only a truly empty body is "no body". A non-empty body must be a JSON object; a
+                // whitespace-only or otherwise unparseable body is a serialization error (verified
+                // against real AWS: whitespace-only returns SerializationException and does not
+                // clear). Within a valid object, an omitted or explicit-null ConfigurationSetName
+                // clears the association (as does an empty body / {}).
+                JsonNode request = objectMapper.readTree(body);
+                if (request == null || !request.isObject()) {
+                    throw new AwsException("SerializationException", null, 400);
+                }
+                JsonNode node = request.path("ConfigurationSetName");
+                if (!node.isMissingNode() && !node.isNull()) {
+                    if (!node.isTextual()) {
+                        throw new AwsException("BadRequestException",
+                                "ConfigurationSetName must be a JSON string.", 400);
+                    }
+                    configurationSetName = node.asText();
+                }
+            }
+            sesService.setEmailIdentityConfigurationSet(emailIdentity, configurationSetName, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
         }
     }
 
@@ -1551,6 +1599,10 @@ public class SesController {
         if (mailFromDomain != null && !mailFromDomain.isEmpty()) {
             mailFromAttributes.put("MailFromDomain", mailFromDomain);
             mailFromAttributes.put("MailFromDomainStatus", toV2Status(identity.getMailFromDomainStatus()));
+        }
+
+        if (identity.getConfigurationSetName() != null && !identity.getConfigurationSetName().isEmpty()) {
+            result.put("ConfigurationSetName", identity.getConfigurationSetName());
         }
 
         result.putObject("Policies");

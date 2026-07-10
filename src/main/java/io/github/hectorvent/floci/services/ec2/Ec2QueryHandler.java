@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -209,6 +210,11 @@ public class Ec2QueryHandler {
         return result;
     }
 
+    private String firstPresent(MultivaluedMap<String, String> p, String first, String second) {
+        String value = p.getFirst(first);
+        return value != null && !value.isBlank() ? value : p.getFirst(second);
+    }
+
     private int parseIntParam(MultivaluedMap<String, String> p, String name, int defaultValue) {
         String val = p.getFirst(name);
         if (val == null || val.isEmpty()) return defaultValue;
@@ -349,6 +355,29 @@ public class Ec2QueryHandler {
             }
         }
         return tags;
+    }
+
+    // Apply tags supplied inline on a create call (TagSpecification) to the resource, so
+    // they round-trip on the next Describe* — otherwise the provider sees phantom tag drift.
+    private void applyResourceTags(MultivaluedMap<String, String> p, String region, String resourceType, String resourceId) {
+        List<Tag> tagList = parseTagsForResource(p, resourceType);
+        if (!tagList.isEmpty()) {
+            service.createTags(region, List.of(resourceId), tagList);
+        }
+    }
+
+    // Each rule gets its own copy so mutating one rule's tag list can never leak into the
+    // others authorized in the same batch, and the copy also feeds the response XML.
+    private void applySecurityGroupRuleTags(MultivaluedMap<String, String> p, String region,
+                                            List<SecurityGroupRule> rules) {
+        List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
+        if (ruleTags.isEmpty()) {
+            return;
+        }
+        for (SecurityGroupRule rule : rules) {
+            service.createTags(region, List.of(rule.getSecurityGroupRuleId()), ruleTags);
+            rule.setTags(new ArrayList<>(ruleTags));
+        }
     }
 
     private Response xmlResponse(String xml) {
@@ -987,6 +1016,7 @@ public class Ec2QueryHandler {
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
         Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az);
+        applyResourceTags(p, region, "subnet", subnet.getSubnetId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1039,6 +1069,7 @@ public class Ec2QueryHandler {
         String description = p.getFirst("GroupDescription");
         String vpcId = p.getFirst("VpcId");
         SecurityGroup sg = service.createSecurityGroup(region, groupName, description, vpcId);
+        applyResourceTags(p, region, "security-group", sg.getGroupId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSecurityGroupResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1075,6 +1106,7 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress(region, groupId, perms);
+        applySecurityGroupRuleTags(p, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupIngressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1091,6 +1123,7 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress(region, groupId, perms);
+        applySecurityGroupRuleTags(p, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupEgressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1119,14 +1152,19 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeSecurityGroupRules(MultivaluedMap<String, String> p, String region) {
         Map<String, List<String>> filters = getFilters(p);
-        // The AWS SDK sends the security group id as a filter with name "group-id"
-        String groupId = "";
-        List<String> groupIdFilter = filters.get("group-id");
-        if (groupIdFilter != null && !groupIdFilter.isEmpty()) {
-            groupId = groupIdFilter.get(0);
-        }
-        List<String> ruleIds = getList(p, "SecurityGroupRuleId");
-        List<SecurityGroupRule> rules = service.describeSecurityGroupRules(region, groupId, ruleIds);
+        // The AWS SDK sends the security group id as a filter with name "group-id". Rule ids can
+        // arrive as the SecurityGroupRuleId.N parameter or the "security-group-rule-id" filter;
+        // filters are conjunctive with parameters, so intersect rather than union when both appear.
+        List<String> paramRuleIds = getList(p, "SecurityGroupRuleId");
+        List<String> filterRuleIds = filters.getOrDefault("security-group-rule-id", List.of());
+        List<String> ruleIds = paramRuleIds.isEmpty() || filterRuleIds.isEmpty()
+                ? (paramRuleIds.isEmpty() ? filterRuleIds : paramRuleIds)
+                : paramRuleIds.stream().filter(filterRuleIds::contains).toList();
+        boolean unsatisfiable = !paramRuleIds.isEmpty() && !filterRuleIds.isEmpty() && ruleIds.isEmpty();
+        List<String> groupIds = filters.getOrDefault("group-id", List.of());
+        List<SecurityGroupRule> rules = unsatisfiable
+                ? List.of()
+                : service.describeSecurityGroupRules(region, groupIds, ruleIds);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSecurityGroupRulesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1342,6 +1380,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateInternetGateway(MultivaluedMap<String, String> p, String region) {
         InternetGateway igw = service.createInternetGateway(region);
+        applyResourceTags(p, region, "internet-gateway", igw.getInternetGatewayId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateInternetGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1385,6 +1424,7 @@ public class Ec2QueryHandler {
     private Response handleCreateRouteTable(MultivaluedMap<String, String> p, String region) {
         String vpcId = p.getFirst("VpcId");
         RouteTable rt = service.createRouteTable(region, vpcId);
+        applyResourceTags(p, region, "route-table", rt.getRouteTableId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateRouteTableResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1437,7 +1477,8 @@ public class Ec2QueryHandler {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
         String gwId = p.getFirst("GatewayId");
-        service.createRoute(region, rtId, dest, gwId);
+        String natGwId = p.getFirst("NatGatewayId");
+        service.createRoute(region, rtId, dest, gwId, natGwId);
         return booleanResponse("CreateRoute");
     }
 
@@ -1561,6 +1602,7 @@ public class Ec2QueryHandler {
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
         Address addr = service.allocateAddress(region);
+        applyResourceTags(p, region, "elastic-ip", addr.getAllocationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1742,6 +1784,7 @@ public class Ec2QueryHandler {
     // ─── Launch Template handlers ─────────────────────────────────────────────
 
     private Response handleCreateLaunchTemplate(MultivaluedMap<String, String> p, String region) {
+        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
         LaunchTemplate launchTemplate = service.createLaunchTemplate(
                 region,
                 p.getFirst("LaunchTemplateName"),
@@ -1749,7 +1792,8 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.InstanceType"),
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                decodeUserData(encodedUserData),
+                encodedUserData,
                 resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseTagsForResource(p, "launch-template"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
@@ -1762,6 +1806,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleCreateLaunchTemplateVersion(MultivaluedMap<String, String> p, String region) {
+        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
         LaunchTemplate launchTemplate = service.createLaunchTemplateVersion(
                 region,
                 p.getFirst("LaunchTemplateId"),
@@ -1771,7 +1816,8 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.InstanceType"),
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                decodeUserData(encodedUserData),
+                encodedUserData,
                 resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
@@ -1822,7 +1868,7 @@ public class Ec2QueryHandler {
                 region,
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
-                p.getFirst("DefaultVersion"));
+                firstPresent(p, "SetDefaultVersion", "DefaultVersion"));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2082,7 +2128,7 @@ public class Ec2QueryHandler {
         if (name == null || name.isBlank()) {
             return null;
         }
-        return "arn:aws:iam::" + config.defaultAccountId() + ":instance-profile/" + name;
+        return AwsArnUtils.Arn.of("iam", "", config.defaultAccountId(), "instance-profile/" + name).toString();
     }
 
     private String vpcXml(Vpc vpc) {
@@ -2152,7 +2198,8 @@ public class Ec2QueryHandler {
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
                 .elem("cidrIpv6", rule.getCidrIpv6())
-                .elem("description", rule.getDescription());
+                .elem("description", rule.getDescription())
+                .raw(tagSetXml(rule.getTags()));
         return xml.build();
     }
 
@@ -2182,6 +2229,7 @@ public class Ec2QueryHandler {
             xml.start("item")
                     .elem("destinationCidrBlock", r.getDestinationCidrBlock())
                     .elem("gatewayId", r.getGatewayId())
+                    .elem("natGatewayId", r.getNatGatewayId())
                     .elem("state", r.getState())
                     .elem("origin", r.getOrigin())
                     .end("item");
@@ -2290,8 +2338,8 @@ public class Ec2QueryHandler {
         if (launchTemplate.getKeyName() != null) {
             xml.elem("keyName", launchTemplate.getKeyName());
         }
-        if (launchTemplate.getUserData() != null) {
-            xml.elem("userData", launchTemplate.getUserData());
+        if (launchTemplate.getEncodedUserData() != null) {
+            xml.elem("userData", launchTemplate.getEncodedUserData());
         }
         if (launchTemplate.getIamInstanceProfileArn() != null) {
             xml.start("iamInstanceProfile")

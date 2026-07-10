@@ -57,6 +57,12 @@ public class IamQueryHandler {
             case "UntagUser" -> handleUntagUser(params);
             case "ListUserTags" -> handleListUserTags(params);
             case "ListMFADevices" -> handleListMFADevices(params);
+            case "GetLoginProfile" -> handleGetLoginProfile(params);
+
+            // Identity providers & server certificates (read-only, not modeled)
+            case "ListSAMLProviders" -> handleListSAMLProviders(params);
+            case "ListOpenIDConnectProviders" -> handleListOpenIDConnectProviders(params);
+            case "ListServerCertificates" -> handleListServerCertificates(params);
 
             // Groups
             case "CreateGroup" -> handleCreateGroup(params);
@@ -130,6 +136,7 @@ public class IamQueryHandler {
             case "DeleteAccessKey" -> handleDeleteAccessKey(params);
             case "ListAccessKeys" -> handleListAccessKeys(params);
             case "UpdateAccessKey" -> handleUpdateAccessKey(params);
+            case "GetAccessKeyLastUsed" -> handleGetAccessKeyLastUsed(params);
 
             // Instance Profiles
             case "CreateInstanceProfile" -> handleCreateInstanceProfile(params);
@@ -233,6 +240,45 @@ public class IamQueryHandler {
                 .elem("IsTruncated", false)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("ListMFADevices", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetLoginProfile(MultivaluedMap<String, String> params) {
+        // Login profiles (console passwords) are not modeled. Per the IAM API,
+        // GetLoginProfile returns NoSuchEntity (HTTP 404) when a user has no console
+        // password — a documented, expected result that callers branch on. We must
+        // return that exact error, not an empty 200 or an UnsupportedOperation 400,
+        // which clients would treat as a real failure rather than "no profile".
+        String userName = getParam(params, "UserName");
+        return AwsQueryResponse.error("NoSuchEntity",
+                "Login Profile for User " + (userName != null ? userName : "") + " cannot be found.",
+                AwsNamespaces.IAM, 404);
+    }
+
+    private Response handleListSAMLProviders(MultivaluedMap<String, String> params) {
+        // SAML identity providers are not modeled; return the wire-accurate empty
+        // list (ListSAMLProviders is not paginated — no Marker/IsTruncated).
+        String result = new XmlBuilder()
+                .start("SAMLProviderList").end("SAMLProviderList")
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("ListSAMLProviders", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleListOpenIDConnectProviders(MultivaluedMap<String, String> params) {
+        // OIDC identity providers are not modeled; return the wire-accurate empty
+        // list (ListOpenIDConnectProviders is not paginated).
+        String result = new XmlBuilder()
+                .start("OpenIDConnectProviderList").end("OpenIDConnectProviderList")
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviders", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleListServerCertificates(MultivaluedMap<String, String> params) {
+        // Server certificates are not modeled; return an empty paginated list.
+        String result = new XmlBuilder()
+                .start("ServerCertificateMetadataList").end("ServerCertificateMetadataList")
+                .elem("IsTruncated", false)
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, result)).build();
     }
 
     // =========================================================================
@@ -645,6 +691,23 @@ public class IamQueryHandler {
         iamService.updateAccessKey(getParam(params, "UserName"),
                 getParam(params, "AccessKeyId"), getParam(params, "Status"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAccessKey", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleGetAccessKeyLastUsed(MultivaluedMap<String, String> params) {
+        // Access-key usage is not modeled, so return the IAM API's documented
+        // "never used" shape: an AccessKeyLastUsed with ServiceName=N/A and Region=N/A
+        // and NO LastUsedDate. UserName is optional and its type is non-empty
+        // (length 1-128); since the emulator exposes no AccessKeyId→UserName lookup,
+        // the element is omitted rather than emitted empty — an empty string could be
+        // rejected by a strict client, and callers that need the owner already have it
+        // from the preceding ListAccessKeys call.
+        String result = new XmlBuilder()
+                .start("AccessKeyLastUsed")
+                .elem("ServiceName", "N/A")
+                .elem("Region", "N/A")
+                .end("AccessKeyLastUsed")
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetAccessKeyLastUsed", AwsNamespaces.IAM, result)).build();
     }
 
     // =========================================================================

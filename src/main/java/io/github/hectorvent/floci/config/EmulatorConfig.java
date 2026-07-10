@@ -4,6 +4,7 @@ import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 @ConfigMapping(prefix = "floci")
 public interface EmulatorConfig {
@@ -177,6 +178,59 @@ public interface EmulatorConfig {
         WalConfig wal();
 
         ServiceStorageOverrides services();
+
+        EfsSharingConfig efs();
+    }
+
+    /**
+     * Emulates an Amazon EFS access point's POSIX ownership for the shared local Docker volumes
+     * that stand in for EFS file systems. A Docker named volume is created {@code root:root 0755},
+     * so a container whose image runs as a non-root {@code USER} (as ECS tasks and
+     * access-point-mounted workloads typically do) then cannot create files on it. Real EFS
+     * applies the access point's {@code PosixUser} to all I/O and initialises the root directory
+     * per {@code RootDirectory.CreationInfo}. These settings reproduce that: Floci initialises the
+     * shared volume root's owner/permissions once and can run the mounting containers under a
+     * fixed identity, so the emulated file system is writable by the intended uid/gid.
+     *
+     * <p>Every value is empty/false by default, so a shared volume behaves exactly as before —
+     * a plain named volume with no ownership change — unless explicitly configured.
+     */
+    interface EfsSharingConfig {
+        /** Owner uid applied to the volume root (EFS {@code RootDirectory.CreationInfo.OwnerUid}). */
+        OptionalInt ownerUid();
+
+        /** Owner gid applied to the volume root (EFS {@code RootDirectory.CreationInfo.OwnerGid}). */
+        OptionalInt ownerGid();
+
+        /**
+         * Octal permissions applied to the volume root (EFS {@code RootDirectory.CreationInfo.Permissions}),
+         * e.g. {@code "0777"}. A 4-digit value carries the special bits exactly as AWS does — e.g.
+         * {@code "2775"} sets the setgid bit so subdirectories inherit the owner gid (the standard
+         * POSIX pattern for a group-shared tree). When empty, no {@code chmod} for the permission
+         * bits is performed; however the init helper container still runs if {@link #ownerUid()} or
+         * {@link #ownerGid()} is set. Volume-root initialisation is skipped entirely only when all of
+         * {@code owner-uid}, {@code owner-gid}, and {@code root-permissions} are left at their
+         * defaults (plain named volume).
+         */
+        Optional<String> rootPermissions();
+
+        /** Lightweight image used for the one-off {@code chown}/{@code chmod} of the volume root. */
+        @WithDefault("busybox:stable")
+        String initImage();
+
+        /**
+         * Run containers that mount a shared volume as this {@code "uid[:gid]"}, emulating the
+         * access point's {@code PosixUser} that squashes all file-system I/O to a fixed identity.
+         * Empty leaves the container's image {@code USER} in effect.
+         */
+        Optional<String> mountUser();
+
+        /**
+         * Supplementary group id added to containers that mount a shared volume, so a process
+         * running under a different primary uid can still write a group-shared tree owned by
+         * {@link #ownerGid()}. Empty adds no supplementary group.
+         */
+        OptionalInt mountGroupAdd();
     }
 
     interface ServiceStorageOverrides {
@@ -1396,6 +1450,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean iamAuthWebhook();
+
+        /**
+         * When true (and ECR is enabled), each new k3s cluster gets a generated
+         * {@code /etc/rancher/k3s/registries.yaml} that mirrors every ECR repository URI the
+         * emulator can mint to the registry container's in-network endpoint, so pods can pull
+         * images pushed to Floci ECR without any manual containerd configuration.
+         */
+        @WithDefault("true")
+        boolean ecrRegistryMirror();
     }
 
     interface InitHooksConfig {
@@ -1475,6 +1538,12 @@ public interface EmulatorConfig {
         /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
         @WithDefault("unix:///var/run/docker.sock")
         String dockerHost();
+
+        /**
+         * Optional namespace inserted into Floci-managed child container and volume names.
+         * Useful when multiple Floci processes share one Docker daemon.
+         */
+        Optional<String> resourceNamespace();
 
         /**
          * Optional registry/repository base for every Docker image Floci launches.

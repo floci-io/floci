@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -70,6 +71,10 @@ class AutoScalingReconcilerTest {
         asg.setDesiredCapacity(1);
         asg.setLaunchTemplateId("lt-123");
         asg.setLaunchTemplateVersion("1");
+        asg.getTags().put("job-id", "2001");
+        asg.getTags().put("control-plane-only", "true");
+        asg.getTagPropagateAtLaunch().put("job-id", true);
+        asg.getTagPropagateAtLaunch().put("control-plane-only", false);
 
         LaunchTemplate launchTemplate = new LaunchTemplate();
         launchTemplate.setLaunchTemplateId("lt-123");
@@ -79,6 +84,7 @@ class AutoScalingReconcilerTest {
         version.setInstanceType("t3.micro");
         version.setIamInstanceProfileArn("arn:aws:iam::000000000000:instance-profile/app-profile");
         List<Tag> instanceTags = List.of(new Tag("app.ClusterId", "development"));
+        List<Tag> propagatedTags = List.of(new Tag("app.ClusterId", "development"), new Tag("job-id", "2001"));
         version.setInstanceTags(instanceTags);
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
@@ -90,7 +96,7 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(instanceTags), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"))).thenReturn(reservation);
+                anyList(), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"))).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -98,9 +104,15 @@ class AutoScalingReconcilerTest {
         assertEquals("i-launched", asg.getInstances().getFirst().getInstanceId());
         assertEquals("lt-123", asg.getInstances().getFirst().getLaunchTemplateId());
         assertEquals("1", asg.getInstances().getFirst().getLaunchTemplateVersion());
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.captor();
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(instanceTags), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"));
+                tags.capture(), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"));
+        assertEquals(propagatedTags.size(), tags.getValue().size());
+        assertEquals("app.ClusterId", tags.getValue().get(0).getKey());
+        assertEquals("development", tags.getValue().get(0).getValue());
+        assertEquals("job-id", tags.getValue().get(1).getKey());
+        assertEquals("2001", tags.getValue().get(1).getValue());
     }
 
     @Test

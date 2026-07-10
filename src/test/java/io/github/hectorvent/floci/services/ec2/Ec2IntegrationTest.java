@@ -51,6 +51,8 @@ class Ec2IntegrationTest {
     private static String rootVolumeId;
     private static String networkInterfaceId;
     private static String launchTemplateId;
+    private static String launchTemplateUserData;
+    private static String launchTemplateVersionUserData;
     private static String vpcEndpointId;
     private static String natGatewayId;
     private static String registeredImageId;
@@ -914,6 +916,7 @@ class Ec2IntegrationTest {
     @Order(43)
     void createLaunchTemplate()
             throws IOException {
+        launchTemplateUserData = gzipBase64("#!/bin/sh\necho launch-template\n");
         launchTemplateId = given()
             .formParam("Action", "CreateLaunchTemplate")
             .formParam("LaunchTemplateName", "sample-template")
@@ -922,7 +925,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
-            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
+            .formParam("LaunchTemplateData.UserData", launchTemplateUserData)
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:ClusterId")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "sample-template")
@@ -978,7 +981,7 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template\n"))
+                    equalTo(launchTemplateUserData))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.iamInstanceProfile.arn",
                     equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
@@ -993,6 +996,7 @@ class Ec2IntegrationTest {
     @Order(46)
     void createLaunchTemplateVersion()
             throws IOException {
+        launchTemplateVersionUserData = gzipBase64("#!/bin/sh\necho launch-template-version\n");
         given()
             .formParam("Action", "CreateLaunchTemplateVersion")
             .formParam("LaunchTemplateId", launchTemplateId)
@@ -1003,7 +1007,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile-v2")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
-            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
+            .formParam("LaunchTemplateData.UserData", launchTemplateVersionUserData)
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:NodeType")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "SECONDARY")
@@ -1021,7 +1025,7 @@ class Ec2IntegrationTest {
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.instanceType",
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template-version\n"))
+                    equalTo(launchTemplateVersionUserData))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.iamInstanceProfile.arn",
                     equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
@@ -1043,7 +1047,7 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template\n"))
+                    equalTo(launchTemplateUserData))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
                     equalTo("PRIMARY"));
     }
@@ -1054,7 +1058,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ModifyLaunchTemplate")
             .formParam("LaunchTemplateId", launchTemplateId)
-            .formParam("DefaultVersion", "2")
+            .formParam("SetDefaultVersion", "2")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1065,6 +1069,32 @@ class Ec2IntegrationTest {
             .body("ModifyLaunchTemplateResponse.launchTemplate.defaultVersionNumber",
                     equalTo("2"))
             .body("ModifyLaunchTemplateResponse.launchTemplate.latestVersionNumber",
+                    equalTo("2"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateId.1", launchTemplateId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.defaultVersionNumber",
+                    equalTo("2"))
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.latestVersionNumber",
+                    equalTo("2"));
+
+        given()
+            .formParam("Action", "ModifyLaunchTemplate")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("SetDefaultVersion", "")
+            .formParam("DefaultVersion", "2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ModifyLaunchTemplateResponse.launchTemplate.defaultVersionNumber",
                     equalTo("2"));
     }
 
@@ -3023,5 +3053,164 @@ class Ec2IntegrationTest {
             // subnetIdSet item text must be the plain id (not a wrapped <subnetId> element),
             // otherwise the AWS SDK for Go fails to deserialize interface endpoints.
             .body("CreateVpcEndpointResponse.vpcEndpoint.subnetIdSet.item", equalTo(subnet));
+    }
+
+    @Test
+    @Order(317)
+    void subnetTagsFromCreateSurviveDescribe() {
+        String vpc = newVpc("10.37.0.0/16");
+        String subnet = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.37.1.0/24")
+            .formParam("TagSpecification.1.ResourceType", "subnet")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "tagged-subnet")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("SubnetId.1", subnet)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.key", equalTo("Name"))
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.value", equalTo("tagged-subnet"));
+    }
+
+    @Test
+    @Order(318)
+    void routeNatGatewayIdRoundTrips() {
+        String vpc = newVpc("10.38.0.0/16");
+        String rt = given()
+            .formParam("Action", "CreateRouteTable")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateRouteTableResponse.routeTable.routeTableId");
+
+        given()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", rt)
+            .formParam("DestinationCidrBlock", "0.0.0.0/0")
+            .formParam("NatGatewayId", "nat-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateRouteResponse.return", equalTo("true"));
+
+        given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("RouteTableId.1", rt)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeRouteTablesResponse.routeTableSet.item.routeSet.item.natGatewayId",
+                    equalTo("nat-0123456789abcdef0"));
+    }
+
+    @Test
+    @Order(319)
+    void securityGroupRuleDescribableByRuleId() {
+        String vpc = newVpc("10.39.0.0/16");
+        String sg = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "rule-test")
+            .formParam("GroupDescription", "rule test")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String ruleId = given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", sg)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "443")
+            .formParam("IpPermissions.1.ToPort", "443")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/16")
+            .formParam("TagSpecification.1.ResourceType", "security-group-rule")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "allow-https")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AuthorizeSecurityGroupIngressResponse.securityGroupRuleSet.item.securityGroupRuleId");
+
+        // The modern aws_vpc_security_group_ingress_rule reads back by security-group-rule-id,
+        // and its create-time tags must round-trip or Terraform recreates the rule every plan.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", ruleId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.securityGroupRuleId",
+                    equalTo(ruleId))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.tagSet.item.key",
+                    equalTo("Name"))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.tagSet.item.value",
+                    equalTo("allow-https"));
+    }
+
+    @Test
+    @Order(320)
+    void securityGroupRuleIdParamAndFilterAreConjunctive() {
+        String vpc = newVpc("10.40.0.0/16");
+        String sg = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "conjunctive-test")
+            .formParam("GroupDescription", "conjunctive test")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String ruleId = given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", sg)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "80")
+            .formParam("IpPermissions.1.ToPort", "80")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AuthorizeSecurityGroupIngressResponse.securityGroupRuleSet.item.securityGroupRuleId");
+
+        // Param and filter naming different rules must intersect to nothing, not union to both.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("SecurityGroupRuleId.1", ruleId)
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", "sgr-00000000000000000")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet", emptyOrNullString());
+
+        // Param and filter naming the same rule still match.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("SecurityGroupRuleId.1", ruleId)
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", ruleId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.securityGroupRuleId",
+                    equalTo(ruleId));
     }
 }

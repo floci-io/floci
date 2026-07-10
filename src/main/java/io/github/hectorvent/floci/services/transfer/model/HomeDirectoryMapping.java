@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.transfer.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public class HomeDirectoryMapping {
 
     private String entry;

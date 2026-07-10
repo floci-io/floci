@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.route53.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 
+@RegisterForReflection
 public class ResourceRecordSet {
 
     private String name;

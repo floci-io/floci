@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -145,8 +146,8 @@ public class NeptuneContainerManager {
         lifecycleManager.removeIfExists(containerName(clusterId));
     }
 
-    private static String containerName(String clusterId) {
-        return "floci-neptune-" + clusterId;
+    private String containerName(String clusterId) {
+        return ContainerStorageHelper.resourceName(config, "neptune", null, clusterId);
     }
 
     public void stopAll() {

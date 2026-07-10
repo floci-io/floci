@@ -517,7 +517,7 @@ public class S3Controller {
                     return handleUploadPartCopy(copySource, bucket, key, uploadId, partNumber, httpHeaders);
                 }
                 byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
-                validateChecksumHeaders(httpHeaders, partData, httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm"));
+                validateChecksumHeaders(httpHeaders, partData, getChecksumAlgorithm(httpHeaders));
                 String eTag = s3Service.uploadPart(bucket, key, uploadId, partNumber, partData,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
@@ -541,7 +541,7 @@ public class S3Controller {
             Instant retainUntil = retainUntilStr != null ? Instant.parse(retainUntilStr) : null;
 
             byte[] data = decodeAwsChunked(body, contentEncoding, contentSha256);
-            String checksumAlgorithm = httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm");
+            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders);
             validateChecksumHeaders(httpHeaders, data, checksumAlgorithm);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
@@ -989,7 +989,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-acl"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
+                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
+                        getChecksumAlgorithm(httpHeaders));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -1804,6 +1805,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerAlgorithm(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-algorithm"))
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
+                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
                         .withAcl(cannedAcl));
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -1991,6 +1993,14 @@ public class S3Controller {
         checksum.setChecksumSHA256(sha256);
         checksum.setChecksumType("FULL_OBJECT");
         return checksum;
+    }
+
+    private String getChecksumAlgorithm(HttpHeaders httpHeaders) {
+        String algorithm = httpHeaders.getHeaderString("x-amz-checksum-algorithm");
+        if (algorithm == null || algorithm.isBlank()) {
+            algorithm = httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm");
+        }
+        return algorithm;
     }
 
     private void validateChecksumHeaders(HttpHeaders httpHeaders, byte[] data, String algorithm) {

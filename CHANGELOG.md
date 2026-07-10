@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.31] - 2026-07-07
+
+### Added
+
+- **stepfunctions:** support Map `ItemReader` for S3-backed JSON datasets ([#1588](https://github.com/floci-io/floci/pull/1588))
+- **iam/rds/docdb/elasticache/glue/ssm/backup/s3control:** implement read-only describe/list APIs for resource collection ([#1581](https://github.com/floci-io/floci/pull/1581))
+- **eventbridge:** deliver events to Firehose delivery stream targets ([#1739](https://github.com/floci-io/floci/pull/1739))
+- **apigateway:** persist API key tags and add the `GetApiKey` route ([#1677](https://github.com/floci-io/floci/pull/1677))
+- **scheduler:** dispatch ECS targets to `RunTask` ([#1733](https://github.com/floci-io/floci/pull/1733))
+- **secretsmanager:** support `Filters` and pagination in `BatchGetSecretValue` ([#1737](https://github.com/floci-io/floci/pull/1737))
+- **ec2:** support registered images and snapshots ([#1601](https://github.com/floci-io/floci/pull/1601)); add instance metadata catalog and architecture parity ([#1596](https://github.com/floci-io/floci/pull/1596))
+- **rds-data:** add the Data API for PostgreSQL ([#1720](https://github.com/floci-io/floci/pull/1720))
+- **rds:** add mock mode to create clusters and instances without Docker ([#1655](https://github.com/floci-io/floci/pull/1655))
+- **cloudwatch:** add Logs Insights query support ([#1448](https://github.com/floci-io/floci/pull/1448))
+- **cloudcontrol:** list resources from local services ([#1602](https://github.com/floci-io/floci/pull/1602))
+- **cloudformation:** apply S3 Bucket `CorsConfiguration` ([#1617](https://github.com/floci-io/floci/pull/1617))
+- **core:** claim wire protocols reactively per the Smithy selection guide ([#1712](https://github.com/floci-io/floci/pull/1712))
+- **docs:** generate Supported Actions tables from handler source ([#1641](https://github.com/floci-io/floci/pull/1641))
+
+### Changed
+
+- **lambda:** mount function code from a read-only volume instead of copying per cold start ([#1673](https://github.com/floci-io/floci/pull/1673))
+
+### Fixed
+
+- **stepfunctions:** resolve qualified Lambda function ARNs in `lambda:invoke` ([#1660](https://github.com/floci-io/floci/pull/1660))
+- **s3:** fix `CopyObject` handling ([#1670](https://github.com/floci-io/floci/pull/1670))
+- **sqs:** honor queue-level `DelaySeconds` for standard queues ([#1567](https://github.com/floci-io/floci/pull/1567)); render Query-protocol errors as XML instead of leaking JSON ([#1732](https://github.com/floci-io/floci/pull/1732))
+- **ec2:** honor launch template default version updates ([#1704](https://github.com/floci-io/floci/pull/1704))
+- **rds:** improve postgres proxy startup parity ([#1599](https://github.com/floci-io/floci/pull/1599)); resolve tags by ARN resource type, not only DB instances ([#1649](https://github.com/floci-io/floci/pull/1649))
+- **eks:** let pods pull images pushed to the Floci ECR registry ([#1762](https://github.com/floci-io/floci/pull/1762))
+- **cloudwatch:** return `ResourceNotFound` for `SetAlarmState` on a missing alarm ([#1621](https://github.com/floci-io/floci/pull/1621))
+- **lambda:** persist version counters and event-invoke configs across restart ([#1730](https://github.com/floci-io/floci/pull/1730))
+- **elasticbeanstalk:** persist applications, versions, and environments across restart ([#1729](https://github.com/floci-io/floci/pull/1729))
+- **emr:** return AWS client-error codes instead of 500 `InternalServerError` ([#1731](https://github.com/floci-io/floci/pull/1731))
+- **autoscaling:** align active instance refresh behavior ([#1598](https://github.com/floci-io/floci/pull/1598))
+- **docker:** isolate managed resource containers ([#1703](https://github.com/floci-io/floci/pull/1703))
+- **storage:** make `computeIfAbsent` atomic ([#1699](https://github.com/floci-io/floci/pull/1699))
+
 ## [1.5.30] - 2026-07-03
 
 ### Added
@@ -1139,7 +1178,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.30...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.31...HEAD
+[1.5.31]: https://github.com/floci-io/floci/compare/1.5.30...1.5.31
 [1.5.30]: https://github.com/floci-io/floci/compare/1.5.29...1.5.30
 [1.5.29]: https://github.com/floci-io/floci/compare/1.5.28...1.5.29
 [1.5.28]: https://github.com/floci-io/floci/compare/1.5.27...1.5.28
