@@ -108,9 +108,10 @@ public class SesController {
 
             // Verified against AWS: a non-existent ConfigurationSetName fails the whole call
             // (NotFoundException) without creating the identity, so validate it before creating.
-            // (AWS stores a blank name verbatim; Floci treats blank as "no default configuration set"
-            // to avoid persisting a default that no configuration set can satisfy.)
-            boolean hasConfigSet = configurationSetName != null && !configurationSetName.isBlank();
+            // Only the empty string means "no default configuration set" (consistent with the
+            // PutEmailIdentityConfigurationSetAttributes path); a whitespace-only name flows through
+            // name validation and is rejected as invalid input, rather than being silently ignored.
+            boolean hasConfigSet = configurationSetName != null && !configurationSetName.isEmpty();
             if (hasConfigSet) {
                 sesService.getConfigurationSet(configurationSetName, region);
             }
