@@ -256,8 +256,9 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::IAM::Role" -> provisionIamRole(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::User" -> provisionIamUser(resource, properties, engine, stackName);
                 case "AWS::IAM::AccessKey" -> provisionIamAccessKey(resource, properties, engine);
-                case "AWS::IAM::Policy", "AWS::IAM::ManagedPolicy" ->
-                        provisionIamPolicy(resource, properties, engine, accountId, stackName);
+                case "AWS::IAM::Policy" -> provisionIamInlinePolicy(resource, properties, engine, stackName);
+                case "AWS::IAM::ManagedPolicy" ->
+                        provisionIamManagedPolicy(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::InstanceProfile" -> provisionInstanceProfile(resource, properties, engine, accountId, stackName);
                 case "AWS::SSM::Parameter" -> provisionSsmParameter(resource, properties, engine, region, stackName);
                 case "AWS::KMS::Key" -> provisionKmsKey(resource, properties, engine, region, accountId);
@@ -388,6 +389,12 @@ public class CloudFormationResourceProvisioner {
             }
             return;
         }
+        // AWS::IAM::Policy is an inline policy; detaching it needs the principals it was attached to,
+        // which the type/physicalId delete path can't provide (only the delete-stack path has them).
+        if ("AWS::IAM::Policy".equals(resourceType)) {
+            deleteInlinePolicySafe(resource);
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
@@ -408,7 +415,11 @@ public class CloudFormationResourceProvisioner {
             case "AWS::DynamoDB::Table" -> dynamoDbService.deleteTable(physicalId, region);
             case "AWS::Lambda::Function" -> lambdaService.deleteFunction(region, physicalId);
             case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
-            case "AWS::IAM::Policy", "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
+            // AWS::IAM::Policy is inline: it is removed together with its owning principal (see
+            // deleteRoleSafe), or precisely via the StackResource-aware delete path. Nothing to do
+            // here when only the physical id (policy name) is known, as on rollback.
+            case "AWS::IAM::Policy" -> { }
+            case "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
             case "AWS::IAM::InstanceProfile" -> iamService.deleteInstanceProfile(physicalId);
             case "AWS::SSM::Parameter" -> ssmService.deleteParameter(physicalId, region);
             case "AWS::KMS::Key" -> {
@@ -1897,9 +1908,70 @@ public class CloudFormationResourceProvisioner {
 
     // ── IAM Policy ────────────────────────────────────────────────────────────
 
-    private void provisionIamPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                    String accountId, String stackName) {
+    /**
+     * Provisions {@code AWS::IAM::Policy}, which in AWS is an <em>inline</em> policy embedded in the
+     * named roles/users/groups (equivalent to PutRolePolicy/PutUserPolicy/PutGroupPolicy) — <em>not</em>
+     * a standalone managed policy. Because an inline policy name is scoped to the principal that owns
+     * it (not the account), two stacks that reuse the same construct sub-tree — and therefore emit the
+     * same auto-generated {@code PolicyName} on different roles — no longer collide. {@code Ref} returns
+     * the policy name; the resource exposes no ARN attribute (AWS::IAM::Policy has none).
+     */
+    private void provisionIamInlinePolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                          String stackName) {
         String policyName = resolveOptional(props, "PolicyName", engine);
+        if (policyName == null || policyName.isBlank()) {
+            policyName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+        String document = props != null && props.has("PolicyDocument")
+                ? props.get("PolicyDocument").toString()
+                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+        r.setPhysicalId(policyName);
+
+        // Embed the inline policy into each named principal, remembering the targets so the resource
+        // delete can detach cleanly (the delete path only has the physical id + stashed attributes).
+        final String name = policyName;
+        final String doc = document;
+        r.getAttributes().put("InlineRoleTargets",
+                putInlinePolicy(props, "Roles", engine,
+                        (principal) -> iamService.putRolePolicy(principal, name, doc)));
+        r.getAttributes().put("InlineUserTargets",
+                putInlinePolicy(props, "Users", engine,
+                        (principal) -> iamService.putUserPolicy(principal, name, doc)));
+        r.getAttributes().put("InlineGroupTargets",
+                putInlinePolicy(props, "Groups", engine,
+                        (principal) -> iamService.putGroupPolicy(principal, name, doc)));
+    }
+
+    /**
+     * Applies {@code op} to each principal name listed under {@code propName}, returning a comma-joined
+     * list of the resolved names for later cleanup.
+     */
+    private String putInlinePolicy(JsonNode props, String propName,
+                                   CloudFormationTemplateEngine engine, java.util.function.Consumer<String> op) {
+        if (props == null || !props.has(propName)) {
+            return "";
+        }
+        List<String> names = new ArrayList<>();
+        for (JsonNode entry : props.get(propName)) {
+            String name = engine.resolve(entry);
+            if (name != null && !name.isBlank()) {
+                op.accept(name);
+                names.add(name);
+            }
+        }
+        return String.join(",", names);
+    }
+
+    /**
+     * Provisions {@code AWS::IAM::ManagedPolicy} as a standalone customer-managed policy (has an ARN,
+     * must be detached before deletion), attaching it to any specified roles. Unlike an inline policy
+     * a managed policy name is account-global, so its physical name is honoured verbatim from
+     * {@code ManagedPolicyName} when set, matching AWS.
+     */
+    private void provisionIamManagedPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                           String accountId, String stackName) {
+        String policyName = resolveOptional(props, "ManagedPolicyName", engine);
         if (policyName == null || policyName.isBlank()) {
             policyName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
@@ -1920,11 +1992,6 @@ public class CloudFormationResourceProvisioner {
                 }
             }
         }
-    }
-
-    private void provisionIamManagedPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String accountId, String stackName) {
-        provisionIamPolicy(r, props, engine, accountId, stackName);
     }
 
     // ── IAM Instance Profile ──────────────────────────────────────────────────
@@ -3827,6 +3894,32 @@ public class CloudFormationResourceProvisioner {
             iamService.deletePolicy(policyArn);
         } catch (Exception e) {
             LOG.debugv("Could not delete policy {0}: {1}", policyArn, e.getMessage());
+        }
+    }
+
+    /** Removes an {@code AWS::IAM::Policy} inline policy from each principal it was embedded in. */
+    private void deleteInlinePolicySafe(StackResource resource) {
+        String policyName = resource.getPhysicalId();
+        detachInline(resource.getAttributes().get("InlineRoleTargets"),
+                (name) -> iamService.deleteRolePolicy(name, policyName));
+        detachInline(resource.getAttributes().get("InlineUserTargets"),
+                (name) -> iamService.deleteUserPolicy(name, policyName));
+        detachInline(resource.getAttributes().get("InlineGroupTargets"),
+                (name) -> iamService.deleteGroupPolicy(name, policyName));
+    }
+
+    private void detachInline(String csvTargets, java.util.function.Consumer<String> op) {
+        if (csvTargets == null || csvTargets.isBlank()) {
+            return;
+        }
+        for (String name : csvTargets.split(",")) {
+            if (!name.isBlank()) {
+                // The principal may already be gone (deleted earlier in the same teardown) — ignore.
+                try {
+                    op.accept(name);
+                } catch (Exception ignored) {
+                }
+            }
         }
     }
 
