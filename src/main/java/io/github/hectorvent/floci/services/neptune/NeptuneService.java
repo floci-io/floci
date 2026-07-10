@@ -62,24 +62,25 @@ public class NeptuneService {
                     "Neptune cluster " + id + " already exists.", 400);
         }
 
+        // Open the try immediately after reserving the port so config reads below can't leak it.
         int proxyPort = allocateProxyPort();
-        String configuredDbType = config.services().neptune().dbType();
-        NeptuneDbType dbType = NeptuneDbType.fromConfig(configuredDbType).orElseGet(() -> {
-            LOG.warnv("Unsupported Neptune db-type ''{0}'', falling back to {1}. Supported: gremlin, neo4j.",
-                    configuredDbType, NeptuneDbType.GREMLIN);
-            return NeptuneDbType.GREMLIN;
-        });
-        String image = switch (dbType) {
-            case GREMLIN -> config.services().neptune().defaultImage();
-            case NEO4J -> config.services().neptune().defaultNeo4jImage();
-        };
-
-        LOG.infov("Creating Neptune cluster {0} on proxy port {1}, dbType={2}, image={3}",
-                id, String.valueOf(proxyPort), dbType, image);
-
         NeptuneContainerHandle handle = null;
         boolean provisioned = false;
         try {
+            String configuredDbType = config.services().neptune().dbType();
+            NeptuneDbType dbType = NeptuneDbType.fromConfig(configuredDbType).orElseGet(() -> {
+                LOG.warnv("Unsupported Neptune db-type ''{0}'', falling back to {1}. Supported: gremlin, neo4j.",
+                        configuredDbType, NeptuneDbType.GREMLIN);
+                return NeptuneDbType.GREMLIN;
+            });
+            String image = switch (dbType) {
+                case GREMLIN -> config.services().neptune().defaultImage();
+                case NEO4J -> config.services().neptune().defaultNeo4jImage();
+            };
+
+            LOG.infov("Creating Neptune cluster {0} on proxy port {1}, dbType={2}, image={3}",
+                    id, String.valueOf(proxyPort), dbType, image);
+
             handle = containerManager.start(id, image, dbType);
 
             String region = regionResolver.getDefaultRegion();
