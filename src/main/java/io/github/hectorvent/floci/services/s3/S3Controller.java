@@ -2115,7 +2115,10 @@ public class S3Controller {
             try {
                 s3Service.authorizeGetObject(bucket, indexKey, null, authorization);
                 S3Object indexObj = s3Service.headObject(bucket, indexKey, null);
-                return fullObjectResponse(bucket, indexKey, null, indexObj, ResponseHeaderOverrides.NONE);
+                // A website endpoint serves the index document with no response-header overrides and no
+                // checksum headers (no viewer sends response-* or x-amz-checksum-mode to a website endpoint).
+                return fullObjectResponse(bucket, indexKey, null, indexObj,
+                        new ResponseHeaderOverrides(null, null, null, null, null, null), false);
             } catch (AwsException e) {
                 if (!isWebsiteErrorDocumentTrigger(e)) {
                     throw e;
