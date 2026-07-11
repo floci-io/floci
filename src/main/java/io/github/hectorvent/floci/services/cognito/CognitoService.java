@@ -2374,19 +2374,15 @@ public class CognitoService {
         List<String> autoVerifiedAttributes =
                 pool.getAutoVerifiedAttributes() != null ? pool.getAutoVerifiedAttributes()
                         : List.of();
-        for (String attribute : autoVerifiedAttributes) {
-            if ("email".equals(attribute)) {
-                String email = blankToNull(attributes.get("email"));
-                if (email != null) {
-                    return new DeliveryTarget("email", "EMAIL", maskEmail(email));
-                }
-            }
-            if ("phone_number".equals(attribute)) {
-                String phoneNumber = blankToNull(attributes.get("phone_number"));
-                if (phoneNumber != null) {
-                    return new DeliveryTarget("phone_number", "SMS", maskPhoneNumber(phoneNumber));
-                }
-            }
+
+        String phoneNumber = blankToNull(attributes.get("phone_number"));
+        if (autoVerifiedAttributes.contains("phone_number") && phoneNumber != null) {
+            return new DeliveryTarget("phone_number", "SMS", maskPhoneNumber(phoneNumber));
+        }
+
+        String email = blankToNull(attributes.get("email"));
+        if (autoVerifiedAttributes.contains("email") && email != null) {
+            return new DeliveryTarget("email", "EMAIL", maskEmail(email));
         }
 
         return null;

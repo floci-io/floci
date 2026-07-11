@@ -37,6 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -291,6 +294,51 @@ class CognitoIntegrationTest {
                 .statusCode(400)
                 .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"))
                 .body("message", org.hamcrest.Matchers.equalTo("Invalid verification code provided, please try again."));
+    }
+
+    @Test
+    void signUpPrefersPhoneDeliveryWhenEmailAndPhoneAreAutoVerified() throws Exception {
+        Response poolResponse = cognitoAction("CreateUserPool", """
+                {
+                  "PoolName": "SignUpPhonePreferredPool",
+                  "AutoVerifiedAttributes": ["email", "phone_number"]
+                }
+                """);
+
+        poolResponse.then().statusCode(200);
+        String userPoolId = poolResponse.jsonPath().getString("UserPool.Id");
+
+        Response clientResponse = cognitoAction("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "signup-phone-preferred-client"
+                }
+                """.formatted(userPoolId));
+
+        clientResponse.then().statusCode(200);
+        String clientId = clientResponse.jsonPath().getString("UserPoolClient.ClientId");
+
+        Response signUpResponse = cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "phone-preferred-user",
+                  "Password": "Password123!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "user@example.com" },
+                    { "Name": "phone_number", "Value": "+15551234567" }
+                  ]
+                }
+                """.formatted(clientId));
+
+        signUpResponse.then().statusCode(200);
+
+        assertEquals("phone_number",
+                signUpResponse.jsonPath().getString("CodeDeliveryDetails.AttributeName"));
+        assertEquals("SMS",
+                signUpResponse.jsonPath().getString("CodeDeliveryDetails.DeliveryMedium"));
+        String destination = signUpResponse.jsonPath().getString("CodeDeliveryDetails.Destination");
+        assertThat(destination, notNullValue());
+        assertThat(destination, containsString("4567"));
     }
 
     @Test
