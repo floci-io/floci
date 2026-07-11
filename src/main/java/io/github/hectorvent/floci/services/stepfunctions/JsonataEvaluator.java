@@ -68,6 +68,16 @@ public class JsonataEvaluator {
             Jsonata jsonataExpr = jsonata(expr);
             Jsonata.Frame frame = jsonataExpr.createFrame();
             frame.bind("states", toObject(statesVar));
+            // Execution-scoped variables (the Assign field) are referenced as top-level $name in
+            // AWS's JSONata dialect, e.g. $CheckpointCount — bind each one accordingly.
+            JsonNode variables = statesVar.path("variables");
+            if (variables.isObject()) {
+                Iterator<Map.Entry<String, JsonNode>> fields = variables.fields();
+                while (fields.hasNext()) {
+                    Map.Entry<String, JsonNode> entry = fields.next();
+                    frame.bind(entry.getKey(), toObject(entry.getValue()));
+                }
+            }
             Object result = jsonataExpr.evaluate(null, frame);
             return toJsonNode(result);
         } catch (Exception e) {

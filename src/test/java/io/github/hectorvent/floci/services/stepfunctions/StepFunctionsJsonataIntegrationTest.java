@@ -1194,6 +1194,146 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void assignedVariablesSurviveBeyondNextStateOutput() throws Exception {
+        // Variables set via Assign persist across states even after a later state replaces the output.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "AssignVariables",
+                    "States": {
+                        "AssignVariables": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "CheckpointCount": "0",
+                                "ExecutionWaitTimeInSeconds": "3"
+                            },
+                            "Output": {
+                                "transient": 3
+                            },
+                            "Next": "UseAndReplaceOutput"
+                        },
+                        "UseAndReplaceOutput": {
+                            "Type": "Pass",
+                            "Output": {
+                                "fromAssignedVariable": "{% $ExecutionWaitTimeInSeconds %}",
+                                "fromPreviousOutput": "{% $states.input.transient %}"
+                            },
+                            "Next": "UseAssignedAgain"
+                        },
+                        "UseAssignedAgain": {
+                            "Type": "Pass",
+                            "Output": {
+                                "checkpoint": "{% $CheckpointCount %}",
+                                "fromAssignedVariable": "{% $ExecutionWaitTimeInSeconds %}",
+                                "previousTransientStillPresent": "{% $exists($states.input.transient) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-vars-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"checkpoint\":\"0\"") || output.contains("\"checkpoint\": \"0\""));
+        assertTrue(output.contains("\"fromAssignedVariable\":\"3\"") || output.contains("\"fromAssignedVariable\": \"3\""));
+        assertTrue(output.contains("\"previousTransientStillPresent\":false")
+                || output.contains("\"previousTransientStillPresent\": false"));
+    }
+
+    @Test
+    void assignedVariableVisibleToSameStateOutput() throws Exception {
+        // AWS evaluates a state's Assign before its Output, so the same state's Output sees the
+        // newly assigned variable.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "AssignAndUse",
+                    "States": {
+                        "AssignAndUse": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "Greeting": "{% 'hello ' & $states.input.name %}"
+                            },
+                            "Output": {
+                                "message": "{% $Greeting %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-same-state-test", definition);
+        String execArn = startExecution(smArn, "{\"name\": \"world\"}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"message\":\"hello world\"")
+                || output.contains("\"message\": \"hello world\""));
+    }
+
+    @Test
+    void variablesAssignedInsideMapDoNotLeakToParentScope() throws Exception {
+        // A variable is set in the parent scope, reassigned inside each Map iteration, and read
+        // again after the Map. The parent must still observe its own value: iteration assignments
+        // are scoped to the iteration.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "SetScope",
+                    "States": {
+                        "SetScope": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "Scope": "outer"
+                            },
+                            "Next": "MapState"
+                        },
+                        "MapState": {
+                            "Type": "Map",
+                            "Items": [1, 2],
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "INLINE"
+                                },
+                                "StartAt": "Reassign",
+                                "States": {
+                                    "Reassign": {
+                                        "Type": "Pass",
+                                        "Assign": {
+                                            "Scope": "inner"
+                                        },
+                                        "Output": {
+                                            "seen": "{% $Scope %}"
+                                        },
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "Next": "CheckScope"
+                        },
+                        "CheckScope": {
+                            "Type": "Pass",
+                            "Output": {
+                                "finalScope": "{% $Scope %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-map-scope-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"finalScope\":\"outer\"")
+                || output.contains("\"finalScope\": \"outer\""));
+    }
+
+    @Test
     void mixedModeDefaultJsonPathWithPerStateJsonata() throws Exception {
         // Default JSONPath (no top-level QueryLanguage) with one state overriding to JSONata
         String definition = """
