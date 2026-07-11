@@ -12,6 +12,10 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.ext.Provider;
 
 import java.net.URI;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 @Provider
 @PreMatching
@@ -20,16 +24,41 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
     private final String baseHostname;
 
+    /**
+     * Hostname suffixes for which a bare {@code s3.<suffix>} Host header is Floci's own
+     * S3 service endpoint (bucketless) rather than a bucket literally named {@code s3}.
+     * Derived from the same source of truth the embedded DNS server uses: the always-on
+     * builtins ({@code localhost.floci.io}, {@code localhost.localstack.cloud}) plus any
+     * configured {@code floci.dns.extra-suffixes}, alongside plain {@code localhost}.
+     * Stored lowercase for case-insensitive matching.
+     */
+    private final Set<String> serviceHostSuffixes;
+
     @Inject
     public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector) {
         this.baseHostname = config.hostname()
                 .orElseGet(() -> containerDetector.isRunningInContainer()
                         ? EmbeddedDnsServer.DEFAULT_SUFFIX
                         : extractHostnameFromUrl(config.baseUrl()));
+        this.serviceHostSuffixes = buildServiceHostSuffixes(config.dns().extraSuffixes());
     }
 
     S3VirtualHostFilter() {
         this.baseHostname = "localhost";
+        this.serviceHostSuffixes = buildServiceHostSuffixes(Optional.empty());
+    }
+
+    /**
+     * Builds the service-host suffix set from the DNS source of truth rather than
+     * re-hardcoding it: {@code {"localhost"}} plus the {@link EmbeddedDnsServer} builtins
+     * plus any configured extra suffixes.
+     */
+    private static Set<String> buildServiceHostSuffixes(Optional<List<String>> extraSuffixes) {
+        Set<String> suffixes = new HashSet<>();
+        suffixes.add("localhost");
+        EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(s -> suffixes.add(s.toLowerCase()));
+        extraSuffixes.ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase())));
+        return Set.copyOf(suffixes);
     }
 
     @Override
@@ -52,7 +81,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return;
         }
 
-        String bucket = extractBucket(host, baseHostname);
+        String bucket = extractBucket(host, baseHostname, serviceHostSuffixes);
         if (bucket == null) return;
 
         URI uri = requestContext.getUriInfo().getRequestUri();
@@ -93,7 +122,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      *
      * Returns null if the host does not match a virtual-hosted pattern.
      */
-    static String extractBucket(String host, String baseHostname) {
+    static String extractBucket(String host, String baseHostname, Set<String> serviceHostSuffixes) {
         if (host == null) {
             return null;
         }
@@ -115,7 +144,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         String firstLabel = hostname.substring(0, firstDot);
         String remainder  = hostname.substring(firstDot + 1);
 
-        if (isS3ServiceEndpointHost(firstLabel, remainder, baseHostname)) {
+        if (isS3ServiceEndpointHost(firstLabel, remainder, baseHostname, serviceHostSuffixes)) {
             return null;
         }
 
@@ -130,20 +159,45 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return firstLabel;
         }
 
+        // Configured Floci DNS suffixes (builtins + floci.dns.extra-suffixes): route
+        // bucket.<suffix>, bucket.s3.<suffix> and bucket.s3.<region>.<suffix> the same
+        // way the always-on wildcard-DNS builtins resolve.
+        if (matchesConfiguredSuffixHost(remainder, serviceHostSuffixes)) {
+            return firstLabel;
+        }
+
         return null;
     }
 
-    private static boolean isS3ServiceEndpointHost(String firstLabel, String remainder, String baseHostname) {
+    /**
+     * Matches the virtual-hosted bucket forms for a configured DNS suffix {@code S}
+     * (a builtin or a {@code floci.dns.extra-suffix}): {@code bucket.S},
+     * {@code bucket.s3.S}, and the region-qualified {@code bucket.s3.<region>.S}.
+     * Plain {@code localhost} is skipped here — it keeps its dedicated
+     * {@link #matchesEndpointHost} handling via {@link #isAwsS3Domain}.
+     */
+    private static boolean matchesConfiguredSuffixHost(String remainder, Set<String> serviceHostSuffixes) {
+        String lower = remainder.toLowerCase();
+        for (String suffix : serviceHostSuffixes) {
+            if ("localhost".equals(suffix)) {
+                continue;
+            }
+            if (lower.equals(suffix) || (lower.startsWith("s3.") && lower.endsWith("." + suffix))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean isS3ServiceEndpointHost(String firstLabel, String remainder, String baseHostname,
+                                           Set<String> serviceHostSuffixes) {
         if (!"s3".equalsIgnoreCase(firstLabel)) {
             return false;
         }
         if (baseHostname != null && matchesEndpointHost(remainder, baseHostname)) {
             return true;
         }
-        String lowerRemainder = remainder.toLowerCase();
-        return "localhost".equals(lowerRemainder)
-                || "localhost.localstack.cloud".equals(lowerRemainder)
-                || "localhost.floci.io".equals(lowerRemainder);
+        return serviceHostSuffixes.contains(remainder.toLowerCase());
     }
 
     /**
@@ -198,7 +252,13 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         return true;
     }
 
-    /** Returns true for *.s3.amazonaws.com and other well-known S3 domains. */
+    /**
+     * Returns true for well-known AWS S3 domains and the always-on {@code localhost}
+     * endpoint. The Floci wildcard-DNS builtins ({@code localhost.floci.io},
+     * {@code localhost.localstack.cloud}) and any configured {@code floci.dns.extra-suffixes}
+     * are handled by {@link #matchesConfiguredSuffixHost} instead, so they stay derived
+     * from the DNS source of truth rather than hardcoded here.
+     */
     private static boolean isAwsS3Domain(String remainder) {
         if ("s3.amazonaws.com".equals(remainder)) {
             return true;
@@ -213,14 +273,6 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Also accept the region-qualified s3.<region>.localhost form (e.g. bucket.s3.us-east-1.localhost).
         if (matchesEndpointHost(remainder, "localhost")) {
             return true;
-        }
-        // LocalStack public wildcard DNS: bucket.s3.localhost.localstack.cloud and bucket.localhost.localstack.cloud
-        if (remainder.endsWith(".localstack.cloud")) {
-            return remainder.startsWith("s3.") || "localhost.localstack.cloud".equals(remainder);
-        }
-        // Floci public wildcard DNS: bucket.s3.localhost.floci.io and bucket.localhost.floci.io → 127.0.0.1
-        if (remainder.endsWith(".localhost.floci.io") || "localhost.floci.io".equals(remainder)) {
-            return remainder.startsWith("s3.") || "localhost.floci.io".equals(remainder);
         }
         // S3 website endpoints: bucket.s3-website-<region>.amazonaws.com, bucket.s3-website-<region>.localhost, etc.
         if (remainder.startsWith("s3-website")) {
