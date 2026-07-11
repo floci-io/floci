@@ -41,8 +41,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -1186,6 +1189,13 @@ public class ApiGatewayExecuteController {
         for (Map.Entry<String, String> hdr : vtlHeaderOverrides.entrySet()) {
             rb.header(hdr.getKey(), hdr.getValue());
         }
+        // Header names a VTL $context.responseOverride already set (HTTP header names are
+        // case-insensitive); these win, so skip a responseParameters entry for the same header
+        // rather than adding a second value for it.
+        Set<String> vtlOverriddenHeaders = new HashSet<>();
+        for (String name : vtlHeaderOverrides.keySet()) {
+            vtlOverriddenHeaders.add(name.toLowerCase(Locale.ROOT));
+        }
 
         // Apply static header mappings from the integration response's responseParameters.
         // This is what makes MOCK-integration CORS work (e.g. OPTIONS preflight returning
@@ -1197,6 +1207,9 @@ public class ApiGatewayExecuteController {
                 String dest = param.getKey();   // method.response.header.X-Foo
                 if (!dest.startsWith("method.response.header.")) continue;
                 String headerName = dest.substring("method.response.header.".length());
+                if (vtlOverriddenHeaders.contains(headerName.toLowerCase(Locale.ROOT))) {
+                    continue;   // a VTL $context.responseOverride for this header takes precedence
+                }
                 String headerValue = resolveResponseParameter(param.getValue(),
                         new HashMap<>(), responseBody != null ? responseBody : "{}");
                 if (headerValue != null) {
