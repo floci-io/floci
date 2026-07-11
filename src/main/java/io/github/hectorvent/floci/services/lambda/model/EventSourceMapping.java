@@ -104,6 +104,8 @@ public class EventSourceMapping {
         this.destinationConfig = destinationConfig;
     }
 
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class DestinationConfig {
         private OnFailure onFailure;
 
@@ -119,6 +121,8 @@ public class EventSourceMapping {
         }
     }
 
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class OnFailure {
         private String destination;
 
