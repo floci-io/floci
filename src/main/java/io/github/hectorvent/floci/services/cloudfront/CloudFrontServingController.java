@@ -11,8 +11,10 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
@@ -78,17 +80,19 @@ public class CloudFrontServingController {
 
     @GET
     @Path("/{proxy:.*}")
-    public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy) {
-        return serve(distId, proxy, true);
+    public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                        @Context UriInfo uriInfo) {
+        return serve(distId, proxy, true, uriInfo);
     }
 
     @HEAD
     @Path("/{proxy:.*}")
-    public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy) {
-        return serve(distId, proxy, false);
+    public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                         @Context UriInfo uriInfo) {
+        return serve(distId, proxy, false, uriInfo);
     }
 
-    private Response serve(String distId, String proxy, boolean includeBody) {
+    private Response serve(String distId, String proxy, boolean includeBody, UriInfo uriInfo) {
         Distribution dist;
         try {
             dist = service.getDistribution(distId);
@@ -107,7 +111,7 @@ public class CloudFrontServingController {
         // valid CloudFront signature (signed URL or signed cookies), otherwise CloudFront returns 403.
         List<String> trustedKeyGroups = CloudFrontRequestRouter.trustedKeyGroupsFor(config, normalized);
         if (!trustedKeyGroups.isEmpty()) {
-            CloudFrontSignatureVerifier.Result verdict = verifySignedRequest(dist, viewerPath, trustedKeyGroups);
+            CloudFrontSignatureVerifier.Result verdict = verifySignedRequest(dist, trustedKeyGroups, uriInfo);
             if (!verdict.allowed()) {
                 LOG.debugv("CloudFront denied a request for {0}{1}: {2}",
                         dist.getId(), viewerPath, verdict.reason());
@@ -130,8 +134,8 @@ public class CloudFrontServingController {
      * Verifies the live request against the behavior's trusted key groups, resolving a Key-Pair-Id to
      * its public key only when that key is a member of one of those groups.
      */
-    private CloudFrontSignatureVerifier.Result verifySignedRequest(Distribution dist, String viewerPath,
-                                                                   List<String> trustedKeyGroups) {
+    private CloudFrontSignatureVerifier.Result verifySignedRequest(Distribution dist,
+                                                                   List<String> trustedKeyGroups, UriInfo uriInfo) {
         io.vertx.core.http.HttpServerRequest request = currentVertxRequest.getCurrent().request();
 
         Map<String, String> query = new java.util.LinkedHashMap<>();
@@ -139,30 +143,57 @@ public class CloudFrontServingController {
             query.put(name, request.getParam(name));
         }
         Map<String, String> cookies = parseCookies(request.getHeader("Cookie"));
-        String resourceUrl = buildResourceUrl(dist, request, viewerPath, query);
+        String resourceUrl = buildResourceUrl(dist, request, uriInfo);
         String sourceIp = request.remoteAddress() != null ? request.remoteAddress().hostAddress() : null;
 
         return CloudFrontSignatureVerifier.verify(resourceUrl, query, cookies, sourceIp,
                 keyPairId -> service.trustedPublicKeyPem(keyPairId, trustedKeyGroups), java.time.Instant.now());
     }
 
-    /** Rebuilds the URL a signer would have signed: {@code scheme://host<path>[?app-query]}. */
+    /**
+     * Rebuilds the URL a signer would have signed: {@code scheme://host<path>[?app-query]}. The path
+     * and query are taken RAW from the Vert.x request — a signer signs the percent-encoded URL, so
+     * using the JAX-RS-decoded path/params here would make a legitimately signed request for an
+     * encoded path (e.g. {@code /a%20b.jpg}) fail to match its own signature.
+     */
     private static String buildResourceUrl(Distribution dist, io.vertx.core.http.HttpServerRequest request,
-                                           String viewerPath, Map<String, String> query) {
+                                           UriInfo uriInfo) {
         String scheme = request.scheme() != null ? request.scheme() : "https";
         String host = request.getHeader("Host");
         if (host == null || host.isBlank()) {
             host = dist.getDomainName();
         }
+        // A signer signs the percent-encoded URL, so the resource must be rebuilt from the RAW path and
+        // query (Vert.x request.path()/getParam() are already decoded). The PreMatching filter routed the
+        // request to /_cloudfront/{distId}{rawPath} preserving the encoding, so recover the viewer path
+        // by stripping that prefix from UriInfo's raw path.
+        String rawPath = uriInfo.getRequestUri().getRawPath();
+        String prefix = "/_cloudfront/" + dist.getId();
+        if (rawPath.startsWith(prefix)) {
+            rawPath = rawPath.substring(prefix.length());
+        }
+        if (rawPath.isEmpty()) {
+            rawPath = "/";
+        }
+        return scheme + "://" + host + rawPath + rawAppQuery(uriInfo.getRequestUri().getRawQuery());
+    }
+
+    /** The raw (encoding-preserved) query string minus the CloudFront signing params. */
+    private static String rawAppQuery(String rawQuery) {
+        if (rawQuery == null || rawQuery.isEmpty()) {
+            return "";
+        }
         StringBuilder appQuery = new StringBuilder();
-        for (Map.Entry<String, String> entry : query.entrySet()) {
-            if (CLOUDFRONT_SIGNING_PARAMS.contains(entry.getKey())) {
+        for (String pair : rawQuery.split("&")) {
+            int eq = pair.indexOf('=');
+            String name = java.net.URLDecoder.decode(eq >= 0 ? pair.substring(0, eq) : pair,
+                    StandardCharsets.UTF_8);
+            if (CLOUDFRONT_SIGNING_PARAMS.contains(name)) {
                 continue;
             }
-            appQuery.append(appQuery.length() == 0 ? '?' : '&')
-                    .append(entry.getKey()).append('=').append(entry.getValue());
+            appQuery.append(appQuery.length() == 0 ? '?' : '&').append(pair);
         }
-        return scheme + "://" + host + viewerPath + appQuery;
+        return appQuery.toString();
     }
 
     private static Map<String, String> parseCookies(String cookieHeader) {

@@ -118,6 +118,67 @@ class CloudFrontSignedUrlServingTest {
                 .then().statusCode(403);
     }
 
+    @Test
+    void signedUrlForAPercentEncodedPathVerifiesAgainstTheRawUrl() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cf-enc-" + suffix;
+        s3Service.createBucket(bucket, REGION);
+        // The object key contains a space; on the wire the viewer requests it percent-encoded.
+        s3Service.putObject(bucket, "private/my report.pdf", ("DOC-" + suffix).getBytes(StandardCharsets.UTF_8),
+                "application/pdf", Map.of());
+
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair keyPair = generator.generateKeyPair();
+        String pem = "-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----";
+        io.github.hectorvent.floci.services.cloudfront.model.PublicKey publicKey =
+                new io.github.hectorvent.floci.services.cloudfront.model.PublicKey();
+        publicKey.setName("pk-" + suffix);
+        publicKey.setCallerReference("cr-" + suffix);
+        publicKey.setEncodedKey(pem);
+        publicKey = cloudFrontService.createPublicKey(publicKey);
+
+        KeyGroup keyGroup = new KeyGroup();
+        keyGroup.setName("kg-" + suffix);
+        keyGroup.setItems(List.of(publicKey.getId()));
+        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(s3Origin("o", bucket)));
+        cfg.setDefaultCacheBehavior(defaultBehavior("o"));
+        CacheBehavior priv = new CacheBehavior();
+        priv.setPathPattern("/private/*");
+        priv.setTargetOriginId("o");
+        priv.setViewerProtocolPolicy("allow-all");
+        priv.setTrustedKeyGroups(List.of(keyGroup.getId()));
+        cfg.setCacheBehaviors(List.of(priv));
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+        String host = dist.getDomainName();
+
+        // Custom policy whose Resource carries the EXACT percent-encoded path the signer signs (scheme
+        // and host are wildcarded so the assertion isolates path encoding). If the resource URL were
+        // rebuilt from the decoded path, "my%20report.pdf" would not match "my report.pdf" → wrongly 403.
+        long expires = Instant.now().getEpochSecond() + 3600;
+        String resource = "*/private/my%20report.pdf";
+        String policyJson = "{\"Statement\":[{\"Resource\":\"" + resource + "\",\"Condition\":"
+                + "{\"DateLessThan\":{\"AWS:EpochTime\":" + expires + "}}}]}";
+        Signature signer = Signature.getInstance("SHA1withRSA");
+        signer.initSign(keyPair.getPrivate());
+        signer.update(policyJson.getBytes(StandardCharsets.UTF_8));
+        String signature = cfBase64(signer.sign());
+        String policyParam = cfBase64(policyJson.getBytes(StandardCharsets.UTF_8));
+
+        given().header("Host", host).urlEncodingEnabled(false)
+                .queryParam("Policy", policyParam)
+                .queryParam("Signature", signature)
+                .queryParam("Key-Pair-Id", publicKey.getId())
+                .when().get("/private/my%20report.pdf")
+                .then().statusCode(200).body(containsString("DOC-" + suffix));
+    }
+
     private static String cfBase64(byte[] bytes) {
         return Base64.getEncoder().encodeToString(bytes).replace('+', '-').replace('=', '_').replace('/', '~');
     }

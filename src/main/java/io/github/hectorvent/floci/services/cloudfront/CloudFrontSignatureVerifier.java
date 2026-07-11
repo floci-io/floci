@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.PublicKey;
@@ -182,41 +183,37 @@ public final class CloudFrontSignatureVerifier {
         return value != null && value.matches(regex.toString());
     }
 
-    /** Basic IPv4 CIDR containment (e.g. {@code 0.0.0.0/0}, {@code 192.0.2.0/24}); non-IPv4 is permissive. */
+    /**
+     * CIDR containment for IPv4 and IPv6 (e.g. {@code 0.0.0.0/0}, {@code 192.0.2.0/24},
+     * {@code 2001:db8::/32}). Fails CLOSED: an address of a different family than the CIDR, or any
+     * unparseable input, is treated as NOT in range so an {@code IpAddress} restriction is never
+     * bypassed (an IPv6 client must not slip past an IPv4-only allow-list).
+     */
     static boolean ipInCidr(String ip, String cidr) {
         try {
             int slash = cidr.indexOf('/');
             String network = slash >= 0 ? cidr.substring(0, slash) : cidr;
-            int bits = slash >= 0 ? Integer.parseInt(cidr.substring(slash + 1)) : 32;
-            long ipVal = ipv4ToLong(ip);
-            long netVal = ipv4ToLong(network);
-            if (ipVal < 0 || netVal < 0) {
-                return true;
+            byte[] ipBytes = InetAddress.ofLiteral(ip).getAddress();
+            byte[] netBytes = InetAddress.ofLiteral(network).getAddress();
+            if (ipBytes.length != netBytes.length) {
+                return false;
             }
-            if (bits <= 0) {
-                return true;
+            int maxBits = ipBytes.length * 8;
+            int bits = slash >= 0 ? Integer.parseInt(cidr.substring(slash + 1)) : maxBits;
+            if (bits < 0 || bits > maxBits) {
+                return false;
             }
-            long mask = bits >= 32 ? 0xFFFFFFFFL : ~((1L << (32 - bits)) - 1) & 0xFFFFFFFFL;
-            return (ipVal & mask) == (netVal & mask);
-        } catch (Exception e) {
+            for (int i = 0; i < ipBytes.length; i++) {
+                int maskBits = Math.min(8, Math.max(0, bits - i * 8));
+                int mask = maskBits == 0 ? 0 : (0xFF << (8 - maskBits)) & 0xFF;
+                if ((ipBytes[i] & mask) != (netBytes[i] & mask)) {
+                    return false;
+                }
+            }
             return true;
+        } catch (Exception e) {
+            return false;
         }
-    }
-
-    private static long ipv4ToLong(String ip) {
-        String[] parts = ip.split("\\.");
-        if (parts.length != 4) {
-            return -1;
-        }
-        long value = 0;
-        for (String part : parts) {
-            int octet = Integer.parseInt(part);
-            if (octet < 0 || octet > 255) {
-                return -1;
-            }
-            value = (value << 8) | octet;
-        }
-        return value;
     }
 
     private static String firstNonNull(String a, String b) {

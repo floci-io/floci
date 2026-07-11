@@ -170,6 +170,18 @@ class CloudFrontSignatureVerifierTest {
 
         assertTrue(CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), "203.0.113.5", trusted(), now).allowed());
         assertFalse(CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), "198.51.100.5", trusted(), now).allowed());
+        // An IPv6 client must not bypass an IPv4-only allow-list (containment fails closed).
+        assertFalse(CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), "2001:db8::1", trusted(), now).allowed());
+    }
+
+    @Test
+    void ipInCidrMatchesIpv6AndFailsClosed() {
+        assertTrue(CloudFrontSignatureVerifier.ipInCidr("2001:db8::5", "2001:db8::/32"));
+        assertFalse(CloudFrontSignatureVerifier.ipInCidr("2001:dead::5", "2001:db8::/32"));
+        // Cross-family and unparseable inputs are never "in range".
+        assertFalse(CloudFrontSignatureVerifier.ipInCidr("2001:db8::1", "192.0.2.0/24"));
+        assertFalse(CloudFrontSignatureVerifier.ipInCidr("not-an-ip", "192.0.2.0/24"));
+        assertTrue(CloudFrontSignatureVerifier.ipInCidr("10.0.0.1", "0.0.0.0/0"));
     }
 
     @Test
