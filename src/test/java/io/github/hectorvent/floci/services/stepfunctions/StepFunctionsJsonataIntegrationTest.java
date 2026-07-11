@@ -1369,6 +1369,132 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void assignInMatchedChoiceRuleApplies() throws Exception {
+        // A Choice rule carries its own Assign, which applies when that rule matches. The state-level
+        // Assign belongs to the Default path and must not run when a rule matches.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "ChoiceState",
+                    "States": {
+                        "ChoiceState": {
+                            "Type": "Choice",
+                            "Choices": [
+                                {
+                                    "Condition": "{% $states.input.condition %}",
+                                    "Next": "Report",
+                                    "Assign": {
+                                        "assignment": "Condition assignment"
+                                    }
+                                }
+                            ],
+                            "Default": "Report",
+                            "Assign": {
+                                "assignment": "Default Assignment"
+                            }
+                        },
+                        "Report": {
+                            "Type": "Pass",
+                            "Output": {
+                                "assignment": "{% $assignment %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-in-choice-test", definition);
+
+        JsonNode matched = objectMapper.readTree(
+                waitForExecution(startExecution(smArn, "{\"condition\": true}")));
+        assertEquals("Condition assignment", matched.get("assignment").asText());
+
+        JsonNode defaulted = objectMapper.readTree(
+                waitForExecution(startExecution(smArn, "{\"condition\": false}")));
+        assertEquals("Default Assignment", defaulted.get("assignment").asText());
+    }
+
+    @Test
+    void assignInWaitStateApplies() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "WaitState",
+                    "States": {
+                        "WaitState": {
+                            "Type": "Wait",
+                            "Seconds": 0,
+                            "Assign": {
+                                "foo": "oof"
+                            },
+                            "Next": "Report"
+                        },
+                        "Report": {
+                            "Type": "Pass",
+                            "Output": {
+                                "foo": "{% $foo %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-in-wait-test", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        assertEquals("oof", output.get("foo").asText());
+    }
+
+    @Test
+    void assignInCatchAppliesAndSeesErrorOutput() throws Exception {
+        // A Catch block supports Assign and Output, and $states.errorOutput is bound inside it.
+        // The Task fails while evaluating its Arguments, which is a catchable States.QueryEvaluationError.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Boom",
+                    "States": {
+                        "Boom": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::lambda:invoke",
+                            "Arguments": {
+                                "bad": "{% $number('not-a-number') %}"
+                            },
+                            "Catch": [
+                                {
+                                    "ErrorEquals": ["States.QueryEvaluationError"],
+                                    "Next": "Report",
+                                    "Assign": {
+                                        "caughtError": "{% $states.errorOutput.Error %}"
+                                    }
+                                }
+                            ],
+                            "End": true
+                        },
+                        "Report": {
+                            "Type": "Pass",
+                            "Output": {
+                                "caughtError": "{% $caughtError %}",
+                                "catchOutputError": "{% $states.input.Error %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-in-catch-test", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        // The Catch's Assign ran, and it could read $states.errorOutput.
+        assertEquals("States.QueryEvaluationError", output.get("caughtError").asText());
+        // With no Output on the Catch, the error output becomes the state output.
+        assertEquals("States.QueryEvaluationError", output.get("catchOutputError").asText());
+    }
+
+    @Test
     void mixedModeDefaultJsonPathWithPerStateJsonata() throws Exception {
         // Default JSONPath (no top-level QueryLanguage) with one state overriding to JSONata
         String definition = """
