@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -14,6 +16,8 @@ class StepFunctionsJsonataIntegrationTest {
 
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/test-role";
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -1244,21 +1248,42 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
-    void assignedVariableVisibleToSameStateOutput() throws Exception {
-        // AWS evaluates a state's Assign before its Output, so the same state's Output sees the
-        // newly assigned variable.
+    void assignedVariablesAreNotVisibleUntilTheNextState() throws Exception {
+        // Every variable reference in a state resolves against the values held on state entry, so a
+        // state's own Output never sees that state's Assign; the new values land in the next state.
+        // Assignments within one Assign block are likewise independent of each other. This mirrors
+        // the evaluation-order example in the AWS docs: starting from $x=3 and $a=6,
+        // {"x": "{% $a %}", "nextX": "{% $x %}"} ends with $x=6 and $nextX=3.
         String definition = """
                 {
                     "QueryLanguage": "JSONata",
-                    "StartAt": "AssignAndUse",
+                    "StartAt": "SeedVariables",
                     "States": {
-                        "AssignAndUse": {
+                        "SeedVariables": {
                             "Type": "Pass",
                             "Assign": {
-                                "Greeting": "{% 'hello ' & $states.input.name %}"
+                                "x": 3,
+                                "a": 6
+                            },
+                            "Next": "ReassignAndEmit"
+                        },
+                        "ReassignAndEmit": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "x": "{% $a %}",
+                                "nextX": "{% $x %}"
                             },
                             "Output": {
-                                "message": "{% $Greeting %}"
+                                "xSeenByAssigningState": "{% $x %}"
+                            },
+                            "Next": "ObserveAfterAssign"
+                        },
+                        "ObserveAfterAssign": {
+                            "Type": "Pass",
+                            "Output": {
+                                "xSeenByAssigningState": "{% $states.input.xSeenByAssigningState %}",
+                                "xAfter": "{% $x %}",
+                                "nextXAfter": "{% $nextX %}"
                             },
                             "End": true
                         }
@@ -1266,28 +1291,32 @@ class StepFunctionsJsonataIntegrationTest {
                 }
                 """;
 
-        String smArn = createStateMachine("jsonata-assign-same-state-test", definition);
-        String execArn = startExecution(smArn, "{\"name\": \"world\"}");
-        String output = waitForExecution(execArn);
+        String smArn = createStateMachine("jsonata-assign-evaluation-order-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
 
-        assertTrue(output.contains("\"message\":\"hello world\"")
-                || output.contains("\"message\": \"hello world\""));
+        // The assigning state's own Output still sees the pre-assignment value of $x.
+        assertEquals(3, output.get("xSeenByAssigningState").asInt());
+        // The next state sees both new values: $x from $a, and $nextX from the old $x.
+        assertEquals(6, output.get("xAfter").asInt());
+        assertEquals(3, output.get("nextXAfter").asInt());
     }
 
     @Test
     void variablesAssignedInsideMapDoNotLeakToParentScope() throws Exception {
-        // A variable is set in the parent scope, reassigned inside each Map iteration, and read
-        // again after the Map. The parent must still observe its own value: iteration assignments
-        // are scoped to the iteration.
+        // Map iterations can read outer-scope variables but keep their own workflow-local scope:
+        // a variable assigned inside an iteration goes out of scope once the Map completes.
+        // The inner variable deliberately uses a name distinct from the outer one — AWS rejects an
+        // inner-scope assignment that reuses an outer-scope variable name.
         String definition = """
                 {
                     "QueryLanguage": "JSONata",
-                    "StartAt": "SetScope",
+                    "StartAt": "SetOuter",
                     "States": {
-                        "SetScope": {
+                        "SetOuter": {
                             "Type": "Pass",
                             "Assign": {
-                                "Scope": "outer"
+                                "outerVar": 42
                             },
                             "Next": "MapState"
                         },
@@ -1298,15 +1327,15 @@ class StepFunctionsJsonataIntegrationTest {
                                 "ProcessorConfig": {
                                     "Mode": "INLINE"
                                 },
-                                "StartAt": "Reassign",
+                                "StartAt": "AssignInner",
                                 "States": {
-                                    "Reassign": {
+                                    "AssignInner": {
                                         "Type": "Pass",
                                         "Assign": {
-                                            "Scope": "inner"
+                                            "innerVar": "{% $outerVar %}"
                                         },
                                         "Output": {
-                                            "seen": "{% $Scope %}"
+                                            "outerSeenFromIteration": "{% $outerVar %}"
                                         },
                                         "End": true
                                     }
@@ -1317,7 +1346,9 @@ class StepFunctionsJsonataIntegrationTest {
                         "CheckScope": {
                             "Type": "Pass",
                             "Output": {
-                                "finalScope": "{% $Scope %}"
+                                "iterations": "{% $states.input %}",
+                                "outerStillInScope": "{% $outerVar %}",
+                                "innerLeaked": "{% $exists($innerVar) %}"
                             },
                             "End": true
                         }
@@ -1327,10 +1358,14 @@ class StepFunctionsJsonataIntegrationTest {
 
         String smArn = createStateMachine("jsonata-assign-map-scope-test", definition);
         String execArn = startExecution(smArn, "{}");
-        String output = waitForExecution(execArn);
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
 
-        assertTrue(output.contains("\"finalScope\":\"outer\"")
-                || output.contains("\"finalScope\": \"outer\""));
+        // Each iteration could read the outer variable.
+        assertEquals(42, output.get("iterations").get(0).get("outerSeenFromIteration").asInt());
+        assertEquals(42, output.get("iterations").get(1).get("outerSeenFromIteration").asInt());
+        // The outer variable survives the Map, and the iteration-local one does not escape it.
+        assertEquals(42, output.get("outerStillInScope").asInt());
+        assertFalse(output.get("innerLeaked").asBoolean());
     }
 
     @Test
