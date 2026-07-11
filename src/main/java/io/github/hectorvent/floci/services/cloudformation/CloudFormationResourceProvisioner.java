@@ -1041,7 +1041,9 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "DatabaseName", engine),
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                 resolveOptional(props, "DBClusterParameterGroupName", engine),
-                null, null, false, region);
+                null, null, false, region,
+                parseServerlessV2Capacity(props, "MinCapacity", engine),
+                parseServerlessV2Capacity(props, "MaxCapacity", engine));
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
         if (cluster.getEndpoint() != null) {
@@ -1053,6 +1055,26 @@ public class CloudFormationResourceProvisioner {
         }
         if (cluster.getDbClusterArn() != null) {
             r.getAttributes().put("DBClusterArn", cluster.getDbClusterArn());
+        }
+    }
+
+    /**
+     * Reads a single ServerlessV2ScalingConfiguration capacity (MinCapacity/MaxCapacity) from an
+     * {@code AWS::RDS::DBCluster} resource. Returns null when the nested object or field is absent.
+     */
+    private Double parseServerlessV2Capacity(JsonNode props, String field, CloudFormationTemplateEngine engine) {
+        JsonNode config = props.get("ServerlessV2ScalingConfiguration");
+        if (config == null || config.isNull()) {
+            return null;
+        }
+        String resolved = resolveOptional(config, field, engine);
+        if (resolved == null || resolved.isBlank()) {
+            return null;
+        }
+        try {
+            return Double.valueOf(resolved.trim());
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 

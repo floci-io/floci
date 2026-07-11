@@ -462,6 +462,33 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbClusterAppliesServerlessV2Scaling() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.5, 16.0);
+
+        assertEquals(0.5, cluster.getServerlessV2MinCapacity());
+        assertEquals(16.0, cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void serverlessV2CapacityValidationEnforcesAcuConstraints() {
+        // Non-half-step increment.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.3, 16.0));
+        // Above the 256-ACU ceiling.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, 300.0));
+        // MaxCapacity below MinCapacity.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(16.0, 8.0));
+        // Valid: 0 (auto-pause), the 256 ceiling, and half-step values.
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(0.0, 256.0));
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(0.5, 128.0));
+        // Both null is a no-op (not a Serverless v2 cluster).
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(null, null));
+    }
+
+    @Test
     void mockModeCreatesClusterInstanceAvailableWithoutContainer() {
         when(config.services().rds().mock()).thenReturn(true);
         rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",

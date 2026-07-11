@@ -346,13 +346,28 @@ public class RdsQueryHandler {
         }
 
         try {
+            Double serverlessV2Min = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MinCapacity");
+            Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, paramGroupName,
-                    dbSubnetGroupName, availabilityZone, multiAz, region);
+                    dbSubnetGroupName, availabilityZone, multiAz, region,
+                    serverlessV2Min, serverlessV2Max);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private static Double parseDoubleParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Double.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " must be a number.", 400);
         }
     }
 
@@ -792,8 +807,18 @@ public class RdsQueryHandler {
            .end("VpcSecurityGroups")
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
            .elem("DbClusterResourceId", c.getDbClusterResourceId())
-           .elem("DBClusterArn", c.getDbClusterArn())
-           .start("DBClusterMembers");
+           .elem("DBClusterArn", c.getDbClusterArn());
+        if (c.getServerlessV2MinCapacity() != null || c.getServerlessV2MaxCapacity() != null) {
+            xml.start("ServerlessV2ScalingConfiguration");
+            if (c.getServerlessV2MinCapacity() != null) {
+                xml.elem("MinCapacity", String.valueOf(c.getServerlessV2MinCapacity()));
+            }
+            if (c.getServerlessV2MaxCapacity() != null) {
+                xml.elem("MaxCapacity", String.valueOf(c.getServerlessV2MaxCapacity()));
+            }
+            xml.end("ServerlessV2ScalingConfiguration");
+        }
+        xml.start("DBClusterMembers");
         if (c.getDbClusterMembers() != null) {
             for (String memberId : c.getDbClusterMembers()) {
                 xml.start("member")

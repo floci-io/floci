@@ -668,11 +668,23 @@ public class RdsService implements Resettable {
                                      String databaseName, boolean iamEnabled,
                                      String paramGroupName, String dbSubnetGroupName,
                                      String availabilityZone, boolean multiAz, String region) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, null, null);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity) {
         String effectiveRegion = effectiveRegion(region);
         if (clusters.get(id).isPresent()) {
             throw new AwsException("DBClusterAlreadyExistsFault",
                     "DB cluster " + id + " already exists.", 400);
         }
+        validateServerlessV2Capacity(serverlessV2MinCapacity, serverlessV2MaxCapacity);
 
         DatabaseEngine engine = resolveEngine(engineParam);
         validateClusterParameterGroup(paramGroupName, engineParam, engineVersion);
@@ -712,10 +724,43 @@ public class RdsService implements Resettable {
                     (user, pw) -> validateDbClusterPassword(id, user, pw));
         }
 
+        cluster.setServerlessV2MinCapacity(serverlessV2MinCapacity);
+        cluster.setServerlessV2MaxCapacity(serverlessV2MaxCapacity);
         clusters.put(id, cluster);
         LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint=localhost:{3}",
                 id, String.valueOf(mock), engine, String.valueOf(proxyPort));
         return cluster;
+    }
+
+    /**
+     * Validates an Aurora Serverless v2 scaling configuration against the AWS ACU constraints:
+     * capacities are specified in half-step (0.5) increments; MinCapacity ranges 0–256 (0 requires an
+     * auto-pause-capable engine version, otherwise the smallest value is 0.5) and MaxCapacity ranges
+     * 0.5–256, with MaxCapacity at least MinCapacity. A null capacity is left unset.
+     */
+    void validateServerlessV2Capacity(Double minCapacity, Double maxCapacity) {
+        if (minCapacity != null) {
+            validateAcu("MinCapacity", minCapacity, 0.0);
+        }
+        if (maxCapacity != null) {
+            validateAcu("MaxCapacity", maxCapacity, 0.5);
+        }
+        if (minCapacity != null && maxCapacity != null && maxCapacity < minCapacity) {
+            throw new AwsException("InvalidParameterCombination",
+                    "MaxCapacity must be greater than or equal to MinCapacity.", 400);
+        }
+    }
+
+    private static void validateAcu(String field, double value, double smallest) {
+        if (value < smallest || value > 256.0) {
+            throw new AwsException("InvalidParameterValue",
+                    field + " must be between " + smallest + " and 256.0 ACUs.", 400);
+        }
+        // ACUs are only valid in half-step increments (0.5, 1, 1.5, ...).
+        if (Math.abs(value * 2.0 - Math.rint(value * 2.0)) > 1e-9) {
+            throw new AwsException("InvalidParameterValue",
+                    field + " must be specified in half-step (0.5) increments.", 400);
+        }
     }
 
     public DbCluster getDbCluster(String id) {

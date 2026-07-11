@@ -125,7 +125,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getReaderEndpoint()).thenReturn(new DbEndpoint("mycluster-ro.local", 5432));
         when(cluster.getDbClusterArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:cluster:mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any()))
                 .thenReturn(cluster);
 
         StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -138,7 +138,7 @@ class RdsCfnProvisionerTest {
         assertEquals("mycluster-ro.local", r.getAttributes().get("ReadEndpoint.Address"));
         assertEquals("5432", r.getAttributes().get("Endpoint.Port"));
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", "16.3",
-                "admin", "secret", "appdb", false, null, null, null, false, "us-east-1");
+                "admin", "secret", "appdb", false, null, null, null, false, "us-east-1", null, null);
     }
 
     @Test
@@ -146,7 +146,7 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -154,7 +154,24 @@ class RdsCfnProvisionerTest {
                 """, "us-west-2");
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
-                null, null, null, false, null, null, null, false, "us-west-2");
+                null, null, null, false, null, null, null, false, "us-west-2", null, null);
+    }
+
+    @Test
+    void provisionsDbClusterWithServerlessV2Scaling() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "ServerlessV2ScalingConfiguration":{"MinCapacity":0.5,"MaxCapacity":16}}
+                """);
+
+        verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
+                null, null, null, false, null, null, null, false, "us-east-1", 0.5, 16.0);
     }
 
     @Test
