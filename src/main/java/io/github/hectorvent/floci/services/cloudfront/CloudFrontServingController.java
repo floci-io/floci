@@ -163,6 +163,19 @@ public class CloudFrontServingController {
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(URI.create(target))
                     .timeout(Duration.ofSeconds(30));
+            // Origin custom headers: CloudFront adds these to every request it forwards to the origin
+            // (overriding any same-named viewer header), which is how a distribution restricts an origin
+            // to CloudFront-only traffic via a shared secret header.
+            List<Map<String, String>> customHeaders = origin.getCustomHeaders();
+            if (customHeaders != null) {
+                for (Map<String, String> header : customHeaders) {
+                    String name = header.get("HeaderName");
+                    String value = header.get("HeaderValue");
+                    if (name != null && value != null) {
+                        rb.header(name, value);
+                    }
+                }
+            }
             if (includeBody) {
                 rb.GET();
             } else {

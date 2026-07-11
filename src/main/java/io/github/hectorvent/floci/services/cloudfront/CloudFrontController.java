@@ -1832,6 +1832,20 @@ public class CloudFrontController {
                     .end("CustomOriginConfig");
         }
 
+        List<Map<String, String>> customHeaders = o.getCustomHeaders();
+        if (customHeaders != null && !customHeaders.isEmpty()) {
+            xml.start("CustomHeaders")
+                    .elem("Quantity", customHeaders.size())
+                    .start("Items");
+            for (Map<String, String> header : customHeaders) {
+                xml.start("OriginCustomHeader")
+                        .elem("HeaderName", header.getOrDefault("HeaderName", ""))
+                        .elem("HeaderValue", header.getOrDefault("HeaderValue", ""))
+                        .end("OriginCustomHeader");
+            }
+            xml.end("Items").end("CustomHeaders");
+        }
+
         xml.end("Origin");
         return xml.build();
     }
@@ -2203,6 +2217,9 @@ public class CloudFrontController {
             Origin current = null;
             Map<String, String> s3Config = null;
             Map<String, Object> customConfig = null;
+            boolean inCustomHeaders = false;
+            List<Map<String, String>> customHeaders = null;
+            Map<String, String> currentHeader = null;
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2284,6 +2301,27 @@ public class CloudFrontController {
                                 customConfig.put("OriginProtocolPolicy", r.getElementText());
                             }
                         }
+                        case "CustomHeaders" -> {
+                            if (inOrigin) {
+                                inCustomHeaders = true;
+                                customHeaders = new ArrayList<>();
+                            }
+                        }
+                        case "OriginCustomHeader" -> {
+                            if (inCustomHeaders) {
+                                currentHeader = new LinkedHashMap<>();
+                            }
+                        }
+                        case "HeaderName" -> {
+                            if (inCustomHeaders && currentHeader != null) {
+                                currentHeader.put("HeaderName", r.getElementText());
+                            }
+                        }
+                        case "HeaderValue" -> {
+                            if (inCustomHeaders && currentHeader != null) {
+                                currentHeader.put("HeaderValue", r.getElementText());
+                            }
+                        }
                         default -> {
                         }
                     }
@@ -2302,6 +2340,19 @@ public class CloudFrontController {
                             }
                             inCustomOriginConfig = false;
                             customConfig = null;
+                        }
+                        case "OriginCustomHeader" -> {
+                            if (inCustomHeaders && currentHeader != null && customHeaders != null) {
+                                customHeaders.add(currentHeader);
+                            }
+                            currentHeader = null;
+                        }
+                        case "CustomHeaders" -> {
+                            if (inCustomHeaders && current != null) {
+                                current.setCustomHeaders(customHeaders);
+                            }
+                            inCustomHeaders = false;
+                            customHeaders = null;
                         }
                         case "Origin" -> {
                             if (inOrigin && current != null) {

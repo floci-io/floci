@@ -10,13 +10,19 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import com.sun.net.httpserver.HttpServer;
+
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end tests for CloudFront distribution request-serving: a viewer request addressed to a
@@ -220,6 +226,96 @@ class CloudFrontDistributionServingTest {
             .body(containsString("<ResponsePagePath>/index.html</ResponsePagePath>"));
     }
 
+    @Test
+    void injectsOriginCustomHeadersIntoCustomOriginRequests() throws Exception {
+        // CloudFront forwards a distribution's configured origin custom headers on every origin
+        // request — the mechanism a distribution uses to prove a request arrived via CloudFront.
+        AtomicReference<String> received = new AtomicReference<>();
+        HttpServer stub = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        stub.createContext("/", exchange -> {
+            received.set(exchange.getRequestHeaders().getFirst("X-Origin-Verify"));
+            byte[] payload = "ORIGIN-OK".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, payload.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(payload);
+            }
+        });
+        stub.start();
+        try {
+            Origin origin = customOrigin("secured-origin", "127.0.0.1", stub.getAddress().getPort());
+            origin.setCustomHeaders(List.of(new LinkedHashMap<>(Map.of(
+                    "HeaderName", "X-Origin-Verify", "HeaderValue", "shared-secret-42"))));
+
+            DistributionConfig cfg = new DistributionConfig();
+            cfg.setEnabled(true);
+            cfg.setOrigins(List.of(origin));
+            cfg.setDefaultCacheBehavior(defaultBehavior("secured-origin"));
+
+            Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+            given().header("Host", dist.getDomainName()).when().get("/anything")
+                    .then().statusCode(200).body(containsString("ORIGIN-OK"));
+
+            assertEquals("shared-secret-42", received.get(),
+                    "the origin should have received the configured custom header");
+        } finally {
+            stub.stop(0);
+        }
+    }
+
+    @Test
+    void roundTripsOriginCustomHeadersThroughTheApi() {
+        // The distribution parser must capture and re-serialize origin CustomHeaders so a read-back
+        // (get-distribution) matches what was configured, rather than dropping them.
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>cf-custom-headers-roundtrip</CallerReference>
+                  <Origins>
+                    <Quantity>1</Quantity>
+                    <Items>
+                      <Origin>
+                        <Id>secured</Id>
+                        <DomainName>api.internal.example</DomainName>
+                        <OriginPath></OriginPath>
+                        <CustomHeaders>
+                          <Quantity>1</Quantity>
+                          <Items>
+                            <OriginCustomHeader>
+                              <HeaderName>X-Origin-Verify</HeaderName>
+                              <HeaderValue>shared-secret-42</HeaderValue>
+                            </OriginCustomHeader>
+                          </Items>
+                        </CustomHeaders>
+                        <CustomOriginConfig>
+                          <HTTPPort>80</HTTPPort>
+                          <HTTPSPort>443</HTTPSPort>
+                          <OriginProtocolPolicy>https-only</OriginProtocolPolicy>
+                        </CustomOriginConfig>
+                      </Origin>
+                    </Items>
+                  </Origins>
+                  <DefaultCacheBehavior>
+                    <TargetOriginId>secured</TargetOriginId>
+                    <ViewerProtocolPolicy>https-only</ViewerProtocolPolicy>
+                  </DefaultCacheBehavior>
+                  <Comment>custom-headers round-trip</Comment>
+                  <Enabled>true</Enabled>
+                </DistributionConfig>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(201)
+            .body(containsString("<OriginCustomHeader>"))
+            .body(containsString("<HeaderName>X-Origin-Verify</HeaderName>"))
+            .body(containsString("<HeaderValue>shared-secret-42</HeaderValue>"));
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
     private void createBucket(String bucket) {
@@ -241,6 +337,18 @@ class CloudFrontDistributionServingTest {
         origin.setId(id);
         origin.setDomainName(bucket + ".s3." + REGION + ".amazonaws.com");
         origin.setS3OriginConfig(new LinkedHashMap<>(Map.of("OriginAccessIdentity", "")));
+        return origin;
+    }
+
+    private static Origin customOrigin(String id, String domain, int port) {
+        Map<String, Object> coc = new LinkedHashMap<>();
+        coc.put("HTTPPort", String.valueOf(port));
+        coc.put("HTTPSPort", "443");
+        coc.put("OriginProtocolPolicy", "http-only");
+        Origin origin = new Origin();
+        origin.setId(id);
+        origin.setDomainName(domain);
+        origin.setCustomOriginConfig(coc);
         return origin;
     }
 
