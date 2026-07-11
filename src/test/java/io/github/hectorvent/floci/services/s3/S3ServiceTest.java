@@ -58,6 +58,21 @@ class S3ServiceTest {
     }
 
     @Test
+    void objectExistsReturnsFalseForMissingKey() {
+        s3Service.createBucket("exists-bucket", "us-east-1");
+        assertFalse(s3Service.objectExists("exists-bucket", "no-such-key"));
+    }
+
+    @Test
+    void objectExistsRethrowsWhenBucketMissing() {
+        // A missing key returns false, but a non-"not found" storage error (here NoSuchBucket) must
+        // surface rather than be masked as "object absent".
+        AwsException e = assertThrows(AwsException.class,
+                () -> s3Service.objectExists("no-such-bucket", "any-key"));
+        assertEquals("NoSuchBucket", e.getErrorCode());
+    }
+
+    @Test
     void createDuplicateBucketInUsEast1IsIdempotent() {
         Bucket first = s3Service.createBucket("test-bucket", "us-east-1");
         Bucket duplicate = s3Service.createBucket("test-bucket", "us-east-1");

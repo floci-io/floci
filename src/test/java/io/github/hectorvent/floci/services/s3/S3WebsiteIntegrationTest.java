@@ -130,6 +130,24 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
+    @Order(12)
+    void indexServedForRootEvenWithQueryString() {
+        // A website endpoint has no S3 REST API, so a query string on the site root (e.g. an SPA
+        // OAuth callback GET /?code=...&state=...) must still serve the index document rather than
+        // fall through to a ListObjects response.
+        given()
+            .header("Host", websiteHost())
+            .queryParam("code", "abc")
+            .queryParam("state", "xyz")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200)
+            .contentType("text/html")
+            .body(equalTo("<html><body>Hello Website</body></html>"));
+    }
+
+    @Test
     @Order(9)
     void missingKeyServesErrorDocument() {
         given()

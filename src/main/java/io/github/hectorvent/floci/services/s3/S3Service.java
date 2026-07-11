@@ -518,7 +518,13 @@ public class S3Service implements Resettable {
             getObjectMetadata(bucketName, key, null);
             return true;
         } catch (AwsException e) {
-            return false;
+            // Only a genuine miss means "does not exist"; surface any other storage error (e.g.
+            // NoSuchBucket) instead of masking it as absent, which would let callers act on a wrong
+            // answer (e.g. issue a website redirect that hides the real failure).
+            if ("NoSuchKey".equals(e.getErrorCode()) || "NoSuchVersion".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
         }
     }
 

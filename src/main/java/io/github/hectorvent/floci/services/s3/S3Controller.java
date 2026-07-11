@@ -391,8 +391,11 @@ public class S3Controller {
             }
 
             // --- S3 static-website index resolution (site root) ---
-            if (isWebsiteRequest(httpHeaders) && (uriInfo.getQueryParameters().isEmpty()
-                    || (uriInfo.getQueryParameters().size() == 1 && hasQueryParam(uriInfo, "list-type")))) {
+            // A website endpoint has no S3 REST API, so it serves the index document for the site root
+            // regardless of any query string — e.g. a single-page-app OAuth callback GET
+            // /?code=...&state=... must return index.html, not a ListObjects response. (?list-type and
+            // other sub-resource queries only reach the REST endpoint, never a website host.)
+            if (isWebsiteRequest(httpHeaders)) {
                 Response website = serveWebsiteObject(bucket, "");
                 if (website != null) {
                     return website;
