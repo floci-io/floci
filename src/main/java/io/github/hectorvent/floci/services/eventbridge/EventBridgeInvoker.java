@@ -163,7 +163,7 @@ public class EventBridgeInvoker {
                 // AWS keeps the originating account/region; blank falls back inside putEvents.
                 entry.put("Region", envelope.path("region").asText(""));
                 entry.put("Account", envelope.path("account").asText(""));
-                if (envelope.has("resources")) {
+                if (envelope.hasNonNull("resources") && envelope.get("resources").isArray()) {
                     entry.put("Resources", envelope.get("resources"));
                 }
                 BUS_TO_BUS_DEPTH.set(depth + 1);

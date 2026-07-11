@@ -309,6 +309,24 @@ class EventBridgeInvokerTest {
         assertEquals("eu-central-1", entry.get("Region"));
     }
 
+    @SuppressWarnings("unchecked")
+    @Test
+    void invokeTarget_eventBusTargetWithNullResources_omitsResourcesEntry() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+        String event = "{\"source\":\"myapp.orders\",\"detail-type\":\"Order.Created\","
+                + "\"resources\":null,\"detail\":{\"orderId\":\"o-1\"}}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertFalse(entry.containsKey("Resources"));
+        assertEquals("{\"orderId\":\"o-1\"}", entry.get("Detail"));
+    }
+
     @Test
     void invokeTarget_eventBusTargetWithNonJsonInput_dropsWithoutPublishing() {
         Target target = new Target("id1",
