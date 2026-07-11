@@ -593,8 +593,19 @@ public class KmsService {
     }
 
     public List<KmsAlias> listAliases(String region) {
+        return listAliases(null, region);
+    }
+
+    public List<KmsAlias> listAliases(String keyId, String region) {
         String prefix = region + "::";
-        return aliasStore.scan(k -> k.startsWith(prefix));
+        List<KmsAlias> all = aliasStore.scan(k -> k.startsWith(prefix));
+        if (keyId == null || keyId.isBlank()) {
+            return all;
+        }
+        KmsKey key = resolveKey(keyId, region);
+        return all.stream()
+                .filter(a -> key.getKeyId().equals(a.getTargetKeyId()))
+                .toList();
     }
 
     // ──────────────────────────── Crypto Ops (Mocks) ────────────────────────────
