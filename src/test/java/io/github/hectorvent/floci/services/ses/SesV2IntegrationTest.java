@@ -85,7 +85,18 @@ class SesV2IntegrationTest {
             .body("EmailIdentities", notNullValue())
             .body("EmailIdentities.size()", greaterThanOrEqualTo(2))
             .body("EmailIdentities.IdentityName", hasItem("v2sender@example.com"))
-            .body("EmailIdentities.IdentityName", hasItem("v2example.com"));
+            .body("EmailIdentities.IdentityName", hasItem("v2example.com"))
+            // VerificationStatus must be populated per identity (never null), matching AWS.
+            .body("EmailIdentities.VerificationStatus", everyItem(notNullValue()))
+            .body("EmailIdentities.find { it.IdentityName == 'v2sender@example.com' }.VerificationStatus",
+                    equalTo("SUCCESS"))
+            .body("EmailIdentities.find { it.IdentityName == 'v2example.com' }.VerificationStatus",
+                    equalTo("PENDING"))
+            // SendingEnabled tracks verification: SUCCESS -> true, PENDING -> false (matches AWS).
+            .body("EmailIdentities.find { it.IdentityName == 'v2sender@example.com' }.SendingEnabled",
+                    equalTo(true))
+            .body("EmailIdentities.find { it.IdentityName == 'v2example.com' }.SendingEnabled",
+                    equalTo(false));
     }
 
     @Test

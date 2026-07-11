@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -69,9 +71,11 @@ class EcsContainerManagerVolumesTest {
         RegionResolver regionResolver = mock(RegionResolver.class);
         awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
+        SsmService ssmService = mock(SsmService.class);
+        SecretsManagerService secretsManagerService = mock(SecretsManagerService.class);
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver, awsEnv);
+                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService);
     }
 
     @Test
@@ -160,7 +164,8 @@ class EcsContainerManagerVolumesTest {
         when(cfg.storage().efs().initImage()).thenReturn("busybox:stable");
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
-                mock(RegionResolver.class), awsEnv);
+                mock(RegionResolver.class), awsEnv, mock(SsmService.class),
+                mock(SecretsManagerService.class));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -193,7 +198,8 @@ class EcsContainerManagerVolumesTest {
         when(cfg.storage().efs().mountGroupAdd()).thenReturn(OptionalInt.of(2000));
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
-                mock(RegionResolver.class), awsEnv);
+                mock(RegionResolver.class), awsEnv, mock(SsmService.class),
+                mock(SecretsManagerService.class));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
