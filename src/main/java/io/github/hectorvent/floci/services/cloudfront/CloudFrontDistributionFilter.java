@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import jakarta.annotation.Priority;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -34,10 +35,14 @@ public class CloudFrontDistributionFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(CloudFrontDistributionFilter.class);
 
-    private final CloudFrontService service;
+    // A @PreMatching filter is wired into the request pipeline at build time, so holding the
+    // CloudFrontService proxy directly would place it in the native-image build heap — illegal because
+    // CloudFrontService is initialized at image run time (it uses SecureRandom). Inject a lazy Instance
+    // and resolve the bean per request instead.
+    private final Instance<CloudFrontService> service;
 
     @Inject
-    public CloudFrontDistributionFilter(CloudFrontService service) {
+    public CloudFrontDistributionFilter(Instance<CloudFrontService> service) {
         this.service = service;
     }
 
@@ -48,7 +53,7 @@ public class CloudFrontDistributionFilter implements ContainerRequestFilter {
             return;
         }
 
-        Distribution dist = service.findByHost(host);
+        Distribution dist = service.get().findByHost(host);
         if (dist == null) {
             return;
         }
