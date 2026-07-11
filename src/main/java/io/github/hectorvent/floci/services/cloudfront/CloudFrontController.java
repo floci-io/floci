@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.*;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
@@ -22,6 +23,8 @@ import java.util.Map;
 
 @Path("/2020-05-31")
 public class CloudFrontController {
+
+    private static final Logger LOG = Logger.getLogger(CloudFrontController.class);
 
     private static final String NS = AwsNamespaces.CLOUDFRONT;
     private static final String XML = "application/xml";
@@ -1771,11 +1774,18 @@ public class CloudFrontController {
         if (cerCount > 0) {
             xml.start("Items");
             for (Map<String, Object> cer : customErrors) {
-                xml.start("CustomErrorResponse")
-                        .elem("ErrorCode", str(cer.get("ErrorCode")))
-                        .elem("ResponsePagePath", str(cer.get("ResponsePagePath")))
-                        .elem("ResponseCode", str(cer.get("ResponseCode")))
-                        .elem("ErrorCachingMinTTL", cer.get("ErrorCachingMinTTL") != null
+                xml.start("CustomErrorResponse").elem("ErrorCode", str(cer.get("ErrorCode")));
+                // ResponsePagePath and ResponseCode are optional; CloudFront omits them when unset
+                // rather than returning empty elements.
+                String pagePath = str(cer.get("ResponsePagePath"));
+                if (!pagePath.isEmpty()) {
+                    xml.elem("ResponsePagePath", pagePath);
+                }
+                String responseCode = str(cer.get("ResponseCode"));
+                if (!responseCode.isEmpty()) {
+                    xml.elem("ResponseCode", responseCode);
+                }
+                xml.elem("ErrorCachingMinTTL", cer.get("ErrorCachingMinTTL") != null
                                 ? str(cer.get("ErrorCachingMinTTL")) : "0")
                         .end("CustomErrorResponse");
             }
@@ -2185,7 +2195,10 @@ public class CloudFrontController {
                 }
             }
             r.close();
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            // A malformed CustomErrorResponses block yields the entries parsed so far rather than
+            // failing the whole distribution create/update; log it so the cause is diagnosable.
+            LOG.debugv("Ignoring malformed CustomErrorResponses during parse: {0}", e.getMessage());
         }
         return result;
     }
