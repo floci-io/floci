@@ -28,15 +28,17 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return;
         }
 
+        if (S3RequestAuthorizationParser.isMissingRequiredPresignedParameter(queryParams)) {
+            requestContext.abortWith(errorResponse(
+                    S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_STATUS,
+                    S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_CODE,
+                    S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE));
+            return;
+        }
+
         String amzDate = queryParams.getFirst("X-Amz-Date");
         String expiresStr = queryParams.getFirst("X-Amz-Expires");
         String signature = queryParams.getFirst("X-Amz-Signature");
-
-        if (amzDate == null || expiresStr == null || signature == null) {
-            requestContext.abortWith(errorResponse(403, "AccessDenied",
-                    "Missing required pre-signed URL parameters."));
-            return;
-        }
 
         int expires;
         try {
