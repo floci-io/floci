@@ -406,6 +406,145 @@ class SchedulerIntegrationTest {
     }
 
     @Test
+    @Order(39)
+    void createScheduleWithEventBridgeParametersRoundTrips() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EventBridgeParameters": {"DetailType": "schedule.completed", "Source": "my.app"}
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/eb-schedule")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/schedules/eb-schedule")
+        .then()
+            .statusCode(200)
+            .body("Target.EventBridgeParameters.DetailType", equalTo("schedule.completed"))
+            .body("Target.EventBridgeParameters.Source", equalTo("my.app"));
+    }
+
+    @Test
+    @Order(40)
+    void createScheduleWithOnlyDetailTypeOrSourceReturns400() {
+        // AWS spec: EventBridgeParameters requires BOTH DetailType and Source.
+        // Providing only one must surface as ValidationException.
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EventBridgeParameters": {"DetailType": "schedule.completed"}
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/eb-only-detailtype")
+        .then()
+            .statusCode(400);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EventBridgeParameters": {"Source": "my.app"}
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/eb-only-source")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(41)
+    void createScheduleWithOversizedDetailTypeOrSourceReturns400() {
+        // AWS spec: DetailType max 128 chars, Source max 256 chars.
+        String longDetailType = "d".repeat(129);
+        String longSource = "s".repeat(257);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EventBridgeParameters": {"DetailType": "%s", "Source": "my.app"}
+                    }
+                }
+                """.formatted(longDetailType))
+        .when()
+            .post("/schedules/eb-long-detailtype")
+        .then()
+            .statusCode(400);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EventBridgeParameters": {"DetailType": "schedule.completed", "Source": "%s"}
+                    }
+                }
+                """.formatted(longSource))
+        .when()
+            .post("/schedules/eb-long-source")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(42)
+    void createScheduleWithReservedSourcePrefixReturns400() {
+        // AWS spec: Source cannot start with the reserved "aws." or "aws:" prefix.
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EventBridgeParameters": {"DetailType": "schedule.completed", "Source": "aws.myservice"}
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/eb-reserved-source")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
     @Order(21)
     void createScheduleWithEcsParametersRoundTrips() {
         given()
