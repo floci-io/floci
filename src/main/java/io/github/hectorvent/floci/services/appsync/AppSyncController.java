@@ -111,10 +111,7 @@ public class AppSyncController {
                 // Not base64, use as-is
             }
         }
-        service.startSchemaCreation(apiId, definition);
-        SchemaCreationStatus status = new SchemaCreationStatus();
-        status.setStatus(SchemaCreationStatusType.ACTIVE);
-        return Response.ok(status).build();
+        return Response.ok(service.startSchemaCreation(apiId, definition)).build();
     }
 
     @GET
@@ -213,23 +210,6 @@ public class AppSyncController {
         ObjectNode root = objectMapper.createObjectNode();
         root.set("resolver", objectMapper.valueToTree(resolver));
         return Response.status(200).entity(root).build();
-    }
-
-    @GET
-    @Path("/v1/apis/{apiId}/resolvers")
-    public Response listResolvers(@PathParam("apiId") String apiId,
-                                  @QueryParam("maxResults") Integer maxResults,
-                                  @QueryParam("nextToken") String nextToken) {
-        var page = service.listResolvers(apiId, maxResults, nextToken);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("resolvers");
-        page.items().forEach(items::addPOJO);
-        if (page.nextToken() != null) {
-            root.put("nextToken", page.nextToken());
-        } else {
-            root.putNull("nextToken");
-        }
-        return Response.ok(root).build();
     }
 
     @GET
@@ -454,15 +434,6 @@ public class AppSyncController {
         return Response.ok(root).build();
     }
 
-    @GET
-    @Path("/v1/apis/{apiId}/apikeys/{keyId}")
-    public Response getApiKey(@PathParam("apiId") String apiId, @PathParam("keyId") String keyId) {
-        ApiKey key = service.getApiKey(apiId, keyId);
-        ObjectNode root = objectMapper.createObjectNode();
-        root.set("apiKey", objectMapper.valueToTree(key));
-        return Response.ok(root).build();
-    }
-
     @POST
     @Path("/v1/apis/{apiId}/apikeys/{keyId}")
     public Response updateApiKey(@PathParam("apiId") String apiId,
@@ -517,7 +488,7 @@ public class AppSyncController {
     // ──────────────────────────── Environment Variables ────────────────────────────
 
     @GET
-    @Path("/v1/apis/{apiId}/environmentvariables")
+    @Path("/v1/apis/{apiId}/environmentVariables")
     public Response getEnvironmentVariables(@PathParam("apiId") String apiId) {
         Map<String, String> envVars = service.getEnvironmentVariables(apiId);
         ObjectNode root = objectMapper.createObjectNode();
@@ -527,7 +498,7 @@ public class AppSyncController {
     }
 
     @PUT
-    @Path("/v1/apis/{apiId}/environmentvariables")
+    @Path("/v1/apis/{apiId}/environmentVariables")
     public Response putEnvironmentVariables(@PathParam("apiId") String apiId,
                                             String body) throws IOException {
         @SuppressWarnings("unchecked")

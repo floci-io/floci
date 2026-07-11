@@ -212,6 +212,11 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/contact-lists/{ContactListName}` | `GetContactList` |
 | `PUT` | `/v2/email/contact-lists/{ContactListName}` | `UpdateContactList` |
 | `DELETE` | `/v2/email/contact-lists/{ContactListName}` | `DeleteContactList` |
+| `POST` | `/v2/email/contact-lists/{ContactListName}/contacts` | `CreateContact` |
+| `POST` | `/v2/email/contact-lists/{ContactListName}/contacts/list` | `ListContacts` |
+| `GET` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `GetContact` |
+| `PUT` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `UpdateContact` |
+| `DELETE` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `DeleteContact` |
 | `PUT` | `/v2/email/suppression/addresses` | `PutSuppressedDestination` |
 | `GET` | `/v2/email/suppression/addresses/{EmailAddress}` | `GetSuppressedDestination` |
 | `DELETE` | `/v2/email/suppression/addresses/{EmailAddress}` | `DeleteSuppressedDestination` |

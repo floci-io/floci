@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -66,9 +68,11 @@ class EcsContainerManagerOverridesTest {
         RegionResolver regionResolver = mock(RegionResolver.class);
         LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
+        SsmService ssmService = mock(SsmService.class);
+        SecretsManagerService secretsManagerService = mock(SecretsManagerService.class);
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver, awsEnv);
+                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService);
     }
 
     @Test

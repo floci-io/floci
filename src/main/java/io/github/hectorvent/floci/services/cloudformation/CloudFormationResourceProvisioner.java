@@ -328,12 +328,12 @@ public class CloudFormationResourceProvisioner {
                         provisionFirehoseDeliveryStream(resource, properties, engine, stackName);
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
-                case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName);
+                case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBParameterGroup" -> provisionDbParameterGroup(resource, properties, engine, stackName);
                 case "AWS::RDS::DBClusterParameterGroup" ->
                         provisionDbClusterParameterGroup(resource, properties, engine, stackName);
-                case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName);
-                case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName);
+                case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName, region);
+                case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
@@ -954,7 +954,7 @@ public class CloudFormationResourceProvisioner {
     // ── RDS ─────────────────────────────────────────────────────────────────────
 
     private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                        String stackName) {
+                                        String stackName, String region) {
         String name = resolveOptional(props, "DBSubnetGroupName", engine);
         if (name == null || name.isBlank()) {
             name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -967,7 +967,7 @@ public class CloudFormationResourceProvisioner {
                 subnetIds.add(engine.resolve(subnet));
             }
         }
-        var group = rdsService.createDbSubnetGroup(name, description, subnetIds);
+        var group = rdsService.createDbSubnetGroup(name, description, subnetIds, region);
         r.setPhysicalId(group.getDbSubnetGroupName());
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
     }
@@ -1001,7 +1001,7 @@ public class CloudFormationResourceProvisioner {
     }
 
     private void provisionDbInstance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                     String stackName) {
+                                     String stackName, String region) {
         String id = resolveOptional(props, "DBInstanceIdentifier", engine);
         if (id == null || id.isBlank()) {
             id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -1018,7 +1018,8 @@ public class CloudFormationResourceProvisioner {
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                 resolveOptional(props, "DBParameterGroupName", engine),
                 resolveOptional(props, "DBSubnetGroupName", engine),
-                resolveOptional(props, "DBClusterIdentifier", engine));
+                resolveOptional(props, "DBClusterIdentifier", engine),
+                null, false, false, null, Map.of(), region);
         r.setPhysicalId(instance.getDbInstanceIdentifier());
         r.getAttributes().put("DBInstanceIdentifier", instance.getDbInstanceIdentifier());
         if (instance.getEndpoint() != null) {
@@ -1031,7 +1032,7 @@ public class CloudFormationResourceProvisioner {
     }
 
     private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                    String stackName) {
+                                    String stackName, String region) {
         String id = resolveOptional(props, "DBClusterIdentifier", engine);
         if (id == null || id.isBlank()) {
             id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -1044,7 +1045,8 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "MasterUserPassword", engine),
                 resolveOptional(props, "DatabaseName", engine),
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                resolveOptional(props, "DBClusterParameterGroupName", engine));
+                resolveOptional(props, "DBClusterParameterGroupName", engine),
+                null, null, false, region);
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
         if (cluster.getEndpoint() != null) {
