@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.DeadLetterConfig;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
+import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.FlexibleTimeWindow;
 import io.github.hectorvent.floci.services.scheduler.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.RetryPolicy;
@@ -276,6 +277,19 @@ public class SchedulerController {
                     t.put("EcsParameters", ep);
                 }
             }
+            if (s.getTarget().getEventBridgeParameters() != null) {
+                EventBridgeParameters ebp = s.getTarget().getEventBridgeParameters();
+                Map<String, Object> eb = new HashMap<>();
+                if (ebp.getDetailType() != null) {
+                    eb.put("DetailType", ebp.getDetailType());
+                }
+                if (ebp.getSource() != null) {
+                    eb.put("Source", ebp.getSource());
+                }
+                if (!eb.isEmpty()) {
+                    t.put("EventBridgeParameters", eb);
+                }
+            }
             r.put("Target", t);
         }
         if (s.getDescription() != null) {
@@ -413,6 +427,44 @@ public class SchedulerController {
         }
         if (node.has("EcsParameters") && !node.get("EcsParameters").isNull()) {
             target.setEcsParameters(parseEcsParameters(node.get("EcsParameters")));
+        }
+        if (node.has("EventBridgeParameters") && !node.get("EventBridgeParameters").isNull()) {
+            JsonNode ebNode = node.get("EventBridgeParameters");
+            EventBridgeParameters ebp = new EventBridgeParameters();
+            if (
+                ebNode.has("DetailType") &&
+                !ebNode.get("DetailType").isNull() &&
+                !ebNode.get("DetailType").asText().isBlank()
+            ) {
+                ebp.setDetailType(ebNode.get("DetailType").asText());
+            }
+            if (
+                ebNode.has("Source") &&
+                !ebNode.get("Source").isNull() &&
+                !ebNode.get("Source").asText().isBlank()
+            ) {
+                ebp.setSource(ebNode.get("Source").asText());
+            }
+            if (ebp.getDetailType() == null || ebp.getSource() == null) {
+                 throw new AwsException("ValidationException",
+                    "EventBridgeParameters requires both DetailType and Source.", 400);
+            }
+
+            if(ebp.getDetailType().length() > 128) {
+                throw new AwsException("ValidationException",
+                    "EventBridgeParameters DetailType must be less than or equal to 128 characters.", 400);
+            }
+            if(ebp.getSource().length() > 256) {
+                throw new AwsException("ValidationException",
+                    "EventBridgeParameters Source must be less than or equal to 256 characters.", 400);
+            }
+
+            if(ebp.getSource().startsWith("aws.") || ebp.getSource().startsWith("aws:")) {
+                throw new AwsException("ValidationException",
+                    "EventBridgeParameters Source cannot start with 'aws.' or 'aws:'.", 400);
+            }
+
+            target.setEventBridgeParameters(ebp);
         }
         return target;
     }

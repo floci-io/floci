@@ -390,6 +390,43 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void batchGetSecretValuePartialMissingReturns200WithErrorsList() {
+        String existingSecretName = "exists-secret";
+        String missingSecretName = "does-not-exist";
+
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", existingSecretName);
+        createReq.put("SecretString", "val");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode batchReq = MAPPER.createObjectNode();
+        batchReq.putArray("SecretIdList").add(existingSecretName).add(missingSecretName);
+
+        Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(1));
+        assertThat(body.get("SecretValues").get(0).get("Name").asText(), is(existingSecretName));
+        assertThat(body.get("Errors").size(), is(1));
+        assertThat(body.get("Errors").get(0).get("SecretId").asText(), is(missingSecretName));
+        assertThat(body.get("Errors").get(0).get("ErrorCode").asText(), is("ResourceNotFoundException"));
+    }
+
+    @Test
+    void batchGetSecretValueAllMissingReturns200WithEmptyValuesAndErrors() {
+        ObjectNode batchReq = MAPPER.createObjectNode();
+        batchReq.putArray("SecretIdList").add("no-such-secret-1").add("no-such-secret-2");
+
+        Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(0));
+        assertThat(body.get("Errors").size(), is(2));
+    }
+
+    @Test
     void rotateSecretParsesRotationRules() {
         ObjectNode createReq = MAPPER.createObjectNode();
         createReq.put("Name", "rotate-test-secret");
