@@ -13,36 +13,36 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 
 | Action | Description |
 |--------|-------------|
-| CreateDatabase | - |
-| GetDatabase | - |
-| GetDatabases | - |
-| DeleteDatabase | - |
+| CreateDatabase | Creates a database in the local Glue Data Catalog. |
+| GetDatabase | Returns a stored Data Catalog database. |
+| GetDatabases | Lists databases in the local Glue Data Catalog. |
+| DeleteDatabase | Deletes a database from the local Glue Data Catalog. |
 
 #### Tables
 
 | Action | Description |
 |--------|-------------|
-| CreateTable | - |
-| GetTable | - |
-| GetTables | - |
-| DeleteTable | - |
+| CreateTable | Creates a table definition in the local Glue Data Catalog. |
+| GetTable | Returns a stored table definition and resolves schema references when possible. |
+| GetTables | Lists table definitions for a database. |
+| DeleteTable | Deletes a table definition from a database. |
 
 #### Partitions
 
 | Action | Description |
 |--------|-------------|
-| CreatePartition | - |
-| GetPartitions | - |
+| CreatePartition | Creates a partition for a Data Catalog table. |
+| GetPartitions | Lists partitions stored for a Data Catalog table. |
 
 #### User-defined Functions
 
 | Action | Description |
 |--------|-------------|
-| CreateUserDefinedFunction | - |
-| GetUserDefinedFunction | - |
-| GetUserDefinedFunctions | - |
-| UpdateUserDefinedFunction | - |
-| DeleteUserDefinedFunction | - |
+| CreateUserDefinedFunction | Creates a user-defined function in the Data Catalog. |
+| GetUserDefinedFunction | Returns a stored user-defined function. |
+| GetUserDefinedFunctions | Lists user-defined functions for a database. |
+| UpdateUserDefinedFunction | Updates a stored user-defined function. |
+| DeleteUserDefinedFunction | Deletes a user-defined function from a database. |
 
 ### Schema Registry
 
@@ -50,44 +50,44 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 
 | Action | Description |
 |--------|-------------|
-| CreateRegistry | - |
-| GetRegistry | - |
-| ListRegistries | - |
-| UpdateRegistry | - |
-| DeleteRegistry | - |
+| CreateRegistry | Creates a schema registry. |
+| GetRegistry | Returns a stored schema registry. |
+| ListRegistries | Lists schema registries. |
+| UpdateRegistry | Updates a schema registry's stored metadata. |
+| DeleteRegistry | Deletes a schema registry. |
 
 #### Schemas
 
 | Action | Description |
 |--------|-------------|
-| CreateSchema | - |
-| GetSchema | - |
-| ListSchemas | - |
-| UpdateSchema | - |
-| DeleteSchema | - |
+| CreateSchema | Creates a schema in a registry with the supplied data format and compatibility mode. |
+| GetSchema | Returns a stored schema. |
+| ListSchemas | Lists schemas in a registry. |
+| UpdateSchema | Updates schema metadata or compatibility settings. |
+| DeleteSchema | Deletes a schema from a registry. |
 
 #### Versions
 
 | Action | Description |
 |--------|-------------|
-| RegisterSchemaVersion | - |
-| GetSchemaByDefinition | - |
-| GetSchemaVersion | - |
-| ListSchemaVersions | - |
-| DeleteSchemaVersions | - |
-| GetSchemaVersionsDiff | - |
-| CheckSchemaVersionValidity | - |
+| RegisterSchemaVersion | Registers a new schema version definition. |
+| GetSchemaByDefinition | Finds a schema version that matches a supplied definition. |
+| GetSchemaVersion | Returns a stored schema version. |
+| ListSchemaVersions | Lists versions for a schema. |
+| DeleteSchemaVersions | Deletes schema versions from a schema. |
+| GetSchemaVersionsDiff | Returns the diff between two schema version numbers. |
+| CheckSchemaVersionValidity | Validates a schema definition for the supplied data format. |
 
 #### Metadata and Tags
 
 | Action | Description |
 |--------|-------------|
-| PutSchemaVersionMetadata | - |
-| RemoveSchemaVersionMetadata | - |
-| QuerySchemaVersionMetadata | - |
-| TagResource | - |
-| UntagResource | - |
-| GetTags | - |
+| PutSchemaVersionMetadata | Adds metadata to a schema version. |
+| RemoveSchemaVersionMetadata | Removes metadata from a schema version. |
+| QuerySchemaVersionMetadata | Returns metadata stored for matching schema versions. |
+| TagResource | Adds tags to a Glue schema registry resource. |
+| UntagResource | Removes tags from a Glue schema registry resource. |
+| GetTags | Returns tags stored for a Glue schema registry resource. |
 
 Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes are `NONE`, `DISABLED`, `BACKWARD`, `BACKWARD_ALL`, `FORWARD`, `FORWARD_ALL`, `FULL`, and `FULL_ALL`.
 
