@@ -76,7 +76,24 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
         // Verify signature: SigV4 when enforce-auth is enabled, custom when validateSignatures is enabled
         if (s3Service.isAuthEnforced()) {
-            if (!verifySigV4Signature(requestContext, signature)) {
+            String credential = queryParams.getFirst("X-Amz-Credential");
+            String decodedCredential = URLDecoder.decode(credential, StandardCharsets.UTF_8);
+            String[] credParts = decodedCredential.split("/");
+            if (credParts.length < 5) {
+                requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
+                        "The AWS Access Key Id you provided does not exist in our records."));
+                return;
+            }
+
+            String accessKeyId = credParts[0];
+            String secretKey = resolveSecretKey(accessKeyId);
+            if (secretKey == null) {
+                requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
+                        "The AWS Access Key Id you provided does not exist in our records."));
+                return;
+            }
+
+            if (!verifySigV4Signature(requestContext, signature, secretKey)) {
                 requestContext.abortWith(errorResponse(403, "SignatureDoesNotMatch",
                         "The request signature we calculated does not match the signature you provided."));
             }
@@ -99,7 +116,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         }
     }
 
-    private boolean verifySigV4Signature(ContainerRequestContext requestContext, String signature) {
+    private boolean verifySigV4Signature(ContainerRequestContext requestContext,
+                                        String signature, String secretKey) {
         try {
             var queryParams = requestContext.getUriInfo().getQueryParameters();
             String credential = queryParams.getFirst("X-Amz-Credential");
@@ -111,16 +129,10 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             if (credParts.length < 5) {
                 return false;
             }
-            String accessKeyId = credParts[0];
             String date = credParts[1];
             String region = credParts[2];
             String service = credParts[3];
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
-
-            String secretKey = resolveSecretKey(accessKeyId);
-            if (secretKey == null) {
-                return false;
-            }
 
             // Build canonical query string from raw query (excluding X-Amz-Signature)
             String rawQuery = requestContext.getUriInfo().getRequestUri().getRawQuery();
