@@ -2014,18 +2014,17 @@ public class CloudFormationResourceProvisioner {
     private void provisionSecretTargetAttachment(StackResource r, JsonNode props,
                                                  CloudFormationTemplateEngine engine, String region) {
         String secretId = resolveOptional(props, "SecretId", engine);
-        String arn = secretId;
-        if (secretId != null && !secretId.isBlank()) {
-            try {
-                arn = secretsManagerService.describeSecret(secretId, region).getArn();
-            } catch (Exception e) {
-                // SecretId is normally already the complete ARN (a Ref to the Secret resolves to its
-                // physical id, which provisionSecret sets to the ARN); fall back to it as-is.
-                LOG.debugv("SecretTargetAttachment: could not resolve secret {0}: {1}", secretId, e.getMessage());
-            }
+        if (secretId == null || secretId.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "AWS::SecretsManager::SecretTargetAttachment requires SecretId.", 400);
         }
-        if (arn == null || arn.isBlank()) {
-            arn = r.getLogicalId();
+        String arn = secretId;
+        try {
+            arn = secretsManagerService.describeSecret(secretId, region).getArn();
+        } catch (Exception e) {
+            // SecretId is normally already the complete ARN (a Ref to the Secret resolves to its
+            // physical id, which provisionSecret sets to the ARN); fall back to it as-is.
+            LOG.debugv("SecretTargetAttachment: could not resolve secret {0}: {1}", secretId, e.getMessage());
         }
         r.setPhysicalId(arn);
         r.getAttributes().put("Arn", arn);

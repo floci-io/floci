@@ -8,6 +8,7 @@ import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -97,5 +98,26 @@ class CloudFormationSecretTargetAttachmentIntegrationTest {
             .formParam("Action", "DeleteStack")
             .formParam("StackName", stackName)
         .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void secretTargetAttachmentWithoutSecretIdFailsTheStack() {
+        String stackName = "sta-nosecret-" + System.nanoTime();
+        String template = """
+                {
+                  "Resources": {
+                    "Attachment": {
+                      "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                      "Properties": {
+                        "TargetId": "db-abc123",
+                        "TargetType": "AWS::RDS::DBInstance"
+                      }
+                    }
+                  }
+                }
+                """;
+        String xml = createStackAndDescribe(stackName, template);
+        assertFalse(xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
+                "a SecretTargetAttachment missing the required SecretId must not create successfully");
     }
 }
