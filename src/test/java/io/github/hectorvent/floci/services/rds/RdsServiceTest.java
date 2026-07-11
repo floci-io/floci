@@ -232,6 +232,27 @@ class RdsServiceTest {
     }
 
     @Test
+    void listDbInstancesMatchesByArn() {
+        DbInstance created = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        Collection<DbInstance> result = rdsService.listDbInstances(created.getDbInstanceArn());
+        assertEquals(1, result.size());
+        assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
+    }
+
+    @Test
+    void listDbClustersMatchesByArn() {
+        DbCluster created = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        Collection<DbCluster> result = rdsService.listDbClusters(created.getDbClusterArn());
+        assertEquals(1, result.size());
+        assertEquals("cluster1", result.iterator().next().getDbClusterIdentifier());
+    }
+
+    @Test
     void modifyDbInstanceBlankPasswordDoesNotOverwriteExistingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",

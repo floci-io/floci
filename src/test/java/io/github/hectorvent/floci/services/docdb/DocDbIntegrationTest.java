@@ -320,4 +320,40 @@ class DocDbIntegrationTest {
             .statusCode(200)
             .body(containsString(RDS_SCOPE_CLUSTER_ID));
     }
+
+    // The db-cluster-id / db-instance-id Filters form returns an empty list for a
+    // missing id, unlike the DBClusterIdentifier / DBInstanceIdentifier parameter
+    // which faults with 404. Mirrors AWS and the RDS behaviour.
+
+    @Test
+    @Order(20)
+    void describeClustersByFilterReturnsEmptyForMissing() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType(FORM)
+            .formParam("Action", "DescribeDBClusters")
+            .formParam("Filters.Filter.1.Name", "db-cluster-id")
+            .formParam("Filters.Filter.1.Values.Value.1", "nonexistent-cluster")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<DBClusters"))
+            .body(not(containsString("DBClusterNotFoundFault")));
+    }
+
+    @Test
+    @Order(21)
+    void describeInstancesByFilterReturnsEmptyForMissing() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType(FORM)
+            .formParam("Action", "DescribeDBInstances")
+            .formParam("Filters.Filter.1.Name", "db-instance-id")
+            .formParam("Filters.Filter.1.Values.Value.1", "nonexistent-instance")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<DBInstances"))
+            .body(not(containsString("DBInstanceNotFound")));
+    }
 }
