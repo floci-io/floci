@@ -23,87 +23,87 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 
 | Action | Description |
 |--------|-------------|
-| CreateUserPool | - |
-| DescribeUserPool | - |
-| ListUserPools | - |
-| UpdateUserPool | - |
-| DeleteUserPool | - |
+| CreateUserPool | Creates a local user pool, applying supported `floci:*` creation-time overrides from tags. |
+| DescribeUserPool | Returns the stored user pool configuration. |
+| ListUserPools | Lists local user pools visible in the request region. |
+| UpdateUserPool | Updates mutable user pool settings and persisted user-pool tags. |
+| DeleteUserPool | Deletes a local user pool and its related state. |
 
 ### User Pool Tags
 
 | Action | Description |
 |--------|-------------|
-| TagResource | - |
-| UntagResource | - |
-| ListTagsForResource | - |
+| TagResource | Adds user-visible tags to a user pool and rejects reserved `floci:*` tag keys. |
+| UntagResource | Removes tags from a user pool's persisted tag map. |
+| ListTagsForResource | Returns the persisted user-pool tags. |
 
 ### User Pool Clients
 
 | Action | Description |
 |--------|-------------|
-| CreateUserPoolClient | - |
-| DescribeUserPoolClient | - |
-| ListUserPoolClients | - |
-| DeleteUserPoolClient | - |
+| CreateUserPoolClient | Creates an app client for a user pool, including optional generated secret handling. |
+| DescribeUserPoolClient | Returns the stored app client configuration. |
+| ListUserPoolClients | Lists app clients for a user pool. |
+| DeleteUserPoolClient | Deletes an app client from a user pool. |
 
 ### Resource Servers
 
 | Action | Description |
 |--------|-------------|
-| CreateResourceServer | - |
-| DescribeResourceServer | - |
-| ListResourceServers | - |
-| DeleteResourceServer | - |
+| CreateResourceServer | Registers a resource server and scopes for a user pool. |
+| DescribeResourceServer | Returns a registered resource server. |
+| ListResourceServers | Lists resource servers for a user pool. |
+| DeleteResourceServer | Deletes a resource server from a user pool. |
 
 ### Admin User Management
 
 | Action | Description |
 |--------|-------------|
-| AdminCreateUser | - |
-| AdminGetUser | - |
-| AdminDeleteUser | - |
-| AdminSetUserPassword | - |
-| AdminUpdateUserAttributes | - |
+| AdminCreateUser | Creates or resends setup for a user in a user pool. |
+| AdminGetUser | Returns a user's stored attributes and status. |
+| AdminDeleteUser | Deletes a user from a user pool. |
+| AdminSetUserPassword | Sets a user's password and permanent-password status. |
+| AdminUpdateUserAttributes | Updates attributes for a user in a user pool. |
 
 ### User Operations
 
 | Action | Description |
 |--------|-------------|
-| SignUp | - |
-| ConfirmSignUp | - |
-| GetUser | - |
-| UpdateUserAttributes | - |
-| ChangePassword | - |
-| ForgotPassword | - |
-| ConfirmForgotPassword | - |
+| SignUp | Creates a self-service user for an app client. |
+| ConfirmSignUp | Confirms a pending self-service signup. |
+| GetUser | Returns attributes for the authenticated access-token user. |
+| UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
+| ChangePassword | Changes the authenticated user's password. |
+| ForgotPassword | Starts the local forgot-password flow for a user. |
+| ConfirmForgotPassword | Completes the forgot-password flow by setting a replacement password. |
 
 ### Authentication
 
 | Action | Description |
 |--------|-------------|
-| InitiateAuth | - |
-| AdminInitiateAuth | - |
-| RespondToAuthChallenge | - |
+| InitiateAuth | Authenticates app-client users through supported user-password and SRP-style flows. |
+| AdminInitiateAuth | Starts an admin authentication flow for a user pool user. |
+| RespondToAuthChallenge | Responds to supported Cognito auth challenges. |
 
 ### User Listing
 
 | Action | Description |
 |--------|-------------|
-| ListUsers | - |
+| ListUsers | Lists users stored in a user pool. |
 
 ### Groups
 
 | Action | Description |
 |--------|-------------|
-| CreateGroup | - |
-| GetGroup | - |
-| UpdateGroup | - |
-| ListGroups | - |
-| ListUsersInGroup | - |
-| DeleteGroup | - |
-| AdminAddUserToGroup | - |
-| AdminRemoveUserFromGroup | - |
-| AdminListGroupsForUser | - |
+| CreateGroup | Creates a group in a user pool. |
+| GetGroup | Returns a user-pool group. |
+| UpdateGroup | Updates a user-pool group's stored settings. |
+| ListGroups | Lists groups in a user pool. |
+| ListUsersInGroup | Lists users assigned to a group. |
+| DeleteGroup | Deletes a group from a user pool. |
+| AdminAddUserToGroup | Adds a user to a group. |
+| AdminRemoveUserFromGroup | Removes a user from a group. |
+| AdminListGroupsForUser | Lists the groups assigned to a user. |
 
 ## Well-Known And OAuth Endpoints
 

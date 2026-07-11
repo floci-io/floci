@@ -1,6 +1,13 @@
 package com.floci.test;
 
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
@@ -8,6 +15,8 @@ import software.amazon.awssdk.services.lambda.model.DeleteFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.FunctionCode;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueResponse;
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretRequest;
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretResponse;
 import software.amazon.awssdk.services.secretsmanager.model.DeleteSecretRequest;
@@ -26,19 +35,19 @@ import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueRespon
 import software.amazon.awssdk.services.secretsmanager.model.RotateSecretRequest;
 import software.amazon.awssdk.services.secretsmanager.model.RotateSecretResponse;
 import software.amazon.awssdk.services.secretsmanager.model.RotationRulesType;
-import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
 import software.amazon.awssdk.services.secretsmanager.model.SecretVersionsListEntry;
+import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
 import software.amazon.awssdk.services.secretsmanager.model.TagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UntagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UpdateSecretRequest;
-import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueRequest;
-import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueResponse;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("Secrets Manager")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -410,6 +419,44 @@ class SecretsManagerTest {
                 sm.deleteSecret(DeleteSecretRequest.builder().secretId(s1).forceDeleteWithoutRecovery(true).build());
                 sm.deleteSecret(DeleteSecretRequest.builder().secretId(s2).forceDeleteWithoutRecovery(true).build());
             } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(20)
+    @DisplayName("batchGetSecretValue returns partial Errors list for missing secrets without throwing")
+    void batchGetSecretValuePartialErrors() {
+        String exists = "batch-exists-" + UUID.randomUUID();
+        String missing = "batch-missing-" + UUID.randomUUID();
+
+        try {
+            sm.createSecret(CreateSecretRequest.builder()
+                    .name(exists)
+                    .secretString("v1")
+                    .build());
+
+            BatchGetSecretValueResponse response = sm.batchGetSecretValue(
+                    BatchGetSecretValueRequest.builder()
+                            .secretIdList(exists, missing)
+                            .build()
+            );
+
+            assertThat(response.secretValues()).hasSize(1);
+            assertThat(response.secretValues().get(0).name()).isEqualTo(exists);
+
+            assertThat(response.errors()).hasSize(1);
+            assertThat(response.errors().get(0).secretId()).isEqualTo(missing);
+            assertThat(response.errors().get(0).errorCode()).isEqualTo("ResourceNotFoundException");
+            assertThat(response.errors().get(0).message())
+                    .isEqualTo("Secrets Manager can't find the specified secret.");
+        } finally {
+            try {
+                sm.deleteSecret(DeleteSecretRequest.builder()
+                        .secretId(exists)
+                        .forceDeleteWithoutRecovery(true)
+                        .build());
+            } catch (Exception ignored) {
+            }
         }
     }
 }

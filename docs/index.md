@@ -46,6 +46,7 @@ Floci emulates 68 AWS services. See the [Services Overview](services/index.md) f
 | Data Firehose | JSON 1.1 |
 | ECS | JSON 1.1 |
 | EC2 | EC2 Query |
+| Lightsail | JSON 1.1 |
 | ACM | JSON 1.1 |
 | ECR | JSON 1.1 + OCI Distribution |
 | Resource Groups Tagging API | JSON 1.1 |

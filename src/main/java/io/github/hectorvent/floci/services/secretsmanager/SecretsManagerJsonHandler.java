@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -72,18 +71,16 @@ public class SecretsManagerJsonHandler {
         }
 
         List<SecretsManagerService.BatchSecretValue> values;
+        List<SecretsManagerService.BatchGetSecretValueError> errors = List.of();
         String nextToken = null;
 
         if (request.has("SecretIdList")) {
             List<String> secretIdList = new ArrayList<>();
             request.path("SecretIdList").forEach(id -> secretIdList.add(id.asText()));
-            try {
-                values = service.batchGetSecretValue(secretIdList, region);
-            } catch (AwsException e) {
-                return Response.status(e.getHttpStatus())
-                        .entity(new AwsErrorResponse(e.jsonType(), e.getMessage()))
-                        .build();
-            }
+            SecretsManagerService.BatchGetSecretValueResult result =
+                    service.batchGetSecretValue(secretIdList, region);
+            values = result.values();
+            errors = result.errors();
         } else {
             // Validate paging inputs before the service scans and filters the whole store.
             int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt() : 20;
@@ -145,10 +142,20 @@ public class SecretsManagerJsonHandler {
             secretValues.add(node);
         }
         response.set("SecretValues", secretValues);
+
+        ArrayNode errorNodes = objectMapper.createArrayNode();
+        for (SecretsManagerService.BatchGetSecretValueError error : errors) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("SecretId", error.secretId());
+            node.put("ErrorCode", error.errorCode());
+            node.put("Message", error.message());
+            errorNodes.add(node);
+        }
+        response.set("Errors", errorNodes);
+
         if (nextToken != null) {
             response.put("NextToken", nextToken);
         }
-        response.set("Errors", objectMapper.createArrayNode());
         return Response.ok(response).build();
     }
 
