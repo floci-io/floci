@@ -1855,6 +1855,35 @@ class S3IntegrationTest {
             .body(containsString("NoSuchPublicAccessBlockConfiguration"));
     }
 
+    @Test
+    @Order(104)
+    void malformedAuthorizationHeaderIsIgnoredWhenAuthEnforcementDisabled() {
+        String bucket = "auth-disabled-bucket";
+        String key = "greeting.txt";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("Hello World from S3!").when().put("/" + bucket + "/" + key).then().statusCode(200);
+        try {
+            given()
+                .header("Authorization", "not-a-valid-signature")
+            .when()
+                .get("/" + bucket + "/" + key)
+            .then()
+                .statusCode(200)
+                .body(equalTo("Hello World from S3!"));
+
+            given()
+                .header("Authorization", "not-a-valid-signature")
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>" + key + "</Key>"));
+        } finally {
+            given().when().delete("/" + bucket + "/" + key);
+            given().when().delete("/" + bucket);
+        }
+    }
+
     // --- ListObjectsV2 pagination ---
 
     @Test
