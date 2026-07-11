@@ -301,7 +301,7 @@ public class AwsQueryController {
                        || docDbService.hasInstance(instanceId)) {
                         yield docDbQueryHandler.handle(action, formParams);
                 }
-                yield rdsQueryHandler.handle(action, formParams);
+                yield rdsQueryHandler.handle(action, formParams, region);
             }
             case "neptune" -> neptuneQueryHandler.handle(action, formParams);
             case "docdb" -> docDbQueryHandler.handle(action, formParams);
