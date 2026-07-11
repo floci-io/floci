@@ -38,6 +38,8 @@ floci:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
+      lightsail:
+        flush-interval-ms: 60000
       codepipeline:
         flush-interval-ms: 60000
       s3vectors:
@@ -57,6 +59,8 @@ floci:
       elasticbeanstalk:
         flush-interval-ms: 60000
       cloudfront:
+      appsync:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
@@ -92,6 +96,7 @@ floci:
       max-message-size: 1048576
     s3:
       enabled: true
+      enforce-auth: false
       default-presign-expiry-seconds: 3600
     dynamodb:
       enabled: true
@@ -258,12 +263,15 @@ floci:
       emit-mode: off
     cloudtrail:
       enabled: true
+    lightsail:
     cloudcontrol:
       enabled: true
     cloudfront:
       enabled: true
     appsync:
       enabled: true
+      schema-worker-threads: 4
+      schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
     iot:

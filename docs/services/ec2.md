@@ -159,165 +159,165 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 | Action | Description |
 |--------|-------------|
-| RunInstances | - |
-| DescribeInstances | - |
-| TerminateInstances | - |
-| StartInstances | - |
-| StopInstances | - |
-| RebootInstances | - |
-| DescribeInstanceStatus | - |
-| DescribeInstanceAttribute | - |
-| ModifyInstanceAttribute | - |
+| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. |
+| DescribeInstances | Lists or returns stored EC2 instances. |
+| TerminateInstances | Terminates instances and updates their stored lifecycle state. |
+| StartInstances | Starts stopped instances and their local runtime when applicable. |
+| StopInstances | Stops running instances and updates their stored lifecycle state. |
+| RebootInstances | Reboots instances through the local EC2 service model. |
+| DescribeInstanceStatus | Returns status records for stored instances. |
+| DescribeInstanceAttribute | Returns a supported attribute for an instance. |
+| ModifyInstanceAttribute | Updates supported mutable attributes for an instance. |
 
 ### VPCs
 
 | Action | Description |
 |--------|-------------|
-| CreateVpc | - |
-| DescribeVpcs | - |
-| DeleteVpc | - |
-| ModifyVpcAttribute | - |
-| DescribeVpcAttribute | - |
-| DescribeVpcEndpointServices | - |
-| CreateVpcEndpoint | - |
-| DescribeVpcEndpoints | - |
-| DeleteVpcEndpoints | - |
-| CreateDefaultVpc | - |
-| AssociateVpcCidrBlock | - |
-| DisassociateVpcCidrBlock | - |
+| CreateVpc | Creates a VPC with the requested CIDR block. |
+| DescribeVpcs | Lists or returns stored VPCs. |
+| DeleteVpc | Deletes a VPC from the local EC2 store. |
+| ModifyVpcAttribute | Updates supported VPC attributes. |
+| DescribeVpcAttribute | Returns a supported VPC attribute. |
+| DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
+| CreateVpcEndpoint | Creates a VPC endpoint record. |
+| DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
+| DeleteVpcEndpoints | Deletes VPC endpoint records. |
+| CreateDefaultVpc | Creates or returns the default VPC for the region. |
+| AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
+| DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
 
 ### Subnets
 
 | Action | Description |
 |--------|-------------|
-| CreateSubnet | - |
-| DescribeSubnets | - |
-| DeleteSubnet | - |
-| ModifySubnetAttribute | - |
+| CreateSubnet | Creates a subnet in a VPC. |
+| DescribeSubnets | Lists or returns stored subnets. |
+| DeleteSubnet | Deletes a subnet from the local EC2 store. |
+| ModifySubnetAttribute | Updates supported subnet attributes. |
 
 ### Security Groups
 
 | Action | Description |
 |--------|-------------|
-| CreateSecurityGroup | - |
-| DescribeSecurityGroups | - |
-| DeleteSecurityGroup | - |
-| AuthorizeSecurityGroupIngress | - |
-| AuthorizeSecurityGroupEgress | - |
-| RevokeSecurityGroupIngress | - |
-| RevokeSecurityGroupEgress | - |
-| DescribeSecurityGroupRules | - |
-| ModifySecurityGroupRules | - |
-| UpdateSecurityGroupRuleDescriptionsIngress | - |
-| UpdateSecurityGroupRuleDescriptionsEgress | - |
+| CreateSecurityGroup | Creates a security group in a VPC. |
+| DescribeSecurityGroups | Lists or returns stored security groups. |
+| DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
+| AuthorizeSecurityGroupIngress | Adds inbound permissions to a security group. |
+| AuthorizeSecurityGroupEgress | Adds outbound permissions to a security group. |
+| RevokeSecurityGroupIngress | Removes inbound permissions from a security group. |
+| RevokeSecurityGroupEgress | Removes outbound permissions from a security group. |
+| DescribeSecurityGroupRules | Lists stored security group rules. |
+| ModifySecurityGroupRules | Updates supported fields on security group rules. |
+| UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
+| UpdateSecurityGroupRuleDescriptionsEgress | Updates descriptions on matching outbound security group rules. |
 
 ### Key Pairs
 
 | Action | Description |
 |--------|-------------|
-| CreateKeyPair | - |
-| DescribeKeyPairs | - |
-| DeleteKeyPair | - |
-| ImportKeyPair | - |
+| CreateKeyPair | Creates and stores a local key pair. |
+| DescribeKeyPairs | Lists or returns stored key pairs. |
+| DeleteKeyPair | Deletes a key pair from the local EC2 store. |
+| ImportKeyPair | Imports a public key as a local key pair. |
 
 ### AMIs
 
 | Action | Description |
 |--------|-------------|
-| DescribeImages | - |
+| DescribeImages | Returns AMI metadata known to the local EC2 service. |
 
 ### Tags
 
 | Action | Description |
 |--------|-------------|
-| CreateTags | - |
-| DeleteTags | - |
-| DescribeTags | - |
+| CreateTags | Adds tags to supported EC2 resources. |
+| DeleteTags | Removes tags from supported EC2 resources. |
+| DescribeTags | Lists tags stored for EC2 resources. |
 
 ### Internet Gateways
 
 | Action | Description |
 |--------|-------------|
-| CreateInternetGateway | - |
-| DescribeInternetGateways | - |
-| DeleteInternetGateway | - |
-| AttachInternetGateway | - |
-| DetachInternetGateway | - |
+| CreateInternetGateway | Creates an internet gateway. |
+| DescribeInternetGateways | Lists or returns stored internet gateways. |
+| DeleteInternetGateway | Deletes an internet gateway. |
+| AttachInternetGateway | Attaches an internet gateway to a VPC. |
+| DetachInternetGateway | Detaches an internet gateway from a VPC. |
 
 ### Route Tables
 
 | Action | Description |
 |--------|-------------|
-| CreateRouteTable | - |
-| DescribeRouteTables | - |
-| DeleteRouteTable | - |
-| AssociateRouteTable | - |
-| DisassociateRouteTable | - |
-| CreateRoute | - |
-| DeleteRoute | - |
+| CreateRouteTable | Creates a route table in a VPC. |
+| DescribeRouteTables | Lists or returns stored route tables. |
+| DeleteRouteTable | Deletes a route table from the local EC2 store. |
+| AssociateRouteTable | Associates a route table with a subnet. |
+| DisassociateRouteTable | Removes a route table association. |
+| CreateRoute | Adds a route to a route table. |
+| DeleteRoute | Removes a route from a route table. |
 
 ### Network ACLs
 
 | Action | Description |
 |--------|-------------|
-| CreateNetworkAcl | - |
-| DescribeNetworkAcls | - |
-| DeleteNetworkAcl | - |
-| CreateNetworkAclEntry | - |
-| ReplaceNetworkAclEntry | - |
-| DeleteNetworkAclEntry | - |
-| ReplaceNetworkAclAssociation | - |
+| CreateNetworkAcl | Creates a network ACL in a VPC. |
+| DescribeNetworkAcls | Lists or returns stored network ACLs. |
+| DeleteNetworkAcl | Deletes a network ACL from the local EC2 store. |
+| CreateNetworkAclEntry | Adds an entry to a network ACL. |
+| ReplaceNetworkAclEntry | Replaces an entry in a network ACL. |
+| DeleteNetworkAclEntry | Removes an entry from a network ACL. |
+| ReplaceNetworkAclAssociation | Replaces the network ACL associated with a subnet. |
 
 ### Prefix Lists
 
 | Action | Description |
 |--------|-------------|
-| DescribePrefixLists | - |
+| DescribePrefixLists | Returns prefix lists known to the local EC2 service. |
 
 ### NAT Gateways
 
 | Action | Description |
 |--------|-------------|
-| CreateNatGateway | - |
-| DescribeNatGateways | - |
-| DeleteNatGateway | - |
+| CreateNatGateway | Creates a NAT gateway record. |
+| DescribeNatGateways | Lists or returns stored NAT gateways. |
+| DeleteNatGateway | Deletes a NAT gateway record. |
 
 ### Elastic IPs
 
 | Action | Description |
 |--------|-------------|
-| AllocateAddress | - |
-| DescribeAddresses | - |
-| DescribeAddressesAttribute | - |
-| AssociateAddress | - |
-| DisassociateAddress | - |
-| ReleaseAddress | - |
+| AllocateAddress | Allocates an Elastic IP address record. |
+| DescribeAddresses | Lists or returns stored Elastic IP address records. |
+| DescribeAddressesAttribute | Returns allocation ID and public IP attributes for Elastic IP addresses. |
+| AssociateAddress | Associates an Elastic IP address with a resource. |
+| DisassociateAddress | Removes an Elastic IP address association. |
+| ReleaseAddress | Releases an Elastic IP address record. |
 
 ### Availability Zones & Regions
 
 | Action | Description |
 |--------|-------------|
-| DescribeAvailabilityZones | - |
-| DescribeRegions | - |
-| DescribeAccountAttributes | - |
+| DescribeAvailabilityZones | Returns the configured local availability zones. |
+| DescribeRegions | Returns the regions known to the local EC2 service. |
+| DescribeAccountAttributes | Returns local account-level EC2 attributes. |
 
 ### Instance Types
 
 | Action | Description |
 |--------|-------------|
-| DescribeInstanceTypes | - |
-| DescribeInstanceTypeOfferings | - |
+| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service. |
+| DescribeInstanceTypeOfferings | Returns instance type offerings for the requested location filters. |
 
 ### Launch Templates
 
 | Action | Description |
 |--------|-------------|
-| CreateLaunchTemplate | - |
-| CreateLaunchTemplateVersion | - |
-| DescribeLaunchTemplates | - |
-| DescribeLaunchTemplateVersions | - |
-| ModifyLaunchTemplate | - |
-| DeleteLaunchTemplate | - |
+| CreateLaunchTemplate | Creates a launch template with an initial version. |
+| CreateLaunchTemplateVersion | Creates a new launch template version, optionally from a source version. |
+| DescribeLaunchTemplates | Lists or returns stored launch templates. |
+| DescribeLaunchTemplateVersions | Lists versions stored for a launch template. |
+| ModifyLaunchTemplate | Updates launch template metadata such as the default version. |
+| DeleteLaunchTemplate | Deletes a launch template and its versions. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
 
@@ -325,21 +325,21 @@ Launch templates store versioned launch data. New template versions can be creat
 
 | Action | Description |
 |--------|-------------|
-| DescribeIamInstanceProfileAssociations | - |
+| DescribeIamInstanceProfileAssociations | Lists IAM instance profile associations known to the local EC2 service. |
 
 ### Network Interfaces
 
 | Action | Description |
 |--------|-------------|
-| DescribeNetworkInterfaces | - |
+| DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service. |
 
 ### Volumes
 
 | Action | Description |
 |--------|-------------|
-| CreateVolume | - |
-| DescribeVolumes | - |
-| DeleteVolume | - |
+| CreateVolume | Creates an EBS volume record. |
+| DescribeVolumes | Lists or returns stored EBS volume records. |
+| DeleteVolume | Deletes an EBS volume record. |
 
 ## Configuration
 

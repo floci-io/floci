@@ -159,7 +159,7 @@ public class PipesPoller implements Resettable {
         });
     }
 
-    private void pollSqs(Pipe pipe, String region) {
+    void pollSqs(Pipe pipe, String region) {
         String queueUrl = AwsArnUtils.arnToQueueUrl(pipe.getSource(), baseUrl);
         int batchSize = getBatchSize(pipe, "SqsQueueParameters");
         List<Message> messages = sqsService.receiveMessage(queueUrl, batchSize, 30, 0, region);
@@ -193,6 +193,14 @@ public class PipesPoller implements Resettable {
         }
 
         if (filtered.isEmpty()) {
+            return;
+        }
+
+        // AWS EventBridge Pipes: source → filter → ENRICHMENT → target. When an enrichment is
+        // configured it is invoked once with the filtered events (as a bare JSON array, matching the
+        // Lambda's SQSRecord[] input) and its response is forwarded to the target.
+        if (hasEnrichment(pipe)) {
+            deliverEnrichedBatch(pipe, filtered, messages, matchedMessageIds, queueUrl, region);
             return;
         }
 
@@ -494,6 +502,10 @@ public class PipesPoller implements Resettable {
     // ──────────────────────────── Invocation & DLQ ────────────────────────────
 
     private int deliverRecords(Pipe pipe, List<JsonNode> records, String region) {
+        // Enrichment (source → filter → ENRICHMENT → target) is currently applied only on the SQS
+        // source path (see deliverEnrichedBatch). Kinesis, DynamoDB Streams and Kafka sources
+        // deliver the filtered records straight to the target, so a pipe that configures an
+        // enrichment on those sources bypasses it — see docs/services/pipes.md.
         if (isLambdaTarget(pipe)) {
             return invokeWithDlq(pipe, wrapRecords(records), region) ? 0 : records.size();
         }
@@ -514,6 +526,76 @@ public class PipesPoller implements Resettable {
             LOG.warnv("Pipe {0}: delivery failed: {1} ({2})",
                     pipe.getName(), e.getMessage(), e.getClass().getSimpleName());
             return sendToDeadLetterQueue(pipe, eventJson, region);
+        }
+    }
+
+    private static boolean hasEnrichment(Pipe pipe) {
+        return pipe.getEnrichment() != null && !pipe.getEnrichment().isBlank();
+    }
+
+    /**
+     * Runs the pipe enrichment once over the filtered SQS batch and forwards its response to the
+     * target, then deletes the consumed source messages. The enrichment Lambda receives the events
+     * as a bare JSON array (SQSRecord[]); a null/empty enrichment response skips the target (AWS
+     * behavior) while still consuming the source messages.
+     */
+    private void deliverEnrichedBatch(Pipe pipe, List<JsonNode> filtered, List<Message> messages,
+                                      Set<String> matchedMessageIds, String queueUrl, String region) {
+        String eventsArray = bareArray(filtered);
+        boolean delivered;
+        try {
+            String enriched = targetInvoker.applyEnrichment(pipe, eventsArray, region);
+            if (enriched != null) {
+                // Only a Lambda target expects the batch (JSON array) shape; a Step Functions, SQS,
+                // SNS or EventBridge target must receive the raw enrichment response, matching the
+                // non-enrichment delivery path. Array-wrapping those would corrupt their input.
+                String targetPayload = isLambdaTarget(pipe)
+                        ? asEventArray(objectMapper, enriched)
+                        : enriched;
+                targetInvoker.invoke(pipe, targetPayload, region);
+            }
+            delivered = true;
+        } catch (Exception e) {
+            LOG.warnv("Pipe {0}: enriched delivery failed: {1} ({2})",
+                    pipe.getName(), e.getMessage(), e.getClass().getSimpleName());
+            delivered = sendToDeadLetterQueue(pipe, eventsArray, region);
+        }
+        if (delivered) {
+            for (Message msg : messages) {
+                if (matchedMessageIds.contains(msg.getMessageId())) {
+                    try {
+                        sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
+                    } catch (Exception e) {
+                        LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
+                                pipe.getName(), msg.getMessageId(), e.getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    private String bareArray(List<JsonNode> records) {
+        var arr = objectMapper.createArrayNode();
+        records.forEach(arr::add);
+        return arr.toString();
+    }
+
+    /**
+     * EventBridge Pipes delivers events to a target as a batch (JSON array). An enrichment that
+     * returns a single (non-array) JSON value represents one event, so it is wrapped in a
+     * one-element array; an array response is already a batch and is forwarded unchanged.
+     */
+    static String asEventArray(ObjectMapper objectMapper, String payload) {
+        try {
+            JsonNode node = objectMapper.readTree(payload);
+            if (node.isArray()) {
+                return payload;
+            }
+            return objectMapper.createArrayNode().add(node).toString();
+        } catch (Exception e) {
+            LOG.debugv("Pipe enrichment response was not JSON, wrapping as a single string event: {0}",
+                    e.getMessage());
+            return objectMapper.createArrayNode().add(payload).toString();
         }
     }
 
@@ -755,8 +837,7 @@ public class PipesPoller implements Resettable {
     }
 
     private static String extractRegionFromArn(String arn) {
-        String[] parts = arn.split(":");
-        return parts.length >= 4 ? parts[3] : "us-east-1";
+        return AwsArnUtils.regionOrDefault(arn, "us-east-1");
     }
 
     private static String extractResourceName(String arn) {

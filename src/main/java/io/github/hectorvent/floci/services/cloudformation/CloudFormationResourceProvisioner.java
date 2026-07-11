@@ -622,10 +622,8 @@ public class CloudFormationResourceProvisioner {
         String routeTableId = resolveOptional(props, "RouteTableId", engine);
         String destinationCidr = resolveOptional(props, "DestinationCidrBlock", engine);
         String gatewayId = resolveOptional(props, "GatewayId", engine);
-        if (gatewayId == null || gatewayId.isBlank()) {
-            gatewayId = resolveOptional(props, "NatGatewayId", engine);
-        }
-        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId);
+        String natGatewayId = resolveOptional(props, "NatGatewayId", engine);
+        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId, natGatewayId);
         r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
     }
 
@@ -847,7 +845,8 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "HealthCheckType", engine),
                 parseIntProp(props, "HealthCheckGracePeriod", engine, 0),
                 resolveStringList(props, "TerminationPolicies", engine),
-                resolveAsgTags(props, engine));
+                resolveAsgTags(props, engine),
+                resolveAsgTagPropagation(props, engine));
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
@@ -864,6 +863,19 @@ public class CloudFormationResourceProvisioner {
             }
         }
         return tags;
+    }
+
+    private Map<String, Boolean> resolveAsgTagPropagation(JsonNode props, CloudFormationTemplateEngine engine) {
+        Map<String, Boolean> propagation = new LinkedHashMap<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    propagation.put(key, Boolean.parseBoolean(engine.resolve(tag.path("PropagateAtLaunch"))));
+                }
+            }
+        }
+        return propagation;
     }
 
     private List<String> resolveStringList(JsonNode props, String field, CloudFormationTemplateEngine engine) {
@@ -3124,8 +3136,8 @@ public class CloudFormationResourceProvisioner {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
             event.put("ResponseURL", reachableEndpoint.baseUrl() + "/cfn-response/" + token);
-            event.put("StackId", "arn:aws:cloudformation:" + region + ":" + accountId + ":stack/"
-                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID());
+            event.put("StackId", AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/"
+                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID()).toString());
             event.put("RequestId", UUID.randomUUID().toString());
             event.put("ResourceType", resourceType);
             event.put("LogicalResourceId", logicalId);
@@ -3191,11 +3203,8 @@ public class CloudFormationResourceProvisioner {
     }
 
     private static String accountFromArn(String arn) {
-        if (arn == null) {
-            return "000000000000";
-        }
-        String[] parts = arn.split(":");
-        return parts.length >= 5 && parts[4].matches("\\d{12}") ? parts[4] : "000000000000";
+        String account = AwsArnUtils.accountOrDefault(arn, "000000000000");
+        return account.matches("\\d{12}") ? account : "000000000000";
     }
 
     // ── ECS ──────────────────────────────────────────────────────────────────

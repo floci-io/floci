@@ -173,6 +173,124 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void updateTerminationProtection_togglesFlagAndReflectsInDescribeStacks() {
+        String template = """
+            { "Resources": { "Q": { "Type": "AWS::SQS::Queue",
+              "Properties": { "QueueName": "cf-tp-queue" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "tp-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        // DescribeStacks reports protection off by default.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>false</EnableTerminationProtection>"));
+
+        // Enable termination protection — returns the StackId.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateTerminationProtection")
+            .formParam("StackName", "tp-stack")
+            .formParam("EnableTerminationProtection", "true")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackId>"))
+            .body(containsString("</UpdateTerminationProtectionResult>"));
+
+        // DescribeStacks now reflects it.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>true</EnableTerminationProtection>"));
+    }
+
+    @Test
+    void deleteStack_protectedStackIsRejectedAndStackRemains() {
+        String template = """
+            { "Resources": { "Q": { "Type": "AWS::SQS::Queue",
+              "Properties": { "QueueName": "cf-tp-del-queue" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "tp-del-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        // Enable termination protection.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateTerminationProtection")
+            .formParam("StackName", "tp-del-stack")
+            .formParam("EnableTerminationProtection", "true")
+        .when().post("/")
+        .then().statusCode(200);
+
+        // DeleteStack is rejected with a 400 ValidationError (XML error body, Query protocol).
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "tp-del-stack")
+        .when().post("/")
+        .then().statusCode(400)
+            .contentType(containsString("xml"))
+            .body(containsString("<Code>ValidationError</Code>"))
+            .body(containsString("cannot be deleted while TerminationProtection is enabled"));
+
+        // The stack still exists and is not in a DELETE state.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-del-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackName>tp-del-stack</StackName>"))
+            .body(not(containsString("DELETE_IN_PROGRESS")))
+            .body(not(containsString("DELETE_COMPLETE")));
+    }
+
+    @Test
+    void createStack_withTerminationProtectionEnabled() {
+        String template = """
+            { "Resources": { "Q": { "Type": "AWS::SQS::Queue",
+              "Properties": { "QueueName": "cf-tp-create-queue" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "tp-create-stack")
+            .formParam("TemplateBody", template)
+            .formParam("EnableTerminationProtection", "true")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        // The CreateStackInput flag is honored — DescribeStacks reports protection on.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-create-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>true</EnableTerminationProtection>"));
+    }
+
+    @Test
     void createStack_s3BucketWithCorsConfiguration() {
         String template = """
             {

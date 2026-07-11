@@ -257,7 +257,8 @@ public class SesService {
         if (!hasRecipient) {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
-        validateConfigurationSet(configurationSetName, region);
+        String effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName, source, region);
+        validateConfigurationSet(effectiveConfigSet, region);
 
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
@@ -265,7 +266,7 @@ public class SesService {
         emailStore.put("email::" + region + "::" + messageId, email);
 
         List<String> envelope = allRecipients(toAddresses, ccAddresses, bccAddresses);
-        Map<String, String> suppressedReasons = collectSuppressedReasons(envelope, configurationSetName, region);
+        Map<String, String> suppressedReasons = collectSuppressedReasons(envelope, effectiveConfigSet, region);
 
         List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
         List<String> relayedCc = filterUnsuppressed(ccAddresses, suppressedReasons);
@@ -280,7 +281,7 @@ public class SesService {
 
         LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
                 source, toAddresses, subject, messageId);
-        publishSendEvents(configurationSetName, messageId, source, subject,
+        publishSendEvents(effectiveConfigSet, messageId, source, subject,
                 toAddresses, ccAddresses, bccAddresses, envelope,
                 suppressedReasons, emailTags, additionalHeaders, region);
         return messageId;
@@ -292,10 +293,11 @@ public class SesService {
         if (rawMessage == null || rawMessage.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
-        validateConfigurationSet(configurationSetName, region);
+        String effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName, source, region);
+        validateConfigurationSet(effectiveConfigSet, region);
         boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
         boolean sourceOmitted = source == null || source.isBlank();
-        boolean willPublishEvents = (configurationSetName != null && !configurationSetName.isBlank())
+        boolean willPublishEvents = (effectiveConfigSet != null && !effectiveConfigSet.isBlank())
                 || !resolveIdentityNotificationTargets(source, region).isEmpty();
         SmtpRelay.RawMessageHeaders headers = (hasExplicitDestinations && !willPublishEvents && !sourceOmitted)
                 ? null
@@ -310,6 +312,14 @@ public class SesService {
             // both with this message.
             throw new AwsException("InvalidParameterValue", "Missing required header 'From'.", 400);
         }
+        // FromEmailAddress was omitted, so the configuration set couldn't be resolved from the
+        // sender until the MIME "From" was parsed. Re-resolve from the effective sender now so an
+        // email identity's default configuration set still applies to a Raw send without an
+        // explicit FromEmailAddress.
+        if (sourceOmitted && (configurationSetName == null || configurationSetName.isBlank())) {
+            effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName, effectiveSource, region);
+            validateConfigurationSet(effectiveConfigSet, region);
+        }
         List<String> effectiveDestinations = hasExplicitDestinations
                 ? destinations
                 : allRecipients(headers.to(), headers.cc(), headers.bcc());
@@ -321,7 +331,7 @@ public class SesService {
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         emailStore.put("email::" + region + "::" + messageId, email);
 
-        Map<String, String> suppressedReasons = collectSuppressedReasons(effectiveDestinations, configurationSetName, region);
+        Map<String, String> suppressedReasons = collectSuppressedReasons(effectiveDestinations, effectiveConfigSet, region);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!relayedDestinations.isEmpty()) {
@@ -332,7 +342,7 @@ public class SesService {
         }
 
         LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
-        publishSendEvents(configurationSetName, messageId, effectiveSource,
+        publishSendEvents(effectiveConfigSet, messageId, effectiveSource,
                 headers != null ? headers.subject() : "",
                 headers != null ? headers.to() : List.of(),
                 headers != null ? headers.cc() : List.of(),
@@ -736,6 +746,73 @@ public class SesService {
         identity.setFeedbackForwardingEnabled(enabled);
         identityStore.put(key, identity);
         LOG.infov("Updated feedback forwarding for {0}: enabled={1}", identityValue, enabled);
+    }
+
+    public void setEmailIdentityConfigurationSet(String identityValue, String configurationSetName,
+                                                 String region) {
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Identity <" + identityValue + "> does not exist.", 404));
+        boolean clearing = configurationSetName == null || configurationSetName.isEmpty();
+        if (!clearing) {
+            getConfigurationSet(configurationSetName, region);
+        }
+        identity.setConfigurationSetName(clearing ? null : configurationSetName);
+        identityStore.put(key, identity);
+        LOG.infov("Updated default ConfigurationSet for {0}: {1}",
+                identityValue, clearing ? "<cleared>" : configurationSetName);
+    }
+
+    /**
+     * Resolves the configuration set a send should use: a non-blank configuration set explicitly
+     * supplied by the caller takes precedence (a blank value is treated as absent); otherwise the
+     * default configuration set associated with the sending identity (set via
+     * {@code PutEmailIdentityConfigurationSetAttributes}) is used, with the email-address identity
+     * taking precedence over its parent domain. If that default association is stale (its
+     * configuration set was deleted), the send fails with a bad-request error, matching AWS.
+     */
+    private String resolveDefaultConfigurationSet(String configurationSetName, String source, String region) {
+        if (configurationSetName != null && !configurationSetName.isBlank()) {
+            return configurationSetName;
+        }
+        if (source == null || source.isBlank()) {
+            return configurationSetName;
+        }
+        String email = extractEmailAddress(source);
+        if (email.isBlank()) {
+            return configurationSetName;
+        }
+        String fromEmail = existingDefaultConfigSet(identityStore.get(identityKey(region, email)).orElse(null), region);
+        if (fromEmail != null) {
+            return fromEmail;
+        }
+        int at = email.indexOf('@');
+        if (at >= 0 && at < email.length() - 1) {
+            String fromDomain = existingDefaultConfigSet(
+                    identityStore.get(identityKey(region, email.substring(at + 1))).orElse(null), region);
+            if (fromDomain != null) {
+                return fromDomain;
+            }
+        }
+        return configurationSetName;
+    }
+
+    private String existingDefaultConfigSet(Identity identity, String region) {
+        if (identity == null) {
+            return null;
+        }
+        String cs = identity.getConfigurationSetName();
+        if (cs == null || cs.isEmpty()) {
+            return null;
+        }
+        // AWS: deleting the configuration set that is an identity's default, then sending through
+        // that identity, fails with a bad-request error rather than silently sending without it.
+        if (configSetStore.get(configSetKey(region, cs)).isEmpty()) {
+            throw new AwsException("BadRequestException",
+                    "Configuration set <" + cs + "> does not exist.", 400);
+        }
+        return cs;
     }
 
     public void setMailFromDomain(String identityValue, String mailFromDomain,

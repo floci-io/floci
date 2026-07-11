@@ -164,7 +164,8 @@ public class AutoScalingService {
                                                     List<String> targetGroupArns, List<String> lbNames,
                                                     String healthCheckType, int healthCheckGracePeriod,
                                                     List<String> terminationPolicies,
-                                                    Map<String, String> tags) {
+                                                    Map<String, String> tags,
+                                                    Map<String, Boolean> tagPropagateAtLaunch) {
         String key = asgKey(region, name);
         if (groups.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -205,6 +206,9 @@ public class AutoScalingService {
         asg.setRegion(region);
         if (tags != null) {
             asg.getTags().putAll(tags);
+        }
+        if (tagPropagateAtLaunch != null) {
+            asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
         }
         groups.put(key, asg);
         return asg;
@@ -326,15 +330,22 @@ public class AutoScalingService {
         groups.put(asgKey(region, name), asg);
     }
 
-    public void createOrUpdateTags(String region, String resourceId, String resourceType, Map<String, String> tags) {
+    public void createOrUpdateTags(
+            String region,
+            String resourceId,
+            String resourceType,
+            Map<String, String> tags,
+            Map<String, Boolean> tagPropagateAtLaunch) {
         AutoScalingGroup asg = requireTaggableGroup(region, resourceId, resourceType);
         asg.getTags().putAll(tags);
+        asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
     public void deleteTags(String region, String resourceId, String resourceType, List<String> tagKeys) {
         AutoScalingGroup asg = requireTaggableGroup(region, resourceId, resourceType);
         tagKeys.forEach(asg.getTags()::remove);
+        tagKeys.forEach(asg.getTagPropagateAtLaunch()::remove);
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
