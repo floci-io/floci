@@ -67,7 +67,15 @@ public class ContainerLifecycleManager {
      */
     public ContainerInfo createAndStart(ContainerSpec spec) {
         String containerId = create(spec);
-        return startCreated(containerId, spec);
+        try {
+            return startCreated(containerId, spec);
+        } catch (Exception e) {
+            // A failed start (e.g. host-port conflict) must not leak the created
+            // container: retrying callers would accumulate Created containers and
+            // fixed-name callers would hit name conflicts on the next attempt.
+            removeIfExists(containerId);
+            throw e;
+        }
     }
 
     /**

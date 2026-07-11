@@ -354,7 +354,7 @@ public class LambdaService {
             if (zipFileBase64 != null) {
                 fn.setS3Bucket(null);
                 fn.setS3Key(null);
-                extractZipCode(fn, zipFileBase64);
+                extractZipCode(fn, zipFileBase64, region);
             }
             String s3Bucket = (String) code.get("S3Bucket");
             String s3Key = (String) code.get("S3Key");
@@ -362,7 +362,7 @@ public class LambdaService {
                 if ("hot-reload".equals(s3Bucket)) {
                     applyHotReload(fn, s3Key);
                 } else {
-                    extractZipCodeFromS3(fn, s3Bucket, s3Key);
+                    extractZipCodeFromS3(fn, s3Bucket, s3Key, region);
                 }
             }
         }
@@ -424,7 +424,7 @@ public class LambdaService {
         if (zipFileBase64 != null) {
             fn.setS3Bucket(null);
             fn.setS3Key(null);
-            extractZipCode(fn, zipFileBase64);
+            extractZipCode(fn, zipFileBase64, region);
         }
         if (imageUri != null) {
             fn.setImageUri(imageUri);
@@ -433,7 +433,7 @@ public class LambdaService {
             if ("hot-reload".equals(s3Bucket)) {
                 applyHotReload(fn, s3Key);
             } else {
-                extractZipCodeFromS3(fn, s3Bucket, s3Key);
+                extractZipCodeFromS3(fn, s3Bucket, s3Key, region);
             }
         }
 
@@ -594,6 +594,15 @@ public class LambdaService {
                 }
             }
         }
+        // Best-effort: drop the stored deployment package.
+        if (s3Service != null) {
+            try {
+                s3Service.deleteObject(tasksBucketName(region), codeObjectKey(fn));
+            } catch (Exception e) {
+                LOG.warnv("Could not delete deployment package for {0}: {1}",
+                        functionName, e.getMessage());
+            }
+        }
         LOG.infov("Deleted Lambda function: {0}", functionName);
     }
 
@@ -700,6 +709,12 @@ public class LambdaService {
 
         ScalingConfig scalingConfig = parseScalingConfig(request, eventSourceArn);
 
+        Boolean bisectBatchOnFunctionError = request.get("BisectBatchOnFunctionError") instanceof Boolean b
+                ? b
+                : null;
+
+        EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
+
         String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
 
         EventSourceMapping esm = new EventSourceMapping();
@@ -715,6 +730,8 @@ public class LambdaService {
         esm.setState(enabled ? "Enabled" : "Disabled");
         esm.setScalingConfig(scalingConfig);
         esm.setFunctionResponseTypes(functionResponseTypes);
+        esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
+        esm.setDestinationConfig(destinationConfig);
         esm.setLastModified(System.currentTimeMillis());
 
         esmStore.save(esm);
@@ -723,6 +740,38 @@ public class LambdaService {
         }
         LOG.infov("Created ESM {0}: {1} → {2}", esm.getUuid(), eventSourceArn, resolvedName);
         return esm;
+    }
+
+    private EventSourceMapping.DestinationConfig parseDestinationConfig(Map<String, Object> request) {
+        Object raw = request.get("DestinationConfig");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map<?, ?> destMap)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "DestinationConfig must be a JSON object", 400);
+        }
+
+        Object rawOnFailure = destMap.get("OnFailure");
+        if (rawOnFailure == null) {
+            return null;
+        }
+        if (!(rawOnFailure instanceof Map<?, ?> onFailureMap)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "DestinationConfig.OnFailure must be a JSON object", 400);
+        }
+
+        Object destination = onFailureMap.get("Destination");
+        if (destination == null) {
+            return null;
+        }
+
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination(String.valueOf(destination));
+
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        return destinationConfig;
     }
 
     /**
@@ -825,6 +874,15 @@ public class LambdaService {
             // AWS: passing ScalingConfig resets it. An empty object or one
             // with MaximumConcurrency=null clears the cap.
             esm.setScalingConfig(parseScalingConfig(request, esm.getEventSourceArn()));
+        }
+
+        if (request.containsKey("BisectBatchOnFunctionError")) {
+            Object raw = request.get("BisectBatchOnFunctionError");
+            esm.setBisectBatchOnFunctionError(raw instanceof Boolean b ? b : null);
+        }
+
+        if (request.containsKey("DestinationConfig")) {
+            esm.setDestinationConfig(parseDestinationConfig(request));
         }
 
         esm.setLastModified(System.currentTimeMillis());
@@ -1189,11 +1247,23 @@ public class LambdaService {
         return null;
     }
 
-    private void extractZipCode(LambdaFunction fn, String zipFileBase64) {
-        extractZipCodeBytes(fn, Base64.getDecoder().decode(zipFileBase64));
+    /** Per-region bucket that mirrors AWS's Lambda code bucket naming. */
+    public static String tasksBucketName(String region) {
+        String r = (region == null || region.isBlank()) ? "us-east-1" : region;
+        return "awslambda-" + r + "-tasks";
     }
 
-    private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes) {
+    /** Stable, account-scoped S3 key for a function's current deployment package. */
+    public static String codeObjectKey(LambdaFunction fn) {
+        String account = fn.getAccountId() != null ? fn.getAccountId() : "000000000000";
+        return "snapshots/" + account + "/" + fn.getFunctionName();
+    }
+
+    private void extractZipCode(LambdaFunction fn, String zipFileBase64, String region) {
+        extractZipCodeBytes(fn, Base64.getDecoder().decode(zipFileBase64), region);
+    }
+
+    private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
         Path codePath = codeStore.getCodePath(fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
@@ -1227,6 +1297,10 @@ public class LambdaService {
                             "Handler file '" + handlerFile + "' not found in deployment package", 400);
                 }
             }
+
+            // Deploy succeeded: keep the exact package so GetFunction can serve
+            // a real Code.Location.
+            storeDeploymentPackage(fn, zipBytes, region);
         } catch (AwsException e) {
             throw e;
         } catch (IOException e) {
@@ -1235,7 +1309,30 @@ public class LambdaService {
         }
     }
 
-    private void extractZipCodeFromS3(LambdaFunction fn, String s3Bucket, String s3Key) {
+    private void storeDeploymentPackage(LambdaFunction fn, byte[] zipBytes, String region) {
+        if (s3Service == null) {
+            return;
+        }
+        String bucket = tasksBucketName(region);
+        try {
+            try {
+                s3Service.createBucket(bucket, region);
+            } catch (AwsException e) {
+                // createBucket is idempotent only in us-east-1; elsewhere it 409s if it exists.
+                if (!"BucketAlreadyOwnedByYou".equals(e.getErrorCode())) {
+                    throw e;
+                }
+            }
+            s3Service.putObject(bucket, codeObjectKey(fn), zipBytes,
+                    "application/zip", java.util.Map.of());
+        } catch (Exception e) {
+            // Never fail a deploy because the convenience copy failed.
+            LOG.warnv("Could not store deployment package for {0}: {1}",
+                    fn.getFunctionName(), e.getMessage());
+        }
+    }
+
+    private void extractZipCodeFromS3(LambdaFunction fn, String s3Bucket, String s3Key, String region) {
         if (s3Service == null) {
             throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
         }
@@ -1249,7 +1346,7 @@ public class LambdaService {
             throw new AwsException("InvalidParameterValueException",
                     "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
         }
-        extractZipCodeBytes(fn, obj.getData());
+        extractZipCodeBytes(fn, obj.getData(), region);
     }
 
     private String resolveHandlerFilePath(LambdaFunction fn) {
@@ -1542,7 +1639,7 @@ public class LambdaService {
                         fn.getFunctionName(), event.bucketName(), event.key());
                 try {
                     S3Object obj = s3Service.getObject(event.bucketName(), event.key());
-                    extractZipCodeBytes(fn, obj.getData());
+                    extractZipCodeBytes(fn, obj.getData(), region);
                     fn.setLastModified(Instant.now().toEpochMilli());
                     fn.setRevisionId(UUID.randomUUID().toString());
                     functionStore.save(region, fn);
