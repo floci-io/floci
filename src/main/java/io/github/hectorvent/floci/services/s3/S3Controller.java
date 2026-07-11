@@ -2096,7 +2096,12 @@ public class S3Controller {
         WebsiteConfiguration cfg;
         try {
             cfg = s3Service.getBucketWebsite(bucket);
-        } catch (AwsException notAWebsite) {
+        } catch (AwsException e) {
+            // Only "no website configuration" means fall through to normal handling; a real error
+            // (e.g. NoSuchBucket) must propagate rather than be masked as "not a website".
+            if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
+                throw e;
+            }
             return null;
         }
         String index = cfg.getIndexDocument();
