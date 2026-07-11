@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.rds.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -24,6 +26,7 @@ public class DbInstance {
     private String dbSubnetGroupName;
     private String dbClusterIdentifier;
     private String vpcId;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
     private String availabilityZone;
     private boolean multiAz;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
@@ -114,6 +117,11 @@ public class DbInstance {
 
     public String getVpcId() { return vpcId; }
     public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) {
+        this.vpcSecurityGroupIds = vpcSecurityGroupIds != null ? new ArrayList<>(vpcSecurityGroupIds) : new ArrayList<>();
+    }
 
     public String getAvailabilityZone() { return availabilityZone; }
     public void setAvailabilityZone(String availabilityZone) { this.availabilityZone = availabilityZone; }
