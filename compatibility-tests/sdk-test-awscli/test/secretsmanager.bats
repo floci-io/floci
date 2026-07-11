@@ -224,3 +224,48 @@ teardown() {
     has_current=$(echo "$output" | jq --arg vid "$v1" '.VersionIdsToStages[$vid] | any(. == "AWSCURRENT")')
     [ "$has_current" = "true" ]
 }
+
+# --- Batch Get Secret Value Tests ---
+
+@test "Secrets Manager: batch-get-secret-value returns all found secrets" {
+    S1="${SECRET_NAME}-batch-a"
+    S2="${SECRET_NAME}-batch-b"
+
+    aws_cmd secretsmanager create-secret \
+        --name "$S1" \
+        --secret-string '{"key":"val-a"}' >/dev/null
+    aws_cmd secretsmanager create-secret \
+        --name "$S2" \
+        --secret-string '{"key":"val-b"}' >/dev/null
+
+    run aws_cmd secretsmanager batch-get-secret-value \
+        --secret-id-list "$S1" "$S2"
+    assert_success
+
+    count=$(echo "$output" | jq '.SecretValues | length')
+    [ "$count" = "2" ]
+    errors=$(echo "$output" | jq '.Errors | length')
+    [ "$errors" = "0" ]
+
+    aws_cmd secretsmanager delete-secret --secret-id "$S1" --force-delete-without-recovery >/dev/null 2>&1 || true
+    aws_cmd secretsmanager delete-secret --secret-id "$S2" --force-delete-without-recovery >/dev/null 2>&1 || true
+}
+
+@test "Secrets Manager: batch-get-secret-value with one missing returns partial Errors list" {
+    aws_cmd secretsmanager create-secret \
+        --name "$SECRET_NAME" \
+        --secret-string '{"key":"value"}' >/dev/null
+
+    run aws_cmd secretsmanager batch-get-secret-value \
+        --secret-id-list "$SECRET_NAME" "not-exists"
+    assert_success
+
+    values=$(echo "$output" | jq '.SecretValues | length')
+    [ "$values" = "1" ]
+    errors=$(echo "$output" | jq '.Errors | length')
+    [ "$errors" = "1" ]
+    error_code=$(echo "$output" | jq -r '.Errors[0].ErrorCode')
+    [ "$error_code" = "ResourceNotFoundException" ]
+    secret_id=$(echo "$output" | jq -r '.Errors[0].SecretId')
+    [ "$secret_id" = "not-exists" ]
+}
