@@ -23,6 +23,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Serves viewer requests routed to a CloudFront distribution (via {@link CloudFrontDistributionFilter})
@@ -97,15 +99,35 @@ public class CloudFrontServingController {
         String viewerPath = "/" + (proxy == null ? "" : proxy);
         String normalized = CloudFrontRequestRouter.normalizePath(viewerPath);
 
+        // The response-headers policy of the behavior that matches the request applies to the final
+        // response CloudFront returns to the viewer, including any custom-error page substituted below.
+        ResponseHeadersPolicyConfigCodec.Directives directives = responseHeaderDirectives(
+                CloudFrontRequestRouter.matchResponseHeadersPolicyId(config, normalized));
+
         OriginResponse origin = route(config, normalized, includeBody);
 
         if (origin.status() >= 400) {
-            Response fallback = applyCustomError(config, origin, includeBody);
+            Response fallback = applyCustomError(config, origin, includeBody, directives);
             if (fallback != null) {
                 return fallback;
             }
         }
-        return toResponse(origin, includeBody);
+        return toResponse(origin, includeBody, directives);
+    }
+
+    /** Resolves the response-headers policy for a behavior into the headers it contributes, if any. */
+    private ResponseHeadersPolicyConfigCodec.Directives responseHeaderDirectives(String policyId) {
+        if (policyId == null || policyId.isBlank()) {
+            return null;
+        }
+        try {
+            return ResponseHeadersPolicyConfigCodec.directives(
+                    service.getResponseHeadersPolicy(policyId).getConfig());
+        } catch (AwsException e) {
+            // A behavior may reference an AWS-managed policy the emulator has not seeded; treat an
+            // unknown policy as no policy rather than failing the request.
+            return null;
+        }
     }
 
     /** Resolves the target origin for a normalized path and fetches the content. */
@@ -194,7 +216,8 @@ public class CloudFrontServingController {
      *       not recurse (no loop).</li>
      * </ul>
      */
-    private Response applyCustomError(DistributionConfig config, OriginResponse origin, boolean includeBody) {
+    private Response applyCustomError(DistributionConfig config, OriginResponse origin, boolean includeBody,
+                                      ResponseHeadersPolicyConfigCodec.Directives directives) {
         Map<String, Object> cer = matchCustomError(config, origin.status());
         if (cer == null) {
             return null;
@@ -204,7 +227,7 @@ public class CloudFrontServingController {
         if (pagePath.isBlank()) {
             // ResponseCode override with no custom page: keep the origin body, change the status.
             return toResponse(new OriginResponse(responseCode, origin.contentType(), origin.body(),
-                    origin.contentLength()), includeBody);
+                    origin.contentLength()), includeBody, directives);
         }
 
         String errNormalized = CloudFrontRequestRouter.normalizePath(pagePath);
@@ -225,10 +248,10 @@ public class CloudFrontServingController {
         if (page.status() >= 400) {
             // Custom error page unavailable → return the status received from the error-page origin
             // (AWS behavior), without recursively applying custom error handling.
-            return toResponse(page, includeBody);
+            return toResponse(page, includeBody, directives);
         }
         return toResponse(new OriginResponse(responseCode, page.contentType(), page.body(),
-                page.contentLength()), includeBody);
+                page.contentLength()), includeBody, directives);
     }
 
     private Map<String, Object> matchCustomError(DistributionConfig config, int status) {
@@ -244,17 +267,43 @@ public class CloudFrontServingController {
         return null;
     }
 
-    private Response toResponse(OriginResponse origin, boolean includeBody) {
+    private Response toResponse(OriginResponse origin, boolean includeBody,
+                                ResponseHeadersPolicyConfigCodec.Directives directives) {
         Response.ResponseBuilder rb = Response.status(origin.status());
+        Set<String> present = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         if (origin.contentType() != null) {
             rb.type(origin.contentType());
+            present.add("Content-Type");
         }
         if (includeBody && origin.body() != null) {
             rb.entity(origin.body());
         } else {
             rb.header("Content-Length", origin.contentLength());
+            present.add("Content-Length");
         }
+        applyResponseHeadersPolicy(rb, directives, present);
         return rb.build();
+    }
+
+    /**
+     * Adds a response-headers policy's headers to the response. Each header carries an override flag:
+     * when false it yields to a header the origin already set (here, only the ones Floci sets itself,
+     * since it does not forward arbitrary origin headers). {@code RemoveHeadersConfig} is parsed and
+     * round-tripped but has no serving effect for the same reason — there are no forwarded origin
+     * headers to strip.
+     */
+    private void applyResponseHeadersPolicy(Response.ResponseBuilder rb,
+                                            ResponseHeadersPolicyConfigCodec.Directives directives,
+                                            Set<String> present) {
+        if (directives == null) {
+            return;
+        }
+        for (ResponseHeadersPolicyConfigCodec.PolicyHeader header : directives.add()) {
+            if (header.override() || !present.contains(header.name())) {
+                rb.header(header.name(), header.value());
+                present.add(header.name());
+            }
+        }
     }
 
     private Response textError(int status, String message) {

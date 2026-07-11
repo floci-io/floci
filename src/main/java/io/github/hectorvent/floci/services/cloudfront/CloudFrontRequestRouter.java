@@ -91,6 +91,24 @@ public final class CloudFrontRequestRouter {
     }
 
     /**
+     * Returns the {@code ResponseHeadersPolicyId} of the cache behavior that serves a normalized path,
+     * evaluating ordered behaviors first (first match wins) and the default behavior last, or
+     * {@code null} when the matched behavior references no response-headers policy.
+     */
+    public static String matchResponseHeadersPolicyId(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return behavior.getResponseHeadersPolicyId();
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        return dflt != null ? dflt.getResponseHeadersPolicyId() : null;
+    }
+
+    /**
      * Matches a CloudFront path pattern against a normalized path. A leading {@code /} on either side is
      * ignored, {@code *} matches zero or more characters, {@code ?} matches exactly one, and matching is
      * case-sensitive. A {@code null}/blank or {@code *} pattern matches everything (the default behavior).

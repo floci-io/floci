@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -218,6 +219,51 @@ class CloudFrontDistributionServingTest {
             .body(containsString("<ErrorCode>403</ErrorCode>"))
             .body(containsString("<ResponseCode>200</ResponseCode>"))
             .body(containsString("<ResponsePagePath>/index.html</ResponsePagePath>"));
+    }
+
+    @Test
+    void appliesResponseHeadersPolicyToServedResponses() {
+        String suffix = suffix();
+        String bucket = "cf-rhp-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "index.html", "RHP-INDEX-" + suffix, "text/html");
+
+        Map<String, Object> security = new LinkedHashMap<>();
+        security.put("StrictTransportSecurity", new LinkedHashMap<>(Map.of(
+                "Override", "true", "AccessControlMaxAgeSec", "31536000", "IncludeSubdomains", "true")));
+        security.put("ContentTypeOptions", new LinkedHashMap<>(Map.of("Override", "true")));
+        security.put("FrameOptions", new LinkedHashMap<>(Map.of("Override", "true", "FrameOption", "DENY")));
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("SecurityHeadersConfig", security);
+        config.put("CustomHeadersConfig", List.of(new LinkedHashMap<>(Map.of(
+                "Header", "X-App", "Value", "floci", "Override", "true"))));
+        config.put("CorsConfig", new LinkedHashMap<>(Map.of(
+                "AccessControlAllowOrigins", List.of("*"), "OriginOverride", "true")));
+
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setName("sec-" + suffix);
+        policy.setConfig(config);
+        ResponseHeadersPolicy created = cloudFrontService.createResponseHeadersPolicy(policy);
+
+        DefaultCacheBehavior dcb = defaultBehavior("only-origin");
+        dcb.setResponseHeadersPolicyId(created.getId());
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setDefaultRootObject("index.html");
+        cfg.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        cfg.setDefaultCacheBehavior(dcb);
+
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given().header("Host", dist.getDomainName()).when().get("/")
+                .then().statusCode(200)
+                .header("Strict-Transport-Security", containsString("max-age=31536000"))
+                .header("X-Content-Type-Options", "nosniff")
+                .header("X-Frame-Options", "DENY")
+                .header("X-App", "floci")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(containsString("RHP-INDEX-" + suffix));
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

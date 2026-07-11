@@ -68,6 +68,26 @@ class CloudFrontRequestRouterTest {
         assertEquals("default-origin", CloudFrontRequestRouter.matchTargetOriginId(cfg, "/index.html"));
     }
 
+    @Test
+    void matchResponseHeadersPolicyIdFollowsTheSameBehaviorOrder() {
+        CacheBehavior api = behavior("api/*", "api-origin");
+        api.setResponseHeadersPolicyId("api-policy");
+        DefaultCacheBehavior dflt = defaultBehavior("default-origin");
+        dflt.setResponseHeadersPolicyId("default-policy");
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setCacheBehaviors(List.of(api));
+        cfg.setDefaultCacheBehavior(dflt);
+
+        // A matching ordered behavior wins; otherwise the default behavior's policy applies.
+        assertEquals("api-policy", CloudFrontRequestRouter.matchResponseHeadersPolicyId(cfg, "/api/data"));
+        assertEquals("default-policy", CloudFrontRequestRouter.matchResponseHeadersPolicyId(cfg, "/index.html"));
+
+        // A behavior with no policy resolves to null (no headers applied).
+        dflt.setResponseHeadersPolicyId(null);
+        assertNull(CloudFrontRequestRouter.matchResponseHeadersPolicyId(cfg, "/index.html"));
+    }
+
     // ── Default root object: ROOT ONLY (never appended to subdirectories) ─────────
 
     @Test
