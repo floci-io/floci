@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
@@ -81,6 +82,7 @@ public class EmulatorLifecycle {
     private final EcrRegistryManager ecrRegistryManager;
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
+    private final SchemaCreationWorker schemaCreationWorker;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -105,7 +107,8 @@ public class EmulatorLifecycle {
                              Ec2MetadataServer ec2MetadataServer,
                              EcrRegistryManager ecrRegistryManager,
                              FlociUiManager flociUiManager,
-                             InitLifecycleState initLifecycleState) {
+                             InitLifecycleState initLifecycleState,
+                             SchemaCreationWorker schemaCreationWorker) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -130,6 +133,7 @@ public class EmulatorLifecycle {
         this.ecrRegistryManager = ecrRegistryManager;
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
+        this.schemaCreationWorker = schemaCreationWorker;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -152,6 +156,7 @@ public class EmulatorLifecycle {
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        schemaCreationWorker.recoverOrphans();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
