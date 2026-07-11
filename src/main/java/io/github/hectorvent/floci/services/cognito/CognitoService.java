@@ -1260,13 +1260,13 @@ public class CognitoService {
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);
         String jti = extractJtiFromToken(accessToken);
-        
+
         if (username == null || poolId == null) {
             throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
         }
-        
-        // Check if access token has been revoked
+
         validateTokenNotRevoked(jti, poolId, "access");
+        validateOriginJtiNotRevoked(accessToken, poolId);
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
 
@@ -1324,13 +1324,13 @@ public class CognitoService {
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);
         String jti = extractJtiFromToken(accessToken);
-        
+
         if (username == null || poolId == null || jti == null) {
             throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
         }
-        
-        // Check if access token has been revoked
+
         validateTokenNotRevoked(jti, poolId, "access");
+        validateOriginJtiNotRevoked(accessToken, poolId);
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
         
@@ -1347,13 +1347,13 @@ public class CognitoService {
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);
         String jti = extractJtiFromToken(accessToken);
-        
+
         if (username == null || poolId == null) {
             throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
         }
-        
-        // Check if access token has been revoked
+
         validateTokenNotRevoked(jti, poolId, "access");
+        validateOriginJtiNotRevoked(accessToken, poolId);
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
         
@@ -1364,13 +1364,13 @@ public class CognitoService {
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);
         String jti = extractJtiFromToken(accessToken);
-        
+
         if (username == null || poolId == null) {
             throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
         }
-        
-        // Check if access token has been revoked
+
         validateTokenNotRevoked(jti, poolId, "access");
+        validateOriginJtiNotRevoked(accessToken, poolId);
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
         
@@ -1481,7 +1481,7 @@ public class CognitoService {
         // present a valid secret first, matching AWS which validates identity ahead of feature checks.
         String secret = client.getClientSecret();
         if (secret != null && !secret.isBlank() && !secret.equals(clientSecret)) {
-            throw new AwsException("NotAuthorizedException", "Invalid client secret", 400);
+            throw new AwsException("UnauthorizedException", "Invalid client secret", 403);
         }
 
         if (!isTokenRevocationEnabled(client)) {
@@ -1501,7 +1501,7 @@ public class CognitoService {
         String familyId = parts.length > 4 && !parts[4].isEmpty() ? parts[4] : null;
 
         if (!clientId.equals(tokenClientId)) {
-            throw new AwsException("NotAuthorizedException", "Refresh token was not issued to this client", 400);
+            throw new AwsException("UnauthorizedException", "Refresh token was not issued to this client", 403);
         }
         if (familyId == null) {
             return; // Nothing keyed to revoke (legacy token); revocation is idempotent.
@@ -2113,10 +2113,6 @@ public class CognitoService {
         }
     }
 
-    String buildRefreshToken(String poolId, String username, String clientId) {
-        return buildRefreshToken(poolId, username, clientId, null);
-    }
-
     String buildRefreshToken(String poolId, String username, String clientId, String originJti) {
         long issuedAt = System.currentTimeMillis();
         String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
@@ -2236,6 +2232,17 @@ public class CognitoService {
         }
     }
 
+    private String extractOriginJtiFromToken(String token) {
+        try {
+            String[] parts = token.split("\\.");
+            if (parts.length < 2) return null;
+            String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+            return extractJsonField(payloadJson, "origin_jti");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private Long extractIatFromToken(String token) {
         try {
             String[] parts = token.split("\\.");
@@ -2303,6 +2310,13 @@ public class CognitoService {
         }
     }
     
+    private void validateOriginJtiNotRevoked(String accessToken, String poolId) {
+        String originJti = extractOriginJtiFromToken(accessToken);
+        if (originJti != null) {
+            validateTokenNotRevoked(originJti, poolId, "access");
+        }
+    }
+
     /**
      * Check if a user has been globally signed out (affects all their tokens).
      * This method should be called in addition to validateTokenNotRevoked.

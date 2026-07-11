@@ -333,7 +333,33 @@ class OriginJtiIntegrationTest {
         JsonNode body = cognitoJsonAny("RevokeToken", """
                 {"ClientId":"%s","Token":"any-token","ClientSecret":"wrong-secret"}
                 """.formatted(confidentialClientId));
-        assertEquals("NotAuthorizedException", body.path("__type").asText(),
+        assertEquals("UnauthorizedException", body.path("__type").asText(),
                 "Caller identity must be validated before the revocation-enabled check, body was: " + body);
+    }
+
+    @Test
+    @Order(12)
+    void revokeTokenInvalidatesAccessTokens() throws Exception {
+        requireSetup();
+        JsonNode auth = passwordLogin();
+        String freshAccess = auth.path("AuthenticationResult").path("AccessToken").asText();
+        String freshRefresh = auth.path("AuthenticationResult").path("RefreshToken").asText();
+
+        // GetUser must succeed before revocation.
+        JsonNode ok = cognitoJsonAny("GetUser", """
+                {"AccessToken":"%s"}
+                """.formatted(freshAccess));
+        assertFalse(ok.has("__type"), "GetUser must succeed before RevokeToken, body was: " + ok);
+
+        cognitoAction("RevokeToken", """
+                {"ClientId":"%s","Token":"%s"}
+                """.formatted(clientId, freshRefresh)).then().statusCode(200);
+
+        // Access token issued alongside the revoked refresh token must now be rejected.
+        JsonNode rejected = cognitoJsonAny("GetUser", """
+                {"AccessToken":"%s"}
+                """.formatted(freshAccess));
+        assertEquals("NotAuthorizedException", rejected.path("__type").asText(),
+                "GetUser must fail after RevokeToken invalidates the origin_jti family, body was: " + rejected);
     }
 }
