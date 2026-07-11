@@ -89,4 +89,25 @@ class S3EncryptionIntegrationTest {
             .statusCode(404)
             .body(containsString("NoSuchBucket"));
     }
+
+    /**
+     * After DeleteBucketEncryption clears the explicit config, GetBucketEncryption must fall back
+     * to the AWS default SSE-S3 (AES256) — not the previously stored KMS config and not a 404.
+     */
+    @Test
+    @Order(6)
+    void getEncryptionAfterDeleteReturnsDefaultSseS3() {
+        given()
+        .when()
+            .delete("/" + BUCKET + "?encryption")
+        .then()
+            .statusCode(204);
+        given()
+        .when()
+            .get("/" + BUCKET + "?encryption")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SSEAlgorithm>AES256</SSEAlgorithm>"))
+            .body(not(containsString("aws:kms")));
+    }
 }
