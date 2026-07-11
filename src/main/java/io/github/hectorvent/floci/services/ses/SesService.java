@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
@@ -24,6 +25,7 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.Topic;
+import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
@@ -84,8 +86,12 @@ public class SesService {
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
     private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
     private final StorageBackend<String, ContactList> contactListStore;
+    private final StorageBackend<String, Contact> contactStore;
     // Guards the one-list-per-account check-then-create so concurrent creates can't both pass.
     private final Object contactListCreateLock = new Object();
+    // Serializes contact create/update against contact-list deletion so a concurrent delete
+    // can't purge the list between validation and the write, leaving an orphaned contact.
+    private final Object contactMutationLock = new Object();
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -116,6 +122,8 @@ public class SesService {
                 new TypeReference<Map<String, DedicatedIpPool>>() {});
         this.contactListStore = storageFactory.create("ses", "ses-contact-lists.json",
                 new TypeReference<Map<String, ContactList>>() {});
+        this.contactStore = storageFactory.create("ses", "ses-contacts.json",
+                new TypeReference<Map<String, Contact>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
@@ -133,11 +141,13 @@ public class SesService {
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                StorageBackend<String, ContactList> contactListStore,
+               StorageBackend<String, Contact> contactStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, emailStore, accountSettingsStore, templateStore, configSetStore, suppressionStore,
-                accountSuppressionStore, dedicatedIpPoolStore, contactListStore, smtpRelay, objectMapper, null, clock);
+                accountSuppressionStore, dedicatedIpPoolStore, contactListStore, contactStore, smtpRelay,
+                objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -149,6 +159,7 @@ public class SesService {
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                StorageBackend<String, ContactList> contactListStore,
+               StorageBackend<String, Contact> contactStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Route53Service route53Service,
@@ -162,6 +173,7 @@ public class SesService {
         this.accountSuppressionStore = accountSuppressionStore;
         this.dedicatedIpPoolStore = dedicatedIpPoolStore;
         this.contactListStore = contactListStore;
+        this.contactStore = contactStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
@@ -1366,10 +1378,25 @@ public class SesService {
 
     public void deleteContactList(String name, String region) {
         String key = contactListKey(region, name);
-        if (contactListStore.get(key).isEmpty()) {
-            throw contactListNotFound(name);
+        // Existence check, list delete, and contact purge all under the lock: concurrent deletes
+        // can't both pass the check (one must 404), and a concurrent create/update can't slip a
+        // contact in after the purge. Contacts are stored independently, so purging them here keeps
+        // them from leaking into a same-named list recreated later (AWS deletes them with the list).
+        String prefix = "contact::" + region + "::" + name + "::";
+        synchronized (contactMutationLock) {
+            if (contactListStore.get(key).isEmpty()) {
+                throw contactListNotFound(name);
+            }
+            contactListStore.delete(key);
+            // Delete by the actual stored keys (not keys rebuilt from each value's EmailAddress),
+            // so a persisted entry whose key and EmailAddress diverge is still purged.
+            List<String> contactKeys = contactStore.keys().stream()
+                    .filter(k -> k.startsWith(prefix))
+                    .toList();
+            for (String contactKey : contactKeys) {
+                contactStore.delete(contactKey);
+            }
         }
-        contactListStore.delete(key);
         LOG.infov("Deleted SES contact list: {0} in region {1}", name, region);
     }
 
@@ -1479,6 +1506,196 @@ public class SesService {
         // against real AWS: read/delete with an invalid name returns the same constraint message.
         validateContactListName(name);
         return "contactList::" + region + "::" + name;
+    }
+
+    // ─────────────────────────── Contacts ───────────────────────────
+
+    private static final Pattern EMAIL_PATTERN = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
+
+    public Contact createContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
+                                 Boolean unsubscribeAll, String attributesData, String region) {
+        validateContactInput(listName, emailAddress, topicPreferences, region);
+        Contact contact = new Contact(emailAddress);
+        contact.setTopicPreferences(topicPreferences);
+        contact.setUnsubscribeAll(unsubscribeAll != null && unsubscribeAll);
+        contact.setAttributesData(attributesData);
+        Instant now = Instant.now(clock);
+        contact.setCreatedTimestamp(now);
+        contact.setLastUpdatedTimestamp(now);
+        String key = contactKey(region, listName, emailAddress);
+        // Re-check the list, duplicate, and put under the lock so a concurrent deleteContactList
+        // can't purge the list between validation and the write (which would orphan this contact).
+        synchronized (contactMutationLock) {
+            getContactList(listName, region);
+            if (contactStore.get(key).isPresent()) {
+                throw new AwsException("AlreadyExistsException",
+                        emailAddress + " already exists in List.", 400);
+            }
+            contactStore.put(key, contact);
+        }
+        LOG.infov("Created SES contact {0} in list {1} (region {2})", emailAddress, listName, region);
+        return contact;
+    }
+
+    // Read operations return the resolved ContactList alongside the contact(s) so the controller
+    // can render TopicDefaultPreferences without a second getContactList round-trip (which would
+    // open a TOCTOU window where a concurrent delete turns a successful read into "List not found").
+    public record ContactWithList(Contact contact, ContactList list) {
+    }
+
+    public record ContactsWithList(List<Contact> contacts, ContactList list) {
+    }
+
+    public ContactWithList getContact(String listName, String emailAddress, String region) {
+        validateEmailAddress(emailAddress);
+        ContactList list = getContactList(listName, region);
+        Contact contact = contactStore.get(contactKey(region, listName, emailAddress))
+                .orElseThrow(() -> contactNotFound(emailAddress));
+        return new ContactWithList(contact, list);
+    }
+
+    public ContactsWithList listContacts(String listName, String region) {
+        ContactList list = getContactList(listName, region);
+        String prefix = "contact::" + region + "::" + listName + "::";
+        List<Contact> contacts = contactStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(Contact::getEmailAddress,
+                        Comparator.nullsFirst(Comparator.naturalOrder())))
+                .toList();
+        return new ContactsWithList(contacts, list);
+    }
+
+    public Contact updateContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
+                                 boolean topicPreferencesPresent, Boolean unsubscribeAll, String attributesData,
+                                 String region) {
+        validateContactInput(listName, emailAddress, topicPreferences, region);
+        String key = contactKey(region, listName, emailAddress);
+        Contact existing;
+        // Re-check the list and read-modify-write under the lock so a concurrent deleteContactList
+        // can't purge the contact/list between validation and the write (which would resurrect it).
+        synchronized (contactMutationLock) {
+            getContactList(listName, region);
+            existing = contactStore.get(key).orElseThrow(() -> contactNotFound(emailAddress));
+            // Verified against real AWS: TopicPreferences merge by topic name (omitting keeps existing);
+            // AttributesData and UnsubscribeAll are replaced (omitting clears / resets them).
+            if (topicPreferencesPresent) {
+                existing.setTopicPreferences(mergeTopicPreferences(existing.getTopicPreferences(), topicPreferences));
+            }
+            existing.setUnsubscribeAll(unsubscribeAll != null && unsubscribeAll);
+            existing.setAttributesData(attributesData);
+            existing.setLastUpdatedTimestamp(Instant.now(clock));
+            contactStore.put(key, existing);
+        }
+        LOG.infov("Updated SES contact {0} in list {1}", emailAddress, listName);
+        return existing;
+    }
+
+    public void deleteContact(String listName, String emailAddress, String region) {
+        validateEmailAddress(emailAddress);
+        String key = contactKey(region, listName, emailAddress);
+        // List re-check + existence check + delete under the lock (matching create/update): a
+        // concurrent deleteContactList then surfaces "list not found" rather than "contact not
+        // found", and an updateContact can't put a just-deleted contact back (resurrecting it).
+        synchronized (contactMutationLock) {
+            getContactList(listName, region);
+            if (contactStore.get(key).isEmpty()) {
+                throw contactNotFound(emailAddress);
+            }
+            contactStore.delete(key);
+        }
+        LOG.infov("Deleted SES contact {0} in list {1}", emailAddress, listName);
+    }
+
+    /**
+     * Derives {@code TopicDefaultPreferences}: each list topic the contact has not set an explicit
+     * preference for, carrying that topic's default subscription status.
+     */
+    public List<TopicPreference> deriveTopicDefaultPreferences(Contact contact, ContactList list) {
+        Set<String> explicit = new HashSet<>();
+        for (TopicPreference p : contact.getTopicPreferences()) {
+            explicit.add(p.getTopicName());
+        }
+        List<TopicPreference> defaults = new ArrayList<>();
+        for (Topic t : list.getTopics()) {
+            if (!explicit.contains(t.getTopicName())) {
+                defaults.add(new TopicPreference(t.getTopicName(), t.getDefaultSubscriptionStatus()));
+            }
+        }
+        return defaults;
+    }
+
+    private static AwsException contactNotFound(String emailAddress) {
+        return new AwsException("NotFoundException", emailAddress + " doesn't exist in List.", 404);
+    }
+
+    // Validation order verified against real AWS: protocol-layer (Smithy) topic-preference checks
+    // first, then EmailAddress format, then contact-list existence, then topic existence.
+    private void validateContactInput(String listName, String emailAddress, List<TopicPreference> prefs,
+                                      String region) {
+        if (prefs != null) {
+            for (int i = 0; i < prefs.size(); i++) {
+                TopicPreference p = prefs.get(i);
+                String member = "topicPreferences." + (i + 1) + ".member.";
+                if (p.getTopicName() == null) {
+                    throw validationError(member + "topicName", "Member must not be null");
+                }
+                if (p.getSubscriptionStatus() == null) {
+                    throw validationError(member + "subscriptionStatus", "Member must not be null");
+                }
+                if (!SUBSCRIPTION_STATUSES.contains(p.getSubscriptionStatus())) {
+                    throw validationError(member + "subscriptionStatus",
+                            "Member must satisfy enum value set: [OPT_OUT, OPT_IN]");
+                }
+            }
+        }
+        validateEmailAddress(emailAddress);
+        ContactList list = getContactList(listName, region);
+        if (prefs != null && !prefs.isEmpty()) {
+            Set<String> topicNames = new HashSet<>();
+            for (Topic t : list.getTopics()) {
+                topicNames.add(t.getTopicName());
+            }
+            for (TopicPreference p : prefs) {
+                if (!topicNames.contains(p.getTopicName())) {
+                    throw new AwsException("BadRequestException",
+                            "List: " + listName + " doesn't contain Topic: " + p.getTopicName(), 400);
+                }
+            }
+        }
+    }
+
+    private static List<TopicPreference> mergeTopicPreferences(List<TopicPreference> existing,
+                                                               List<TopicPreference> provided) {
+        Map<String, TopicPreference> byTopic = new LinkedHashMap<>();
+        if (existing != null) {
+            for (TopicPreference p : existing) {
+                byTopic.put(p.getTopicName(), p);
+            }
+        }
+        if (provided != null) {
+            for (TopicPreference p : provided) {
+                byTopic.put(p.getTopicName(), p);
+            }
+        }
+        return new ArrayList<>(byTopic.values());
+    }
+
+    private static void validateEmailAddress(String emailAddress) {
+        // Verified against real AWS: a missing/null required member is a Smithy validation error,
+        // an empty/blank value is "can't be blank", and only a non-blank malformed value is "invalid".
+        if (emailAddress == null) {
+            throw validationError("emailAddress", "Member must not be null");
+        }
+        if (emailAddress.isBlank()) {
+            throw new AwsException("BadRequestException", "EmailAddress can't be blank.", 400);
+        }
+        if (!EMAIL_PATTERN.matcher(emailAddress).matches()) {
+            throw new AwsException("BadRequestException",
+                    "EmailAddress <" + emailAddress + "> is invalid", 400);
+        }
+    }
+
+    private static String contactKey(String region, String listName, String emailAddress) {
+        return "contact::" + region + "::" + listName + "::" + emailAddress;
     }
 
     static void validateConfigurationSetName(String name) {

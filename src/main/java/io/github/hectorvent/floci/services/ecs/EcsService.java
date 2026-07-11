@@ -481,7 +481,14 @@ public class EcsService {
                     LOG.errorv("Failed to start ECS task {0}: {1}", taskArn, e.getMessage());
                     task.setLastStatus(TaskStatus.STOPPED.name());
                     task.setDesiredStatus(TaskStatus.STOPPED.name());
-                    task.setStoppedReason("Failed to start: " + e.getMessage());
+                    // A ResourceInitializationError is already AWS's exact stopped-reason wording
+                    // (e.g. a secret that could not be resolved), so pass it through verbatim.
+                    // Other start failures keep the generic prefix.
+                    boolean resourceInitError = e instanceof AwsException ae
+                            && "ResourceInitializationError".equals(ae.getErrorCode());
+                    task.setStoppedReason(resourceInitError
+                            ? e.getMessage()
+                            : "Failed to start: " + e.getMessage());
                     task.setStoppedAt(Instant.now());
                 }
             } else {

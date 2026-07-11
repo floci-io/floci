@@ -102,6 +102,22 @@ class RdsServiceTest {
     }
 
     @Test
+    void createAndModifyDbInstancePersistVpcSecurityGroups() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of("sg-created"));
+
+        assertEquals(List.of("sg-created"), instance.getVpcSecurityGroupIds());
+
+        DbInstance modified = rdsService.modifyDbInstance("mydb", null, null, null,
+                List.of("sg-updated-a", "sg-updated-b"));
+
+        assertEquals(List.of("sg-updated-a", "sg-updated-b"), modified.getVpcSecurityGroupIds());
+        assertEquals(List.of("sg-updated-a", "sg-updated-b"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
+    }
+
+    @Test
     void postgresImageUsesRequestedEngineVersionAndDefaultFlavor() {
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1"));
@@ -596,6 +612,21 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbSubnetGroupUsesSuppliedRegionForSubnetLookup() {
+        List<String> subnetIds = List.of("subnet-west-a", "subnet-west-b");
+        when(ec2Service.describeSubnets(eq("us-west-2"), eq(subnetIds), eq(Map.of())))
+                .thenReturn(List.of(
+                        subnet("subnet-west-a", "vpc-west", "us-west-2a"),
+                        subnet("subnet-west-b", "vpc-west", "us-west-2b")));
+
+        DbSubnetGroup group = rdsService.createDbSubnetGroup("west-subnets", "desc", subnetIds, "us-west-2");
+
+        assertEquals("vpc-west", group.getVpcId());
+        assertEquals("arn:aws:rds:us-west-2:123456789012:subgrp:west-subnets", group.getDbSubnetGroupArn());
+        verify(ec2Service).describeSubnets(eq("us-west-2"), eq(subnetIds), eq(Map.of()));
+    }
+
+    @Test
     void createDbSubnetGroupRequiresSubnetIdsWithMissingParameter() {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of()));
@@ -652,6 +683,36 @@ class RdsServiceTest {
 
         assertEquals("default", group.getDbSubnetGroupName());
         assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:default", group.getDbSubnetGroupArn());
+    }
+
+    @Test
+    void resolveDbSubnetGroupViewUsesSuppliedRegionForDefaultGroup() {
+        when(ec2Service.describeSubnets(eq("us-west-2"), anyList(), any()))
+                .thenReturn(List.of(
+                        subnet("subnet-west-a", "vpc-west", "us-west-2a"),
+                        subnet("subnet-west-b", "vpc-west", "us-west-2b")));
+
+        DbSubnetGroup group = rdsService.resolveDbSubnetGroupView(null, "us-west-2");
+
+        assertEquals("default", group.getDbSubnetGroupName());
+        assertEquals("vpc-west", group.getVpcId());
+        assertEquals("arn:aws:rds:us-west-2:123456789012:subgrp:default", group.getDbSubnetGroupArn());
+        assertEquals(Map.of("subnet-west-a", "us-west-2a", "subnet-west-b", "us-west-2b"),
+                group.getSubnetAvailabilityZones());
+    }
+
+    @Test
+    void getDbSubnetGroupUsesSuppliedRegionForDefaultGroup() {
+        when(ec2Service.describeSubnets(eq("us-west-2"), anyList(), any()))
+                .thenReturn(List.of(
+                        subnet("subnet-west-a", "vpc-west", "us-west-2a"),
+                        subnet("subnet-west-b", "vpc-west", "us-west-2b")));
+
+        DbSubnetGroup group = rdsService.getDbSubnetGroup("default", "us-west-2");
+
+        assertEquals("default", group.getDbSubnetGroupName());
+        assertEquals("vpc-west", group.getVpcId());
+        assertEquals("arn:aws:rds:us-west-2:123456789012:subgrp:default", group.getDbSubnetGroupArn());
     }
 
     @Test
@@ -799,16 +860,16 @@ class RdsServiceTest {
     }
 
     private static List<Subnet> defaultSubnets() {
-        Subnet subnetA = new Subnet();
-        subnetA.setSubnetId("subnet-default-a");
-        subnetA.setVpcId("vpc-default");
-        subnetA.setAvailabilityZone("us-east-1a");
+        return List.of(
+                subnet("subnet-default-a", "vpc-default", "us-east-1a"),
+                subnet("subnet-default-b", "vpc-default", "us-east-1b"));
+    }
 
-        Subnet subnetB = new Subnet();
-        subnetB.setSubnetId("subnet-default-b");
-        subnetB.setVpcId("vpc-default");
-        subnetB.setAvailabilityZone("us-east-1b");
-
-        return List.of(subnetA, subnetB);
+    private static Subnet subnet(String subnetId, String vpcId, String availabilityZone) {
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId(subnetId);
+        subnet.setVpcId(vpcId);
+        subnet.setAvailabilityZone(availabilityZone);
+        return subnet;
     }
 }
