@@ -10,12 +10,15 @@ import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
+import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
+import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -175,6 +178,65 @@ class AslExecutorResultWriterTest {
         assertEquals(3, out.size());
         assertEquals(1, out.get(0).path("id").asInt());
         assertEquals(3, out.get(2).path("id").asInt());
+    }
+
+    @Test
+    void exportRecordsScalarStringInputAndOutputAsQuotedJson() throws Exception {
+        JsonNode stateDef = mapper.readTree("""
+                {"Type":"Map",
+                 "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                   "Parameters":{"Bucket":"my-bucket","Prefix":"p"}}}
+                """);
+        // A child whose input and output are JSON string scalars.
+        ArrayNode results = arr("\"hello\"");
+        ArrayNode inputs = arr("\"world\"");
+        List<long[]> timings = List.of(new long[]{1000L, 2000L});
+
+        executor.applyResultWriter("Process", stateDef, mapper.createObjectNode(),
+                results, inputs, timings, sm, context, false);
+
+        ArgumentCaptor<byte[]> bodies = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service, org.mockito.Mockito.times(2))
+                .putObject(eq("my-bucket"), anyString(), bodies.capture(), anyString(), any());
+        // The records file is the JSON array write (the other write is manifest.json, an object).
+        JsonNode first = mapper.readTree(bodies.getAllValues().get(0));
+        JsonNode records = first.isArray() ? first : mapper.readTree(bodies.getAllValues().get(1));
+        JsonNode rec = records.get(0);
+        // AWS stores a child's Input/Output as a JSON-encoded string, so a string scalar keeps its
+        // surrounding quotes (regression: asText() would drop them and yield invalid JSON).
+        assertEquals("\"hello\"", rec.path("Output").asText());
+        assertEquals("\"world\"", rec.path("Input").asText());
+    }
+
+    @Test
+    void resultWriterOnInlineMapIsRejected() {
+        StateMachine machine = new StateMachine();
+        machine.setName("orderProcessing");
+        machine.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:orderProcessing");
+        machine.setRoleArn("arn:aws:iam::000000000000:role/test-role");
+        // An INLINE map (no ProcessorConfig Mode) carrying a ResultWriter but no ItemReader.
+        machine.setDefinition("""
+                {"StartAt":"M","States":{"M":{"Type":"Map",
+                  "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                  "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                    "Parameters":{"Bucket":"b","Prefix":"p"}},
+                  "End":true}}}
+                """);
+        Execution execution = new Execution();
+        execution.setName("exec-1");
+        execution.setExecutionArn(
+                "arn:aws:states:us-east-1:000000000000:execution:orderProcessing:exec-1");
+        execution.setStateMachineArn(machine.getStateMachineArn());
+        execution.setInput("[1,2]");
+
+        executor.executeSync(machine, execution, new ArrayList<HistoryEvent>(), (u, e) -> { });
+
+        // AWS rejects ResultWriter on an inline map; Floci fails the execution rather than exporting.
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Runtime", execution.getError());
+        assertTrue(execution.getCause().contains("not supported for INLINE maps"), execution.getCause());
+        verify(s3Service, org.mockito.Mockito.never())
+                .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
     @Test

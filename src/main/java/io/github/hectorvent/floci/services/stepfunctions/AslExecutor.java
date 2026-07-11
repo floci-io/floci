@@ -1373,7 +1373,10 @@ public class AslExecutor {
 
     private StateResult executeMapState(String name, JsonNode stateDef, JsonNode input, StateMachine sm,
                                          boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
-        if (stateDef.has("ItemReader")) {
+        // ItemReader, ItemBatcher and ResultWriter are distributed-map-only fields; AWS rejects them on
+        // an INLINE map. Guard on all three (not just ItemReader) so a ResultWriter on an inline map is
+        // rejected rather than silently exporting to S3.
+        if (stateDef.has("ItemReader") || stateDef.has("ItemBatcher") || stateDef.has("ResultWriter")) {
             String mode = stateDef.path("ItemProcessor").path("ProcessorConfig").path("Mode").asText("INLINE");
             if (!"DISTRIBUTED".equals(mode)) {
                 throw new FailStateException("States.Runtime",
@@ -1608,12 +1611,16 @@ public class AslExecutor {
         return out;
     }
 
-    /** AWS records a child execution's Input/Output as a JSON string; scalars keep their text form. */
+    /**
+     * AWS records a child execution's Input/Output as a JSON-encoded string. Using {@code toString()}
+     * (not {@code asText()}) keeps scalar strings quoted — the string {@code hello} is exported as
+     * {@code "hello"} — so the field is always valid JSON regardless of the value's type.
+     */
     private String stringifyResult(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return "null";
         }
-        return node.isValueNode() ? node.asText() : node.toString();
+        return node.toString();
     }
 
     /** Serializes a formatted result array as a JSON array or as JSON Lines per {@code OutputType}. */
