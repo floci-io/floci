@@ -135,6 +135,86 @@ class EsmIntegrationTest {
     }
 
     @Test
+    void updateEventSourceMappingReturnsFailureConfig() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:000000000000:table/esm-table/stream/2026-01-01T00:00:00.000";
+        String destinationArn = "arn:aws:sqs:us-east-1:000000000000:esm-updated-failure-config-dlq";
+
+        String uuid = given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "FunctionName": "%s",
+                          "EventSourceArn": "%s"
+                        }
+                        """.formatted(FUNCTION_NAME, streamArn))
+                .when()
+                .post(LAMBDA_BASE + "/event-source-mappings/")
+                .then()
+                .statusCode(202)
+                .body("$", not(hasKey("BisectBatchOnFunctionError")))
+                .body("$", not(hasKey("DestinationConfig")))
+                .extract()
+                .path("UUID");
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "BisectBatchOnFunctionError": true,
+                          "DestinationConfig": {
+                            "OnFailure": {
+                              "Destination": "%s"
+                            }
+                          }
+                        }
+                        """.formatted(destinationArn))
+                .when()
+                .put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+                .then()
+                .statusCode(202)
+                .body("BisectBatchOnFunctionError", equalTo(true))
+                .body("DestinationConfig.OnFailure.Destination", equalTo(destinationArn));
+
+        given()
+                .when()
+                .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+                .then()
+                .statusCode(200)
+                .body("BisectBatchOnFunctionError", equalTo(true))
+                .body("DestinationConfig.OnFailure.Destination", equalTo(destinationArn));
+
+        given()
+                .delete(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+                .then()
+                .statusCode(202);
+    }
+
+    @Test
+    void responseOmitsFailureConfigWhenUnset() {
+        String uuid = given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "FunctionName": "%s",
+                          "EventSourceArn": "%s"
+                        }
+                        """.formatted(FUNCTION_NAME, QUEUE_ARN))
+                .when()
+                .post(LAMBDA_BASE + "/event-source-mappings/")
+                .then()
+                .statusCode(202)
+                .body("$", not(hasKey("BisectBatchOnFunctionError")))
+                .body("$", not(hasKey("DestinationConfig")))
+                .extract()
+                .path("UUID");
+
+        given()
+                .delete(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+                .then()
+                .statusCode(202);
+    }
+
+    @Test
     @Order(5)
     void createEventSourceMappingForNonExistentFunction() {
         given()

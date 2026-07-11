@@ -709,6 +709,12 @@ public class LambdaService {
 
         ScalingConfig scalingConfig = parseScalingConfig(request, eventSourceArn);
 
+        Boolean bisectBatchOnFunctionError = request.get("BisectBatchOnFunctionError") instanceof Boolean b
+                ? b
+                : null;
+
+        EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
+
         String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
 
         EventSourceMapping esm = new EventSourceMapping();
@@ -724,6 +730,8 @@ public class LambdaService {
         esm.setState(enabled ? "Enabled" : "Disabled");
         esm.setScalingConfig(scalingConfig);
         esm.setFunctionResponseTypes(functionResponseTypes);
+        esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
+        esm.setDestinationConfig(destinationConfig);
         esm.setLastModified(System.currentTimeMillis());
 
         esmStore.save(esm);
@@ -732,6 +740,38 @@ public class LambdaService {
         }
         LOG.infov("Created ESM {0}: {1} → {2}", esm.getUuid(), eventSourceArn, resolvedName);
         return esm;
+    }
+
+    private EventSourceMapping.DestinationConfig parseDestinationConfig(Map<String, Object> request) {
+        Object raw = request.get("DestinationConfig");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map<?, ?> destMap)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "DestinationConfig must be a JSON object", 400);
+        }
+
+        Object rawOnFailure = destMap.get("OnFailure");
+        if (rawOnFailure == null) {
+            return null;
+        }
+        if (!(rawOnFailure instanceof Map<?, ?> onFailureMap)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "DestinationConfig.OnFailure must be a JSON object", 400);
+        }
+
+        Object destination = onFailureMap.get("Destination");
+        if (destination == null) {
+            return null;
+        }
+
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination(String.valueOf(destination));
+
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        return destinationConfig;
     }
 
     /**
@@ -834,6 +874,15 @@ public class LambdaService {
             // AWS: passing ScalingConfig resets it. An empty object or one
             // with MaximumConcurrency=null clears the cap.
             esm.setScalingConfig(parseScalingConfig(request, esm.getEventSourceArn()));
+        }
+
+        if (request.containsKey("BisectBatchOnFunctionError")) {
+            Object raw = request.get("BisectBatchOnFunctionError");
+            esm.setBisectBatchOnFunctionError(raw instanceof Boolean b ? b : null);
+        }
+
+        if (request.containsKey("DestinationConfig")) {
+            esm.setDestinationConfig(parseDestinationConfig(request));
         }
 
         esm.setLastModified(System.currentTimeMillis());

@@ -330,6 +330,17 @@ public class LambdaController {
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
         ArrayNode responseTypes = node.putArray("FunctionResponseTypes");
+
+        if (esm.getBisectBatchOnFunctionError() != null) {
+            node.put("BisectBatchOnFunctionError", esm.getBisectBatchOnFunctionError());
+        }
+
+        if (esm.getDestinationConfig() != null && esm.getDestinationConfig().getOnFailure() != null) {
+            ObjectNode destinationConfig = node.putObject("DestinationConfig");
+            ObjectNode onFailure = destinationConfig.putObject("OnFailure");
+            onFailure.put("Destination", esm.getDestinationConfig().getOnFailure().getDestination());
+        }
+
         if (esm.getFunctionResponseTypes() != null) {
             esm.getFunctionResponseTypes().forEach(responseTypes::add);
         }
