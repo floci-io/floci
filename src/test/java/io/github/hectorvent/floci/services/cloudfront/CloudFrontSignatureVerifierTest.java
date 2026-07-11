@@ -133,6 +133,20 @@ class CloudFrontSignatureVerifierTest {
     }
 
     @Test
+    void malformedPolicyBase64IsDeniedNotThrown() {
+        // A Policy value that is not valid CloudFront base64 is a bad request: verify() must deny
+        // it (CloudFront answers 403) rather than let the base64 decode throw and become a 500.
+        Map<String, String> query = Map.of(
+                "Policy", "@@@not-valid-base64@@@",
+                "Signature", "AAAA",
+                "Key-Pair-Id", KEY_ID);
+
+        var result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
+        assertFalse(result.allowed());
+        assertTrue(result.reason().contains("base64"), result.reason());
+    }
+
+    @Test
     void customPolicyWithWildcardResourceIsAccepted() throws Exception {
         String policyJson = "{\"Statement\":[{\"Resource\":\"https://d123.cloudfront.net/private/*\","
                 + "\"Condition\":{\"DateLessThan\":{\"AWS:EpochTime\":" + soon() + "}}}]}";

@@ -77,7 +77,14 @@ public final class CloudFrontSignatureVerifier {
 
         String policyJson;
         if (policyParam != null) {
-            policyJson = new String(cfBase64Decode(policyParam), StandardCharsets.UTF_8);
+            try {
+                policyJson = new String(cfBase64Decode(policyParam), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                // A malformed Policy value is a bad request, not a server fault: CloudFront denies
+                // it (403) rather than surfacing a decode error. cfBase64Decode delegates to
+                // Base64.getDecoder().decode(), which throws IllegalArgumentException on invalid input.
+                return Result.deny("Policy parameter is not valid CloudFront base64");
+            }
         } else if (expires != null) {
             policyJson = cannedPolicy(resourceUrl, expires);
         } else {
