@@ -1765,7 +1765,23 @@ public class CloudFrontController {
         }
         xml.end("CacheBehaviors");
 
-        xml.start("CustomErrorResponses").elem("Quantity", 0).end("CustomErrorResponses");
+        List<Map<String, Object>> customErrors = cfg.getCustomErrorResponses();
+        int cerCount = customErrors != null ? customErrors.size() : 0;
+        xml.start("CustomErrorResponses").elem("Quantity", cerCount);
+        if (cerCount > 0) {
+            xml.start("Items");
+            for (Map<String, Object> cer : customErrors) {
+                xml.start("CustomErrorResponse")
+                        .elem("ErrorCode", str(cer.get("ErrorCode")))
+                        .elem("ResponsePagePath", str(cer.get("ResponsePagePath")))
+                        .elem("ResponseCode", str(cer.get("ResponseCode")))
+                        .elem("ErrorCachingMinTTL", cer.get("ErrorCachingMinTTL") != null
+                                ? str(cer.get("ErrorCachingMinTTL")) : "0")
+                        .end("CustomErrorResponse");
+            }
+            xml.end("Items");
+        }
+        xml.end("CustomErrorResponses");
 
         List<String> aliases = cfg.getAliases();
         int aliasCount = aliases != null ? aliases.size() : 0;
@@ -2059,6 +2075,11 @@ public class CloudFrontController {
                 .build();
     }
 
+    /** Renders a possibly-null value as a string, using the empty string for {@code null}. */
+    private static String str(Object value) {
+        return value != null ? value.toString() : "";
+    }
+
     private String xmlQuantityItems(String wrapper, String itemTag, int count, List<String> items) {
         XmlBuilder xml = new XmlBuilder().start(wrapper).elem("Quantity", count);
         if (count > 0 && items != null && !items.isEmpty()) {
@@ -2106,8 +2127,66 @@ public class CloudFrontController {
         cfg.setCacheBehaviors(parseCacheBehaviors(body));
         cfg.setAliases(parseAliases(body));
         cfg.setViewerCertificate(parseViewerCertificate(body));
+        cfg.setCustomErrorResponses(parseCustomErrorResponses(body));
 
         return cfg;
+    }
+
+    /**
+     * Parses the {@code CustomErrorResponses} block into a list of maps keyed by
+     * {@code ErrorCode}, {@code ResponsePagePath}, {@code ResponseCode} and {@code ErrorCachingMinTTL}
+     * (values kept as strings). CloudFront uses these to override an origin error with a custom
+     * page/status — most notably the SPA fallback that turns a 403/404 into 200 {@code /index.html}.
+     */
+    private List<Map<String, Object>> parseCustomErrorResponses(String body) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (body == null || body.isEmpty()) {
+            return result;
+        }
+        try {
+            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            boolean inBlock = false;
+            boolean inItem = false;
+            Map<String, Object> current = null;
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String local = r.getLocalName();
+                    switch (local) {
+                        case "CustomErrorResponses" -> inBlock = true;
+                        case "CustomErrorResponse" -> {
+                            if (inBlock) {
+                                inItem = true;
+                                current = new LinkedHashMap<>();
+                            }
+                        }
+                        case "ErrorCode", "ResponsePagePath", "ResponseCode", "ErrorCachingMinTTL" -> {
+                            if (inItem && current != null) {
+                                current.put(local, r.getElementText());
+                            }
+                        }
+                        default -> {
+                        }
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    switch (r.getLocalName()) {
+                        case "CustomErrorResponse" -> {
+                            if (inItem && current != null) {
+                                result.add(current);
+                            }
+                            inItem = false;
+                            current = null;
+                        }
+                        case "CustomErrorResponses" -> inBlock = false;
+                        default -> {
+                        }
+                    }
+                }
+            }
+            r.close();
+        } catch (Exception ignored) {
+        }
+        return result;
     }
 
     private List<Origin> parseOrigins(String body) {

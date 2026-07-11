@@ -4,6 +4,12 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.batch.BatchService;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -153,6 +159,7 @@ public class CloudFormationResourceProvisioner {
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
     private final FirehoseService firehoseService;
+    private final CloudFrontService cloudFrontService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -181,7 +188,8 @@ public class CloudFormationResourceProvisioner {
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
                                              AutoScalingService autoScalingService,
-                                             FirehoseService firehoseService) {
+                                             FirehoseService firehoseService,
+                                             CloudFrontService cloudFrontService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -213,6 +221,7 @@ public class CloudFormationResourceProvisioner {
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
         this.firehoseService = firehoseService;
+        this.cloudFrontService = cloudFrontService;
     }
 
     /**
@@ -343,6 +352,8 @@ public class CloudFormationResourceProvisioner {
                         provisionLaunchConfiguration(resource, properties, engine, region, stackName);
                 case "AWS::AutoScaling::AutoScalingGroup" ->
                         provisionAutoScalingGroup(resource, properties, engine, region, stackName);
+                case "AWS::CloudFront::Distribution" ->
+                        provisionCloudFrontDistribution(resource, properties, engine);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -450,6 +461,7 @@ public class CloudFormationResourceProvisioner {
                     autoScalingService.deleteLaunchConfiguration(region, physicalId);
             case "AWS::AutoScaling::AutoScalingGroup" ->
                     autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
+            case "AWS::CloudFront::Distribution" -> cloudFrontService.removeDistribution(physicalId);
             default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
         }
     }
@@ -3792,6 +3804,149 @@ public class CloudFormationResourceProvisioner {
 
     private static String textOrNull(JsonNode node, String field) {
         return node != null && node.hasNonNull(field) ? node.path(field).asText() : null;
+    }
+
+    // ── CloudFront ────────────────────────────────────────────────────────────
+
+    /**
+     * Provisions an {@code AWS::CloudFront::Distribution} by translating its {@code DistributionConfig}
+     * property tree into a {@link DistributionConfig} and creating the distribution. {@code Ref} returns
+     * the distribution id; {@code Fn::GetAtt} exposes {@code Id} and {@code DomainName} (closes #1147,
+     * where {@code Fn::GetAtt DomainName} previously returned an unresolved token).
+     */
+    private void provisionCloudFrontDistribution(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine) {
+        JsonNode dc = props != null ? props.path("DistributionConfig") : null;
+        DistributionConfig config = new DistributionConfig();
+        if (dc != null && !dc.isMissingNode() && !dc.isNull()) {
+            config.setEnabled(cfnBool(dc, "Enabled", engine, true));
+            config.setComment(cfnText(dc, "Comment", engine));
+            config.setDefaultRootObject(cfnText(dc, "DefaultRootObject", engine));
+            config.setHttpVersion(cfnTextOrDefault(dc, "HttpVersion", engine, "http2"));
+            config.setPriceClass(cfnTextOrDefault(dc, "PriceClass", engine, "PriceClass_All"));
+            config.setAliases(cfnStringList(dc.path("Aliases"), engine));
+            config.setOrigins(cfnOrigins(dc, engine));
+            config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));
+            config.setCacheBehaviors(cfnCacheBehaviors(dc, engine));
+            config.setCustomErrorResponses(cfnCustomErrorResponses(dc, engine));
+        }
+
+        Distribution dist = new Distribution();
+        dist.setConfig(config);
+        dist = cloudFrontService.createDistribution(dist, Map.of());
+
+        r.setPhysicalId(dist.getId());
+        r.getAttributes().put("Id", dist.getId());
+        r.getAttributes().put("DomainName", dist.getDomainName());
+        r.getAttributes().put("Arn", dist.getArn());
+    }
+
+    private List<Origin> cfnOrigins(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<Origin> origins = new ArrayList<>();
+        JsonNode items = dc.path("Origins");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                Origin origin = new Origin();
+                origin.setId(cfnText(node, "Id", engine));
+                origin.setDomainName(cfnText(node, "DomainName", engine));
+                String originPath = cfnText(node, "OriginPath", engine);
+                if (!originPath.isEmpty()) {
+                    origin.setOriginPath(originPath);
+                }
+                JsonNode s3 = node.path("S3OriginConfig");
+                JsonNode custom = node.path("CustomOriginConfig");
+                if (!custom.isMissingNode() && !custom.isNull()) {
+                    Map<String, Object> coc = new LinkedHashMap<>();
+                    coc.put("HTTPPort", cfnTextOrDefault(custom, "HTTPPort", engine, "80"));
+                    coc.put("HTTPSPort", cfnTextOrDefault(custom, "HTTPSPort", engine, "443"));
+                    coc.put("OriginProtocolPolicy",
+                            cfnTextOrDefault(custom, "OriginProtocolPolicy", engine, "https-only"));
+                    origin.setCustomOriginConfig(coc);
+                } else {
+                    // No CustomOriginConfig => S3 origin (S3OriginConfig may be present or defaulted).
+                    Map<String, String> s3c = new LinkedHashMap<>();
+                    s3c.put("OriginAccessIdentity",
+                            s3.isMissingNode() || s3.isNull() ? "" : cfnText(s3, "OriginAccessIdentity", engine));
+                    origin.setS3OriginConfig(s3c);
+                }
+                origins.add(origin);
+            }
+        }
+        return origins;
+    }
+
+    private DefaultCacheBehavior cfnDefaultCacheBehavior(JsonNode node, CloudFormationTemplateEngine engine) {
+        DefaultCacheBehavior dcb = new DefaultCacheBehavior();
+        if (node != null && !node.isMissingNode() && !node.isNull()) {
+            dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
+            dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+        }
+        return dcb;
+    }
+
+    private List<CacheBehavior> cfnCacheBehaviors(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<CacheBehavior> behaviors = new ArrayList<>();
+        JsonNode items = dc.path("CacheBehaviors");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                CacheBehavior cb = new CacheBehavior();
+                cb.setPathPattern(cfnText(node, "PathPattern", engine));
+                cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
+                cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+                behaviors.add(cb);
+            }
+        }
+        return behaviors;
+    }
+
+    private List<Map<String, Object>> cfnCustomErrorResponses(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        JsonNode items = dc.path("CustomErrorResponses");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                Map<String, Object> cer = new LinkedHashMap<>();
+                cer.put("ErrorCode", cfnText(node, "ErrorCode", engine));
+                putIfPresent(cer, "ResponseCode", cfnText(node, "ResponseCode", engine));
+                putIfPresent(cer, "ResponsePagePath", cfnText(node, "ResponsePagePath", engine));
+                putIfPresent(cer, "ErrorCachingMinTTL", cfnText(node, "ErrorCachingMinTTL", engine));
+                result.add(cer);
+            }
+        }
+        return result;
+    }
+
+    private static void putIfPresent(Map<String, Object> map, String key, String value) {
+        if (value != null && !value.isEmpty()) {
+            map.put(key, value);
+        }
+    }
+
+    private List<String> cfnStringList(JsonNode arrayNode, CloudFormationTemplateEngine engine) {
+        List<String> result = new ArrayList<>();
+        if (arrayNode != null && arrayNode.isArray()) {
+            for (JsonNode item : arrayNode) {
+                String value = engine.resolve(item);
+                if (value != null && !value.isEmpty()) {
+                    result.add(value);
+                }
+            }
+        }
+        return result;
+    }
+
+    private String cfnText(JsonNode parent, String field, CloudFormationTemplateEngine engine) {
+        return parent == null ? "" : engine.resolve(parent.path(field));
+    }
+
+    private String cfnTextOrDefault(JsonNode parent, String field, CloudFormationTemplateEngine engine,
+                                    String dflt) {
+        String value = cfnText(parent, field, engine);
+        return value.isEmpty() ? dflt : value;
+    }
+
+    private boolean cfnBool(JsonNode parent, String field, CloudFormationTemplateEngine engine, boolean dflt) {
+        String value = cfnText(parent, field, engine);
+        return value.isEmpty() ? dflt : "true".equalsIgnoreCase(value);
     }
 
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
