@@ -198,6 +198,7 @@ floci:
       clear-fifo-deduplication-cache-on-purge: false
     s3:
       enabled: true
+      enforce-auth: false
       default-presign-expiry-seconds: 3600
     dynamodb:
       enabled: true
