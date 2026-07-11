@@ -87,6 +87,308 @@ resource "aws_iam_role" "lambda_exec" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 
+# -- ECR Repository ------------------------------------------------------------
+resource "aws_ecr_repository" "app" {
+  name                 = "floci-compat-app"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = false
+  }
+}
+
+# -- ECS Cluster ---------------------------------------------------------------
+resource "aws_ecs_cluster" "app" {
+  name = "floci-compat-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "disabled"
+  }
+}
+
+# -- KMS Key -------------------------------------------------------------------
+resource "aws_kms_key" "compat" {
+  description             = "Floci Terraform compatibility key"
+  deletion_window_in_days = 7
+  enable_key_rotation     = false
+}
+
+# -- Kinesis Stream ------------------------------------------------------------
+resource "aws_kinesis_stream" "events" {
+  name             = "floci-compat-events"
+  shard_count      = 1
+  retention_period = 24
+}
+
+# -- CloudWatch Log Group ------------------------------------------------------
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/floci/compat/app"
+  retention_in_days = 1
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+# -- EventBridge Event Bus -----------------------------------------------------
+resource "aws_cloudwatch_event_bus" "compat" {
+  name = "floci-compat-bus"
+}
+
+# -- Step Functions State Machine ----------------------------------------------
+resource "aws_sfn_state_machine" "compat" {
+  name     = "floci-compat-state-machine"
+  role_arn = aws_iam_role.lambda_exec.arn
+  definition = jsonencode({
+    Comment = "Floci Terraform compatibility state machine"
+    StartAt = "Pass"
+    States = {
+      Pass = {
+        Type = "Pass"
+        End  = true
+      }
+    }
+  })
+}
+
+# -- CloudFormation Stack ------------------------------------------------------
+resource "aws_cloudformation_stack" "compat" {
+  name = "floci-compat-stack"
+  template_body = jsonencode({
+    Resources = {
+      CompatBucket = {
+        Type = "AWS::S3::Bucket"
+        Properties = {
+          BucketName = "floci-compat-cfn-bucket"
+        }
+      }
+    }
+  })
+}
+
+# -- EKS Cluster ---------------------------------------------------------------
+resource "aws_eks_cluster" "compat" {
+  name     = "floci-compat-eks"
+  role_arn = aws_iam_role.lambda_exec.arn
+
+  vpc_config {
+    subnet_ids = [aws_subnet.compat.id]
+  }
+}
+
+# -- CodeBuild Project ---------------------------------------------------------
+resource "aws_codebuild_project" "compat" {
+  name         = "floci-compat-codebuild"
+  service_role = aws_iam_role.lambda_exec.arn
+
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    image                       = "aws/codebuild/standard:7.0"
+    type                        = "LINUX_CONTAINER"
+    image_pull_credentials_type = "CODEBUILD"
+  }
+
+  source {
+    type = "NO_SOURCE"
+  }
+}
+
+# -- API Gateway v1 ------------------------------------------------------------
+resource "aws_api_gateway_rest_api" "compat" {
+  name = "floci-compat-api"
+}
+
+# -- API Gateway v2 ------------------------------------------------------------
+resource "aws_apigatewayv2_api" "compat" {
+  name          = "floci-compat-http-api"
+  protocol_type = "HTTP"
+}
+
+# -- AppConfig Application -----------------------------------------------------
+resource "aws_appconfig_application" "compat" {
+  name        = "floci-compat-appconfig"
+  description = "Floci Terraform compatibility application"
+}
+
+# -- Athena Workgroup ----------------------------------------------------------
+resource "aws_athena_workgroup" "compat" {
+  name = "floci-compat-workgroup"
+}
+
+# -- AWS Backup Vault ----------------------------------------------------------
+resource "aws_backup_vault" "compat" {
+  name = "floci-compat-vault"
+}
+
+# -- Cloud Map Namespace -------------------------------------------------------
+resource "aws_service_discovery_private_dns_namespace" "compat" {
+  name        = "floci-compat.internal"
+  description = "Floci Terraform compatibility namespace"
+  vpc         = aws_vpc.compat.id
+}
+
+# -- CodeDeploy Application ----------------------------------------------------
+resource "aws_codedeploy_app" "compat" {
+  name             = "floci-compat-codedeploy"
+  compute_platform = "Server"
+}
+
+# -- ACM Certificate -----------------------------------------------------------
+resource "aws_acm_certificate" "compat" {
+  domain_name       = "floci-compat.internal"
+  validation_method = "DNS"
+}
+
+# -- SES Email Identity --------------------------------------------------------
+resource "aws_ses_email_identity" "compat" {
+  email = "terraform@floci-compat.internal"
+}
+
+# -- EventBridge Scheduler -----------------------------------------------------
+resource "aws_scheduler_schedule" "compat" {
+  name                         = "floci-compat-schedule"
+  schedule_expression          = "rate(1 hour)"
+  schedule_expression_timezone = "UTC"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = aws_sqs_queue.jobs.arn
+    role_arn = aws_iam_role.lambda_exec.arn
+  }
+}
+
+# -- Transfer Family Server ----------------------------------------------------
+resource "aws_transfer_server" "compat" {
+  identity_provider_type = "SERVICE_MANAGED"
+  protocols              = ["SFTP"]
+}
+
+# -- WAFv2 Web ACL -------------------------------------------------------------
+resource "aws_wafv2_web_acl" "compat" {
+  name  = "floci-compat-waf"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = false
+    metric_name                = "flociCompatWaf"
+    sampled_requests_enabled   = false
+  }
+}
+
+# -- CloudTrail Trail ----------------------------------------------------------
+resource "aws_cloudtrail" "compat" {
+  name           = "floci-compat-trail"
+  s3_bucket_name = aws_s3_bucket.app.bucket
+}
+
+# -- Cost and Usage Report -----------------------------------------------------
+resource "aws_cur_report_definition" "compat" {
+  report_name                = "floci-compat-report"
+  time_unit                  = "HOURLY"
+  format                     = "textORcsv"
+  compression                = "GZIP"
+  additional_schema_elements = ["RESOURCES"]
+  s3_bucket                  = aws_s3_bucket.app.bucket
+  s3_prefix                  = "cur"
+  s3_region                  = "us-east-1"
+}
+
+# -- AppSync GraphQL API -------------------------------------------------------
+resource "aws_appsync_graphql_api" "compat" {
+  name                = "floci-compat-graphql"
+  authentication_type = "API_KEY"
+  schema              = "type Query { health: String }"
+}
+
+# -- Glue Catalog Database -----------------------------------------------------
+resource "aws_glue_catalog_database" "compat" {
+  name        = "floci_compat_db"
+  description = "Floci Terraform compatibility database"
+}
+
+# -- ElastiCache Cluster -------------------------------------------------------
+resource "aws_elasticache_cluster" "compat" {
+  cluster_id      = "floci-compat-cache"
+  engine          = "redis"
+  node_type       = "cache.t3.micro"
+  num_cache_nodes = 1
+  port            = 6379
+}
+
+# -- Firehose Delivery Stream --------------------------------------------------
+resource "aws_kinesis_firehose_delivery_stream" "compat" {
+  name        = "floci-compat-firehose"
+  destination = "extended_s3"
+
+  extended_s3_configuration {
+    role_arn           = aws_iam_role.lambda_exec.arn
+    bucket_arn         = aws_s3_bucket.app.arn
+    buffering_size     = 5
+    buffering_interval = 60
+    compression_format = "UNCOMPRESSED"
+  }
+}
+
+# -- EventBridge Pipe ----------------------------------------------------------
+resource "aws_pipes_pipe" "compat" {
+  name     = "floci-compat-pipe"
+  role_arn = aws_iam_role.lambda_exec.arn
+  source   = aws_sqs_queue.jobs.arn
+  target   = aws_sns_topic.events.arn
+
+  source_parameters {
+    sqs_queue_parameters {
+      batch_size                         = 1
+      maximum_batching_window_in_seconds = 0
+    }
+  }
+}
+
+# -- AWS Batch Compute Environment ---------------------------------------------
+resource "aws_batch_compute_environment" "compat" {
+  name         = "floci-compat-batch"
+  type         = "MANAGED"
+  state        = "ENABLED"
+  service_role = aws_iam_role.lambda_exec.arn
+
+  compute_resources {
+    type               = "FARGATE"
+    max_vcpus          = 1
+    subnets            = [aws_subnet.compat.id]
+    security_group_ids = [aws_security_group.compat.id]
+  }
+}
+
+# -- Neptune Cluster -----------------------------------------------------------
+resource "aws_neptune_cluster" "compat" {
+  cluster_identifier      = "floci-compat-neptune"
+  engine                  = "neptune"
+  skip_final_snapshot     = true
+  apply_immediately       = true
+  backup_retention_period = 1
+}
+
+# -- OpenSearch Domain ---------------------------------------------------------
+resource "aws_opensearch_domain" "compat" {
+  domain_name = "floci-compat-search"
+
+  cluster_config {
+    instance_type = "t3.small.search"
+  }
+}
+
 # -- SSM Parameters ------------------------------------------------------------
 resource "aws_ssm_parameter" "db_url" {
   name  = "/floci-compat/db-url"
@@ -115,13 +417,13 @@ resource "aws_secretsmanager_secret_version" "db_creds" {
 
 # -- RDS DB Instance -----------------------------------------------------------
 resource "aws_db_instance" "app" {
-  identifier        = "floci-compat-db"
-  engine            = "postgres"
-  engine_version    = "15"
-  instance_class    = "db.t3.micro"
-  allocated_storage = 20
-  username          = "admin"
-  password          = "Password1!"
+  identifier          = "floci-compat-db"
+  engine              = "postgres"
+  engine_version      = "15"
+  instance_class      = "db.t3.micro"
+  allocated_storage   = 20
+  username            = "admin"
+  password            = "Password1!"
   skip_final_snapshot = true
 }
 
