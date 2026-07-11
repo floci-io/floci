@@ -33,8 +33,6 @@ import org.jboss.logging.Logger;
 
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Generic dispatcher for all AWS services that use the Query Protocol (form-encoded POST, XML response).
@@ -56,10 +54,6 @@ import java.util.regex.Pattern;
 public class AwsQueryController {
 
     private static final Logger LOG = Logger.getLogger(AwsQueryController.class);
-
-    // Extracts service name: Credential=AKID/20260227/us-east-1/iam/aws4_request → "iam"
-    private static final Pattern SERVICE_PATTERN =
-            Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
 
     private static final Set<String> STS_ACTIONS = Set.of(
             "AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML",
@@ -157,7 +151,7 @@ public class AwsQueryController {
             "DescribeSecurityGroupRules", "ModifySecurityGroupRules",
             "UpdateSecurityGroupRuleDescriptionsIngress", "UpdateSecurityGroupRuleDescriptionsEgress",
             "CreateKeyPair", "DescribeKeyPairs", "DeleteKeyPair", "ImportKeyPair",
-            "DescribeImages",
+            "DescribeImages", "RegisterImage", "DescribeSnapshots",
             "CreateTags", "DeleteTags", "DescribeTags",
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",
@@ -263,10 +257,30 @@ public class AwsQueryController {
 
         String region = regionResolver.resolveRegion(httpHeaders);
 
+        try {
+            return dispatchToHandler(service, action, formParams, authorization, region);
+        } catch (AwsException e) {
+            // Handlers that don't render their own error XML would otherwise reach
+            // AwsExceptionMapper, which emits JSON — the same JSON-on-the-XML-wire defect.
+            // The declared code and status must survive; only the encoding changes.
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus(),
+                    e.getHttpStatus() >= 500 ? "Receiver" : "Sender");
+        } catch (Exception e) {
+            // A handler bug (e.g. an NPE) must never leak Quarkus's JSON error page onto
+            // the Query/XML wire — SDK parsers fail before they can surface anything useful.
+            LOG.errorv(e, "Unhandled error dispatching Query action {0} for service {1}", action, service);
+            return xmlErrorResponse("InternalFailure",
+                    "Unexpected error: " + e.getMessage(), 500, "Receiver");
+        }
+    }
+
+    private Response dispatchToHandler(String service, String action,
+                                       MultivaluedMap<String, String> formParams,
+                                       String authorization, String region) {
         return switch (service) {
             case "sqs" -> sqsQueryHandler.handle(action, formParams, region);
             case "sns" -> snsQueryHandler.handle(action, formParams, region);
-            case "iam" -> iamQueryHandler.handle(action, formParams);
+            case "iam" -> iamQueryHandler.handle(action, formParams, authorization);
             case "sts" -> stsQueryHandler.handle(action, formParams);
             case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams);
             case "rds" -> { 
@@ -287,7 +301,7 @@ public class AwsQueryController {
                        || docDbService.hasInstance(instanceId)) {
                         yield docDbQueryHandler.handle(action, formParams);
                 }
-                yield rdsQueryHandler.handle(action, formParams);
+                yield rdsQueryHandler.handle(action, formParams, region);
             }
             case "neptune" -> neptuneQueryHandler.handle(action, formParams);
             case "docdb" -> docDbQueryHandler.handle(action, formParams);
@@ -357,7 +371,7 @@ public class AwsQueryController {
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
-            "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks",
+            "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks", "UpdateTerminationProtection",
             "ListStacks", "ListExports", "GetTemplate", "ValidateTemplate",
             "CreateChangeSet", "DeleteChangeSet", "DescribeChangeSet", "ExecuteChangeSet", "ListChangeSets",
             "DescribeStackEvents", "DescribeStackResources", "ListStackResources", "DescribeStackResource",
@@ -407,15 +421,11 @@ public class AwsQueryController {
     );
 
     private String resolveService(String authorization, String action) {
-        if (authorization != null && !authorization.isEmpty()) {
-            Matcher m = SERVICE_PATTERN.matcher(authorization);
-            if (m.find()) {
-                String scope = m.group(1).toLowerCase();
-                ServiceDescriptor descriptor = catalog.byCredentialScope(scope).orElse(null);
-                if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
-                    return descriptor.externalKey();
-                }
-            }
+        ServiceDescriptor descriptor = SigV4CredentialScope.serviceName(authorization)
+                .flatMap(catalog::byCredentialScope)
+                .orElse(null);
+        if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
+            return descriptor.externalKey();
         }
         return inferServiceFromAction(action);
     }
@@ -466,10 +476,14 @@ public class AwsQueryController {
     }
 
     private Response xmlErrorResponse(String code, String message, int status) {
+        return xmlErrorResponse(code, message, status, "Sender");
+    }
+
+    private Response xmlErrorResponse(String code, String message, int status, String type) {
         String xml = new XmlBuilder()
                 .start("ErrorResponse")
                   .start("Error")
-                    .elem("Type", "Sender")
+                    .elem("Type", type)
                     .elem("Code", code)
                     .elem("Message", message)
                   .end("Error")

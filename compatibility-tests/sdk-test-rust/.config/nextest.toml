@@ -1,5 +1,0 @@
-[profile.ci]
-fail-fast = false
-
-[profile.ci.junit]
-path = "/results/junit.xml"

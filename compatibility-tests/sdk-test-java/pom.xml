@@ -142,6 +142,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>mq</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>athena</artifactId>
         </dependency>
         <dependency>
@@ -251,6 +255,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>sesv2</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>route53</artifactId>
+        </dependency>
         <!-- OpenSearch Service management client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -333,6 +341,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appsync</artifactId>
+        </dependency>
+        <!-- Lightsail client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>lightsail</artifactId>
         </dependency>
         <!-- S3 Vectors client -->
         <dependency>

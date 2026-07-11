@@ -89,3 +89,21 @@ Floci emulates EventBridge Pipes with the following supported source and target 
 - SNS topics
 - Kinesis streams
 - Step Functions state machines
+
+## Enrichment
+
+A pipe's optional enrichment step (`source → filter → enrichment → target`) is emulated for
+**Lambda** enrichments: the filtered batch is invoked synchronously (`RequestResponse`) and the
+response becomes the target input.
+
+- **Empty responses skip the target**, matching AWS: an empty body, `null`, `{}`, or `[]` consumes
+  the source records without invoking the target. A non-empty array such as `[{}]` still invokes the
+  target (with an empty-payload element).
+- **A Lambda enrichment `FunctionError` fails the batch** — the source records are routed to the
+  pipe's dead-letter queue rather than silently consumed.
+- **Non-Lambda enrichment types** (API destinations, API Gateway, Step Functions Express) are valid
+  on AWS but not emulated; a pipe configured with one fails the batch to the DLQ rather than
+  delivering the unenriched payload.
+- **Enrichment is currently applied only on the SQS source path.** Kinesis, DynamoDB Streams and
+  Kafka sources deliver filtered records straight to the target; an enrichment configured on those
+  sources is not yet applied.

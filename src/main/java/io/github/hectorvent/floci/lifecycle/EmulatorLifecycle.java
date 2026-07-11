@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
+import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -18,6 +19,7 @@ import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
@@ -69,6 +71,7 @@ public class EmulatorLifecycle {
     private final DocDbContainerManager docDbContainerManager;
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
+    private final RabbitMqManager rabbitMqManager;
     private final RdsService rdsService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
@@ -79,6 +82,7 @@ public class EmulatorLifecycle {
     private final EcrRegistryManager ecrRegistryManager;
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
+    private final SchemaCreationWorker schemaCreationWorker;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -93,6 +97,7 @@ public class EmulatorLifecycle {
                              DocDbContainerManager docDbContainerManager,
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
+                             RabbitMqManager rabbitMqManager,
                              RdsService rdsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
@@ -102,7 +107,8 @@ public class EmulatorLifecycle {
                              Ec2MetadataServer ec2MetadataServer,
                              EcrRegistryManager ecrRegistryManager,
                              FlociUiManager flociUiManager,
-                             InitLifecycleState initLifecycleState) {
+                             InitLifecycleState initLifecycleState,
+                             SchemaCreationWorker schemaCreationWorker) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -116,6 +122,7 @@ public class EmulatorLifecycle {
         this.docDbContainerManager = docDbContainerManager;
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
+        this.rabbitMqManager = rabbitMqManager;
         this.rdsService = rdsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
@@ -126,6 +133,7 @@ public class EmulatorLifecycle {
         this.ecrRegistryManager = ecrRegistryManager;
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
+        this.schemaCreationWorker = schemaCreationWorker;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -148,6 +156,7 @@ public class EmulatorLifecycle {
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        schemaCreationWorker.recoverOrphans();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
@@ -252,6 +261,7 @@ public class EmulatorLifecycle {
         memoryDbContainerManager.stopAll();
         docDbContainerManager.stopAll();
         neptuneContainerManager.stopAll();
+        rabbitMqManager.stopAll();
         ecrRegistryManager.shutdown();
         flociUiManager.shutdown();
         storageFactory.shutdownAll();

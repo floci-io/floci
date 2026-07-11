@@ -1,8 +1,13 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
@@ -151,6 +156,10 @@ public class CloudFormationResourceProvisioner {
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
     private final FirehoseService firehoseService;
+    // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
+    // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
+    // now-dead service deps above are cleared in the final cleanup once the switch is empty.
+    private final CloudFormationResourceRegistry resourceRegistry;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -179,7 +188,8 @@ public class CloudFormationResourceProvisioner {
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
                                              AutoScalingService autoScalingService,
-                                             FirehoseService firehoseService) {
+                                             FirehoseService firehoseService,
+                                             CloudFormationResourceRegistry resourceRegistry) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -211,6 +221,7 @@ public class CloudFormationResourceProvisioner {
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
         this.firehoseService = firehoseService;
+        this.resourceRegistry = resourceRegistry;
     }
 
     /**
@@ -241,9 +252,15 @@ public class CloudFormationResourceProvisioner {
         resource.setAttributes(new HashMap<>(existingAttributes != null ? existingAttributes : Map.of()));
 
         try {
+            CfnResourceProvisioner extracted = resourceRegistry.forType(resourceType).orElse(null);
+            if (extracted != null) {
+                extracted.provision(resource, properties,
+                        new ProvisionContext(engine, region, accountId, stackName));
+                resource.setStatus("CREATE_COMPLETE");
+                return resource;
+            }
             switch (resourceType) {
                 case "AWS::S3::Bucket" -> provisionS3Bucket(resource, properties, engine, region, accountId, stackName);
-                case "AWS::SQS::Queue" -> provisionSqsQueue(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SNS::Topic" -> provisionSnsTopic(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SNS::Subscription" -> provisionSnsSubscription(resource, properties, engine, region);
                 case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" ->
@@ -263,7 +280,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
                 case "AWS::CDK::Metadata" -> provisionCdkMetadata(resource);
                 case "AWS::S3::BucketPolicy" -> provisionS3BucketPolicy(resource, properties, engine);
-                case "AWS::SQS::QueuePolicy" -> provisionSqsQueuePolicy(resource, properties, engine);
                 case "AWS::ECR::Repository" -> provisionEcrRepository(resource, properties, engine, stackName, region);
                 case "AWS::Route53::HostedZone" -> provisionRoute53HostedZone(resource, properties, engine);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
@@ -324,12 +340,12 @@ public class CloudFormationResourceProvisioner {
                         provisionFirehoseDeliveryStream(resource, properties, engine, stackName);
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
-                case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName);
+                case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBParameterGroup" -> provisionDbParameterGroup(resource, properties, engine, stackName);
                 case "AWS::RDS::DBClusterParameterGroup" ->
                         provisionDbClusterParameterGroup(resource, properties, engine, stackName);
-                case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName);
-                case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName);
+                case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName, region);
+                case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
@@ -398,9 +414,13 @@ public class CloudFormationResourceProvisioner {
      * conflicts, and KMS keys are intentionally left for scheduled deletion.
      */
     public void delete(String resourceType, String physicalId, String region) {
+        CfnResourceProvisioner extracted = resourceRegistry.forType(resourceType).orElse(null);
+        if (extracted != null) {
+            extracted.delete(resourceType, physicalId, region);
+            return;
+        }
         switch (resourceType) {
             case "AWS::S3::Bucket" -> s3Service.deleteBucket(physicalId);
-            case "AWS::SQS::Queue" -> sqsService.deleteQueue(physicalId, region);
             case "AWS::SNS::Topic" -> snsService.deleteTopic(physicalId, region);
             case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
             case "AWS::DynamoDB::Table" -> dynamoDbService.deleteTable(physicalId, region);
@@ -461,6 +481,7 @@ public class CloudFormationResourceProvisioner {
             bucketName = generatePhysicalName(stackName, r.getLogicalId(), 63, true);
         }
         s3Service.createBucket(bucketName, region);
+        applyBucketCorsConfiguration(bucketName, props, engine);
         r.setPhysicalId(bucketName);
         r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
         r.getAttributes().put("DomainName", bucketName + ".s3.amazonaws.com");
@@ -469,33 +490,58 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("BucketName", bucketName);
     }
 
-    // ── SQS ───────────────────────────────────────────────────────────────────
-
-    private void provisionSqsQueue(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                   String region, String accountId, String stackName) {
-        String queueName = resolveOptional(props, "QueueName", engine);
-        if (queueName == null || queueName.isBlank()) {
-            queueName = generatePhysicalName(stackName, r.getLogicalId(), 80, false);
+    /**
+     * Applies the optional {@code CorsConfiguration} property of {@code AWS::S3::Bucket} by translating
+     * the CloudFormation {@code CorsRules} list into the S3 CORS XML document the bucket stores and
+     * serves from its {@code ?cors} subresource.
+     *
+     * <p>This reconciles to the template on every provision (create and update): when the property is
+     * absent or has no rules, any existing CORS configuration is cleared so the bucket matches the
+     * template. Clearing is a harmless no-op on create since a freshly created bucket has none.
+     */
+    private void applyBucketCorsConfiguration(String bucketName, JsonNode props,
+                                              CloudFormationTemplateEngine engine) {
+        JsonNode corsRules = null;
+        if (props != null && props.has("CorsConfiguration") && !props.get("CorsConfiguration").isNull()) {
+            corsRules = props.get("CorsConfiguration").get("CorsRules");
         }
-        Map<String, String> attrs = new HashMap<>();
-        if (props != null) {
-            if(props.has("VisibilityTimeout")) {
-                attrs.put("VisibilityTimeout", engine.resolve(props.get("VisibilityTimeout")));
-            }
-            if(props.has("ContentBasedDeduplication")) {
-                attrs.put("ContentBasedDeduplication", engine.resolve(props.get("ContentBasedDeduplication")));
-            }
+        if (corsRules == null || !corsRules.isArray() || corsRules.isEmpty()) {
+            s3Service.deleteBucketCors(bucketName);
+            return;
         }
-        var queue = sqsService.createQueue(queueName, attrs, region);
-        // QueueArn is computed on demand in SqsService#getQueueAttributes and is not
-        // stored on the Queue object, so build it here from region + accountId + queueName.
-        // Without this, Fn::GetAtt [Queue, Arn] references resolve to an empty string.
-        String queueArn = AwsArnUtils.Arn.of("sqs", region, accountId, queueName).toString();
-        r.setPhysicalId(queue.getQueueUrl());
-        r.getAttributes().put("Arn", queueArn);
-        r.getAttributes().put("QueueName", queueName);
-        r.getAttributes().put("QueueUrl", queue.getQueueUrl());
+        XmlBuilder xml = new XmlBuilder().start("CORSConfiguration", AwsNamespaces.S3);
+        for (JsonNode rule : corsRules) {
+            xml.start("CORSRule");
+            xml.elem("ID", resolveOptional(rule, "Id", engine));
+            appendCorsRuleElements(xml, rule.get("AllowedHeaders"), "AllowedHeader", engine);
+            appendCorsRuleElements(xml, rule.get("AllowedMethods"), "AllowedMethod", engine);
+            appendCorsRuleElements(xml, rule.get("AllowedOrigins"), "AllowedOrigin", engine);
+            appendCorsRuleElements(xml, rule.get("ExposedHeaders"), "ExposeHeader", engine);
+            String maxAge = resolveOptional(rule, "MaxAge", engine);
+            if (maxAge != null && !maxAge.isBlank()) {
+                xml.elem("MaxAgeSeconds", maxAge);
+            }
+            xml.end("CORSRule");
+        }
+        xml.end("CORSConfiguration");
+        s3Service.putBucketCors(bucketName, xml.build());
     }
+
+    private void appendCorsRuleElements(XmlBuilder xml, JsonNode values, String elementName,
+                                        CloudFormationTemplateEngine engine) {
+        if (values == null || !values.isArray()) {
+            return;
+        }
+        for (JsonNode value : values) {
+            if (value != null && !value.isNull()) {
+                String resolved = engine.resolve(value);
+                if (resolved != null && !resolved.isBlank()) {
+                    xml.elem(elementName, resolved);
+                }
+            }
+        }
+    }
+
 
     // ── EC2 networking ─────────────────────────────────────────────────────────
     // Each method delegates to Ec2Service so the resource really exists (describe-subnets,
@@ -569,10 +615,8 @@ public class CloudFormationResourceProvisioner {
         String routeTableId = resolveOptional(props, "RouteTableId", engine);
         String destinationCidr = resolveOptional(props, "DestinationCidrBlock", engine);
         String gatewayId = resolveOptional(props, "GatewayId", engine);
-        if (gatewayId == null || gatewayId.isBlank()) {
-            gatewayId = resolveOptional(props, "NatGatewayId", engine);
-        }
-        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId);
+        String natGatewayId = resolveOptional(props, "NatGatewayId", engine);
+        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId, natGatewayId);
         r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
     }
 
@@ -794,7 +838,8 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "HealthCheckType", engine),
                 parseIntProp(props, "HealthCheckGracePeriod", engine, 0),
                 resolveStringList(props, "TerminationPolicies", engine),
-                resolveAsgTags(props, engine));
+                resolveAsgTags(props, engine),
+                resolveAsgTagPropagation(props, engine));
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
@@ -811,6 +856,19 @@ public class CloudFormationResourceProvisioner {
             }
         }
         return tags;
+    }
+
+    private Map<String, Boolean> resolveAsgTagPropagation(JsonNode props, CloudFormationTemplateEngine engine) {
+        Map<String, Boolean> propagation = new LinkedHashMap<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    propagation.put(key, Boolean.parseBoolean(engine.resolve(tag.path("PropagateAtLaunch"))));
+                }
+            }
+        }
+        return propagation;
     }
 
     private List<String> resolveStringList(JsonNode props, String field, CloudFormationTemplateEngine engine) {
@@ -884,7 +942,7 @@ public class CloudFormationResourceProvisioner {
     // ── RDS ─────────────────────────────────────────────────────────────────────
 
     private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                        String stackName) {
+                                        String stackName, String region) {
         String name = resolveOptional(props, "DBSubnetGroupName", engine);
         if (name == null || name.isBlank()) {
             name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -897,7 +955,7 @@ public class CloudFormationResourceProvisioner {
                 subnetIds.add(engine.resolve(subnet));
             }
         }
-        var group = rdsService.createDbSubnetGroup(name, description, subnetIds);
+        var group = rdsService.createDbSubnetGroup(name, description, subnetIds, region);
         r.setPhysicalId(group.getDbSubnetGroupName());
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
     }
@@ -931,7 +989,7 @@ public class CloudFormationResourceProvisioner {
     }
 
     private void provisionDbInstance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                     String stackName) {
+                                     String stackName, String region) {
         String id = resolveOptional(props, "DBInstanceIdentifier", engine);
         if (id == null || id.isBlank()) {
             id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -948,7 +1006,8 @@ public class CloudFormationResourceProvisioner {
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                 resolveOptional(props, "DBParameterGroupName", engine),
                 resolveOptional(props, "DBSubnetGroupName", engine),
-                resolveOptional(props, "DBClusterIdentifier", engine));
+                resolveOptional(props, "DBClusterIdentifier", engine),
+                null, false, false, null, Map.of(), region);
         r.setPhysicalId(instance.getDbInstanceIdentifier());
         r.getAttributes().put("DBInstanceIdentifier", instance.getDbInstanceIdentifier());
         if (instance.getEndpoint() != null) {
@@ -961,7 +1020,7 @@ public class CloudFormationResourceProvisioner {
     }
 
     private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                    String stackName) {
+                                    String stackName, String region) {
         String id = resolveOptional(props, "DBClusterIdentifier", engine);
         if (id == null || id.isBlank()) {
             id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -974,7 +1033,8 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "MasterUserPassword", engine),
                 resolveOptional(props, "DatabaseName", engine),
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                resolveOptional(props, "DBClusterParameterGroupName", engine));
+                resolveOptional(props, "DBClusterParameterGroupName", engine),
+                null, null, false, region);
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
         if (cluster.getEndpoint() != null) {
@@ -2423,9 +2483,6 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId("bucket-policy-" + UUID.randomUUID().toString().substring(0, 8));
     }
 
-    private void provisionSqsQueuePolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
-        r.setPhysicalId("queue-policy-" + UUID.randomUUID().toString().substring(0, 8));
-    }
 
     private void provisionIamUser(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                   String stackName) {
@@ -3071,8 +3128,8 @@ public class CloudFormationResourceProvisioner {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
             event.put("ResponseURL", reachableEndpoint.baseUrl() + "/cfn-response/" + token);
-            event.put("StackId", "arn:aws:cloudformation:" + region + ":" + accountId + ":stack/"
-                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID());
+            event.put("StackId", AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/"
+                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID()).toString());
             event.put("RequestId", UUID.randomUUID().toString());
             event.put("ResourceType", resourceType);
             event.put("LogicalResourceId", logicalId);
@@ -3138,11 +3195,8 @@ public class CloudFormationResourceProvisioner {
     }
 
     private static String accountFromArn(String arn) {
-        if (arn == null) {
-            return "000000000000";
-        }
-        String[] parts = arn.split(":");
-        return parts.length >= 5 && parts[4].matches("\\d{12}") ? parts[4] : "000000000000";
+        String account = AwsArnUtils.accountOrDefault(arn, "000000000000");
+        return account.matches("\\d{12}") ? account : "000000000000";
     }
 
     // ── ECS ──────────────────────────────────────────────────────────────────

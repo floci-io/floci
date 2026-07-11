@@ -12,15 +12,23 @@ Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only
 
 ## Supported Management Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateCluster` | Start a new MemoryDB (Redis/Valkey) cluster |
 | `DescribeClusters` | List clusters and their connection info |
 | `UpdateCluster` | Update mutable cluster attributes (e.g. description) |
 | `DeleteCluster` | Stop and remove a cluster |
+| `CreateUser` | - |
+| `DescribeUsers` | - |
+| `DeleteUser` | - |
+| `CreateACL` | - |
+| `DescribeACLs` | - |
+| `DeleteACL` | - |
 | `ListTags` | List tags for a cluster |
 | `TagResource` | Add tags to a cluster |
 | `UntagResource` | Remove tags from a cluster |
+<!-- floci:actions:end -->
 
 ## Configuration
 

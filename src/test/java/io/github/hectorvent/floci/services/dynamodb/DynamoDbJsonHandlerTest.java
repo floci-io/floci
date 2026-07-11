@@ -1,17 +1,16 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
-
-import jakarta.ws.rs.core.Response;
 
 import java.util.List;
 
@@ -293,5 +292,45 @@ class DynamoDbJsonHandlerTest {
 
         assertNotNull(responseData);
         assertFalse(responseData.has("Attributes"), "Attributes property must not be present");
+    }
+
+    // Reproduces #1604
+    @Test
+    void transactWriteItemsCancellationReasonMessageIsNullForNonFailedItems() throws Exception {
+        createUsersTable("us-east-1");
+        service.putItem("Users", item("userId", "A"), "us-east-1");
+
+        ObjectNode condCheckA = mapper.createObjectNode();
+        condCheckA.put("TableName", "Users");
+        condCheckA.set("Key", item("userId", "A"));
+        condCheckA.put("ConditionExpression", "attribute_exists(userId)");
+
+        ObjectNode condCheckB = mapper.createObjectNode();
+        condCheckB.put("TableName", "Users");
+        condCheckB.set("Key", item("userId", "B"));
+        condCheckB.put("ConditionExpression", "attribute_exists(userId)");
+
+        ObjectNode txItemA = mapper.createObjectNode();
+        txItemA.set("ConditionCheck", condCheckA);
+        ObjectNode txItemB = mapper.createObjectNode();
+        txItemB.set("ConditionCheck", condCheckB);
+
+        ObjectNode request = mapper.createObjectNode();
+        ArrayNode txItems = request.putArray("TransactItems");
+        txItems.add(txItemA);
+        txItems.add(txItemB);
+
+        Response response = handler.handle("TransactWriteItems", request, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+
+        ArrayNode reasons = (ArrayNode) body.get("CancellationReasons");
+        assertEquals(2, reasons.size());
+
+        assertEquals("None", reasons.get(0).get("Code").asText());
+        assertNull(reasons.get(0).get("Message"), "non failed item must not have a Message field");
     }
 }

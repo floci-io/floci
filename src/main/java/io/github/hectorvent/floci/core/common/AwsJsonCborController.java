@@ -23,12 +23,11 @@ import java.util.Iterator;
 import java.util.Map;
 
 /**
- * Generic dispatcher for all AWS services that use the application/cbor protocol.
- * Routes requests to the appropriate service handler based on the X-Amz-Target header prefix.
+ * Generic dispatcher for all AWS services that use the application/cbor protocol,
+ * via either smithy-rpc-v2-cbor path routing or the legacy X-Amz-Target header.
  * <p>
- * Currently supported services:
- * - DynamoDB (DynamoDB_20120810.*)
- * - SQS (AmazonSQS.*)
+ * Currently supported services: DynamoDB (incl. Streams), SQS, SNS, Kinesis,
+ * Step Functions, and CloudWatch Metrics.
  */
 @Path("/")
 public class AwsJsonCborController {
@@ -164,10 +163,11 @@ public class AwsJsonCborController {
     }
 
     /**
-     * Handles AWS smithy-rpc-v2-cbor protocol requests.
-     * AWS SDK v2 sends to POST /service/{sdkId}/operation/{op}
-     * with a CBOR content type and no X-Amz-Target header.
-     * Supported services: DynamoDB, SQS, SNS, StepFunctions, CloudWatch.
+     * Handles AWS smithy-rpc-v2-cbor protocol requests:
+     * POST /service/{serviceName}/operation/{operation} with a CBOR content type,
+     * the smithy-protocol header, and no X-Amz-Target. The {serviceName} segment
+     * is the Smithy service shape name — for AWS services the X-Amz-Target prefix
+     * without its trailing dot (e.g. DynamoDB_20120810, GraniteServiceVersion20100801).
      */
     @POST
     @Path("service/{serviceId}/operation/{operation}")
@@ -291,13 +291,14 @@ public class AwsJsonCborController {
         }
         return switch (descriptor.externalKey()) {
             case "dynamodb" -> {
-                if ("DynamoDB Streams".equals(serviceId)) {
+                if ("DynamoDB Streams".equals(serviceId) || serviceId.startsWith("DynamoDBStreams")) {
                     yield dynamoDbStreamsJsonHandler.handle(operation, request, region);
                 }
                 yield dynamoDbJsonHandler.handle(operation, request, region);
             }
             case "sqs" -> sqsJsonHandler.handle(operation, request, region);
             case "sns" -> snsJsonHandler.handle(operation, request, region);
+            case "kinesis" -> kinesisJsonHandler.handle(operation, request, region);
             case "states" -> sfnJsonHandler.handle(operation, request, region);
             case "monitoring" -> cloudWatchMetricsJsonHandler.handle(operation, request, region);
             default -> null;

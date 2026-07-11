@@ -452,4 +452,103 @@ class LambdaIntegrationTest {
         .then()
             .statusCode(not(413));
     }
+
+    // ── GetFunction Code.Location downloadability ──────────────────────────────
+
+    @Test
+    @Order(40)
+    void getFunction_codeLocation_isDownloadableAndByteExact() throws Exception {
+        // Build a real zip with a nodejs handler file (extractZipCode verifies it).
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write("exports.handler = async () => ({ statusCode: 200 });\n".getBytes());
+            zos.closeEntry();
+        }
+        String zipB64 = Base64.getEncoder().encodeToString(baos.toByteArray());
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "code-dl-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Code": {
+                        "ZipFile": "%s"
+                    }
+                }
+                """.formatted(zipB64))
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201);
+
+        // GetFunction → Code.Location must be an S3-style URL on this endpoint.
+        String location = given()
+            .when()
+            .get(BASE_PATH + "/functions/code-dl-fn")
+        .then()
+            .statusCode(200)
+            .body("Code.RepositoryType", equalTo("S3"))
+            .extract().path("Code.Location");
+
+        String expectedSha256 = given()
+            .when()
+            .get(BASE_PATH + "/functions/code-dl-fn/configuration")
+        .then()
+            .statusCode(200)
+            .extract().path("CodeSha256");
+
+        // Follow Code.Location against the same test server via its path.
+        String path = java.net.URI.create(location).getRawPath();
+        byte[] pkg = given()
+            .when()
+            .get(path)
+        .then()
+            .statusCode(200)
+            .extract().asByteArray();
+
+        // Valid zip → local file header magic "PK\003\004".
+        org.junit.jupiter.api.Assertions.assertTrue(pkg.length > 0, "package must not be empty");
+        org.junit.jupiter.api.Assertions.assertEquals('P', pkg[0]);
+        org.junit.jupiter.api.Assertions.assertEquals('K', pkg[1]);
+
+        // Byte-exact: downloaded package hashes to the stored CodeSha256.
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(pkg);
+        String downloadedSha256 = Base64.getEncoder().encodeToString(digest);
+        org.junit.jupiter.api.Assertions.assertEquals(expectedSha256, downloadedSha256,
+                "downloaded package must be byte-identical to the uploaded zip");
+
+        // Redeploy overwrites in place (stable key), no stale package accumulates.
+        ByteArrayOutputStream baos2 = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos2)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write("exports.handler = async () => ({ statusCode: 201 });\n".getBytes());
+            zos.closeEntry();
+        }
+        given()
+            .contentType("application/json")
+            .body("{ \"ZipFile\": \"%s\" }".formatted(Base64.getEncoder().encodeToString(baos2.toByteArray())))
+        .when()
+            .put(BASE_PATH + "/functions/code-dl-fn/code")
+        .then()
+            .statusCode(200);
+        byte[] pkg2 = given().when().get(path).then().statusCode(200).extract().asByteArray();
+        org.junit.jupiter.api.Assertions.assertFalse(java.util.Arrays.equals(pkg, pkg2),
+                "redeploy must replace the stored package");
+
+        // Deleting the function removes the stored package (Code.Location 404s).
+        given()
+            .when()
+            .delete(BASE_PATH + "/functions/code-dl-fn")
+        .then()
+            .statusCode(anyOf(is(200), is(204)));
+        given()
+            .when()
+            .get(path)
+        .then()
+            .statusCode(404);
+    }
 }

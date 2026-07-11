@@ -2459,6 +2459,82 @@ given()
                 "Second page should return the remaining 1 item");
 
         // Cleanup
+        deleteTable(tableName);
+    }
+
+    // Reproduces #1604
+    @Test
+    void transactWriteCancellationReasonMessageIsNullForNonFailedItems() {
+        String tableName = "TxCancelMsgTest";
+
+        given()
+                .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                        {
+                            "TableName": "%s",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                            "BillingMode": "PAY_PER_REQUEST"
+                        }
+                        """.formatted(tableName))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                        {
+                            "TableName": "%s",
+                            "Item": {"pk": {"S": "A"}}
+                        }
+                        """.formatted(tableName))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        // item 0 passes (A exists), item 1 fails (B absent)
+        given()
+                .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                        {
+                            "TransactItems": [
+                                {
+                                    "ConditionCheck": {
+                                        "TableName": "%s",
+                                        "Key": {"pk": {"S": "A"}},
+                                        "ConditionExpression": "attribute_exists(pk)"
+                                    }
+                                },
+                                {
+                                    "ConditionCheck": {
+                                        "TableName": "%s",
+                                        "Key": {"pk": {"S": "B"}},
+                                        "ConditionExpression": "attribute_exists(pk)"
+                                    }
+                                }
+                            ]
+                        }
+                        """.formatted(tableName, tableName))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("TransactionCanceledException"))
+                .body("CancellationReasons[0].Code", equalTo("None"))
+                .body("CancellationReasons[0].Message", nullValue())
+                .body("CancellationReasons[1].Code", equalTo("ConditionalCheckFailed"));
+
+        // Cleanup
+        deleteTable(tableName);
+    }
+
+    private void deleteTable(String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
             .contentType(DYNAMODB_CONTENT_TYPE)

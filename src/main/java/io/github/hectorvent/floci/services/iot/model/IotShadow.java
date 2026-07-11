@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.iot.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public class IotShadow {
     private String thingName;
     private String shadowName;

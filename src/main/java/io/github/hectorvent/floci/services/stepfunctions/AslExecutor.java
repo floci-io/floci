@@ -23,6 +23,8 @@ import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
@@ -64,6 +66,15 @@ import java.util.function.BiConsumer;
 
 @ApplicationScoped
 public class AslExecutor {
+
+    private enum MapItemsSource {
+        DEFAULT,
+        ITEM_READER_ARRAY,
+        ITEM_READER_OBJECT
+    }
+
+    private record ResolvedMapItems(JsonNode items, MapItemsSource source) {
+    }
 
     private static final Logger LOG = Logger.getLogger(AslExecutor.class);
     private static final int MAX_WAIT_SECONDS = 30;
@@ -397,19 +408,43 @@ public class AslExecutor {
         }
     }
 
+    /**
+     * Extracts the Lambda function name from a reference that may be a bare name, a name with a
+     * version/alias qualifier (e.g. "name:$LATEST"), or a full/partial function ARN
+     * (e.g. "arn:aws:lambda:region:acct:function:name[:qualifier]"). The qualifier is dropped
+     * because the function store is keyed by name. Taking the last ':'-segment is wrong for a
+     * qualified ARN — it yields the qualifier (e.g. "$LATEST") instead of the function name.
+     */
+    static String extractLambdaFunctionName(String ref) {
+        if (ref == null) {
+            return null;
+        }
+        String fn = ref;
+        int fi = ref.indexOf(":function:");
+        if (fi >= 0) {
+            fn = ref.substring(fi + ":function:".length());
+        }
+        // Drop an optional trailing version/alias qualifier (e.g. ":$LATEST", ":1", ":prod").
+        int colon = fn.indexOf(':');
+        if (colon >= 0) {
+            fn = fn.substring(0, colon);
+        }
+        return fn;
+    }
+
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         JsonNode lambdaPayload = input;
 
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
-            // Direct Lambda ARN: arn:aws:lambda:region:account:function:name
-            functionName = resource.substring(resource.lastIndexOf(':') + 1);
+            // Direct Lambda ARN: arn:aws:lambda:region:account:function:name[:qualifier]
+            functionName = extractLambdaFunctionName(resource);
         } else if (resource.equals("arn:aws:states:::lambda:invoke")) {
             // Optimized Lambda integration — function name and payload come from resolved input
             String fnRef = input.path("FunctionName").asText(null);
             if (fnRef != null) {
-                functionName = fnRef.contains(":") ? fnRef.substring(fnRef.lastIndexOf(':') + 1) : fnRef;
+                functionName = extractLambdaFunctionName(fnRef);
             }
             JsonNode payload = input.path("Payload");
             if (!payload.isMissingNode()) {
@@ -1338,19 +1373,15 @@ public class AslExecutor {
 
     private StateResult executeMapState(String name, JsonNode stateDef, JsonNode input, StateMachine sm,
                                          boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
-        JsonNode items;
-        if (jsonata && stateDef.has("Items")) {
-            JsonNode itemsNode = stateDef.get("Items");
-            if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
-                JsonNode statesVar = buildStatesVar(input, null, context);
-                items = jsonataEvaluator.evaluate(itemsNode.asText(), statesVar);
-            } else {
-                items = itemsNode;
+        if (stateDef.has("ItemReader")) {
+            String mode = stateDef.path("ItemProcessor").path("ProcessorConfig").path("Mode").asText("INLINE");
+            if (!"DISTRIBUTED".equals(mode)) {
+                throw new FailStateException("States.Runtime",
+                        "The ItemReader, ItemBatcher and ResultWriter fields are not supported for INLINE maps");
             }
-        } else {
-            JsonNode itemsPath = stateDef.path("ItemsPath");
-            items = itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input);
         }
+        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, input, jsonata, context);
+        JsonNode items = resolvedItems.items();
 
         if (!items.isArray()) {
             throw new FailStateException("States.Runtime", "Items must reference an array");
@@ -1371,20 +1402,25 @@ public class AslExecutor {
         ArrayNode results = objectMapper.createArrayNode();
         int index = 0;
         for (JsonNode item : items) {
+            ObjectNode iterContext = ((ObjectNode) context).deepCopy();
+            ObjectNode mapCtx = objectMapper.createObjectNode();
+            ObjectNode mapItem = objectMapper.createObjectNode();
+            mapItem.put("Index", index);
+            if (resolvedItems.source() == MapItemsSource.ITEM_READER_OBJECT) {
+                mapItem.put("Key", item.path("Key").asText());
+                mapItem.set("Value", item.get("Value"));
+            } else {
+                mapItem.set("Value", item);
+            }
+            mapCtx.set("Item", mapItem);
+            iterContext.set("Map", mapCtx);
+
             JsonNode iterInput = item;
             if (itemTransform != null) {
-                // Enrich context with Map.Item.Index and Map.Item.Value for $$.Map.* references.
                 // $ in ItemSelector resolves against the Map state's effective input, not the item.
-                ObjectNode iterContext = ((ObjectNode) context).deepCopy();
-                ObjectNode mapCtx = objectMapper.createObjectNode();
-                ObjectNode mapItem = objectMapper.createObjectNode();
-                mapItem.put("Index", index);
-                mapItem.set("Value", item);
-                mapCtx.set("Item", mapItem);
-                iterContext.set("Map", mapCtx);
                 iterInput = resolveParameters(itemTransform, mapInput, iterContext);
             }
-            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, context));
+            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, iterContext));
             index++;
         }
 
@@ -1400,6 +1436,119 @@ public class AslExecutor {
         JsonNode output = mergeResult(stateDef, input, selected);
         output = applyOutputPath(stateDef, input, output);
         return new StateResult(output, stateDef.path("Next").asText(null));
+    }
+
+    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input,
+                                             boolean jsonata, JsonNode context) throws Exception {
+        if (jsonata && stateDef.has("Items")) {
+            JsonNode itemsNode = stateDef.get("Items");
+            if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
+                JsonNode statesVar = buildStatesVar(input, null, context);
+                return new ResolvedMapItems(jsonataEvaluator.evaluate(itemsNode.asText(), statesVar),
+                        MapItemsSource.DEFAULT);
+            }
+            return new ResolvedMapItems(itemsNode, MapItemsSource.DEFAULT);
+        }
+
+        if (stateDef.has("ItemReader")) {
+            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata);
+        }
+
+        JsonNode itemsPath = stateDef.path("ItemsPath");
+        return new ResolvedMapItems(itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input),
+                MapItemsSource.DEFAULT);
+    }
+
+    private ResolvedMapItems resolveItemReaderItems(JsonNode itemReader, JsonNode input,
+                                                    JsonNode context, boolean jsonata) throws Exception {
+        String resource = itemReader.path("Resource").asText(null);
+        if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader resource arn:aws:states:::s3:listObjectsV2 is not yet implemented by the emulator");
+        }
+        if (!"arn:aws:states:::s3:getObject".equals(resource)) {
+            throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
+        }
+
+        String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
+        if (!"JSON".equals(inputType)) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
+        }
+
+        JsonNode resolvedParameters;
+        if (jsonata && itemReader.has("Arguments")) {
+            JsonNode statesVar = buildStatesVar(input, null, context);
+            resolvedParameters = jsonataEvaluator.resolveTemplate(itemReader.get("Arguments"), statesVar);
+        } else {
+            JsonNode parameters = itemReader.path("Parameters");
+            resolvedParameters = resolveParameters(parameters, input, context);
+        }
+        String bucket = resolvedParameters.path("Bucket").asText(null);
+        String key = resolvedParameters.path("Key").asText(null);
+        if (bucket == null || key == null) {
+            throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket and Key");
+        }
+
+        try {
+            S3Object object = s3Service.getObject(bucket, key);
+            JsonNode items = objectMapper.readTree(object.getData());
+            items = applyItemsPointer(itemReader, items);
+            if (items.isObject()) {
+                return new ResolvedMapItems(applyMaxItems(itemReader, normalizeObjectItems(items)),
+                        MapItemsSource.ITEM_READER_OBJECT);
+            }
+            if (!items.isArray()) {
+                throw new FailStateException("States.ItemReaderFailed",
+                        "Attempting to map over non-iterable node.");
+            }
+            return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+        } catch (AwsException e) {
+            throw new FailStateException("States.ItemReaderFailed", e.getMessage());
+        } catch (FailStateException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
+        }
+    }
+
+    private ArrayNode normalizeObjectItems(JsonNode items) {
+        ArrayNode normalized = objectMapper.createArrayNode();
+        items.fields().forEachRemaining(entry -> {
+            ObjectNode objectItem = objectMapper.createObjectNode();
+            objectItem.put("Key", entry.getKey());
+            objectItem.set("Value", entry.getValue());
+            normalized.add(objectItem);
+        });
+        return normalized;
+    }
+
+    private JsonNode applyItemsPointer(JsonNode itemReader, JsonNode items) {
+        String itemsPointer = itemReader.path("ReaderConfig").path("ItemsPointer").asText(null);
+        if (itemsPointer == null || itemsPointer.isEmpty()) {
+            return items;
+        }
+
+        JsonNode pointedItems = items.at(itemsPointer);
+        if (pointedItems.isMissingNode()) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "The provided ReaderConfig.ItemsPointer does not match any valid path in the JSON structure.");
+        }
+        return pointedItems;
+    }
+
+    private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
+        int maxItems = itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+        if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
+            return items;
+        }
+
+        ArrayNode limited = objectMapper.createArrayNode();
+        for (int i = 0; i < maxItems; i++) {
+            limited.add(items.get(i));
+        }
+        return limited;
     }
 
     private JsonNode executeBranch(String startAt, JsonNode states, JsonNode input, StateMachine sm,
@@ -1567,9 +1716,12 @@ public class AslExecutor {
                     } else if ("$$".equals(path)) {
                         resolved.set(realKey, context);
                     } else {
-                        resolved.set(realKey, resolvePath(path, input));
+                        // Pass the Context Object through so a $$. reference nested inside an
+                        // intrinsic (e.g. States.Format(..., $$.Map.Item.Value.x)) can resolve it;
+                        // for a plain $. or States.* input reference, context is simply ignored.
+                        resolved.set(realKey, resolvePath(path, input, context));
                     }
-                } else if (val.isObject()) {
+                } else if (val.isObject() || val.isArray()) {
                     resolved.set(key, resolveParameters(val, input, context));
                 } else {
                     resolved.set(key, val);
@@ -1577,27 +1729,53 @@ public class AslExecutor {
             }
             return resolved;
         }
+        if (parameters.isArray()) {
+            // Payload templates resolve .$ references at any depth, including inside arrays
+            // (e.g. an ECS Overrides.ContainerOverrides[].Environment[].Value.$).
+            ArrayNode resolvedArray = objectMapper.createArrayNode();
+            for (JsonNode element : parameters) {
+                resolvedArray.add(resolveParameters(element, input, context));
+            }
+            return resolvedArray;
+        }
         return parameters;
     }
 
     JsonNode resolvePath(String path, JsonNode root) {
-        JsonNode node = resolvePathNode(path, root);
-        // Most callers do not distinguish an absent path from an explicit null; collapse both to null.
+        return resolvePath(path, root, null);
+    }
+
+    /**
+     * Resolve a JSONPath reference or {@code States.*} intrinsic. When {@code context} is
+     * non-null it is the Context Object ({@code $$}), letting intrinsic arguments reference it
+     * (e.g. a {@code $$.Map.Item.Value.x} argument nested inside {@code States.Format(...)}).
+     * It is null for ordinary input-only resolution, which preserves existing behavior.
+     *
+     * <p>Most callers do not distinguish an absent path from an explicit null, so both collapse
+     * to null; callers that care about presence (e.g. {@code IsPresent}) use {@link #resolvePathNode}.
+     */
+    JsonNode resolvePath(String path, JsonNode root, JsonNode context) {
+        JsonNode node = resolvePathNode(path, root, context);
         return node.isMissingNode() ? NullNode.getInstance() : node;
+    }
+
+    JsonNode resolvePathNode(String path, JsonNode root) {
+        return resolvePathNode(path, root, null);
     }
 
     /**
      * Resolves a reference path while preserving the distinction between an explicit null value
      * (returns a {@link NullNode}) and a missing/absent path (returns a {@link MissingNode}).
      * {@link #resolvePath} collapses both to null; only callers that care about presence
-     * (e.g. {@code IsPresent}) should use this variant.
+     * (e.g. {@code IsPresent}) should use this variant. When {@code context} is non-null it is the
+     * Context Object ({@code $$}) available to {@code States.*} intrinsic arguments.
      */
-    JsonNode resolvePathNode(String path, JsonNode root) {
+    JsonNode resolvePathNode(String path, JsonNode root, JsonNode context) {
         if (path == null || "$".equals(path)) {
             return root;
         }
         if (path.startsWith("States.")) {
-            return evaluateIntrinsic(path, root);
+            return evaluateIntrinsic(path, root, context);
         }
         // Support dotted ($.a.b) and root-bracket ($[*], $[0]) forms; anything else is unsupported.
         if (!path.startsWith("$.") && !path.startsWith("$[")) {
@@ -1693,7 +1871,7 @@ public class AslExecutor {
      *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID.
      * Throws FailStateException("States.Runtime") for unrecognized functions.
      */
-    private JsonNode evaluateIntrinsic(String expr, JsonNode root) {
+    private JsonNode evaluateIntrinsic(String expr, JsonNode root, JsonNode context) {
         int parenOpen = expr.indexOf('(');
         int parenClose = expr.lastIndexOf(')');
         if (parenOpen < 0 || parenClose < 0) {
@@ -1704,7 +1882,7 @@ public class AslExecutor {
 
         return switch (fnName) {
             case "States.StringToJson" -> {
-                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                JsonNode arg = resolveIntrinsicArg(argsStr, root, context);
                 try {
                     yield objectMapper.readTree(arg.asText());
                 } catch (Exception e) {
@@ -1713,7 +1891,7 @@ public class AslExecutor {
                 }
             }
             case "States.JsonToString" -> {
-                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                JsonNode arg = resolveIntrinsicArg(argsStr, root, context);
                 try {
                     yield objectMapper.getNodeFactory().textNode(objectMapper.writeValueAsString(arg));
                 } catch (Exception e) {
@@ -1733,7 +1911,7 @@ public class AslExecutor {
                         if (argIdx >= parts.size()) {
                             throw new FailStateException("States.Runtime", "States.Format: not enough arguments");
                         }
-                        JsonNode argVal = resolveIntrinsicArg(parts.get(argIdx++).trim(), root);
+                        JsonNode argVal = resolveIntrinsicArg(parts.get(argIdx++).trim(), root, context);
                         sb.append(argVal.isTextual() ? argVal.asText() : argVal.toString());
                         i++; // skip '}'
                     } else {
@@ -1746,12 +1924,12 @@ public class AslExecutor {
                 List<String> parts = splitIntrinsicArgs(argsStr);
                 ArrayNode arr = objectMapper.createArrayNode();
                 for (String part : parts) {
-                    arr.add(resolveIntrinsicArg(part.trim(), root));
+                    arr.add(resolveIntrinsicArg(part.trim(), root, context));
                 }
                 yield arr;
             }
             case "States.ArrayLength" -> {
-                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                JsonNode arg = resolveIntrinsicArg(argsStr, root, context);
                 if (!arg.isArray()) {
                     throw new FailStateException("States.Runtime", "States.ArrayLength requires an array");
                 }
@@ -1762,8 +1940,8 @@ public class AslExecutor {
                 if (parts.size() != 2) {
                     throw new FailStateException("States.Runtime", "States.MathAdd requires exactly 2 arguments");
                 }
-                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
-                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
+                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root, context);
                 yield objectMapper.getNodeFactory().numberNode(a.asLong() + b.asLong());
             }
             case "States.ArrayContains" -> {
@@ -1772,8 +1950,8 @@ public class AslExecutor {
                     throw new FailStateException("States.Runtime",
                             "States.ArrayContains requires exactly 2 arguments");
                 }
-                JsonNode array = resolveIntrinsicArg(parts.get(0).trim(), root);
-                JsonNode value = resolveIntrinsicArg(parts.get(1).trim(), root);
+                JsonNode array = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode value = resolveIntrinsicArg(parts.get(1).trim(), root, context);
                 if (!array.isArray()) {
                     // AWS throws rather than silently returning false, matching States.ArrayLength.
                     throw new FailStateException("States.Runtime",
@@ -1800,10 +1978,23 @@ public class AslExecutor {
      * Resolve a single intrinsic argument: either a $.path reference, a quoted string literal,
      * or a numeric literal.
      */
-    private JsonNode resolveIntrinsicArg(String arg, JsonNode root) {
+    private JsonNode resolveIntrinsicArg(String arg, JsonNode root, JsonNode context) {
         arg = arg.trim();
+        // A $$.-prefixed argument references the Context Object; resolve it against context
+        // (as a $. path) so intrinsics can read e.g. $$.Map.Item.Value.x or $$.Execution.Id.
+        // When context is null these fall through to the bare-path branch and a $$. arg formats
+        // as the literal string "null". This is Floci-internal transitional behavior, not AWS
+        // semantics: on real AWS the Context Object always exists. Every payload-template call
+        // site already threads context; this fallback (and the noContext_* test pinning it) only
+        // exists until context is also threaded into the remaining resolvePath callers.
+        if (context != null && arg.startsWith("$$.")) {
+            return resolvePath("$." + arg.substring(3), context);
+        }
+        if (context != null && "$$".equals(arg)) {
+            return context;
+        }
         if (arg.startsWith("$.") || "$".equals(arg)) {
-            return resolvePath(arg, root);
+            return resolvePath(arg, root, context);
         }
         if (arg.startsWith("'") && arg.endsWith("'")) {
             return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
@@ -1817,8 +2008,8 @@ public class AslExecutor {
             try {
                 return objectMapper.getNodeFactory().numberNode(Double.parseDouble(arg));
             } catch (NumberFormatException e2) {
-                // fall through: treat as bare path
-                return resolvePath(arg, root);
+                // fall through: treat as bare path (may itself be a nested States.* intrinsic)
+                return resolvePath(arg, root, context);
             }
         }
     }

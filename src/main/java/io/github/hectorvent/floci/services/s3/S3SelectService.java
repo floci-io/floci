@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsEventStreamEncoder;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -107,14 +108,10 @@ public class S3SelectService {
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static String detectType(String requestXml, String sectionTag) {
-        String openTag = "<" + sectionTag + ">";
-        int start = requestXml.indexOf(openTag);
-        if (start < 0) return null;
-        int end = requestXml.indexOf("</" + sectionTag + ">", start);
-        String section = end > start ? requestXml.substring(start, end) : requestXml.substring(start);
-        if (section.contains("<CSV")) return "CSV";
-        if (section.contains("<JSON")) return "JSON";
-        if (section.contains("<Parquet")) return "PARQUET";
+        List<String> children = XmlParser.childElementNames(requestXml, sectionTag);
+        if (children.contains("CSV")) return "CSV";
+        if (children.contains("JSON")) return "JSON";
+        if (children.contains("Parquet")) return "PARQUET";
         return null;
     }
 
@@ -132,9 +129,13 @@ public class S3SelectService {
             statsHeaders.put(":message-type", "event");
             statsHeaders.put(":event-type", "Stats");
             statsHeaders.put(":content-type", "text/xml");
-            String statsXml = "<Stats><BytesScanned>" + bytesScanned + "</BytesScanned>"
-                    + "<BytesProcessed>" + bytesScanned + "</BytesProcessed>"
-                    + "<BytesReturned>" + bytesReturned + "</BytesReturned></Stats>";
+            String statsXml = new XmlBuilder()
+                    .start("Stats")
+                    .elem("BytesScanned", bytesScanned)
+                    .elem("BytesProcessed", bytesScanned)
+                    .elem("BytesReturned", bytesReturned)
+                    .end("Stats")
+                    .build();
             baos.write(AwsEventStreamEncoder.encodeMessage(statsHeaders, statsXml.getBytes(StandardCharsets.UTF_8)));
 
             LinkedHashMap<String, String> endHeaders = new LinkedHashMap<>();

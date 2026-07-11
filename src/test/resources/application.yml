@@ -38,6 +38,8 @@ floci:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
+      lightsail:
+        flush-interval-ms: 60000
       codepipeline:
         flush-interval-ms: 60000
       s3vectors:
@@ -52,7 +54,13 @@ floci:
         flush-interval-ms: 60000
       codedeploy:
         flush-interval-ms: 60000
+      tagging:
+        flush-interval-ms: 60000
+      elasticbeanstalk:
+        flush-interval-ms: 60000
       cloudfront:
+      appsync:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
@@ -70,9 +78,13 @@ floci:
     enabled: false
     self-signed: true
 
+  protocols:
+    strict-claiming: false
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
+    resource-namespace: ""
 
   services:
     ssm:
@@ -84,6 +96,7 @@ floci:
       max-message-size: 1048576
     s3:
       enabled: true
+      enforce-auth: false
       default-presign-expiry-seconds: 3600
     dynamodb:
       enabled: true
@@ -106,6 +119,9 @@ floci:
       enabled: true
       mock: true
       default-image: "redpandadata/redpanda:latest"
+    amazonmq:
+      enabled: true
+      mock: true
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -120,6 +136,7 @@ floci:
       default-image: "valkey/valkey:8"
     rds:
       enabled: true
+      mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
@@ -205,6 +222,7 @@ floci:
     eks:
       enabled: true
       mock: true
+      ecr-registry-mirror: true
     pipes:
       enabled: true
     elbv2:
@@ -245,10 +263,15 @@ floci:
       emit-mode: off
     cloudtrail:
       enabled: true
+    lightsail:
+    cloudcontrol:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:
       enabled: true
+      schema-worker-threads: 4
+      schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
     iot:

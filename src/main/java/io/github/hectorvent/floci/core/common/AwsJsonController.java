@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbResponses;
@@ -39,6 +40,7 @@ public class AwsJsonController {
     private final SnsJsonHandler snsJsonHandler;
     private final StepFunctionsJsonHandler sfnJsonHandler;
     private final CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler;
+    private final CloudControlJsonHandler cloudControlJsonHandler;
 
     @Inject
     public AwsJsonController(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -47,7 +49,8 @@ public class AwsJsonController {
                              DynamoDbStreamsJsonHandler dynamoDbStreamsJsonHandler,
                              SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                              StepFunctionsJsonHandler sfnJsonHandler,
-                             CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler) {
+                             CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler,
+                             CloudControlJsonHandler cloudControlJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -57,6 +60,7 @@ public class AwsJsonController {
         this.snsJsonHandler = snsJsonHandler;
         this.sfnJsonHandler = sfnJsonHandler;
         this.cloudWatchMetricsJsonHandler = cloudWatchMetricsJsonHandler;
+        this.cloudControlJsonHandler = cloudControlJsonHandler;
     }
 
     @POST
@@ -96,6 +100,7 @@ public class AwsJsonController {
                 case "sns" -> snsJsonHandler.handle(action, request, region);
                 case "states" -> sfnJsonHandler.handle(action, request, region);
                 case "monitoring" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
+                case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.1 target
