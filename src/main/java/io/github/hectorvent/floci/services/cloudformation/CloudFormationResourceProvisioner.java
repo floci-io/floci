@@ -3872,6 +3872,7 @@ public class CloudFormationResourceProvisioner {
         if (node != null && !node.isMissingNode() && !node.isNull()) {
             dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
             dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+            dcb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
         }
         return dcb;
     }
@@ -3885,6 +3886,7 @@ public class CloudFormationResourceProvisioner {
                 cb.setPathPattern(cfnText(node, "PathPattern", engine));
                 cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
                 cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+                cb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
                 behaviors.add(cb);
             }
         }

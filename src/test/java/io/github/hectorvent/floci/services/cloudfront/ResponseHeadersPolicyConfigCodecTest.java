@@ -87,6 +87,23 @@ class ResponseHeadersPolicyConfigCodecTest {
     }
 
     @Test
+    void allowOriginIsASingleValueNotACommaJoinedList() {
+        // Access-Control-Allow-Origin must be a single origin (or "*"); joining multiple configured
+        // origins with a comma would be an invalid header value.
+        String xml = """
+                <ResponseHeadersPolicyConfig><Name>multi</Name><CorsConfig>
+                  <AccessControlAllowOrigins><Quantity>2</Quantity><Items>
+                    <Origin>https://a.example</Origin><Origin>https://b.example</Origin>
+                  </Items></AccessControlAllowOrigins>
+                  <OriginOverride>true</OriginOverride>
+                </CorsConfig></ResponseHeadersPolicyConfig>
+                """;
+        String value = headers(ResponseHeadersPolicyConfigCodec.parse(xml)).get("Access-Control-Allow-Origin");
+        assertEquals("https://a.example", value);
+        assertFalse(value.contains(","), value);
+    }
+
+    @Test
     void serializedConfigRoundTripsToTheSameHeaders() {
         Map<String, Object> config = ResponseHeadersPolicyConfigCodec.parse(XML);
         XmlBuilder xml = new XmlBuilder().start("ResponseHeadersPolicyConfig");

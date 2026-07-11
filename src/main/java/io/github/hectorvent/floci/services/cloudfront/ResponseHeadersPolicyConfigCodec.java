@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import org.jboss.logging.Logger;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -31,6 +32,8 @@ import java.util.Map;
  * but not applied — it is sampling based and carries no meaning in the emulator.
  */
 final class ResponseHeadersPolicyConfigCodec {
+
+    private static final Logger LOG = Logger.getLogger(ResponseHeadersPolicyConfigCodec.class);
 
     private ResponseHeadersPolicyConfigCodec() {
     }
@@ -271,7 +274,14 @@ final class ResponseHeadersPolicyConfigCodec {
     @SuppressWarnings("unchecked")
     private static void corsHeaders(Map<String, Object> cors, List<PolicyHeader> add) {
         boolean override = Boolean.parseBoolean(String.valueOf(cors.get("OriginOverride")));
-        corsListHeader(cors, "AccessControlAllowOrigins", "Access-Control-Allow-Origin", override, add);
+        // Access-Control-Allow-Origin must be a single origin (or "*"); a comma-joined list is not a
+        // valid value. CloudFront echoes the matching request origin when several are configured; with
+        // no request context here, emit "*" when allowed, otherwise the first configured origin.
+        List<String> origins = (List<String>) cors.get("AccessControlAllowOrigins");
+        if (origins != null && !origins.isEmpty()) {
+            add.add(new PolicyHeader("Access-Control-Allow-Origin",
+                    origins.contains("*") ? "*" : origins.get(0), override));
+        }
         corsListHeader(cors, "AccessControlAllowHeaders", "Access-Control-Allow-Headers", override, add);
         corsListHeader(cors, "AccessControlAllowMethods", "Access-Control-Allow-Methods", override, add);
         corsListHeader(cors, "AccessControlExposeHeaders", "Access-Control-Expose-Headers", override, add);
@@ -321,6 +331,9 @@ final class ResponseHeadersPolicyConfigCodec {
             }
             return firstDescendant(root, "ResponseHeadersPolicyConfig");
         } catch (Exception e) {
+            // A malformed policy body yields an empty config (no headers applied) rather than failing
+            // the create call; log it so the cause is diagnosable.
+            LOG.debugv("Ignoring unparseable ResponseHeadersPolicyConfig: {0}", e.getMessage());
             return null;
         }
     }
