@@ -223,6 +223,19 @@ class GlobalSignOutIntegrationTest {
 
     @Test
     @Order(11)
+    void globalSignOutFailsForNonexistentPool() throws Exception {
+        String forged = forgeAccessToken("us-east-1_NONEXISTENT", "ghost");
+
+        JsonNode body = cognitoJsonAny("GlobalSignOut", """
+                {"AccessToken":"%s"}
+                """.formatted(forged));
+
+        assertEquals("NotAuthorizedException", body.path("__type").asText(),
+                "GlobalSignOut for a nonexistent pool must fail with NotAuthorizedException, body was: " + body);
+    }
+
+    @Test
+    @Order(12)
     void globalSignOutRejectsMissingAccessToken() throws Exception {
         JsonNode body = cognitoJsonAny("GlobalSignOut", "{}");
 

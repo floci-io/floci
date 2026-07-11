@@ -884,7 +884,8 @@ public class CognitoService {
         try {
             adminGetUser(poolId, username);
         } catch (AwsException e) {
-            if ("UserNotFoundException".equals(e.getErrorCode())) {
+            if ("UserNotFoundException".equals(e.getErrorCode())
+                    || "ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
             }
             throw e;
