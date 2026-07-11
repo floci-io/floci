@@ -51,7 +51,11 @@ public class CloudFrontServingController {
     private static final Logger LOG = Logger.getLogger(CloudFrontServingController.class);
     private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
 
-    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+    // Instance (not static) field: a static HttpClient initialized at class-init time lands in the
+    // GraalVM native-image build heap (jdk.internal.net.http.HttpClientFacade is initialized at run
+    // time), which fails the native build. Creating it per-bean-instance keeps it out of the build
+    // heap, matching the apigatewayv2 HttpProxyInvoker pattern.
+    private final HttpClient httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(10))
             .followRedirects(HttpClient.Redirect.NEVER)
@@ -164,7 +168,7 @@ public class CloudFrontServingController {
             } else {
                 rb.method("HEAD", HttpRequest.BodyPublishers.noBody());
             }
-            HttpResponse<byte[]> resp = HTTP_CLIENT.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> resp = httpClient.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             byte[] body = resp.body() != null ? resp.body() : new byte[0];
             return new OriginResponse(resp.statusCode(), ct, includeBody ? body : null, body.length);
