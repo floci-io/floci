@@ -256,6 +256,7 @@ public interface EmulatorConfig {
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
+        LightsailStorageConfig lightsail();
         CodePipelineStorageConfig codepipeline();
         S3VectorsStorageConfig s3vectors();
         EcsStorageConfig ecs();
@@ -397,6 +398,13 @@ public interface EmulatorConfig {
     }
 
     interface BatchStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface LightsailStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -551,6 +559,7 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
@@ -584,6 +593,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface LightsailServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -695,6 +709,9 @@ public interface EmulatorConfig {
     interface S3ServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean enforceAuth();
 
         @WithDefault("3600")
         int defaultPresignExpirySeconds();
@@ -1175,6 +1192,14 @@ public interface EmulatorConfig {
     interface AppSyncServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Worker threads for async schema creation. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_THREADS */
+        @WithDefault("4")
+        int schemaWorkerThreads();
+
+        /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
+        @WithDefault("30")
+        int schemaWorkerShutdownTimeoutSeconds();
     }
 
     interface BcmDataExportsServiceConfig {

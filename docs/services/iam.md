@@ -8,133 +8,133 @@
 
 | Action | Description |
 |--------|-------------|
-| CreateUser | - |
-| GetUser | - |
-| DeleteUser | - |
-| ListUsers | - |
-| UpdateUser | - |
-| TagUser | - |
-| UntagUser | - |
-| ListUserTags | - |
+| CreateUser | Creates an IAM user in the local account. |
+| GetUser | Returns a stored IAM user. |
+| DeleteUser | Deletes an IAM user from the local IAM store. |
+| ListUsers | Lists IAM users in the local account. |
+| UpdateUser | Updates mutable IAM user fields. |
+| TagUser | Adds tags to an IAM user. |
+| UntagUser | Removes tags from an IAM user. |
+| ListUserTags | Lists tags stored for an IAM user. |
 
 ### Groups
 
 | Action | Description |
 |--------|-------------|
-| CreateGroup | - |
-| GetGroup | - |
-| DeleteGroup | - |
-| ListGroups | - |
-| AddUserToGroup | - |
-| RemoveUserFromGroup | - |
-| ListGroupsForUser | - |
+| CreateGroup | Creates an IAM group. |
+| GetGroup | Returns an IAM group and its users. |
+| DeleteGroup | Deletes an IAM group from the local IAM store. |
+| ListGroups | Lists IAM groups in the local account. |
+| AddUserToGroup | Adds a user to an IAM group. |
+| RemoveUserFromGroup | Removes a user from an IAM group. |
+| ListGroupsForUser | Lists groups that contain a user. |
 
 ### Roles
 
 | Action | Description |
 |--------|-------------|
-| CreateRole | - |
-| GetRole | - |
-| DeleteRole | - |
-| ListRoles | - |
-| UpdateRole | - |
-| UpdateAssumeRolePolicy | - |
-| TagRole | - |
-| UntagRole | - |
-| ListRoleTags | - |
+| CreateRole | Creates an IAM role with an assume-role policy. |
+| GetRole | Returns a stored IAM role. |
+| DeleteRole | Deletes an IAM role from the local IAM store. |
+| ListRoles | Lists IAM roles in the local account. |
+| UpdateRole | Updates mutable IAM role fields. |
+| UpdateAssumeRolePolicy | Replaces a role's assume-role policy document. |
+| TagRole | Adds tags to an IAM role. |
+| UntagRole | Removes tags from an IAM role. |
+| ListRoleTags | Lists tags stored for an IAM role. |
 
 ### Policies
 
 | Action | Description |
 |--------|-------------|
-| CreatePolicy | - |
-| GetPolicy | - |
-| DeletePolicy | - |
-| ListPolicies | - |
-| CreatePolicyVersion | - |
-| GetPolicyVersion | - |
-| DeletePolicyVersion | - |
-| ListPolicyVersions | - |
-| SetDefaultPolicyVersion | - |
-| TagPolicy | - |
-| UntagPolicy | - |
-| ListPolicyTags | - |
+| CreatePolicy | Creates a customer-managed IAM policy. |
+| GetPolicy | Returns metadata for a managed IAM policy. |
+| DeletePolicy | Deletes a managed IAM policy. |
+| ListPolicies | Lists managed IAM policies, including seeded AWS managed policies. |
+| CreatePolicyVersion | Creates a new version of a managed policy. |
+| GetPolicyVersion | Returns a managed policy version document. |
+| DeletePolicyVersion | Deletes a non-default managed policy version. |
+| ListPolicyVersions | Lists versions for a managed policy. |
+| SetDefaultPolicyVersion | Sets the default version for a managed policy. |
+| TagPolicy | Adds tags to a managed policy. |
+| UntagPolicy | Removes tags from a managed policy. |
+| ListPolicyTags | Lists tags stored for a managed policy. |
 
 ### Permission Boundaries
 
 | Action | Description |
 |--------|-------------|
-| PutUserPermissionsBoundary | - |
-| DeleteUserPermissionsBoundary | - |
-| PutRolePermissionsBoundary | - |
-| DeleteRolePermissionsBoundary | - |
+| PutUserPermissionsBoundary | Sets a managed policy as a user's permissions boundary. |
+| DeleteUserPermissionsBoundary | Removes a user's permissions boundary. |
+| PutRolePermissionsBoundary | Sets a managed policy as a role's permissions boundary. |
+| DeleteRolePermissionsBoundary | Removes a role's permissions boundary. |
 
 ### Policy Attachments
 
 | Action | Description |
 |--------|-------------|
-| AttachUserPolicy | - |
-| DetachUserPolicy | - |
-| ListAttachedUserPolicies | - |
-| AttachGroupPolicy | - |
-| DetachGroupPolicy | - |
-| ListAttachedGroupPolicies | - |
-| AttachRolePolicy | - |
-| DetachRolePolicy | - |
-| ListAttachedRolePolicies | - |
+| AttachUserPolicy | Attaches a managed policy to a user. |
+| DetachUserPolicy | Detaches a managed policy from a user. |
+| ListAttachedUserPolicies | Lists managed policies attached to a user. |
+| AttachGroupPolicy | Attaches a managed policy to a group. |
+| DetachGroupPolicy | Detaches a managed policy from a group. |
+| ListAttachedGroupPolicies | Lists managed policies attached to a group. |
+| AttachRolePolicy | Attaches a managed policy to a role. |
+| DetachRolePolicy | Detaches a managed policy from a role. |
+| ListAttachedRolePolicies | Lists managed policies attached to a role. |
 
 ### Inline Policies
 
 | Action | Description |
 |--------|-------------|
-| PutUserPolicy | - |
-| GetUserPolicy | - |
-| DeleteUserPolicy | - |
-| ListUserPolicies | - |
-| PutGroupPolicy | - |
-| GetGroupPolicy | - |
-| DeleteGroupPolicy | - |
-| ListGroupPolicies | - |
-| PutRolePolicy | - |
-| GetRolePolicy | - |
-| DeleteRolePolicy | - |
-| ListRolePolicies | - |
+| PutUserPolicy | Stores or replaces an inline policy on a user. |
+| GetUserPolicy | Returns an inline policy stored on a user. |
+| DeleteUserPolicy | Deletes an inline policy from a user. |
+| ListUserPolicies | Lists inline policy names stored on a user. |
+| PutGroupPolicy | Stores or replaces an inline policy on a group. |
+| GetGroupPolicy | Returns an inline policy stored on a group. |
+| DeleteGroupPolicy | Deletes an inline policy from a group. |
+| ListGroupPolicies | Lists inline policy names stored on a group. |
+| PutRolePolicy | Stores or replaces an inline policy on a role. |
+| GetRolePolicy | Returns an inline policy stored on a role. |
+| DeleteRolePolicy | Deletes an inline policy from a role. |
+| ListRolePolicies | Lists inline policy names stored on a role. |
 
 ### Instance Profiles
 
 | Action | Description |
 |--------|-------------|
-| CreateInstanceProfile | - |
-| GetInstanceProfile | - |
-| DeleteInstanceProfile | - |
-| ListInstanceProfiles | - |
-| AddRoleToInstanceProfile | - |
-| RemoveRoleFromInstanceProfile | - |
-| ListInstanceProfilesForRole | - |
+| CreateInstanceProfile | Creates an IAM instance profile. |
+| GetInstanceProfile | Returns an instance profile and its roles. |
+| DeleteInstanceProfile | Deletes an instance profile from the local IAM store. |
+| ListInstanceProfiles | Lists IAM instance profiles. |
+| AddRoleToInstanceProfile | Adds a role to an instance profile. |
+| RemoveRoleFromInstanceProfile | Removes a role from an instance profile. |
+| ListInstanceProfilesForRole | Lists instance profiles associated with a role. |
 
 ### Access Keys
 
 | Action | Description |
 |--------|-------------|
-| CreateAccessKey | - |
-| GetAccessKeyLastUsed | - |
-| ListAccessKeys | - |
-| UpdateAccessKey | - |
-| DeleteAccessKey | - |
+| CreateAccessKey | Creates access-key credentials for a user. |
+| GetAccessKeyLastUsed | Returns the stored last-used metadata for an access key. |
+| ListAccessKeys | Lists access keys for a user. |
+| UpdateAccessKey | Updates an access key's status. |
+| DeleteAccessKey | Deletes an access key from a user. |
 
 ### Login Profiles
 
 | Action | Description |
 |--------|-------------|
-| CreateLoginProfile | - |
-| DeleteLoginProfile | - |
-| UpdateLoginProfile | - |
+| CreateLoginProfile | Creates a password login profile for a user. |
+| DeleteLoginProfile | Deletes a user's login profile. |
+| UpdateLoginProfile | Updates a user's login profile password settings. |
 
 ### Policy Simulation
 
 | Action | Description |
 |--------|-------------|
-| SimulatePrincipalPolicy | - |
+| SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
 
 ## AWS Managed Policies
 
