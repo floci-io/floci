@@ -780,6 +780,29 @@ public class CloudFrontService {
         return paginate(all, marker, maxItems, PublicKey::getId);
     }
 
+    /**
+     * Resolves the PEM public key for a {@code Key-Pair-Id} used to sign a request, but only when that
+     * public key is a member of one of the supplied key groups. Returns {@code null} when the key is
+     * unknown or is not a member of any of those groups — i.e. it is not a trusted signer.
+     */
+    public String trustedPublicKeyPem(String keyPairId, List<String> keyGroupIds) {
+        if (keyPairId == null || keyGroupIds == null || keyGroupIds.isEmpty()) {
+            return null;
+        }
+        boolean trusted = false;
+        for (String keyGroupId : keyGroupIds) {
+            KeyGroup group = keyGroupStore.get(keyGroupId).orElse(null);
+            if (group != null && group.getItems() != null && group.getItems().contains(keyPairId)) {
+                trusted = true;
+                break;
+            }
+        }
+        if (!trusted) {
+            return null;
+        }
+        return publicKeyStore.get(keyPairId).map(PublicKey::getEncodedKey).orElse(null);
+    }
+
     // ── Key Groups ────────────────────────────────────────────────────────────
 
     public synchronized KeyGroup createKeyGroup(KeyGroup group) {

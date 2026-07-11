@@ -23,6 +23,10 @@ public class DefaultCacheBehavior {
     private long defaultTTL;
     private long minTTL;
     private long maxTTL;
+    // Private-content: key group IDs whose public keys may sign requests (current), and legacy
+    // trusted signer AWS account numbers. A non-empty list means requests must be signed.
+    private List<String> trustedKeyGroups;
+    private List<String> trustedSigners;
 
     public DefaultCacheBehavior() {}
 
@@ -70,4 +74,10 @@ public class DefaultCacheBehavior {
 
     public long getMaxTTL() { return maxTTL; }
     public void setMaxTTL(long maxTTL) { this.maxTTL = maxTTL; }
+
+    public List<String> getTrustedKeyGroups() { return trustedKeyGroups; }
+    public void setTrustedKeyGroups(List<String> trustedKeyGroups) { this.trustedKeyGroups = trustedKeyGroups; }
+
+    public List<String> getTrustedSigners() { return trustedSigners; }
+    public void setTrustedSigners(List<String> trustedSigners) { this.trustedSigners = trustedSigners; }
 }

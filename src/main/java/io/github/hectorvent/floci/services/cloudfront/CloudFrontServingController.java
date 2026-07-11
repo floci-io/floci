@@ -61,13 +61,19 @@ public class CloudFrontServingController {
             .followRedirects(HttpClient.Redirect.NEVER)
             .build();
 
+    private static final java.util.Set<String> CLOUDFRONT_SIGNING_PARAMS =
+            java.util.Set.of("Expires", "Signature", "Key-Pair-Id", "Policy", "Hash-Algorithm");
+
     private final CloudFrontService service;
     private final S3Service s3Service;
+    private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
 
     @Inject
-    public CloudFrontServingController(CloudFrontService service, S3Service s3Service) {
+    public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
+                                       io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest) {
         this.service = service;
         this.s3Service = s3Service;
+        this.currentVertxRequest = currentVertxRequest;
     }
 
     @GET
@@ -97,6 +103,18 @@ public class CloudFrontServingController {
         String viewerPath = "/" + (proxy == null ? "" : proxy);
         String normalized = CloudFrontRequestRouter.normalizePath(viewerPath);
 
+        // Private content: when the matched cache behavior trusts key groups, the request must carry a
+        // valid CloudFront signature (signed URL or signed cookies), otherwise CloudFront returns 403.
+        List<String> trustedKeyGroups = CloudFrontRequestRouter.trustedKeyGroupsFor(config, normalized);
+        if (!trustedKeyGroups.isEmpty()) {
+            CloudFrontSignatureVerifier.Result verdict = verifySignedRequest(dist, viewerPath, trustedKeyGroups);
+            if (!verdict.allowed()) {
+                LOG.debugv("CloudFront denied a request for {0}{1}: {2}",
+                        dist.getId(), viewerPath, verdict.reason());
+                return textError(403, "Access denied: " + verdict.reason());
+            }
+        }
+
         OriginResponse origin = route(config, normalized, includeBody);
 
         if (origin.status() >= 400) {
@@ -106,6 +124,59 @@ public class CloudFrontServingController {
             }
         }
         return toResponse(origin, includeBody);
+    }
+
+    /**
+     * Verifies the live request against the behavior's trusted key groups, resolving a Key-Pair-Id to
+     * its public key only when that key is a member of one of those groups.
+     */
+    private CloudFrontSignatureVerifier.Result verifySignedRequest(Distribution dist, String viewerPath,
+                                                                   List<String> trustedKeyGroups) {
+        io.vertx.core.http.HttpServerRequest request = currentVertxRequest.getCurrent().request();
+
+        Map<String, String> query = new java.util.LinkedHashMap<>();
+        for (String name : request.params().names()) {
+            query.put(name, request.getParam(name));
+        }
+        Map<String, String> cookies = parseCookies(request.getHeader("Cookie"));
+        String resourceUrl = buildResourceUrl(dist, request, viewerPath, query);
+        String sourceIp = request.remoteAddress() != null ? request.remoteAddress().hostAddress() : null;
+
+        return CloudFrontSignatureVerifier.verify(resourceUrl, query, cookies, sourceIp,
+                keyPairId -> service.trustedPublicKeyPem(keyPairId, trustedKeyGroups), java.time.Instant.now());
+    }
+
+    /** Rebuilds the URL a signer would have signed: {@code scheme://host<path>[?app-query]}. */
+    private static String buildResourceUrl(Distribution dist, io.vertx.core.http.HttpServerRequest request,
+                                           String viewerPath, Map<String, String> query) {
+        String scheme = request.scheme() != null ? request.scheme() : "https";
+        String host = request.getHeader("Host");
+        if (host == null || host.isBlank()) {
+            host = dist.getDomainName();
+        }
+        StringBuilder appQuery = new StringBuilder();
+        for (Map.Entry<String, String> entry : query.entrySet()) {
+            if (CLOUDFRONT_SIGNING_PARAMS.contains(entry.getKey())) {
+                continue;
+            }
+            appQuery.append(appQuery.length() == 0 ? '?' : '&')
+                    .append(entry.getKey()).append('=').append(entry.getValue());
+        }
+        return scheme + "://" + host + viewerPath + appQuery;
+    }
+
+    private static Map<String, String> parseCookies(String cookieHeader) {
+        Map<String, String> cookies = new java.util.LinkedHashMap<>();
+        if (cookieHeader == null || cookieHeader.isBlank()) {
+            return cookies;
+        }
+        for (String part : cookieHeader.split(";")) {
+            int eq = part.indexOf('=');
+            if (eq > 0) {
+                cookies.put(part.substring(0, eq).trim(), part.substring(eq + 1).trim());
+            }
+        }
+        return cookies;
     }
 
     /** Resolves the target origin for a normalized path and fetches the content. */

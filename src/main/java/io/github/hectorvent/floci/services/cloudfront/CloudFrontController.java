@@ -2331,7 +2331,9 @@ public class CloudFrontController {
             XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
             boolean inDcb = false;
             boolean inAllowedMethods = false;
+            boolean inTrustedKeyGroups = false;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> trustedKeyGroups = new ArrayList<>();
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2339,6 +2341,12 @@ public class CloudFrontController {
                     String local = r.getLocalName();
                     switch (local) {
                         case "DefaultCacheBehavior" -> inDcb = true;
+                        case "TrustedKeyGroups" -> {
+                            if (inDcb) inTrustedKeyGroups = true;
+                        }
+                        case "KeyGroup" -> {
+                            if (inTrustedKeyGroups) trustedKeyGroups.add(r.getElementText());
+                        }
                         case "AllowedMethods" -> {
                             if (inDcb) inAllowedMethods = true;
                         }
@@ -2375,6 +2383,7 @@ public class CloudFrontController {
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "DefaultCacheBehavior" -> inDcb = false;
                         default -> {
                         }
@@ -2384,6 +2393,9 @@ public class CloudFrontController {
             r.close();
             if (!allowedMethods.isEmpty()) {
                 dcb.setAllowedMethods(allowedMethods);
+            }
+            if (!trustedKeyGroups.isEmpty()) {
+                dcb.setTrustedKeyGroups(trustedKeyGroups);
             }
         } catch (Exception ignored) {
         }
@@ -2400,8 +2412,10 @@ public class CloudFrontController {
             boolean inCacheBehaviors = false;
             boolean inCacheBehavior = false;
             boolean inAllowedMethods = false;
+            boolean inTrustedKeyGroups = false;
             CacheBehavior current = null;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> trustedKeyGroups = new ArrayList<>();
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2414,7 +2428,14 @@ public class CloudFrontController {
                                 inCacheBehavior = true;
                                 current = new CacheBehavior();
                                 allowedMethods = new ArrayList<>();
+                                trustedKeyGroups = new ArrayList<>();
                             }
+                        }
+                        case "TrustedKeyGroups" -> {
+                            if (inCacheBehavior) inTrustedKeyGroups = true;
+                        }
+                        case "KeyGroup" -> {
+                            if (inTrustedKeyGroups) trustedKeyGroups.add(r.getElementText());
                         }
                         case "AllowedMethods" -> {
                             if (inCacheBehavior) inAllowedMethods = true;
@@ -2453,10 +2474,14 @@ public class CloudFrontController {
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "CacheBehavior" -> {
                             if (inCacheBehavior && current != null) {
                                 if (!allowedMethods.isEmpty()) {
                                     current.setAllowedMethods(allowedMethods);
+                                }
+                                if (!trustedKeyGroups.isEmpty()) {
+                                    current.setTrustedKeyGroups(trustedKeyGroups);
                                 }
                                 result.add(current);
                             }
