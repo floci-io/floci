@@ -412,7 +412,7 @@ public class ContainerLauncher {
      * throwaway helper container that has the volume mounted read-write; every real container then
      * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
      */
-    private String ensureCodeVolume(LambdaFunction fn, String image) {
+    String ensureCodeVolume(LambdaFunction fn, String image) {
         String volName = codeVolumeName(fn);
         if (populatedCodeVolumes.contains(volName)) {
             return volName;
@@ -422,10 +422,22 @@ public class ContainerLauncher {
             if (populatedCodeVolumes.contains(volName)) {
                 return volName;
             }
+            // Reuse a volume a previous run already populated. The volume name is content-addressed by
+            // the code's sha256, and the completion marker below is written only after a populate fully
+            // succeeds, so a still-present volume with a marker holds exactly this code version — mount
+            // it and skip the (e.g. ~34k-file) re-copy. A crashed or partial populate leaves no marker,
+            // so it is safely redone.
+            if (codeVolumeMarkerExists(volName) && lifecycleManager.volumeExists(volName)) {
+                LOG.infov("Reusing code volume {0} populated by a previous run (marker present)", volName);
+                populatedCodeVolumes.add(volName);
+                codeVolumeLocks.remove(volName);
+                return volName;
+            }
             long t0 = System.currentTimeMillis();
             LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
                     volName, fn.getFunctionName());
             populateCodeVolume(volName, fn, image);
+            writeCodeVolumeMarker(volName);
             populatedCodeVolumes.add(volName);
             // Bound codeVolumeLocks: drop the lock now that the volume is populated, so the map only
             // ever holds in-flight populates rather than growing across redeploys. Safe under the
@@ -443,7 +455,7 @@ public class ContainerLauncher {
         return volName;
     }
 
-    private void populateCodeVolume(String volName, LambdaFunction fn, String image) {
+    void populateCodeVolume(String volName, LambdaFunction fn, String image) {
         lifecycleManager.ensureVolume(volName);
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
@@ -469,6 +481,30 @@ public class ContainerLauncher {
                 try { lifecycleManager.stopAndRemove(helperId, null); } catch (Exception ignore) { /* best effort */ }
             }
             POPULATE_SEMAPHORE.release();
+        }
+    }
+
+    // A code volume survives an emulator restart, but the in-process populatedCodeVolumes set does not.
+    // A persisted completion marker lets a later run recognize an already-populated, content-addressed
+    // volume and skip re-copying its files. The marker lives under the storage persistent path so it
+    // shares the volume's lifetime expectations (hybrid/persistent storage); in memory-only mode the
+    // marker dir is transient too, which is correct because nothing persists across restarts there.
+    private Path codeVolumeMarkerPath(String volName) {
+        return Path.of(config.storage().persistentPath(), "lambda-codevol-markers", volName);
+    }
+
+    private boolean codeVolumeMarkerExists(String volName) {
+        return Files.isRegularFile(codeVolumeMarkerPath(volName));
+    }
+
+    private void writeCodeVolumeMarker(String volName) {
+        Path marker = codeVolumeMarkerPath(volName);
+        try {
+            Files.createDirectories(marker.getParent());
+            Files.writeString(marker, "");
+        } catch (IOException e) {
+            // A missing marker only costs one re-populate on the next boot; never fail a launch over it.
+            LOG.warnv("Could not write code-volume marker {0}: {1}", marker, e.getMessage());
         }
     }
 
