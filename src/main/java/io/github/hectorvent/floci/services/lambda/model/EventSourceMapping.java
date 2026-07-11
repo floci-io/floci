@@ -104,6 +104,7 @@ public class EventSourceMapping {
         this.destinationConfig = destinationConfig;
     }
 
+    @RegisterForReflection
     public static class DestinationConfig {
         private OnFailure onFailure;
 
@@ -119,6 +120,7 @@ public class EventSourceMapping {
         }
     }
 
+    @RegisterForReflection
     public static class OnFailure {
         private String destination;
 
