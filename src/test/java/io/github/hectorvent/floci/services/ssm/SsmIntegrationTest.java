@@ -233,6 +233,133 @@ class SsmIntegrationTest {
             .body("DeletedParameters.size()", equalTo(2));
     }
 
+    // ── Issue #956: DescribePatchBaselines / GetDefaultPatchBaseline (AWS-owned predefined) ──
+
+    @Test
+    void describePatchBaselines_filteredByOwnerAndOperatingSystem() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribePatchBaselines")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": [
+                        {"Key": "OWNER", "Values": ["AWS"]},
+                        {"Key": "OPERATING_SYSTEM", "Values": ["AMAZON_LINUX_2"]}
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("BaselineIdentities.size()", equalTo(1))
+            .body("BaselineIdentities[0].BaselineName", equalTo("AWS-AmazonLinux2DefaultPatchBaseline"))
+            .body("BaselineIdentities[0].OperatingSystem", equalTo("AMAZON_LINUX_2"))
+            .body("BaselineIdentities[0].DefaultBaseline", equalTo(true))
+            .body("BaselineIdentities[0].BaselineId", startsWith("pb-"));
+    }
+
+    @Test
+    void describePatchBaselines_byNamePrefixReturnsPredefined() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribePatchBaselines")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": [
+                        {"Key": "NAME_PREFIX", "Values": ["AWS-"]}
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("BaselineIdentities.size()", greaterThan(1))
+            .body("BaselineIdentities.BaselineName", everyItem(startsWith("AWS-")));
+    }
+
+    @Test
+    void describePatchBaselines_ownerSelfReturnsEmpty() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribePatchBaselines")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": [
+                        {"Key": "OWNER", "Values": ["Self"]}
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("BaselineIdentities.size()", equalTo(0));
+    }
+
+    @Test
+    void getDefaultPatchBaseline_windows() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetDefaultPatchBaseline")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "OperatingSystem": "WINDOWS"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("OperatingSystem", equalTo("WINDOWS"))
+            .body("BaselineId", startsWith("pb-"));
+    }
+
+    // ── Read-only list operations for resources not modeled (empty results) ──
+
+    @Test
+    void listDocuments_returnsEmptyList() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListDocuments")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentIdentifiers.size()", equalTo(0))
+            .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    void listAssociations_returnsEmptyList() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListAssociations")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Associations.size()", equalTo(0))
+            .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    void describeMaintenanceWindows_returnsEmptyList() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeMaintenanceWindows")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WindowIdentities.size()", equalTo(0))
+            .body("$", not(hasKey("NextToken")));
+    }
+
     @Test
     void unsupportedOperation() {
         given()

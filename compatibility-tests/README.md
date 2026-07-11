@@ -35,7 +35,6 @@ just test-awscli
 | [`sdk-test-awscli`](sdk-test-awscli/) | Bash / AWS CLI | bats-core      | `just test-awscli`     |
 | [`sdk-test-java`](sdk-test-java/)     | Java 17        | JUnit 5        | `just test-java`       |
 | [`sdk-test-go`](sdk-test-go/)         | Go 1.24        | go test        | `just test-go`         |
-| [`sdk-test-rust`](sdk-test-rust/)     | Rust           | cargo-nextest  | `just test-rust`       |
 
 ### IaC Compatibility
 
@@ -62,7 +61,6 @@ Per-module requirements:
 | `sdk-test-awscli` | AWS CLI v2, bash, jq                |
 | `sdk-test-java`   | Java 17+, Maven                     |
 | `sdk-test-go`     | Go 1.24+                            |
-| `sdk-test-rust`   | Rust (stable), Cargo, cargo-nextest |
 
 ## Setup
 

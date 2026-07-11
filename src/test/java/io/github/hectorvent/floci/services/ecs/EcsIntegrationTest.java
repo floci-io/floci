@@ -348,6 +348,56 @@ class EcsIntegrationTest {
 
     @Test
     @Order(16)
+    void registerTaskDefinitionWithSecretsRoundTripsReferences() {
+        String secretArn = "arn:aws:secretsmanager:%s:%s:secret:db-password-AbCdEf"
+                .formatted(REGION, ACCOUNT);
+
+        String secretsTaskDefArn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "task-with-secrets",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true,
+                            "secrets": [
+                                {"name": "DB_PASSWORD", "valueFrom": "%s"},
+                                {"name": "CONFIG_VALUE", "valueFrom": "/app/config"}
+                            ]
+                        }
+                    ]
+                }
+                """.formatted(secretArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(secretsTaskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"));
+    }
+
+    @Test
+    @Order(17)
     void describeTaskDefinition() {
         ecs("DescribeTaskDefinition")
             .body("""
@@ -363,7 +413,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(17)
+    @Order(18)
     void listTaskDefinitions() {
         ecs("ListTaskDefinitions")
             .body("{}")
@@ -375,7 +425,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void listTaskDefinitionFamilies() {
         ecs("ListTaskDefinitionFamilies")
             .body("{}")
@@ -644,6 +694,70 @@ class EcsIntegrationTest {
                 .statusCode(400)
                 .body("__type", containsString("InvalidParameterException"))
                 .body("message", containsString("Creation of service was not idempotent."));
+    }
+
+    // ── Negative desiredCount validation (issue #1382) ───────────────────────
+
+    @Test
+    @Order(36)
+    void createServiceRejectsNegativeDesiredCount() {
+        ecs("CreateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "negative-count-svc",
+                    "taskDefinition": "%s",
+                    "desiredCount": -5,
+                    "launchType": "FARGATE"
+                }
+                """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("desiredCount cannot be a negative number."));
+    }
+
+
+
+    @Test
+    @Order(38)
+    void updateServiceRejectsNegativeDesiredCount() {
+        ecs("UpdateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "service": "%s",
+                    "desiredCount": -3
+                }
+                """.formatted(CLUSTER_NAME, SERVICE_NAME))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("desiredCount cannot be a negative number."));
+    }
+
+    @Test
+    @Order(39)
+    void createServiceAcceptsZeroDesiredCount() {
+        ecs("CreateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "zero-count-svc",
+                    "taskDefinition": "%s",
+                    "desiredCount": 0,
+                    "launchType": "FARGATE"
+                }
+                """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("service.desiredCount", equalTo(0));
     }
 
     // ── Tags ─────────────────────────────────────────────────────────────────

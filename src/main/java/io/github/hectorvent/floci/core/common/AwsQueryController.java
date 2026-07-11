@@ -2,9 +2,12 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneService;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingQueryHandler;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.ec2.Ec2QueryHandler;
+import io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkQueryHandler;
 import io.github.hectorvent.floci.services.elbv2.ElbV2QueryHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsQueryHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -30,8 +33,6 @@ import org.jboss.logging.Logger;
 
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Generic dispatcher for all AWS services that use the Query Protocol (form-encoded POST, XML response).
@@ -53,10 +54,6 @@ import java.util.regex.Pattern;
 public class AwsQueryController {
 
     private static final Logger LOG = Logger.getLogger(AwsQueryController.class);
-
-    // Extracts service name: Credential=AKID/20260227/us-east-1/iam/aws4_request → "iam"
-    private static final Pattern SERVICE_PATTERN =
-            Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
 
     private static final Set<String> STS_ACTIONS = Set.of(
             "AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML",
@@ -103,13 +100,15 @@ public class AwsQueryController {
             "TagPolicy", "UntagPolicy", "ListPolicyTags",
             "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
             "GenerateCredentialReport", "GetCredentialReport",
-            "GetAccountSummary", "GetAccountAuthorizationDetails"
+            "GetAccountSummary", "GetAccountAuthorizationDetails",
+            "SimulatePrincipalPolicy"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
             "CreateLaunchConfiguration", "DescribeLaunchConfigurations", "DeleteLaunchConfiguration",
             "CreateAutoScalingGroup", "UpdateAutoScalingGroup", "DeleteAutoScalingGroup",
             "DescribeAutoScalingGroups", "SetDesiredCapacity",
+            "StartInstanceRefresh", "DescribeInstanceRefreshes",
             "CreateOrUpdateTags", "DeleteTags",
             "DescribeAutoScalingInstances", "AttachInstances", "DetachInstances",
             "TerminateInstanceInAutoScalingGroup",
@@ -143,6 +142,7 @@ public class AwsQueryController {
             "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
             "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
             "DescribeVpcEndpointServices", "CreateVpcEndpoint", "DescribeVpcEndpoints", "DeleteVpcEndpoints",
+            "DescribePrefixLists",
             "CreateDefaultVpc", "AssociateVpcCidrBlock", "DisassociateVpcCidrBlock",
             "CreateSubnet", "DescribeSubnets", "DeleteSubnet", "ModifySubnetAttribute",
             "CreateSecurityGroup", "DescribeSecurityGroups", "DeleteSecurityGroup",
@@ -151,12 +151,15 @@ public class AwsQueryController {
             "DescribeSecurityGroupRules", "ModifySecurityGroupRules",
             "UpdateSecurityGroupRuleDescriptionsIngress", "UpdateSecurityGroupRuleDescriptionsEgress",
             "CreateKeyPair", "DescribeKeyPairs", "DeleteKeyPair", "ImportKeyPair",
-            "DescribeImages",
+            "DescribeImages", "RegisterImage", "DescribeSnapshots",
             "CreateTags", "DeleteTags", "DescribeTags",
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",
             "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
             "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
+            "CreateNetworkAcl", "DescribeNetworkAcls", "DeleteNetworkAcl",
+            "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
+            "ReplaceNetworkAclAssociation",
             "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
             "DescribeAddressesAttribute",
@@ -165,7 +168,9 @@ public class AwsQueryController {
             "DescribeInstanceTypes", "DescribeInstanceTypeOfferings",
             "CreateLaunchTemplate", "CreateLaunchTemplateVersion", "DescribeLaunchTemplates", "DescribeLaunchTemplateVersions",
             "ModifyLaunchTemplate", "DeleteLaunchTemplate",
-            "DescribeNetworkInterfaces"
+            "DescribeNetworkInterfaces",
+            "CreateFlowLogs", "DescribeFlowLogs", "DeleteFlowLogs",
+            "CreateVolume", "DescribeVolumes", "DeleteVolume"
     );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;
@@ -173,6 +178,8 @@ public class AwsQueryController {
     private final RdsQueryHandler rdsQueryHandler;
     private final NeptuneQueryHandler neptuneQueryHandler;
     private final NeptuneService neptuneService;
+    private final DocDbQueryHandler docDbQueryHandler;
+    private final DocDbService docDbService;
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;
@@ -183,6 +190,7 @@ public class AwsQueryController {
     private final Ec2QueryHandler ec2QueryHandler;
     private final ElbV2QueryHandler elbV2QueryHandler;
     private final AutoScalingQueryHandler autoScalingQueryHandler;
+    private final ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
 
@@ -192,6 +200,8 @@ public class AwsQueryController {
                               RdsQueryHandler rdsQueryHandler,
                               NeptuneQueryHandler neptuneQueryHandler,
                               NeptuneService neptuneService,
+                              DocDbQueryHandler docDbQueryHandler,
+                              DocDbService docDbService,
                               SqsQueryHandler sqsQueryHandler, SnsQueryHandler snsQueryHandler,
                               SesQueryHandler sesQueryHandler,
                               IamQueryHandler iamQueryHandler, StsQueryHandler stsQueryHandler,
@@ -200,6 +210,7 @@ public class AwsQueryController {
                               Ec2QueryHandler ec2QueryHandler,
                               ElbV2QueryHandler elbV2QueryHandler,
                               AutoScalingQueryHandler autoScalingQueryHandler,
+                              ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler,
                               ResolvedServiceCatalog catalog,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
@@ -207,6 +218,8 @@ public class AwsQueryController {
         this.rdsQueryHandler = rdsQueryHandler;
         this.neptuneQueryHandler = neptuneQueryHandler;
         this.neptuneService = neptuneService;
+        this.docDbQueryHandler = docDbQueryHandler;
+        this.docDbService = docDbService;
         this.sqsQueryHandler = sqsQueryHandler;
         this.snsQueryHandler = snsQueryHandler;
         this.sesQueryHandler = sesQueryHandler;
@@ -217,6 +230,7 @@ public class AwsQueryController {
         this.ec2QueryHandler = ec2QueryHandler;
         this.elbV2QueryHandler = elbV2QueryHandler;
         this.autoScalingQueryHandler = autoScalingQueryHandler;
+        this.elasticBeanstalkQueryHandler = elasticBeanstalkQueryHandler;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
     }
@@ -231,7 +245,11 @@ public class AwsQueryController {
 
         String action = formParams.getFirst("Action");
         if (action == null) {
-            return null;
+            action = formParams.getFirst("Operation");
+        }
+        if (action == null) {
+            return xmlErrorResponse("MissingAction",
+                    "The request must contain the parameter Action", 400);
         }
 
         String service = resolveService(authorization, action);
@@ -239,13 +257,33 @@ public class AwsQueryController {
 
         String region = regionResolver.resolveRegion(httpHeaders);
 
+        try {
+            return dispatchToHandler(service, action, formParams, authorization, region);
+        } catch (AwsException e) {
+            // Handlers that don't render their own error XML would otherwise reach
+            // AwsExceptionMapper, which emits JSON — the same JSON-on-the-XML-wire defect.
+            // The declared code and status must survive; only the encoding changes.
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus(),
+                    e.getHttpStatus() >= 500 ? "Receiver" : "Sender");
+        } catch (Exception e) {
+            // A handler bug (e.g. an NPE) must never leak Quarkus's JSON error page onto
+            // the Query/XML wire — SDK parsers fail before they can surface anything useful.
+            LOG.errorv(e, "Unhandled error dispatching Query action {0} for service {1}", action, service);
+            return xmlErrorResponse("InternalFailure",
+                    "Unexpected error: " + e.getMessage(), 500, "Receiver");
+        }
+    }
+
+    private Response dispatchToHandler(String service, String action,
+                                       MultivaluedMap<String, String> formParams,
+                                       String authorization, String region) {
         return switch (service) {
             case "sqs" -> sqsQueryHandler.handle(action, formParams, region);
             case "sns" -> snsQueryHandler.handle(action, formParams, region);
-            case "iam" -> iamQueryHandler.handle(action, formParams);
+            case "iam" -> iamQueryHandler.handle(action, formParams, authorization);
             case "sts" -> stsQueryHandler.handle(action, formParams);
             case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams);
-            case "rds" -> {
+            case "rds" -> { 
                 // Neptune signs requests with "rds" credential scope (same wire protocol).
                 // Route to Neptune when Engine=neptune (create ops) or when the cluster/instance
                 // already exists in Neptune storage (describe/modify/delete ops).
@@ -257,9 +295,16 @@ public class AwsQueryController {
                         || neptuneService.hasInstance(instanceId)) {
                     yield neptuneQueryHandler.handle(action, formParams);
                 }
-                yield rdsQueryHandler.handle(action, formParams);
+
+                if ("docdb".equalsIgnoreCase(engine)
+                       || docDbService.hasCluster(clusterId)
+                       || docDbService.hasInstance(instanceId)) {
+                        yield docDbQueryHandler.handle(action, formParams);
+                }
+                yield rdsQueryHandler.handle(action, formParams, region);
             }
             case "neptune" -> neptuneQueryHandler.handle(action, formParams);
+            case "docdb" -> docDbQueryHandler.handle(action, formParams);
             case "email" -> sesQueryHandler.handle(action, formParams, region);
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);
@@ -267,6 +312,7 @@ public class AwsQueryController {
             case "ec2" -> ec2QueryHandler.handle(action, formParams, region);
             case "elasticloadbalancing" -> elbV2QueryHandler.handle(action, formParams, region);
             case "autoscaling" -> autoScalingQueryHandler.handle(action, formParams, region);
+            case "elasticbeanstalk" -> elasticBeanstalkQueryHandler.handle(action, formParams, region);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
@@ -306,6 +352,13 @@ public class AwsQueryController {
             "ListTagsForResource", "TagResource", "UntagResource"
     );
 
+    private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(
+            "CreateApplication", "DescribeApplications", "UpdateApplication", "DeleteApplication",
+            "CreateApplicationVersion", "DescribeApplicationVersions", "DeleteApplicationVersion",
+            "CreateEnvironment", "DescribeEnvironments", "UpdateEnvironment", "TerminateEnvironment",
+            "DescribeConfigurationSettings", "CheckDNSAvailability", "ListAvailableSolutionStacks"
+    );
+
     private static final Set<String> RDS_ACTIONS = Set.of(
             "CreateDBInstance", "DescribeDBInstances", "DeleteDBInstance",
             "ModifyDBInstance", "RebootDBInstance",
@@ -318,11 +371,14 @@ public class AwsQueryController {
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
-            "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks",
+            "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks", "UpdateTerminationProtection",
             "ListStacks", "ListExports", "GetTemplate", "ValidateTemplate",
             "CreateChangeSet", "DeleteChangeSet", "DescribeChangeSet", "ExecuteChangeSet", "ListChangeSets",
             "DescribeStackEvents", "DescribeStackResources", "ListStackResources", "DescribeStackResource",
-            "SetStackPolicy", "GetStackPolicy", "ListStackSets", "DescribeStackSet", "CreateStackSet"
+            "SetStackPolicy", "GetStackPolicy",
+            "ListStackSets", "DescribeStackSet", "CreateStackSet", "UpdateStackSet", "DeleteStackSet",
+            "CreateStackInstances", "ListStackInstances", "DescribeStackInstance", "DeleteStackInstances",
+            "ListStackSetOperations", "DescribeStackSetOperation"
     );
 
     private static final Set<String> SES_ACTIONS = Set.of(
@@ -343,7 +399,12 @@ public class AwsQueryController {
             "CreateConfigurationSetEventDestination",
             "UpdateConfigurationSetEventDestination",
             "DeleteConfigurationSetEventDestination",
-            "UpdateConfigurationSetSendingEnabled"
+            "UpdateConfigurationSetSendingEnabled",
+            "CreateConfigurationSetTrackingOptions",
+            "UpdateConfigurationSetTrackingOptions",
+            "DeleteConfigurationSetTrackingOptions",
+            "UpdateConfigurationSetReputationMetricsEnabled",
+            "PutConfigurationSetDeliveryOptions"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(
@@ -360,15 +421,11 @@ public class AwsQueryController {
     );
 
     private String resolveService(String authorization, String action) {
-        if (authorization != null && !authorization.isEmpty()) {
-            Matcher m = SERVICE_PATTERN.matcher(authorization);
-            if (m.find()) {
-                String scope = m.group(1).toLowerCase();
-                ServiceDescriptor descriptor = catalog.byCredentialScope(scope).orElse(null);
-                if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
-                    return descriptor.externalKey();
-                }
-            }
+        ServiceDescriptor descriptor = SigV4CredentialScope.serviceName(authorization)
+                .flatMap(catalog::byCredentialScope)
+                .orElse(null);
+        if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
+            return descriptor.externalKey();
         }
         return inferServiceFromAction(action);
     }
@@ -410,16 +467,23 @@ public class AwsQueryController {
         if (AUTOSCALING_ACTIONS.contains(action)) {
             return "autoscaling";
         }
+        if (ELASTIC_BEANSTALK_ACTIONS.contains(action)) {
+            return "elasticbeanstalk";
+        }
         // SQS actions are numerous and not enumerated — fall back to sqs only for
         // requests that arrived without an Authorization header (raw/test clients)
         return "sqs";
     }
 
     private Response xmlErrorResponse(String code, String message, int status) {
+        return xmlErrorResponse(code, message, status, "Sender");
+    }
+
+    private Response xmlErrorResponse(String code, String message, int status, String type) {
         String xml = new XmlBuilder()
                 .start("ErrorResponse")
                   .start("Error")
-                    .elem("Type", "Sender")
+                    .elem("Type", type)
                     .elem("Code", code)
                     .elem("Message", message)
                   .end("Error")

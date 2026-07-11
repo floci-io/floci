@@ -11,6 +11,8 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.max-request-size}M
+  datasource:
+    active: false
   security:
      security-providers: BC
   shutdown:
@@ -19,12 +21,19 @@ quarkus:
     delay-enabled: true
   native:
     resources:
-      # The Pricing service reads its bundled snapshot, and EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), at runtime via
+      # The Pricing service reads its bundled snapshot, EC2 reads its image
+      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # message bundles, and API Gateway's Velocity engine reads its default
+      # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**,ec2/*.yaml
+      includes:
+        - pricing-snapshots/**
+        - ui/*.html
+        - ec2/*.yaml
+        - i18n/*.properties
+        - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -46,11 +55,12 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
 
 
 floci:
   port: 4566
-  max-request-size: 512
+  max-request-size: 2048
   base-url: "http://localhost:4566"
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
@@ -62,6 +72,18 @@ floci:
     persistent-path: ./data
     host-persistent-path: ./data
     prune-volumes-on-delete: false
+    # EFS access-point emulation for the shared local Docker volumes that stand in for EFS file
+    # systems. All opt-in; with the defaults below (and no owner/permission overrides) volumes are
+    # plain named volumes, so existing behaviour is unchanged. Emulates an access point's
+    # RootDirectory.CreationInfo (owner-uid/owner-gid/root-permissions) and PosixUser
+    # (mount-user/mount-group-add).
+    efs:
+      # owner-uid:            # RootDirectory.CreationInfo.OwnerUid applied to the volume root (set with owner-gid)
+      # owner-gid:            # RootDirectory.CreationInfo.OwnerGid applied to the volume root (set with owner-uid)
+      # root-permissions:     # CreationInfo.Permissions, 3-4 octal digits; e.g. "0777", or "2775" for setgid
+      init-image: busybox:stable
+      # mount-user:           # run mounting containers as "uid[:gid]" (access point PosixUser)
+      # mount-group-add:      # supplementary gid added to mounting containers
     wal:
       compaction-interval-ms: 30000
     services:
@@ -85,9 +107,35 @@ floci:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
+      lightsail:
+        flush-interval-ms: 5000
+      codepipeline:
+        flush-interval-ms: 5000
+      s3vectors:
+        flush-interval-ms: 5000
+      ecs:
+        flush-interval-ms: 5000
+      codebuild:
+        flush-interval-ms: 5000
+      config:
+        flush-interval-ms: 5000
+      transcribe:
+        flush-interval-ms: 5000
+      codedeploy:
+        flush-interval-ms: 5000
+      tagging:
+        flush-interval-ms: 5000
+      elasticbeanstalk:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
+      ec2:
+        # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
+        # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
+        # mode: memory
+      appsync:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -118,17 +166,25 @@ floci:
     # extra-cors-allowed-headers:
     # extra-cors-expose-headers:
     disable-cors-headers: false
+    # Grant Private Network Access preflights (Access-Control-Allow-Private-Network)
+    # so a page on a public/secure origin can reach this loopback backend.
+    cors-allow-private-network: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""                     # FLOCI_TLS_KEY_PATH (PEM private key file)
     self-signed: true                  # FLOCI_TLS_SELF_SIGNED — auto-generate a self-signed cert if no cert-path provided
+    aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
+
+  protocols:
+    strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
 
   docker:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
 
   services:
@@ -142,6 +198,7 @@ floci:
       clear-fifo-deduplication-cache-on-purge: false
     s3:
       enabled: true
+      enforce-auth: false
       default-presign-expiry-seconds: 3600
     dynamodb:
       enabled: true
@@ -169,18 +226,32 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: false
       default-image: "redpandadata/redpanda:latest"
+      kafka-host-port-base: 9300
+      kafka-host-port-max: 9399
+    amazonmq:
+      enabled: true
+      mock: false
+      default-image: "rabbitmq:3-management"
     elasticache:
       enabled: true
       proxy-base-port: 6379
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+    memorydb:
+      enabled: true
+      mock: false
+      proxy-base-port: 6400
+      proxy-max-port: 6419
+      default-image: "valkey/valkey:8"
     rds:
       enabled: true
+      mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
@@ -193,7 +264,9 @@ floci:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
+      db-type: "gremlin"
       default-image: "tinkerpop/gremlin-server:3.7.3"
+      default-neo4j-image: "neo4j:5-community"
     eventbridge:
       enabled: true
     cloudmap:
@@ -257,6 +330,11 @@ floci:
       imds-port: 9169
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
+      publish-security-group-ports: true
+      app-port-range-start: 30000
+      app-port-range-end: 30999
+      max-published-ports-per-instance: 20
+      socat-image: alpine/socat
       mock: false
     ecs:
       enabled: true
@@ -275,6 +353,12 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname
+    ui:
+      enabled: true
+      image: "floci/floci-ui:latest"
+      container-name: floci-ui
+      port: 4500
+      keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
     eks:
@@ -288,6 +372,7 @@ floci:
       keep-running-on-shutdown: false
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
+      ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
     elbv2:
       enabled: true
       mock: false
@@ -300,7 +385,11 @@ floci:
       # docker-network: floci-network
     codedeploy:
       enabled: true
+    codepipeline:
+      enabled: true
     autoscaling:
+      enabled: true
+    elasticbeanstalk:
       enabled: true
     backup:
       enabled: true
@@ -327,7 +416,23 @@ floci:
       emit-mode: synchronous
     cloudtrail:
       enabled: true
+    lightsail:
+    cloudcontrol:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:
+      enabled: true
+      schema-worker-threads: 4
+      schema-worker-shutdown-timeout-seconds: 30
+    s3vectors:
+      enabled: true
+    iot:
+      enabled: true
+      mqtt:
+        enabled: true
+        auto-start: false
+        host: 0.0.0.0
+        port: 1883
+    iotdata:
       enabled: true

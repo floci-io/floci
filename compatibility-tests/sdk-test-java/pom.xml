@@ -16,8 +16,12 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <aws.sdk.version>2.42.24</aws.sdk.version>
-        <awsjavasdk.version>2.42.24</awsjavasdk.version>
+        <aws.sdk.version>2.44.14</aws.sdk.version>
+        <awsjavasdk.version>2.44.14</awsjavasdk.version>
+        <jackson.version>2.18.8</jackson.version>
+        <kafka.clients.version>3.9.2</kafka.clients.version>
+        <netty.version>4.1.135.Final</netty.version>
+        <wire.version>6.3.0</wire.version>
     </properties>
 
     <dependencyManagement>
@@ -33,15 +37,37 @@
             <dependency>
                 <groupId>io.netty</groupId>
                 <artifactId>netty-bom</artifactId>
-                <version>4.1.118.Final</version>
+                <version>${netty.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-            <version>2.18.2</version>
-        </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.squareup.wire</groupId>
+                <artifactId>wire-runtime</artifactId>
+                <version>${wire.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.squareup.wire</groupId>
+                <artifactId>wire-runtime-jvm</artifactId>
+                <version>${wire.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>3.18.0</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.kafka</groupId>
+                <artifactId>kafka-clients</artifactId>
+                <version>${kafka.clients.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -116,6 +142,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>mq</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>athena</artifactId>
         </dependency>
         <dependency>
@@ -146,6 +176,10 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>elasticbeanstalk</artifactId>
         </dependency>
         <dependency>
             <groupId>io.lettuce</groupId>
@@ -221,6 +255,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>sesv2</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>route53</artifactId>
+        </dependency>
         <!-- OpenSearch Service management client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -241,6 +279,19 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
         </dependency>
+        <!-- AWS IoT client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iot</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iotdataplane</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iotjobsdataplane</artifactId>
+        </dependency>
         <!-- EKS client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -255,6 +306,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>scheduler</artifactId>
+        </dependency>
+        <!-- Auto Scaling client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>autoscaling</artifactId>
         </dependency>
         <!-- CloudFormation client -->
         <dependency>
@@ -271,6 +327,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>codedeploy</artifactId>
         </dependency>
+        <!-- CodePipeline client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>codepipeline</artifactId>
+        </dependency>
         <!-- AWS Backup client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -280,6 +341,16 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appsync</artifactId>
+        </dependency>
+        <!-- Lightsail client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>lightsail</artifactId>
+        </dependency>
+        <!-- S3 Vectors client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3vectors</artifactId>
         </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>
@@ -294,7 +365,7 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.7.3</version>
+            <version>42.7.11</version>
         </dependency>
         <dependency>
             <groupId>com.mysql</groupId>
@@ -310,7 +381,6 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-            <version>2.18.2</version>
         </dependency>
         <!-- JUnit 5 -->
         <dependency>

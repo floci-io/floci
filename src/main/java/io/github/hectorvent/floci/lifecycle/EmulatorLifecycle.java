@@ -7,14 +7,22 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
+import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
+import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
+import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
+import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
+import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.Quarkus;
@@ -58,6 +66,12 @@ public class EmulatorLifecycle {
     private final ElastiCacheProxyManager elastiCacheProxyManager;
     private final RdsContainerManager rdsContainerManager;
     private final RdsProxyManager rdsProxyManager;
+    private final MemoryDbContainerManager memoryDbContainerManager;
+    private final MemoryDbProxyManager memoryDbProxyManager;
+    private final DocDbContainerManager docDbContainerManager;
+    private final NeptuneContainerManager neptuneContainerManager;
+    private final NeptuneProxyManager neptuneProxyManager;
+    private final RabbitMqManager rabbitMqManager;
     private final RdsService rdsService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
@@ -66,7 +80,9 @@ public class EmulatorLifecycle {
     private final PipesService pipesService;
     private final Ec2MetadataServer ec2MetadataServer;
     private final EcrRegistryManager ecrRegistryManager;
+    private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
+    private final SchemaCreationWorker schemaCreationWorker;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -76,6 +92,12 @@ public class EmulatorLifecycle {
                              ElastiCacheProxyManager elastiCacheProxyManager,
                              RdsContainerManager rdsContainerManager,
                              RdsProxyManager rdsProxyManager,
+                             MemoryDbContainerManager memoryDbContainerManager,
+                             MemoryDbProxyManager memoryDbProxyManager,
+                             DocDbContainerManager docDbContainerManager,
+                             NeptuneContainerManager neptuneContainerManager,
+                             NeptuneProxyManager neptuneProxyManager,
+                             RabbitMqManager rabbitMqManager,
                              RdsService rdsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
@@ -84,7 +106,9 @@ public class EmulatorLifecycle {
                              PipesService pipesService,
                              Ec2MetadataServer ec2MetadataServer,
                              EcrRegistryManager ecrRegistryManager,
-                             InitLifecycleState initLifecycleState) {
+                             FlociUiManager flociUiManager,
+                             InitLifecycleState initLifecycleState,
+                             SchemaCreationWorker schemaCreationWorker) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -93,6 +117,12 @@ public class EmulatorLifecycle {
         this.elastiCacheProxyManager = elastiCacheProxyManager;
         this.rdsContainerManager = rdsContainerManager;
         this.rdsProxyManager = rdsProxyManager;
+        this.memoryDbContainerManager = memoryDbContainerManager;
+        this.memoryDbProxyManager = memoryDbProxyManager;
+        this.docDbContainerManager = docDbContainerManager;
+        this.neptuneContainerManager = neptuneContainerManager;
+        this.neptuneProxyManager = neptuneProxyManager;
+        this.rabbitMqManager = rabbitMqManager;
         this.rdsService = rdsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
@@ -101,7 +131,9 @@ public class EmulatorLifecycle {
         this.pipesService = pipesService;
         this.ec2MetadataServer = ec2MetadataServer;
         this.ecrRegistryManager = ecrRegistryManager;
+        this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
+        this.schemaCreationWorker = schemaCreationWorker;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -124,6 +156,7 @@ public class EmulatorLifecycle {
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        schemaCreationWorker.recoverOrphans();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
@@ -209,15 +242,28 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
+        // Flush persisted state to disk FIRST, before the slow proxy/container teardown below.
+        // Stopping Docker sidecars (RDS/ElastiCache/etc.) can block long enough to exhaust the
+        // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
+        // in-memory (hybrid) data would be lost on an otherwise-graceful shutdown. shutdownAll()
+        // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
+        storageFactory.flushAll();
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.stop();
         }
         elastiCacheProxyManager.stopAll();
         rdsProxyManager.stopAll();
+        memoryDbProxyManager.stopAll();
+        neptuneProxyManager.stopAll();
         elastiCacheContainerManager.stopAll();
         elastiCacheMemcachedContainerManager.stopAll();
         rdsContainerManager.stopAll();
+        memoryDbContainerManager.stopAll();
+        docDbContainerManager.stopAll();
+        neptuneContainerManager.stopAll();
+        rabbitMqManager.stopAll();
         ecrRegistryManager.shutdown();
+        flociUiManager.shutdown();
         storageFactory.shutdownAll();
 
         LOG.info("=== AWS Local Emulator Stopped ===");

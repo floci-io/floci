@@ -9,6 +9,9 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
+import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
+import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
+import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
@@ -57,6 +60,12 @@ class EmulatorLifecycleTest {
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
     @Mock private RdsContainerManager rdsContainerManager;
     @Mock private RdsProxyManager rdsProxyManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager memoryDbContainerManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager memoryDbProxyManager;
+    @Mock private DocDbContainerManager docDbContainerManager;
+    @Mock private NeptuneContainerManager neptuneContainerManager;
+    @Mock private NeptuneProxyManager neptuneProxyManager;
+    @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
     @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -65,8 +74,10 @@ class EmulatorLifecycleTest {
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
     @Mock private EcrRegistryManager ecrRegistryManager;
+    @Mock private io.github.hectorvent.floci.services.floci.ui.FlociUiManager flociUiManager;
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
+    @Mock private io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker schemaCreationWorker;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -81,9 +92,13 @@ class EmulatorLifecycleTest {
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
-                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager, rdsService,
+                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
+                memoryDbContainerManager, memoryDbProxyManager,
+                docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
+                rabbitMqManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, ecrRegistryManager, initLifecycleState);
+                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
+                schemaCreationWorker);
     }
 
     private void stubStorageConfig() {
@@ -196,6 +211,7 @@ class EmulatorLifecycleTest {
         verify(storageFactory, never()).shutdownAll();
         verify(elastiCacheProxyManager, never()).stopAll();
         verify(rdsProxyManager, never()).stopAll();
+        verify(neptuneProxyManager, never()).stopAll();
     }
 
     @Test
@@ -243,11 +259,30 @@ class EmulatorLifecycleTest {
 
         verify(elastiCacheProxyManager).stopAll();
         verify(rdsProxyManager).stopAll();
+        verify(neptuneProxyManager).stopAll();
         verify(elastiCacheContainerManager).stopAll();
         verify(rdsContainerManager).stopAll();
+        verify(docDbContainerManager).stopAll();
+        verify(neptuneContainerManager).stopAll();
         verify(storageFactory).shutdownAll();
         // Hooks are handled by onPreShutdown, never from ShutdownEvent.
         verify(initializationHooksRunner, never()).run(InitializationHook.STOP);
+    }
+
+    @Test
+    @DisplayName("onStop flushes storage BEFORE the slow container teardown, and shuts it down last")
+    void shouldFlushStorageBeforeContainerTeardown() {
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        // The disk flush must run before the blocking Docker container teardown so a graceful
+        // shutdown can't be cut off by the SIGTERM grace window before data is persisted
+        // (regression guard for issue #1521). shutdownAll() still runs last to stop the flush
+        // schedulers and capture any shutdown-time writes.
+        var inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
+        inOrder.verify(storageFactory).flushAll();
+        inOrder.verify(elastiCacheContainerManager).stopAll();
+        inOrder.verify(rdsContainerManager).stopAll();
+        inOrder.verify(storageFactory).shutdownAll();
     }
 
     @Test
@@ -261,8 +296,11 @@ class EmulatorLifecycleTest {
         verify(initializationHooksRunner).run(InitializationHook.STOP);
         verify(elastiCacheProxyManager).stopAll();
         verify(rdsProxyManager).stopAll();
+        verify(neptuneProxyManager).stopAll();
         verify(elastiCacheContainerManager).stopAll();
         verify(rdsContainerManager).stopAll();
+        verify(docDbContainerManager).stopAll();
+        verify(neptuneContainerManager).stopAll();
         verify(storageFactory).shutdownAll();
     }
 

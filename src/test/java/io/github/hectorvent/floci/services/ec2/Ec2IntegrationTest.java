@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.emptyOrNullString;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -48,8 +51,11 @@ class Ec2IntegrationTest {
     private static String rootVolumeId;
     private static String networkInterfaceId;
     private static String launchTemplateId;
+    private static String launchTemplateUserData;
+    private static String launchTemplateVersionUserData;
     private static String vpcEndpointId;
     private static String natGatewayId;
+    private static String registeredImageId;
 
     // =========================================================================
     // Default resources
@@ -58,8 +64,14 @@ class Ec2IntegrationTest {
     @Test
     @Order(1)
     void describeDefaultVpc() {
+        // Filter to the default VPC rather than assuming it is item[0] of an unfiltered list:
+        // DescribeVpcs returns every VPC in the store's iteration order, so a VPC left behind by
+        // another test class sharing the in-memory EC2 store could otherwise land at item[0] and
+        // flake this assertion (mirrors the approach in describeDefaultSecurityGroup).
         given()
             .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "is-default")
+            .formParam("Filter.1.Value.1", "true")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -74,24 +86,38 @@ class Ec2IntegrationTest {
     @Test
     @Order(2)
     void describeDefaultSubnets() {
+        // Assert that default subnets are present rather than relying on position: filtering to
+        // vpc-default still returns any non-default subnet another test created there (e.g.
+        // ElbV2IntegrationTest), which could otherwise land at item[0] and flake this assertion.
         given()
             .formParam("Action", "DescribeSubnets")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", "vpc-default")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeSubnetsResponse.subnetSet.item.size()", greaterThanOrEqualTo(3))
-            .body("DescribeSubnetsResponse.subnetSet.item[0].defaultForAz", equalTo("true"))
-            .body("DescribeSubnetsResponse.subnetSet.item[0].mapPublicIpOnLaunch", equalTo("true"));
+            .body("DescribeSubnetsResponse.subnetSet.item.findAll { it.defaultForAz == 'true' }.size()",
+                greaterThanOrEqualTo(3))
+            .body("DescribeSubnetsResponse.subnetSet.item.find { it.defaultForAz == 'true' }.mapPublicIpOnLaunch",
+                equalTo("true"));
     }
 
     @Test
     @Order(3)
     void describeDefaultSecurityGroup() {
+        // Filter to the default VPC's default group rather than assuming it is item[0] of an
+        // unfiltered list: DescribeSecurityGroups returns groups in the store's iteration order,
+        // so any other group in this region (e.g. one left behind by another test class sharing
+        // the in-memory EC2 store) could otherwise land at item[0] and flake this assertion.
         given()
             .formParam("Action", "DescribeSecurityGroups")
+            .formParam("Filter.1.Name", "group-name")
+            .formParam("Filter.1.Value.1", "default")
+            .formParam("Filter.2.Name", "vpc-id")
+            .formParam("Filter.2.Value.1", "vpc-default")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -213,9 +239,143 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
-            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-ubuntu2404-arm64"))
-            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(2))
+            .body("DescribeImagesResponse.imagesSet.item.imageId",
+                    containsInAnyOrder("ami-ubuntu2404-arm64", "ami-ubuntu2404-cloud-arm64"))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", everyItem(equalTo("arm64")));
+    }
+
+    @Test
+    @Order(10)
+    void registerImageCreatesDescribableImageWithSnapshotMapping() {
+        registeredImageId = given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "test-image")
+            .formParam("Description", "test image")
+            .formParam("Architecture", "x86_64")
+            .formParam("RootDeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.Ebs.SnapshotId", "snap-1234567890abcdef0")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeSize", "8")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("RegisterImageResponse.imageId", startsWith("ami-"))
+            .extract().path("RegisterImageResponse.imageId");
+
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "test-image")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo(registeredImageId))
+            .body("DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item.ebs.snapshotId",
+                    equalTo("snap-1234567890abcdef0"));
+    }
+
+    @Test
+    @Order(11)
+    void describeSnapshotsReturnsRegisteredImageSnapshot() {
+        given()
+            .formParam("Action", "DescribeSnapshots")
+            .formParam("SnapshotId.1", "snap-1234567890abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSnapshotsResponse.snapshotSet.item.snapshotId", equalTo("snap-1234567890abcdef0"))
+            .body("DescribeSnapshotsResponse.snapshotSet.item.status", equalTo("completed"))
+            .body("DescribeSnapshotsResponse.snapshotSet.item.volumeSize", equalTo("8"));
+    }
+
+    @Test
+    @Order(12)
+    void describeSnapshotsAcceptsOwnerIdParameter() {
+        given()
+            .formParam("Action", "DescribeSnapshots")
+            .formParam("SnapshotId.1", "snap-1234567890abcdef0")
+            .formParam("OwnerId.1", "self")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSnapshotsResponse.snapshotSet.item.snapshotId", equalTo("snap-1234567890abcdef0"));
+    }
+
+    @Test
+    @Order(13)
+    void describeSnapshotsAcceptsOwnerIdsParameter() {
+        given()
+            .formParam("Action", "DescribeSnapshots")
+            .formParam("SnapshotId.1", "snap-1234567890abcdef0")
+            .formParam("OwnerIds.1", "000000000000")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSnapshotsResponse.snapshotSet.item.snapshotId", equalTo("snap-1234567890abcdef0"));
+    }
+
+    @Test
+    @Order(14)
+    void registerImageRejectsInvalidBlockDeviceVolumeSize() {
+        given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "bad-volume-size-image")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeSize", "large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    @Order(15)
+    void registerImageRejectsInvalidBlockDeviceBoolean() {
+        given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "bad-boolean-image")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.Ebs.Encrypted", "sometimes")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    @Order(16)
+    void registerImageRejectsBlockDeviceMappingWithoutDeviceName() {
+        given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "missing-device-image")
+            .formParam("BlockDeviceMapping.1.Ebs.SnapshotId", "snap-missing-device")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
     }
 
     @Test
@@ -223,17 +383,51 @@ class Ec2IntegrationTest {
     void describeInstanceTypes() {
         given()
             .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "m6gd.2xlarge")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", greaterThan(0));
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceType", equalTo("m6gd.2xlarge"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageSupported", equalTo("true"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB", equalTo("474"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
+                    equalTo("arm64"));
     }
 
     @Test
     @Order(18)
+    void describeLargeGravitonInstanceTypes() {
+        given()
+            .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "m6gd.large")
+            .formParam("InstanceType.2", "m7gd.large")
+            .formParam("InstanceType.3", "m8gd.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", equalTo(3))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceType",
+                    containsInAnyOrder("m6gd.large", "m7gd.large", "m8gd.large"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.vCpuInfo.defaultVCpus",
+                    everyItem(equalTo("2")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.memoryInfo.sizeInMiB",
+                    everyItem(equalTo("8192")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageSupported",
+                    everyItem(equalTo("true")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB",
+                    everyItem(equalTo("118")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
+                    everyItem(equalTo("arm64")));
+    }
+
+    @Test
+    @Order(19)
     void describeInstanceTypeOfferings() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -255,7 +449,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     void describeArmInstanceTypeOfferingByRegion() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -274,6 +468,57 @@ class Ec2IntegrationTest {
                     equalTo("region"))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].location",
                     equalTo("us-east-1"));
+    }
+
+    @Test
+    @Order(21)
+    void describeModernGravitonInstanceTypeOfferingsByRegion() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m8gd.2xlarge")
+            .formParam("Filter.1.Value.2", "m7gd.2xlarge")
+            .formParam("Filter.1.Value.3", "m6gd.2xlarge")
+            .formParam("Filter.1.Value.4", "m8gd.medium")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(4))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                    containsInAnyOrder("m8gd.2xlarge", "m7gd.2xlarge", "m6gd.2xlarge", "m8gd.medium"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
+                    everyItem(equalTo("region")))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
+                    everyItem(equalTo("us-east-1")));
+    }
+
+    @Test
+    @Order(22)
+    void describeLargeGravitonInstanceTypeOfferingsByRegion() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m6gd.large")
+            .formParam("Filter.1.Value.2", "m7gd.large")
+            .formParam("Filter.1.Value.3", "m8gd.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(3))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                    containsInAnyOrder("m6gd.large", "m7gd.large", "m8gd.large"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
+                    everyItem(equalTo("region")))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
+                    everyItem(equalTo("us-east-1")));
     }
 
     // =========================================================================
@@ -539,6 +784,67 @@ class Ec2IntegrationTest {
             .statusCode(200);
     }
 
+    @Test
+    @Order(34)
+    void describeSecurityGroupRulesReturnsDefaultEgress() {
+        // Issue #1093: default egress rule must be visible via DescribeSecurityGroupRules
+        // immediately after CreateSecurityGroup. Terraform relies on this.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            // Must contain at least the default egress-all rule plus the authorized
+            // ingress (ssh/22) and egress (tcp/443) rules
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
+                    greaterThanOrEqualTo(3))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.groupId",
+                    everyItem(equalTo(securityGroupId)));
+    }
+
+    @Test
+    @Order(35)
+    void describeSecurityGroupRulesIncludesIngressRule() {
+        // Verify authorized ingress rule (tcp/22) is present in the rules list
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<fromPort>22</fromPort>"))
+            .body(containsString("<ipProtocol>tcp</ipProtocol>"))
+            .body(containsString("<cidrIpv4>0.0.0.0/0</cidrIpv4>"));
+    }
+
+    @Test
+    @Order(36)
+    void describeSecurityGroupRulesDefaultVpcEgressVisible() {
+        // Issue #1093: default VPC security group must also have its egress rule visible
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", "sg-default")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
+                    greaterThanOrEqualTo(1))
+            .body(containsString("<isEgress>true</isEgress>"))
+            .body(containsString("<ipProtocol>-1</ipProtocol>"));
+    }
+
     // =========================================================================
     // Key Pairs
     // =========================================================================
@@ -610,14 +916,21 @@ class Ec2IntegrationTest {
     @Order(43)
     void createLaunchTemplate()
             throws IOException {
+        launchTemplateUserData = gzipBase64("#!/bin/sh\necho launch-template\n");
         launchTemplateId = given()
             .formParam("Action", "CreateLaunchTemplate")
             .formParam("LaunchTemplateName", "sample-template")
             .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
             .formParam("LaunchTemplateData.InstanceType", "t3.micro")
             .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
-            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
+            .formParam("LaunchTemplateData.UserData", launchTemplateUserData)
+            .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:ClusterId")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "sample-template")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Key", "example:NodeType")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Value", "PRIMARY")
             .formParam("TagSpecification.1.ResourceType", "launch-template")
             .formParam("TagSpecification.1.Tag.1.Key", "Name")
             .formParam("TagSpecification.1.Tag.1.Value", "sample-template")
@@ -668,13 +981,22 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template\n"));
+                    equalTo(launchTemplateUserData))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
+                    equalTo("instance"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:ClusterId' }.value",
+                    equalTo("sample-template"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("PRIMARY"));
     }
 
     @Test
     @Order(46)
     void createLaunchTemplateVersion()
             throws IOException {
+        launchTemplateVersionUserData = gzipBase64("#!/bin/sh\necho launch-template-version\n");
         given()
             .formParam("Action", "CreateLaunchTemplateVersion")
             .formParam("LaunchTemplateId", launchTemplateId)
@@ -683,8 +1005,12 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
             .formParam("LaunchTemplateData.InstanceType", "t3.small")
             .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile-v2")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
-            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
+            .formParam("LaunchTemplateData.UserData", launchTemplateVersionUserData)
+            .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:NodeType")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "SECONDARY")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -699,7 +1025,11 @@ class Ec2IntegrationTest {
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.instanceType",
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template-version\n"));
+                    equalTo(launchTemplateVersionUserData))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("SECONDARY"));
 
         given()
             .formParam("Action", "DescribeLaunchTemplateVersions")
@@ -715,7 +1045,11 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.defaultVersion",
                     equalTo("true"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
-                    equalTo("t3.micro"));
+                    equalTo("t3.micro"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
+                    equalTo(launchTemplateUserData))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("PRIMARY"));
     }
 
     @Test
@@ -724,7 +1058,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ModifyLaunchTemplate")
             .formParam("LaunchTemplateId", launchTemplateId)
-            .formParam("DefaultVersion", "2")
+            .formParam("SetDefaultVersion", "2")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -735,6 +1069,32 @@ class Ec2IntegrationTest {
             .body("ModifyLaunchTemplateResponse.launchTemplate.defaultVersionNumber",
                     equalTo("2"))
             .body("ModifyLaunchTemplateResponse.launchTemplate.latestVersionNumber",
+                    equalTo("2"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateId.1", launchTemplateId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.defaultVersionNumber",
+                    equalTo("2"))
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.latestVersionNumber",
+                    equalTo("2"));
+
+        given()
+            .formParam("Action", "ModifyLaunchTemplate")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("SetDefaultVersion", "")
+            .formParam("DefaultVersion", "2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ModifyLaunchTemplateResponse.launchTemplate.defaultVersionNumber",
                     equalTo("2"));
     }
 
@@ -760,6 +1120,55 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(49)
+    void runInstancesResolvesLaunchTemplateDefaultsWithRequestOverrides() {
+        String launchedInstanceId = given()
+            .formParam("Action", "RunInstances")
+            .formParam("LaunchTemplate.LaunchTemplateId", launchTemplateId)
+            .formParam("LaunchTemplate.Version", "$Default")
+            .formParam("ImageId", "ami-sample-override")
+            .formParam("InstanceType", "c7g.large")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("TagSpecification.1.ResourceType", "instance")
+            .formParam("TagSpecification.1.Tag.1.Key", "example:NodeType")
+            .formParam("TagSpecification.1.Tag.1.Value", "REQUEST")
+            .formParam("TagSpecification.1.Tag.2.Key", "sample-name")
+            .formParam("TagSpecification.1.Tag.2.Value", "sample-local")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.imageId", equalTo("ami-sample-override"))
+            .body("RunInstancesResponse.instancesSet.item.instanceType", equalTo("c7g.large"))
+            .body("RunInstancesResponse.instancesSet.item.keyName", equalTo("test-key"))
+            .body("RunInstancesResponse.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
+            .body("RunInstancesResponse.instancesSet.item.groupSet.item.groupId", equalTo(securityGroupId))
+            .body("RunInstancesResponse.instancesSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("REQUEST"))
+            .body("RunInstancesResponse.instancesSet.item.tagSet.item.findAll { it.key == 'example:NodeType' }.size()",
+                    equalTo(1))
+            .body("RunInstancesResponse.instancesSet.item.tagSet.item.find { it.key == 'sample-name' }.value",
+                    equalTo("sample-local"))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", launchedInstanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                    equalTo(launchedInstanceId))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"));
+    }
+
+    @Test
+    @Order(50)
     void deleteLaunchTemplate() {
         given()
             .formParam("Action", "DeleteLaunchTemplate")
@@ -948,7 +1357,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId", startsWith("vpce-"))
             .body("CreateVpcEndpointResponse.vpcEndpoint.vpcId", equalTo(vpcId))
-            .body("CreateVpcEndpointResponse.vpcEndpoint.routeTableIdSet.item.routeTableId",
+            .body("CreateVpcEndpointResponse.vpcEndpoint.routeTableIdSet.item",
                     equalTo(routeTableId))
             .extract().path("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId");
     }
@@ -1091,6 +1500,52 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(80)
+    void runInstancesWithArm64ImageDescribesArm64Architecture() {
+        String armInstanceId = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2404-cloud-arm64")
+            .formParam("InstanceType", "t4g.medium")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.architecture", equalTo("arm64"))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", armInstanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.architecture",
+                    equalTo("arm64"));
+    }
+
+    @Test
+    @Order(80)
+    void runInstancesRejectsIncompatibleImageAndInstanceTypeArchitecture() {
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2404-amd64")
+            .formParam("InstanceType", "t4g.medium")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
     @Order(81)
     void describeInstances() {
         given()
@@ -1105,6 +1560,23 @@ class Ec2IntegrationTest {
                     equalTo(instanceId))
             .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name",
                     equalTo("running"));
+    }
+
+    @Test
+    @Order(87)
+    void describeInstanceAttributeGroupSet() {
+        given()
+            .formParam("Action", "DescribeInstanceAttribute")
+            .formParam("InstanceId", instanceId)
+            .formParam("Attribute", "groupSet")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceAttributeResponse.instanceId", equalTo(instanceId))
+            .body("DescribeInstanceAttributeResponse.groupSet.item.groupId", equalTo(securityGroupId))
+            .body("DescribeInstanceAttributeResponse.groupSet.item.groupName", not(emptyOrNullString()));
     }
 
     @Test
@@ -1212,12 +1684,14 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(87)
+    @Order(88)
     void describeInstancesByFilter() {
         given()
             .formParam("Action", "DescribeInstances")
             .formParam("Filter.1.Name", "instance-state-name")
             .formParam("Filter.1.Value.1", "running")
+            .formParam("Filter.2.Name", "instance-id")
+            .formParam("Filter.2.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1309,9 +1783,10 @@ class Ec2IntegrationTest {
     @Test
     @Order(79)
     void describeNetworkInterfacesBeforeRun() {
-        // Before any instances exist, the set should be empty
         given()
             .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", "i-00000000000000000")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1326,13 +1801,15 @@ class Ec2IntegrationTest {
     void describeNetworkInterfacesAfterRun() {
         networkInterfaceId = given()
             .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", greaterThanOrEqualTo(1))
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].networkInterfaceId",
                     startsWith("eni-"))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].vpcId", notNullValue())
@@ -1345,7 +1822,7 @@ class Ec2IntegrationTest {
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].attachment.deviceIndex",
                     equalTo("0"))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].attachment.instanceId",
-                    notNullValue())
+                    equalTo(instanceId))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].groupSet.item.size()",
                     greaterThanOrEqualTo(1))
             .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].networkInterfaceId");
@@ -1397,8 +1874,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"))
-            .body("DescribeTagsResponse.tagSet.item.value", equalTo("test-instance"));
+            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'Name' }.value", equalTo("test-instance"));
     }
 
     @Test
@@ -1548,13 +2024,15 @@ class Ec2IntegrationTest {
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("Filter.1.Name", "status")
             .formParam("Filter.1.Value.1", "in-use")
+            .formParam("Filter.2.Name", "attachment.instance-id")
+            .formParam("Filter.2.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()",
-                    greaterThanOrEqualTo(1))
+                    equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].status",
                     equalTo("in-use"));
     }
@@ -2248,5 +2726,491 @@ class Ec2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/");
+    }
+
+    @Test
+    @Order(150)
+    void spotInstanceLifecycle() {
+        // 1. Request Spot Instance
+        String spotRequestId = given()
+            .formParam("Action", "RequestSpotInstances")
+            .formParam("SpotPrice", "0.05")
+            .formParam("InstanceCount", "1")
+            .formParam("Type", "one-time")
+            .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchSpecification.InstanceType", "t2.micro")
+            .formParam("TagSpecification.1.ResourceType", "spot-instances-request")
+            .formParam("TagSpecification.1.Tag.1.Key", "SpotKey")
+            .formParam("TagSpecification.1.Tag.1.Value", "SpotValue")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", startsWith("sir-"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotPrice", equalTo("0.05"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].state", equalTo("active"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].status.code", equalTo("fulfilled"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].launchSpecification.imageId", equalTo("ami-0abcdef1234567890"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].productDescription", equalTo("Linux/UNIX"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].key", equalTo("SpotKey"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo("SpotValue"))
+            .extract().path("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId");
+
+        // 2. Describe Spot Instance Request by ID
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId))
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("active"));
+
+        // 3. Describe Spot Instance Request using tag filter
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("Filter.1.Name", "tag:SpotKey")
+            .formParam("Filter.1.Value.1", "SpotValue")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId));
+
+        // 4. Cancel Spot Instance Request
+        given()
+            .formParam("Action", "CancelSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CancelSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId))
+            .body("CancelSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("cancelled"));
+
+        // 5. Describe Spot Instance Request to verify state is cancelled
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("cancelled"));
+    }
+
+    private String newVpc(String cidr) {
+        return given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", cidr)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+    }
+
+    @Test
+    @Order(310)
+    void defaultNetworkAclCreatedWithVpc() {
+        String vpc = newVpc("10.30.0.0/16");
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpc)
+            .formParam("Filter.2.Name", "default")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.networkAclId", startsWith("acl-"))
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.vpcId", equalTo(vpc));
+    }
+
+    @Test
+    @Order(311)
+    void networkAclCreateEntryAndDelete() {
+        String vpc = newVpc("10.31.0.0/16");
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateNetworkAclResponse.networkAcl.networkAclId", startsWith("acl-"))
+            .body("CreateNetworkAclResponse.networkAcl.vpcId", equalTo(vpc))
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .formParam("PortRange.From", "443")
+            .formParam("PortRange.To", "443")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateNetworkAclEntryResponse.return", equalTo("true"));
+
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.networkAclId", equalTo(aclId));
+
+        given()
+            .formParam("Action", "DeleteNetworkAcl")
+            .formParam("NetworkAclId", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DeleteNetworkAclResponse.return", equalTo("true"));
+    }
+
+    @Test
+    @Order(312)
+    void createNetworkAclEntryRejectsDuplicateButReplaceOverwrites() {
+        String vpc = newVpc("10.32.0.0/16");
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateNetworkAclEntryResponse.return", equalTo("true"));
+
+        // Re-creating the same rule number/direction must fail — only Replace may overwrite.
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "deny")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("NetworkAclEntryAlreadyExists"));
+
+        // Replace on the same rule number succeeds and overwrites the existing entry.
+        given()
+            .formParam("Action", "ReplaceNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "deny")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ReplaceNetworkAclEntryResponse.return", equalTo("true"));
+
+        // Confirm the rule was actually overwritten (allow -> deny), not just that the call succeeded.
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.entrySet.item.find { it.ruleNumber == '100' }.ruleAction",
+                    equalTo("deny"));
+    }
+
+    @Test
+    @Order(313)
+    void deleteNetworkAclWithAssociationFails() {
+        String vpc = newVpc("10.33.0.0/16");
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.33.1.0/24")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        // The subnet starts on the VPC's default NACL — grab that association ID.
+        String associationId = given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpc)
+            .formParam("Filter.2.Name", "default")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeNetworkAclsResponse.networkAclSet.item.associationSet.item.networkAclAssociationId");
+
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        // Move the subnet onto the custom NACL so it now has a live association.
+        given()
+            .formParam("Action", "ReplaceNetworkAclAssociation")
+            .formParam("AssociationId", associationId)
+            .formParam("NetworkAclId", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteNetworkAcl")
+            .formParam("NetworkAclId", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("DependencyViolation"));
+    }
+
+    @Test
+    @Order(315)
+    void describePrefixListsReturnsManagedS3() {
+        String prefixListId = given()
+            .formParam("Action", "DescribePrefixLists")
+            .formParam("Filter.1.Name", "prefix-list-name")
+            .formParam("Filter.1.Value.1", "com.amazonaws.us-east-1.s3")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribePrefixListsResponse.prefixListSet.item.prefixListName",
+                    equalTo("com.amazonaws.us-east-1.s3"))
+            .body("DescribePrefixListsResponse.prefixListSet.item.prefixListId", startsWith("pl-"))
+            .extract().path("DescribePrefixListsResponse.prefixListSet.item.prefixListId");
+
+        // The prefix-list-id filter must narrow results to the matching list only.
+        given()
+            .formParam("Action", "DescribePrefixLists")
+            .formParam("Filter.1.Name", "prefix-list-id")
+            .formParam("Filter.1.Value.1", prefixListId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribePrefixListsResponse.prefixListSet.item.prefixListId", equalTo(prefixListId))
+            .body("DescribePrefixListsResponse.prefixListSet.item.prefixListName",
+                    equalTo("com.amazonaws.us-east-1.s3"));
+    }
+
+    @Test
+    @Order(316)
+    void interfaceEndpointPrivateDnsEnabledByDefault() {
+        String vpc = newVpc("10.36.0.0/16");
+        String subnet = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.36.1.0/24")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        given()
+            .formParam("Action", "CreateVpcEndpoint")
+            .formParam("VpcId", vpc)
+            .formParam("ServiceName", "com.amazonaws.us-east-1.ssm")
+            .formParam("VpcEndpointType", "Interface")
+            .formParam("SubnetId.1", subnet)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateVpcEndpointResponse.vpcEndpoint.privateDnsEnabled", equalTo("true"))
+            // subnetIdSet item text must be the plain id (not a wrapped <subnetId> element),
+            // otherwise the AWS SDK for Go fails to deserialize interface endpoints.
+            .body("CreateVpcEndpointResponse.vpcEndpoint.subnetIdSet.item", equalTo(subnet));
+    }
+
+    @Test
+    @Order(317)
+    void subnetTagsFromCreateSurviveDescribe() {
+        String vpc = newVpc("10.37.0.0/16");
+        String subnet = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.37.1.0/24")
+            .formParam("TagSpecification.1.ResourceType", "subnet")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "tagged-subnet")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("SubnetId.1", subnet)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.key", equalTo("Name"))
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.value", equalTo("tagged-subnet"));
+    }
+
+    @Test
+    @Order(318)
+    void routeNatGatewayIdRoundTrips() {
+        String vpc = newVpc("10.38.0.0/16");
+        String rt = given()
+            .formParam("Action", "CreateRouteTable")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateRouteTableResponse.routeTable.routeTableId");
+
+        given()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", rt)
+            .formParam("DestinationCidrBlock", "0.0.0.0/0")
+            .formParam("NatGatewayId", "nat-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateRouteResponse.return", equalTo("true"));
+
+        given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("RouteTableId.1", rt)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeRouteTablesResponse.routeTableSet.item.routeSet.item.natGatewayId",
+                    equalTo("nat-0123456789abcdef0"));
+    }
+
+    @Test
+    @Order(319)
+    void securityGroupRuleDescribableByRuleId() {
+        String vpc = newVpc("10.39.0.0/16");
+        String sg = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "rule-test")
+            .formParam("GroupDescription", "rule test")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String ruleId = given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", sg)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "443")
+            .formParam("IpPermissions.1.ToPort", "443")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/16")
+            .formParam("TagSpecification.1.ResourceType", "security-group-rule")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "allow-https")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AuthorizeSecurityGroupIngressResponse.securityGroupRuleSet.item.securityGroupRuleId");
+
+        // The modern aws_vpc_security_group_ingress_rule reads back by security-group-rule-id,
+        // and its create-time tags must round-trip or Terraform recreates the rule every plan.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", ruleId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.securityGroupRuleId",
+                    equalTo(ruleId))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.tagSet.item.key",
+                    equalTo("Name"))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.tagSet.item.value",
+                    equalTo("allow-https"));
+    }
+
+    @Test
+    @Order(320)
+    void securityGroupRuleIdParamAndFilterAreConjunctive() {
+        String vpc = newVpc("10.40.0.0/16");
+        String sg = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "conjunctive-test")
+            .formParam("GroupDescription", "conjunctive test")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String ruleId = given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", sg)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "80")
+            .formParam("IpPermissions.1.ToPort", "80")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AuthorizeSecurityGroupIngressResponse.securityGroupRuleSet.item.securityGroupRuleId");
+
+        // Param and filter naming different rules must intersect to nothing, not union to both.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("SecurityGroupRuleId.1", ruleId)
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", "sgr-00000000000000000")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet", emptyOrNullString());
+
+        // Param and filter naming the same rule still match.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("SecurityGroupRuleId.1", ruleId)
+            .formParam("Filter.1.Name", "security-group-rule-id")
+            .formParam("Filter.1.Value.1", ruleId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.securityGroupRuleId",
+                    equalTo(ruleId));
     }
 }

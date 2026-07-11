@@ -4,7 +4,7 @@
 
 ## Instance Execution Model
 
-`RunInstances` launches a **real Docker container** for each instance. The container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. The lifecycle maps directly to Docker:
+`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest.
 
 | EC2 state | Docker operation |
 |---|---|
@@ -31,11 +31,44 @@ metadata.
 | `ami-ubuntu2204` | | `public.ecr.aws/docker/library/ubuntu:22.04` |
 | `ami-ubuntu2404-arm64` | `ami-ubuntu2404` | `public.ecr.aws/docker/library/ubuntu:24.04` |
 | `ami-ubuntu2404-amd64` | | `public.ecr.aws/docker/library/ubuntu:24.04` |
+| `ami-ubuntu2404-cloud-arm64` | `ami-ubuntu2404-cloud` | `floci/ami-ubuntu:24.04-arm64` |
 | `ami-debian12` | | `public.ecr.aws/docker/library/debian:12` |
 | `ami-alpine` | | `public.ecr.aws/docker/library/alpine:latest` |
 | `ami-0abcdef1234567893` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
 
 Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to the catalog `defaultDockerImage` (`public.ecr.aws/amazonlinux/amazonlinux:2023` by default).
+
+### Cloud-image-derived AMI guests
+
+The `ami-ubuntu2404-cloud` entry is an experimental Ubuntu 24.04 guest image built from Canonical cloud-image artifacts, not from the Docker-library `ubuntu:24.04` image. It is intended for EC2 workflows that need packages such as `systemd` and `cloud-init` to match a real Ubuntu cloud image more closely.
+
+This mode is opt-in by AMI selection, not by a global configuration switch.
+Existing catalog entries, including `ami-ubuntu2404`, keep their current
+Docker-library image mapping and default `tail -f /dev/null` container
+lifecycle. The cloud-image-derived entry is a separate AMI ID and alias, so
+`DescribeImages` can advertise it while existing callers continue to get the
+old behavior unless they choose `ami-ubuntu2404-cloud-arm64` or the
+`ami-ubuntu2404-cloud` alias.
+
+The Java metadata-driven builder lives at `io.github.hectorvent.floci.tools.ami.AmiImageTool`. Its recipe is checked in at `docker/ec2/ami-images/image-build-metadata.yaml`, and generated context/provenance defaults to `target/ami-images/<image-id>/`.
+
+```bash
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="plan --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="generate --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="build --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="smoke --image-id ubuntu-24.04-arm64"
+```
 
 ## SSH Key Injection
 
@@ -43,9 +76,27 @@ If `KeyName` is specified at launch, Floci looks up the stored key pair's public
 
 Key pairs created with `CreateKeyPair` contain dummy private key material. Import a real key pair with `ImportKeyPair` to enable working SSH access.
 
+## Security Group Port Publishing
+
+When an instance's security groups open a TCP port to a CIDR source, Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP. This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
+
+```
+Published EC2 instance i-0abc... app port 80 on host port 30000 (socat -> 172.17.0.3:80)
+```
+
+Notes and limitations:
+
+- The app inside the instance must listen on `0.0.0.0` (not `127.0.0.1`) for the forward to reach it.
+- Only CIDR-sourced TCP rules are published. A port opened only to a referenced security group (or via a prefix list) is not published, matching AWS: those grant reachability from the referenced group's private IPs, not from the host. The source CIDR value itself is not enforced, so a CIDR-sourced port is reachable whether the rule is `0.0.0.0/0` or narrower.
+- Ports are aggregated across all of the instance's security groups, SSH (22) is never re-forwarded, and any single rule whose port span exceeds `max-published-ports-per-instance` (default 20) is skipped so an allow-all range cannot spawn thousands of sidecars. The total published per instance is capped at the same limit.
+- Stopping an instance tears down its forwards; starting it again does not automatically restore them (re-run `authorize-security-group-ingress`, or recreate the instance).
+- Set `publish-security-group-ports: false` (`FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS=false`) to keep security groups as metadata only.
+
 ## UserData
 
-`UserData` must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into `/tmp/user-data.sh` inside the container, and executes it with `sh` after SSH key injection. Output is captured and logged.
+`UserData` must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into `/tmp/user-data.sh` inside the container, and executes the script directly after SSH key injection so the script shebang selects the interpreter. Output is captured and logged.
+
+EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
 ## Instance Metadata Service (IMDS)
 
@@ -100,59 +151,195 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Default Security Group | `sg-default` | `groupName=default`, all-traffic egress |
 | Default Internet Gateway | `igw-default` | Attached to default VPC |
 | Main Route Table | `rtb-default` | Associated with default VPC |
+| Default Network ACL | `acl-default` | Allow-all, associated with the default subnets |
 
 ## Supported Actions
 
 ### Instances
-`RunInstances` · `DescribeInstances` · `TerminateInstances` · `StartInstances` · `StopInstances` · `RebootInstances` · `DescribeInstanceStatus` · `DescribeInstanceAttribute` · `ModifyInstanceAttribute`
+
+| Action | Description |
+|--------|-------------|
+| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. |
+| DescribeInstances | Lists or returns stored EC2 instances. |
+| TerminateInstances | Terminates instances and updates their stored lifecycle state. |
+| StartInstances | Starts stopped instances and their local runtime when applicable. |
+| StopInstances | Stops running instances and updates their stored lifecycle state. |
+| RebootInstances | Reboots instances through the local EC2 service model. |
+| DescribeInstanceStatus | Returns status records for stored instances. |
+| DescribeInstanceAttribute | Returns a supported attribute for an instance. |
+| ModifyInstanceAttribute | Updates supported mutable attributes for an instance. |
 
 ### VPCs
-`CreateVpc` · `DescribeVpcs` · `DeleteVpc` · `ModifyVpcAttribute` · `DescribeVpcAttribute` · `DescribeVpcEndpointServices` · `CreateVpcEndpoint` · `DescribeVpcEndpoints` · `DeleteVpcEndpoints` · `CreateDefaultVpc` · `AssociateVpcCidrBlock` · `DisassociateVpcCidrBlock`
+
+| Action | Description |
+|--------|-------------|
+| CreateVpc | Creates a VPC with the requested CIDR block. |
+| DescribeVpcs | Lists or returns stored VPCs. |
+| DeleteVpc | Deletes a VPC from the local EC2 store. |
+| ModifyVpcAttribute | Updates supported VPC attributes. |
+| DescribeVpcAttribute | Returns a supported VPC attribute. |
+| DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
+| CreateVpcEndpoint | Creates a VPC endpoint record. |
+| DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
+| DeleteVpcEndpoints | Deletes VPC endpoint records. |
+| CreateDefaultVpc | Creates or returns the default VPC for the region. |
+| AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
+| DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
 
 ### Subnets
-`CreateSubnet` · `DescribeSubnets` · `DeleteSubnet` · `ModifySubnetAttribute`
+
+| Action | Description |
+|--------|-------------|
+| CreateSubnet | Creates a subnet in a VPC. |
+| DescribeSubnets | Lists or returns stored subnets. |
+| DeleteSubnet | Deletes a subnet from the local EC2 store. |
+| ModifySubnetAttribute | Updates supported subnet attributes. |
 
 ### Security Groups
-`CreateSecurityGroup` · `DescribeSecurityGroups` · `DeleteSecurityGroup` · `AuthorizeSecurityGroupIngress` · `AuthorizeSecurityGroupEgress` · `RevokeSecurityGroupIngress` · `RevokeSecurityGroupEgress` · `DescribeSecurityGroupRules` · `ModifySecurityGroupRules` · `UpdateSecurityGroupRuleDescriptionsIngress` · `UpdateSecurityGroupRuleDescriptionsEgress`
+
+| Action | Description |
+|--------|-------------|
+| CreateSecurityGroup | Creates a security group in a VPC. |
+| DescribeSecurityGroups | Lists or returns stored security groups. |
+| DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
+| AuthorizeSecurityGroupIngress | Adds inbound permissions to a security group. |
+| AuthorizeSecurityGroupEgress | Adds outbound permissions to a security group. |
+| RevokeSecurityGroupIngress | Removes inbound permissions from a security group. |
+| RevokeSecurityGroupEgress | Removes outbound permissions from a security group. |
+| DescribeSecurityGroupRules | Lists stored security group rules. |
+| ModifySecurityGroupRules | Updates supported fields on security group rules. |
+| UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
+| UpdateSecurityGroupRuleDescriptionsEgress | Updates descriptions on matching outbound security group rules. |
 
 ### Key Pairs
-`CreateKeyPair` · `DescribeKeyPairs` · `DeleteKeyPair` · `ImportKeyPair`
+
+| Action | Description |
+|--------|-------------|
+| CreateKeyPair | Creates and stores a local key pair. |
+| DescribeKeyPairs | Lists or returns stored key pairs. |
+| DeleteKeyPair | Deletes a key pair from the local EC2 store. |
+| ImportKeyPair | Imports a public key as a local key pair. |
 
 ### AMIs
-`DescribeImages`
+
+| Action | Description |
+|--------|-------------|
+| DescribeImages | Returns AMI metadata known to the local EC2 service. |
 
 ### Tags
-`CreateTags` · `DeleteTags` · `DescribeTags`
+
+| Action | Description |
+|--------|-------------|
+| CreateTags | Adds tags to supported EC2 resources. |
+| DeleteTags | Removes tags from supported EC2 resources. |
+| DescribeTags | Lists tags stored for EC2 resources. |
 
 ### Internet Gateways
-`CreateInternetGateway` · `DescribeInternetGateways` · `DeleteInternetGateway` · `AttachInternetGateway` · `DetachInternetGateway`
+
+| Action | Description |
+|--------|-------------|
+| CreateInternetGateway | Creates an internet gateway. |
+| DescribeInternetGateways | Lists or returns stored internet gateways. |
+| DeleteInternetGateway | Deletes an internet gateway. |
+| AttachInternetGateway | Attaches an internet gateway to a VPC. |
+| DetachInternetGateway | Detaches an internet gateway from a VPC. |
 
 ### Route Tables
-`CreateRouteTable` · `DescribeRouteTables` · `DeleteRouteTable` · `AssociateRouteTable` · `DisassociateRouteTable` · `CreateRoute` · `DeleteRoute`
+
+| Action | Description |
+|--------|-------------|
+| CreateRouteTable | Creates a route table in a VPC. |
+| DescribeRouteTables | Lists or returns stored route tables. |
+| DeleteRouteTable | Deletes a route table from the local EC2 store. |
+| AssociateRouteTable | Associates a route table with a subnet. |
+| DisassociateRouteTable | Removes a route table association. |
+| CreateRoute | Adds a route to a route table. |
+| DeleteRoute | Removes a route from a route table. |
+
+### Network ACLs
+
+| Action | Description |
+|--------|-------------|
+| CreateNetworkAcl | Creates a network ACL in a VPC. |
+| DescribeNetworkAcls | Lists or returns stored network ACLs. |
+| DeleteNetworkAcl | Deletes a network ACL from the local EC2 store. |
+| CreateNetworkAclEntry | Adds an entry to a network ACL. |
+| ReplaceNetworkAclEntry | Replaces an entry in a network ACL. |
+| DeleteNetworkAclEntry | Removes an entry from a network ACL. |
+| ReplaceNetworkAclAssociation | Replaces the network ACL associated with a subnet. |
+
+### Prefix Lists
+
+| Action | Description |
+|--------|-------------|
+| DescribePrefixLists | Returns prefix lists known to the local EC2 service. |
 
 ### NAT Gateways
-`CreateNatGateway` · `DescribeNatGateways` · `DeleteNatGateway`
+
+| Action | Description |
+|--------|-------------|
+| CreateNatGateway | Creates a NAT gateway record. |
+| DescribeNatGateways | Lists or returns stored NAT gateways. |
+| DeleteNatGateway | Deletes a NAT gateway record. |
 
 ### Elastic IPs
-`AllocateAddress` · `DescribeAddresses` · `DescribeAddressesAttribute` · `AssociateAddress` · `DisassociateAddress` · `ReleaseAddress`
+
+| Action | Description |
+|--------|-------------|
+| AllocateAddress | Allocates an Elastic IP address record. |
+| DescribeAddresses | Lists or returns stored Elastic IP address records. |
+| DescribeAddressesAttribute | Returns allocation ID and public IP attributes for Elastic IP addresses. |
+| AssociateAddress | Associates an Elastic IP address with a resource. |
+| DisassociateAddress | Removes an Elastic IP address association. |
+| ReleaseAddress | Releases an Elastic IP address record. |
 
 ### Availability Zones & Regions
-`DescribeAvailabilityZones` · `DescribeRegions` · `DescribeAccountAttributes`
+
+| Action | Description |
+|--------|-------------|
+| DescribeAvailabilityZones | Returns the configured local availability zones. |
+| DescribeRegions | Returns the regions known to the local EC2 service. |
+| DescribeAccountAttributes | Returns local account-level EC2 attributes. |
 
 ### Instance Types
-`DescribeInstanceTypes` · `DescribeInstanceTypeOfferings`
+
+| Action | Description |
+|--------|-------------|
+| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service. |
+| DescribeInstanceTypeOfferings | Returns instance type offerings for the requested location filters. |
 
 ### Launch Templates
-`CreateLaunchTemplate` · `DescribeLaunchTemplates` · `DeleteLaunchTemplate`
+
+| Action | Description |
+|--------|-------------|
+| CreateLaunchTemplate | Creates a launch template with an initial version. |
+| CreateLaunchTemplateVersion | Creates a new launch template version, optionally from a source version. |
+| DescribeLaunchTemplates | Lists or returns stored launch templates. |
+| DescribeLaunchTemplateVersions | Lists versions stored for a launch template. |
+| ModifyLaunchTemplate | Updates launch template metadata such as the default version. |
+| DeleteLaunchTemplate | Deletes a launch template and its versions. |
+
+Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
 
 ### IAM Instance Profiles
-`DescribeIamInstanceProfileAssociations`
+
+| Action | Description |
+|--------|-------------|
+| DescribeIamInstanceProfileAssociations | Lists IAM instance profile associations known to the local EC2 service. |
 
 ### Network Interfaces
-`DescribeNetworkInterfaces`
+
+| Action | Description |
+|--------|-------------|
+| DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service. |
 
 ### Volumes
-`CreateVolume` · `DescribeVolumes` · `DeleteVolume`
+
+| Action | Description |
+|--------|-------------|
+| CreateVolume | Creates an EBS volume record. |
+| DescribeVolumes | Lists or returns stored EBS volume records. |
+| DeleteVolume | Deletes an EBS volume record. |
 
 ## Configuration
 
@@ -161,6 +348,11 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | `FLOCI_SERVICES_EC2_IMDS_PORT` | `9169` | Host port for the IMDS server |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_START` | `2200` | Start of SSH host port range |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_END` | `2299` | End of SSH host port range |
+| `FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS` | `true` | Publish security-group TCP ingress ports on the host via socat sidecars |
+| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_START` | `30000` | Start of the host-port range for published app ports |
+| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_END` | `30999` | End of the host-port range for published app ports |
+| `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
+| `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
 
 ## Requirements
@@ -254,5 +446,5 @@ aws ec2 associate-address \
 
 - `DescribeImages` returns AMIs from the EC2 image catalog, including common AMIs and Floci-native AMI IDs.
 - Key material returned by `CreateKeyPair` is a dummy RSA PEM — not usable for real SSH. Use `ImportKeyPair` for working SSH access.
-- Security group rules are stored and returned correctly but are not enforced at the network level — Docker bridge networking handles routing.
+- Security group rules are not enforced as a firewall (Docker bridge networking handles routing), but TCP ingress rules opened to a CIDR source are published on the host via socat sidecars so the instance's app is reachable from `localhost` — see [Security Group Port Publishing](#security-group-port-publishing).
 - The IMDS server identifies which instance is calling via IMDSv2 tokens (mapped at token issuance time) or by the container's bridge IP for IMDSv1.

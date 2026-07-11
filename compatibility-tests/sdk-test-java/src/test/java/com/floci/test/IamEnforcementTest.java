@@ -30,6 +30,7 @@ import static org.assertj.core.api.Assertions.*;
  *   <li>Wildcard action policy grants access → ALLOW</li>
  *   <li>Assumed role with no policies → DENY</li>
  *   <li>Assumed role with attached allow policy → ALLOW</li>
+ *   <li>Assumed role session policy deny overrides role allow → DENY</li>
  * </ul>
  */
 @DisplayName("IAM Enforcement Mode")
@@ -61,6 +62,12 @@ class IamEnforcementTest {
     private static final String ALLOW_S3_WILDCARD_POLICY = """
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Action":"s3:*","Resource":"*"}
+            ]}""";
+
+    private static final String DENY_S3_LIST_SESSION_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"},
+              {"Effect":"Deny","Action":"s3:ListAllMyBuckets","Resource":"*"}
             ]}""";
 
     // ── Shared state ───────────────────────────────────────────────────────────
@@ -291,6 +298,32 @@ class IamEnforcementTest {
                 assumed.credentials().secretAccessKey(),
                 assumed.credentials().sessionToken())) {
             assertThatCode(s3::listBuckets).doesNotThrowAnyException();
+        }
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("assumed role session policy deny overrides role allow")
+    void assumedRoleSessionPolicyDenyOverridesRoleAllow() {
+        assumeEnforcementEnabled();
+
+        iam.attachRolePolicy(AttachRolePolicyRequest.builder()
+                .roleName(ROLE).policyArn(allowPolicyArn).build());
+
+        AssumeRoleResponse assumed = sts.assumeRole(AssumeRoleRequest.builder()
+                .roleArn(roleArn)
+                .roleSessionName("enf-test-session-deny")
+                .policy(DENY_S3_LIST_SESSION_POLICY)
+                .build());
+
+        try (S3Client s3 = s3WithSessionCredentials(
+                assumed.credentials().accessKeyId(),
+                assumed.credentials().secretAccessKey(),
+                assumed.credentials().sessionToken())) {
+            assertThatThrownBy(s3::listBuckets)
+                    .isInstanceOf(S3Exception.class)
+                    .extracting(e -> ((S3Exception) e).statusCode())
+                    .isEqualTo(403);
         }
     }
 }

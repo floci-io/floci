@@ -24,6 +24,8 @@ public class Image {
     private String platform;
     private String imageOwnerAlias = "amazon";
     private String creationDate;
+    private String region;
+    private List<BlockDeviceMapping> blockDeviceMappings = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
     public Image() {}
@@ -69,6 +71,12 @@ public class Image {
 
     public String getCreationDate() { return creationDate; }
     public void setCreationDate(String creationDate) { this.creationDate = creationDate; }
+
+    public String getRegion() { return region; }
+    public void setRegion(String region) { this.region = region; }
+
+    public List<BlockDeviceMapping> getBlockDeviceMappings() { return blockDeviceMappings; }
+    public void setBlockDeviceMappings(List<BlockDeviceMapping> blockDeviceMappings) { this.blockDeviceMappings = blockDeviceMappings; }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }

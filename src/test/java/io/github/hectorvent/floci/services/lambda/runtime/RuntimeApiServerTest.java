@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda.runtime;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
 import io.vertx.core.Vertx;
+import io.vertx.core.json.JsonObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -136,6 +137,74 @@ class RuntimeApiServerTest {
         HttpResponse<String> response = asyncResponse.get(2, TimeUnit.SECONDS);
         assertEquals(200, response.statusCode(), "GET /next must return 200 when invocation arrives");
         assertEquals("req-parked", response.headers().firstValue("Lambda-Runtime-Aws-Request-Id").orElse(""));
+    }
+
+    /**
+     * The /error endpoint must return HTTP 202 with a {@code {"status":"OK"}} body, not
+     * an empty body. The AWS .NET runtime client (Amazon.Lambda.RuntimeSupport)
+     * deserializes the acknowledgement and crashes the runtime process with "Could not
+     * deserialize the response body" when it is empty.
+     */
+    @Test
+    @Timeout(15)
+    void errorEndpoint_returns202WithStatusOkBody() throws Exception {
+        PendingInvocation invocation = new PendingInvocation(
+                "req-error", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        // Deliver the invocation to a /next poller so it moves to inFlight.
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port
+                                + "/2018-06-01/runtime/invocation/req-error/error"))
+                        .header("Lambda-Runtime-Function-Error-Type", "Function.Handled")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"errorMessage\":\"intentional failure\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(202, response.statusCode());
+        assertEquals("application/json",
+                response.headers().firstValue("Content-Type").orElse(""));
+        assertEquals("OK", new JsonObject(response.body()).getString("status"),
+                "/error must return a JSON ack body so the .NET runtime client can deserialize it");
+    }
+
+    /**
+     * The /response acknowledgement carries the same {@code {"status":"OK"}} body as
+     * /error so runtime clients that deserialize it succeed.
+     */
+    @Test
+    @Timeout(15)
+    void responseEndpoint_returns202WithStatusOkBody() throws Exception {
+        PendingInvocation invocation = new PendingInvocation(
+                "req-response", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port
+                                + "/2018-06-01/runtime/invocation/req-response/response"))
+                        .POST(HttpRequest.BodyPublishers.ofString("\"result\""))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(202, response.statusCode());
+        assertEquals("application/json",
+                response.headers().firstValue("Content-Type").orElse(""));
+        assertEquals("OK", new JsonObject(response.body()).getString("status"));
     }
 
     @Test

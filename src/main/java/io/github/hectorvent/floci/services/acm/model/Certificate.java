@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.acm.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -15,6 +17,7 @@ import java.util.Map;
  * @see <a href="https://docs.aws.amazon.com/acm/latest/APIReference/API_CertificateDetail.html">AWS ACM CertificateDetail</a>
  */
 @RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class Certificate {
     private String arn;
     private String domainName;
@@ -250,10 +253,12 @@ public class Certificate {
         this.idempotencyToken = idempotencyToken;
     }
 
+    @JsonIgnore
     public boolean isExpired() {
         return notAfter != null && Instant.now().isAfter(notAfter);
     }
 
+    @JsonIgnore
     public boolean canExport() {
         return type == CertificateType.PRIVATE ||
                type == CertificateType.IMPORTED ||

@@ -37,6 +37,7 @@ import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.kafka.KafkaClient;
+import software.amazon.awssdk.services.mq.MqClient;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
@@ -44,20 +45,38 @@ import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTa
 import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
+import software.amazon.awssdk.services.elasticbeanstalk.ElasticBeanstalkClient;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.codebuild.CodeBuildClient;
 import software.amazon.awssdk.services.codedeploy.CodeDeployClient;
+import software.amazon.awssdk.services.codepipeline.CodePipelineClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.eks.EksClient;
+import software.amazon.awssdk.services.iot.IotClient;
+import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
+import software.amazon.awssdk.services.iotjobsdataplane.IotJobsDataPlaneClient;
 import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
+import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.backup.BackupClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
+import software.amazon.awssdk.services.lightsail.LightsailClient;
+import software.amazon.awssdk.services.route53.Route53Client;
+import software.amazon.awssdk.services.route53.model.Change;
+import software.amazon.awssdk.services.route53.model.ChangeAction;
+import software.amazon.awssdk.services.route53.model.ChangeBatch;
+import software.amazon.awssdk.services.route53.model.ChangeResourceRecordSetsRequest;
+import software.amazon.awssdk.services.route53.model.CreateHostedZoneRequest;
+import software.amazon.awssdk.services.route53.model.CreateHostedZoneResponse;
+import software.amazon.awssdk.services.route53.model.RRType;
+import software.amazon.awssdk.services.route53.model.ResourceRecord;
+import software.amazon.awssdk.services.route53.model.ResourceRecordSet;
+import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
@@ -67,11 +86,15 @@ import software.amazon.awssdk.services.lambda.model.InvokeRequest;
 import software.amazon.awssdk.services.lambda.model.InvokeResponse;
 import software.amazon.awssdk.services.lambda.model.InvocationType;
 import software.amazon.awssdk.services.lambda.model.Runtime;
+import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityResponse;
+import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -362,6 +385,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static MqClient mqClient() {
+        return MqClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AthenaClient athenaClient() {
         return AthenaClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -528,6 +559,75 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static Route53Client route53Client() {
+        return Route53Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static void verifySesDomainIdentityViaRoute53(SesV2Client sesV2, String domain) {
+        CreateEmailIdentityResponse identity = sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
+                .emailIdentity(domain)
+                .build());
+        List<String> tokens = identity.dkimAttributes() != null ? identity.dkimAttributes().tokens() : null;
+        if (tokens == null || tokens.isEmpty()) {
+            throw new IllegalStateException("CreateEmailIdentity did not return DKIM tokens for " + domain);
+        }
+
+        try (Route53Client route53 = route53Client()) {
+            CreateHostedZoneResponse zone = route53.createHostedZone(CreateHostedZoneRequest.builder()
+                    .name(domain)
+                    .callerReference(uniqueName("ses-dkim-zone"))
+                    .build());
+
+            List<Change> changes = tokens.stream()
+                    .map(token -> Change.builder()
+                            .action(ChangeAction.CREATE)
+                            .resourceRecordSet(ResourceRecordSet.builder()
+                                    .name(token + "._domainkey." + domain)
+                                    .type(RRType.CNAME)
+                                    .ttl(300L)
+                                    .resourceRecords(ResourceRecord.builder()
+                                            .value(token + ".dkim.amazonses.com")
+                                            .build())
+                                    .build())
+                            .build())
+                    .toList();
+
+            route53.changeResourceRecordSets(ChangeResourceRecordSetsRequest.builder()
+                    .hostedZoneId(stripHostedZonePrefix(zone.hostedZone().id()))
+                    .changeBatch(ChangeBatch.builder().changes(changes).build())
+                    .build());
+        }
+
+        for (int i = 0; i < 10; i++) {
+            boolean verified = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                    .emailIdentity(domain)
+                    .build())
+                    .verifiedForSendingStatus();
+            if (verified) {
+                return;
+            }
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for SES identity verification", e);
+            }
+        }
+
+        throw new IllegalStateException("SES identity was not verified after publishing DKIM records for " + domain);
+    }
+
+    private static String stripHostedZonePrefix(String hostedZoneId) {
+        String prefix = "/hostedzone/";
+        return hostedZoneId != null && hostedZoneId.startsWith(prefix)
+                ? hostedZoneId.substring(prefix.length())
+                : hostedZoneId;
+    }
+
     public static RdsClient rdsClient() {
         return RdsClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -546,6 +646,14 @@ public final class TestFixtures {
 
     public static ElastiCacheClient elastiCacheClient() {
         return ElastiCacheClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static ElasticBeanstalkClient elasticBeanstalkClient() {
+        return ElasticBeanstalkClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -624,6 +732,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static AutoScalingClient autoScalingClient() {
+        return AutoScalingClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AppConfigClient appConfigClient() {
         return AppConfigClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -642,6 +758,30 @@ public final class TestFixtures {
 
     public static PipesClient pipesClient() {
         return PipesClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static IotClient iotClient() {
+        return IotClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static IotDataPlaneClient iotDataClient() {
+        return IotDataPlaneClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static IotJobsDataPlaneClient iotJobsDataClient() {
+        return IotJobsDataPlaneClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -672,6 +812,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static CodePipelineClient codePipelineClient() {
+        return CodePipelineClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static BackupClient backupClient() {
         return BackupClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -682,6 +830,22 @@ public final class TestFixtures {
 
     public static AppSyncClient appSyncClient() {
         return AppSyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static LightsailClient lightsailClient() {
+        return LightsailClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static S3VectorsClient s3vectorsClient() {
+        return S3VectorsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

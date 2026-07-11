@@ -7,25 +7,76 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 ## Supported Actions
 
 ### Load Balancers
-`CreateLoadBalancer` · `DescribeLoadBalancers` · `DeleteLoadBalancer` · `ModifyLoadBalancerAttributes` · `DescribeLoadBalancerAttributes` · `DescribeCapacityReservation` · `SetSecurityGroups` · `SetSubnets` · `SetIpAddressType`
+
+| Action | Description |
+|--------|-------------|
+| CreateLoadBalancer | Creates an ALB or NLB in active state with persisted attributes and tags. |
+| DescribeLoadBalancers | Lists or returns stored load balancers. |
+| DeleteLoadBalancer | Deletes a load balancer and stops its listener sockets. |
+| ModifyLoadBalancerAttributes | Updates persisted load balancer attributes. |
+| DescribeLoadBalancerAttributes | Returns attributes stored for a load balancer. |
+| DescribeCapacityReservation | Returns the stored capacity reservation fields for a load balancer. |
+| SetSecurityGroups | Replaces the security groups associated with a load balancer. |
+| SetSubnets | Replaces the subnets associated with a load balancer. |
+| SetIpAddressType | Updates the IP address type stored for a load balancer. |
 
 ### Target Groups
-`CreateTargetGroup` · `DescribeTargetGroups` · `ModifyTargetGroup` · `DeleteTargetGroup` · `ModifyTargetGroupAttributes` · `DescribeTargetGroupAttributes`
+
+| Action | Description |
+|--------|-------------|
+| CreateTargetGroup | Creates a target group with protocol, port, health check, and target-type settings. |
+| DescribeTargetGroups | Lists or returns stored target groups. |
+| ModifyTargetGroup | Updates mutable target group settings. |
+| DeleteTargetGroup | Deletes an unused target group. |
+| ModifyTargetGroupAttributes | Updates persisted target group attributes. |
+| DescribeTargetGroupAttributes | Returns attributes stored for a target group. |
 
 ### Targets
-`RegisterTargets` · `DeregisterTargets` · `DescribeTargetHealth`
+
+| Action | Description |
+|--------|-------------|
+| RegisterTargets | Registers targets with a target group. |
+| DeregisterTargets | Removes targets from a target group. |
+| DescribeTargetHealth | Returns target health records maintained by Floci. |
 
 ### Listeners
-`CreateListener` · `DescribeListeners` · `ModifyListener` · `ModifyListenerAttributes` · `DescribeListenerAttributes` · `DeleteListener` · `AddListenerCertificates` · `RemoveListenerCertificates` · `DescribeListenerCertificates`
+
+| Action | Description |
+|--------|-------------|
+| CreateListener | Creates a listener and its non-deletable default rule. |
+| DescribeListeners | Lists or returns stored listeners. |
+| ModifyListener | Updates a listener's configuration and default actions. |
+| ModifyListenerAttributes | Updates persisted listener attributes. |
+| DescribeListenerAttributes | Returns attributes stored for a listener. |
+| DeleteListener | Deletes a listener and stops its socket. |
+| AddListenerCertificates | Adds certificates to a listener. |
+| RemoveListenerCertificates | Removes certificates from a listener. |
+| DescribeListenerCertificates | Lists certificates associated with a listener. |
 
 ### Rules
-`CreateRule` · `DescribeRules` · `ModifyRule` · `DeleteRule` · `SetRulePriorities`
+
+| Action | Description |
+|--------|-------------|
+| CreateRule | Creates a non-default listener rule with conditions, actions, and priority. |
+| DescribeRules | Lists or returns listener rules. |
+| ModifyRule | Updates a listener rule's conditions and actions. |
+| DeleteRule | Deletes a non-default listener rule. |
+| SetRulePriorities | Atomically updates rule priorities after validating uniqueness. |
 
 ### Tags
-`AddTags` · `RemoveTags` · `DescribeTags`
+
+| Action | Description |
+|--------|-------------|
+| AddTags | Adds tags to supported ELBv2 resources. |
+| RemoveTags | Removes tags from supported ELBv2 resources. |
+| DescribeTags | Returns tags for supported ELBv2 resources. |
 
 ### Metadata
-`DescribeSSLPolicies` · `DescribeAccountLimits`
+
+| Action | Description |
+|--------|-------------|
+| DescribeSSLPolicies | Returns Floci's pre-seeded standard SSL policy list. |
+| DescribeAccountLimits | Returns standard default ELBv2 account limits. |
 
 ## Behavior Notes
 

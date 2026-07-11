@@ -40,6 +40,22 @@ public class IamPolicyEvaluator {
 
     public enum Decision { ALLOW, DENY }
 
+    public enum SimulationDecision {
+        ALLOWED("allowed"),
+        EXPLICIT_DENY("explicitDeny"),
+        IMPLICIT_DENY("implicitDeny");
+
+        private final String awsValue;
+
+        SimulationDecision(String awsValue) {
+            this.awsValue = awsValue;
+        }
+
+        public String awsValue() {
+            return awsValue;
+        }
+    }
+
     private static final Logger LOG = Logger.getLogger(IamPolicyEvaluator.class);
 
     private final ObjectMapper objectMapper;
@@ -56,7 +72,7 @@ public class IamPolicyEvaluator {
      * @param resourcePolicies resource-based policy documents (Phase 2); may be null or empty
      * @param action        IAM action, e.g. "s3:GetObject"
      * @param resource      resource ARN, e.g. "arn:aws:s3:::my-bucket/key"
-     * @param conditionCtx  condition context key-value pairs (lowercase keys); may be null or empty
+     * @param conditionCtx  condition context key-value pairs; may be null or empty
      * @return {@link Decision#ALLOW} or {@link Decision#DENY}
      */
     public Decision evaluate(CallerContext caller,
@@ -64,7 +80,7 @@ public class IamPolicyEvaluator {
                              String action,
                              String resource,
                              Map<String, String> conditionCtx) {
-        Map<String, String> ctx = conditionCtx == null ? Map.of() : conditionCtx;
+        Map<String, String> ctx = normalizeConditionContext(conditionCtx);
 
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
         List<PolicyStatement> resourceStmts = resourcePolicies == null ? List.of() : parseAll(resourcePolicies);
@@ -119,9 +135,49 @@ public class IamPolicyEvaluator {
         return evaluate(CallerContext.of(policyDocuments), null, action, resource, conditionCtx);
     }
 
+    public SimulationDecision simulatePrincipalPolicy(CallerContext caller,
+                                                      String action,
+                                                      String resource,
+                                                      Map<String, String> conditionCtx) {
+        Map<String, String> ctx = normalizeConditionContext(conditionCtx);
+        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
+        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
+                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
+        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
+                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+
+        if (anyExplicitDeny(identityStmts, action, resource, ctx)
+                || (sessionStmts != null && anyExplicitDeny(sessionStmts, action, resource, ctx))
+                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, action, resource, ctx))) {
+            return SimulationDecision.EXPLICIT_DENY;
+        }
+        if (!anyExplicitAllow(identityStmts, action, resource, ctx)) {
+            return SimulationDecision.IMPLICIT_DENY;
+        }
+        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, action, resource, ctx)) {
+            return SimulationDecision.IMPLICIT_DENY;
+        }
+        if (boundaryStmts != null && !anyExplicitAllow(boundaryStmts, action, resource, ctx)) {
+            return SimulationDecision.IMPLICIT_DENY;
+        }
+        return SimulationDecision.ALLOWED;
+    }
+
     // -----------------------------------------------------------------------
     // Statement matching
     // -----------------------------------------------------------------------
+
+    private Map<String, String> normalizeConditionContext(Map<String, String> conditionCtx) {
+        if (conditionCtx == null || conditionCtx.isEmpty()) {
+            return Map.of();
+        }
+        return conditionCtx.entrySet().stream()
+                .filter(entry -> entry.getKey() != null && entry.getValue() != null)
+                .collect(java.util.stream.Collectors.toMap(
+                        entry -> entry.getKey().toLowerCase(java.util.Locale.ROOT),
+                        Map.Entry::getValue,
+                        (first, ignored) -> first));
+    }
 
     private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
                                      Map<String, String> ctx) {

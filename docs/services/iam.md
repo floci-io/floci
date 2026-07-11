@@ -5,38 +5,136 @@
 ## Supported Actions
 
 ### Users
-`CreateUser` · `GetUser` · `DeleteUser` · `ListUsers` · `UpdateUser` · `TagUser` · `UntagUser` · `ListUserTags`
+
+| Action | Description |
+|--------|-------------|
+| CreateUser | Creates an IAM user in the local account. |
+| GetUser | Returns a stored IAM user. |
+| DeleteUser | Deletes an IAM user from the local IAM store. |
+| ListUsers | Lists IAM users in the local account. |
+| UpdateUser | Updates mutable IAM user fields. |
+| TagUser | Adds tags to an IAM user. |
+| UntagUser | Removes tags from an IAM user. |
+| ListUserTags | Lists tags stored for an IAM user. |
 
 ### Groups
-`CreateGroup` · `GetGroup` · `DeleteGroup` · `ListGroups` · `AddUserToGroup` · `RemoveUserFromGroup` · `ListGroupsForUser`
+
+| Action | Description |
+|--------|-------------|
+| CreateGroup | Creates an IAM group. |
+| GetGroup | Returns an IAM group and its users. |
+| DeleteGroup | Deletes an IAM group from the local IAM store. |
+| ListGroups | Lists IAM groups in the local account. |
+| AddUserToGroup | Adds a user to an IAM group. |
+| RemoveUserFromGroup | Removes a user from an IAM group. |
+| ListGroupsForUser | Lists groups that contain a user. |
 
 ### Roles
-`CreateRole` · `GetRole` · `DeleteRole` · `ListRoles` · `UpdateRole` · `UpdateAssumeRolePolicy` · `TagRole` · `UntagRole` · `ListRoleTags`
+
+| Action | Description |
+|--------|-------------|
+| CreateRole | Creates an IAM role with an assume-role policy. |
+| GetRole | Returns a stored IAM role. |
+| DeleteRole | Deletes an IAM role from the local IAM store. |
+| ListRoles | Lists IAM roles in the local account. |
+| UpdateRole | Updates mutable IAM role fields. |
+| UpdateAssumeRolePolicy | Replaces a role's assume-role policy document. |
+| TagRole | Adds tags to an IAM role. |
+| UntagRole | Removes tags from an IAM role. |
+| ListRoleTags | Lists tags stored for an IAM role. |
 
 ### Policies
-`CreatePolicy` · `GetPolicy` · `DeletePolicy` · `ListPolicies` · `CreatePolicyVersion` · `GetPolicyVersion` · `DeletePolicyVersion` · `ListPolicyVersions` · `SetDefaultPolicyVersion` · `TagPolicy` · `UntagPolicy` · `ListPolicyTags`
+
+| Action | Description |
+|--------|-------------|
+| CreatePolicy | Creates a customer-managed IAM policy. |
+| GetPolicy | Returns metadata for a managed IAM policy. |
+| DeletePolicy | Deletes a managed IAM policy. |
+| ListPolicies | Lists managed IAM policies, including seeded AWS managed policies. |
+| CreatePolicyVersion | Creates a new version of a managed policy. |
+| GetPolicyVersion | Returns a managed policy version document. |
+| DeletePolicyVersion | Deletes a non-default managed policy version. |
+| ListPolicyVersions | Lists versions for a managed policy. |
+| SetDefaultPolicyVersion | Sets the default version for a managed policy. |
+| TagPolicy | Adds tags to a managed policy. |
+| UntagPolicy | Removes tags from a managed policy. |
+| ListPolicyTags | Lists tags stored for a managed policy. |
 
 ### Permission Boundaries
-`PutUserPermissionsBoundary` · `DeleteUserPermissionsBoundary` · `PutRolePermissionsBoundary` · `DeleteRolePermissionsBoundary`
+
+| Action | Description |
+|--------|-------------|
+| PutUserPermissionsBoundary | Sets a managed policy as a user's permissions boundary. |
+| DeleteUserPermissionsBoundary | Removes a user's permissions boundary. |
+| PutRolePermissionsBoundary | Sets a managed policy as a role's permissions boundary. |
+| DeleteRolePermissionsBoundary | Removes a role's permissions boundary. |
 
 ### Policy Attachments
-`AttachUserPolicy` · `DetachUserPolicy` · `ListAttachedUserPolicies`
-`AttachGroupPolicy` · `DetachGroupPolicy` · `ListAttachedGroupPolicies`
-`AttachRolePolicy` · `DetachRolePolicy` · `ListAttachedRolePolicies`
+
+| Action | Description |
+|--------|-------------|
+| AttachUserPolicy | Attaches a managed policy to a user. |
+| DetachUserPolicy | Detaches a managed policy from a user. |
+| ListAttachedUserPolicies | Lists managed policies attached to a user. |
+| AttachGroupPolicy | Attaches a managed policy to a group. |
+| DetachGroupPolicy | Detaches a managed policy from a group. |
+| ListAttachedGroupPolicies | Lists managed policies attached to a group. |
+| AttachRolePolicy | Attaches a managed policy to a role. |
+| DetachRolePolicy | Detaches a managed policy from a role. |
+| ListAttachedRolePolicies | Lists managed policies attached to a role. |
 
 ### Inline Policies
-`PutUserPolicy` · `GetUserPolicy` · `DeleteUserPolicy` · `ListUserPolicies`
-`PutGroupPolicy` · `GetGroupPolicy` · `DeleteGroupPolicy` · `ListGroupPolicies`
-`PutRolePolicy` · `GetRolePolicy` · `DeleteRolePolicy` · `ListRolePolicies`
+
+| Action | Description |
+|--------|-------------|
+| PutUserPolicy | Stores or replaces an inline policy on a user. |
+| GetUserPolicy | Returns an inline policy stored on a user. |
+| DeleteUserPolicy | Deletes an inline policy from a user. |
+| ListUserPolicies | Lists inline policy names stored on a user. |
+| PutGroupPolicy | Stores or replaces an inline policy on a group. |
+| GetGroupPolicy | Returns an inline policy stored on a group. |
+| DeleteGroupPolicy | Deletes an inline policy from a group. |
+| ListGroupPolicies | Lists inline policy names stored on a group. |
+| PutRolePolicy | Stores or replaces an inline policy on a role. |
+| GetRolePolicy | Returns an inline policy stored on a role. |
+| DeleteRolePolicy | Deletes an inline policy from a role. |
+| ListRolePolicies | Lists inline policy names stored on a role. |
 
 ### Instance Profiles
-`CreateInstanceProfile` · `GetInstanceProfile` · `DeleteInstanceProfile` · `ListInstanceProfiles` · `AddRoleToInstanceProfile` · `RemoveRoleFromInstanceProfile` · `ListInstanceProfilesForRole`
+
+| Action | Description |
+|--------|-------------|
+| CreateInstanceProfile | Creates an IAM instance profile. |
+| GetInstanceProfile | Returns an instance profile and its roles. |
+| DeleteInstanceProfile | Deletes an instance profile from the local IAM store. |
+| ListInstanceProfiles | Lists IAM instance profiles. |
+| AddRoleToInstanceProfile | Adds a role to an instance profile. |
+| RemoveRoleFromInstanceProfile | Removes a role from an instance profile. |
+| ListInstanceProfilesForRole | Lists instance profiles associated with a role. |
 
 ### Access Keys
-`CreateAccessKey` · `GetAccessKeyLastUsed` · `ListAccessKeys` · `UpdateAccessKey` · `DeleteAccessKey`
+
+| Action | Description |
+|--------|-------------|
+| CreateAccessKey | Creates access-key credentials for a user. |
+| GetAccessKeyLastUsed | Returns the stored last-used metadata for an access key. |
+| ListAccessKeys | Lists access keys for a user. |
+| UpdateAccessKey | Updates an access key's status. |
+| DeleteAccessKey | Deletes an access key from a user. |
 
 ### Login Profiles
-`CreateLoginProfile` · `DeleteLoginProfile` · `UpdateLoginProfile`
+
+| Action | Description |
+|--------|-------------|
+| CreateLoginProfile | Creates a password login profile for a user. |
+| DeleteLoginProfile | Deletes a user's login profile. |
+| UpdateLoginProfile | Updates a user's login profile password settings. |
+
+### Policy Simulation
+
+| Action | Description |
+|--------|-------------|
+| SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
 
 ## AWS Managed Policies
 
@@ -58,6 +156,20 @@ Floci seeds a catalog of commonly-used AWS managed policies at startup. These ar
 `AmazonS3ObjectLambdaExecutionRolePolicy` · `CloudWatchLambdaInsightsExecutionRolePolicy` · `CloudWatchLambdaApplicationSignalsExecutionRolePolicy` · `AWSConfigRulesExecutionRole` · `AWSMSKReplicatorExecutionRole` · `AWS-SSM-DiagnosisAutomation-ExecutionRolePolicy` · `AWS-SSM-RemediationAutomation-ExecutionRolePolicy` · `AmazonSageMakerGeospatialExecutionRole` · `AmazonSageMakerCanvasEMRServerlessExecutionRolePolicy` · `SageMakerStudioBedrockFunctionExecutionRolePolicy` · `SageMakerStudioDomainExecutionRolePolicy` · `SageMakerStudioQueryExecutionRolePolicy` · `AmazonDataZoneDomainExecutionRolePolicy` · `AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy` · `AWSPartnerCentralSellingResourceSnapshotJobExecutionRolePolicy`
 
 All seeded policies use a permissive wildcard document since Floci does not enforce IAM policy evaluation by default.
+
+## Optional Local Deployer Principal
+
+Floci can seed a local IAM user for development workflows that expect a concrete caller identity before provisioning starts. This is disabled by default.
+
+Enable it with:
+
+```bash
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true
+```
+
+When enabled, Floci creates the `floci-deployer` user if it does not already exist, attaches `arn:aws:iam::aws:policy/AdministratorAccess`, and creates static `floci` / `floci` access-key credentials if that access key does not already exist. Existing users and access keys are preserved.
+
+Requests signed with the seeded access key return the deployer user ARN from `sts:GetCallerIdentity`.
 
 ## IAM Enforcement Mode
 
@@ -82,9 +194,11 @@ environment:
 
 Policy evaluation follows the standard AWS precedence:
 
-1. An explicit **Deny** in any policy → request is denied (HTTP 403 `AccessDeniedException`)
-2. An explicit **Allow** in any policy → request is allowed
-3. No matching statement → implicit deny (HTTP 403)
+1. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
+2. An explicit **Allow** in an identity policy creates the base grant
+3. If a session policy is present, it must also explicitly allow the request
+4. If a permission boundary is present, it must also explicitly allow the request
+5. No matching effective allow → implicit deny (HTTP 403)
 
 ### Bypass rules
 
@@ -153,6 +267,7 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
 |---|---|---|
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
+| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
 
 ## Examples
 

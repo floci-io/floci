@@ -46,6 +46,9 @@ public class UserPool {
     private Map<String, Object> accountRecoverySetting = new HashMap<>();
     private String userPoolTier = "ESSENTIALS";
 
+    private String clientIdOverride = null;
+    private String clientSecretOverride = null;
+
     public UserPool() {
         long now = System.currentTimeMillis() / 1000L;
         this.creationDate = now;
@@ -151,4 +154,10 @@ public class UserPool {
 
     public String getUserPoolTier() { return userPoolTier; }
     public void setUserPoolTier(String userPoolTier) { this.userPoolTier = userPoolTier; }
+
+    public String getClientIdOverride() { return clientIdOverride; }
+    public void setClientIdOverride(String clientIdOverride) { this.clientIdOverride = clientIdOverride;}
+
+    public String getClientSecretOverride() { return clientSecretOverride; }
+    public void setClientSecretOverride(String clientSecretOverride) { this.clientSecretOverride = clientSecretOverride; }
 }

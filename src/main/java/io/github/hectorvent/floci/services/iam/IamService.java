@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -16,6 +18,7 @@ import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -25,18 +28,30 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Core IAM business logic — users, groups, roles, policies, access keys, instance profiles.
  * IAM is a global service: resources are not region-scoped and storage keys have no region prefix.
+ *
+ * <p>Eagerly initialized at startup so AWS-managed policies (and the optional deployer principal)
+ * are seeded under the default account before any request runs. Seeding is account-namespaced via
+ * the request context, so deferring it to the first request would otherwise bind the seed data to
+ * whichever account happened to make that call — a real hazard now that {@code AccountContextFilter}
+ * resolves the request account through this service.
  */
+@Startup
 @ApplicationScoped
-public class IamService {
+public class IamService implements SessionAccountLookup {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
+    private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
+    private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
+    private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
 
     private final StorageBackend<String, IamUser> users;
     private final StorageBackend<String, IamGroup> groups;
@@ -46,6 +61,14 @@ public class IamService {
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
     private final RegionResolver regionResolver;
+    private final boolean seedDeployerPrincipal;
+
+    /**
+     * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
+     * not owned by any account — so they live here rather than in the account-partitioned
+     * {@link #policies} store, and {@link #getPolicy} resolves them for any caller.
+     */
+    private final Map<String, IamPolicy> awsManagedPolicies = buildAwsManagedPolicies();
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -57,7 +80,8 @@ public class IamService {
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
-            regionResolver
+            regionResolver,
+            config.services().iam().seedDeployerPrincipal()
         );
     }
 
@@ -69,6 +93,18 @@ public class IamService {
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
                RegionResolver regionResolver) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, regionResolver, false);
+    }
+
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -77,24 +113,64 @@ public class IamService {
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
         this.regionResolver = regionResolver;
+        this.seedDeployerPrincipal = seedDeployerPrincipal;
     }
 
     @PostConstruct
-    void seedAwsManagedPolicies() {
-        int seeded = 0;
+    void seedDefaults() {
+        seedAwsManagedPolicies();
+        if (seedDeployerPrincipal) {
+            seedDefaultDeployerPrincipal();
+        }
+    }
+
+    private static Map<String, IamPolicy> buildAwsManagedPolicies() {
+        Map<String, IamPolicy> catalog = new LinkedHashMap<>();
         for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
             String arn = def.arn();
-            if (policies.get(arn).isPresent()) {
+            catalog.put(arn, new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
+                    def.description(), AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+        }
+        return catalog;
+    }
+
+    void seedAwsManagedPolicies() {
+        // Managed policies are served globally from the catalog (see getPolicy); this also
+        // mirrors them into the default-account store so ListPolicies(Scope=AWS) lists them.
+        int seeded = 0;
+        for (Map.Entry<String, IamPolicy> entry : awsManagedPolicies.entrySet()) {
+            if (policies.get(entry.getKey()).isPresent()) {
                 continue;
             }
-            String policyId = "ANPA" + randomId(16);
-            IamPolicy policy = new IamPolicy(policyId, def.name(), def.path(), arn,
-                    def.description(), AwsManagedPolicies.PERMISSIVE_DOCUMENT);
-            policies.put(arn, policy);
+            policies.put(entry.getKey(), entry.getValue());
             seeded++;
         }
         if (seeded > 0) {
             LOG.infov("Seeded {0} AWS managed policies", seeded);
+        }
+    }
+
+    private void seedDefaultDeployerPrincipal() {
+        String adminPolicyArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        IamUser user = users.get(DEFAULT_DEPLOYER_USER)
+                .orElseGet(() -> {
+                    String userId = "AIDA" + randomId(16);
+                    String arn = iamArn("user", "/", DEFAULT_DEPLOYER_USER);
+                    IamUser seededUser = new IamUser(userId, DEFAULT_DEPLOYER_USER, "/", arn);
+                    users.put(DEFAULT_DEPLOYER_USER, seededUser);
+                    LOG.infov("Seeded default IAM deployer user: {0}", DEFAULT_DEPLOYER_USER);
+                    return seededUser;
+                });
+        if (!user.getAttachedPolicyArns().contains(adminPolicyArn)) {
+            user.getAttachedPolicyArns().add(adminPolicyArn);
+            users.put(DEFAULT_DEPLOYER_USER, user);
+        }
+        if (accessKeys.get(DEFAULT_DEPLOYER_ACCESS_KEY_ID).isEmpty()) {
+            accessKeys.put(DEFAULT_DEPLOYER_ACCESS_KEY_ID, new AccessKey(
+                    DEFAULT_DEPLOYER_ACCESS_KEY_ID,
+                    DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
+                    DEFAULT_DEPLOYER_USER));
+            LOG.infov("Seeded default IAM deployer access key: {0}", DEFAULT_DEPLOYER_ACCESS_KEY_ID);
         }
     }
 
@@ -117,9 +193,21 @@ public class IamService {
     }
 
     public IamUser getUser(String userName) {
+        if (userName == null) {
+            throw new AwsException("NoSuchEntity",
+                    "The user with name null cannot be found.", 404);
+        }
         return users.get(userName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "The user with name " + userName + " cannot be found.", 404));
+    }
+
+    /** The IAM user that owns the given access key id, when it is a real stored key. */
+    public Optional<String> findUserNameByAccessKeyId(String accessKeyId) {
+        if (accessKeyId == null) {
+            return Optional.empty();
+        }
+        return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
     public void deleteUser(String userName) {
@@ -282,6 +370,19 @@ public class IamService {
                         "The role with name " + roleName + " cannot be found.", 404));
     }
 
+    /**
+     * Looks up a role by name in a specific account's namespace, without throwing when absent.
+     *
+     * <p>Roles are account-namespaced, so a cross-account caller (e.g. STS AssumeRole) must resolve
+     * the role in its owning account — taken from the role ARN — rather than the request's account.
+     */
+    public Optional<IamRole> findRole(String accountId, String roleName) {
+        if (roles instanceof AccountAwareStorageBackend<IamRole> aware) {
+            return aware.getForAccount(accountId, roleName);
+        }
+        return roles.get(roleName);
+    }
+
     public void deleteRole(String roleName) {
         IamRole role = getRole(roleName);
         if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
@@ -349,9 +450,33 @@ public class IamService {
     }
 
     public IamPolicy getPolicy(String policyArn) {
+        // AWS-managed policies (arn:aws:iam::aws:policy/...) are global — not owned by any
+        // account — so they are served from the catalog rather than the account-partitioned
+        // store, which would otherwise make them visible only to the default account.
+        if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            IamPolicy managed = awsManagedPolicies.get(policyArn);
+            if (managed != null) {
+                return managed;
+            }
+            throw new AwsException("NoSuchEntity", "Policy " + policyArn + " does not exist.", 404);
+        }
         return policies.get(policyArn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "Policy " + policyArn + " does not exist.", 404));
+    }
+
+    /**
+     * Resolves a policy by ARN without throwing, mirroring {@link #getPolicy} so that
+     * AWS-managed policies (arn:aws:iam::aws:policy/...) are served from the global catalog
+     * rather than the account-partitioned store. Attached-policy read paths must use this:
+     * a managed policy attached to a principal owned by a non-default account is absent from
+     * that account's {@link #policies} partition and would otherwise be silently dropped.
+     */
+    private Optional<IamPolicy> resolvePolicy(String arn) {
+        if (arn != null && arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            return Optional.ofNullable(awsManagedPolicies.get(arn));
+        }
+        return policies.get(arn);
     }
 
     private void rejectIfAwsManaged(String policyArn) {
@@ -382,34 +507,50 @@ public class IamService {
                             + "Member must satisfy enum value set: [All, AWS, Local]", 400);
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
-        return policies.scan(k -> true).stream()
-                .filter(p -> p.getPath().startsWith(prefix))
-                .filter(p -> {
-                    if ("AWS".equalsIgnoreCase(scope)) {
-                        return p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX);
-                    } else if ("Local".equalsIgnoreCase(scope)) {
-                        return !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX);
-                    }
-                    return true;
-                })
-                .toList();
+        boolean blankScope = scope == null || scope.isBlank();
+        boolean includeAws = blankScope || "All".equalsIgnoreCase(scope) || "AWS".equalsIgnoreCase(scope);
+        boolean includeLocal = blankScope || "All".equalsIgnoreCase(scope) || "Local".equalsIgnoreCase(scope);
+
+        List<IamPolicy> result = new ArrayList<>();
+        if (includeLocal) {
+            // Customer-managed policies live in the account-partitioned store. Exclude any
+            // AWS-managed ARNs mirrored into the default account at seed time — those are
+            // served from the global catalog below so the default account does not see them twice.
+            policies.scan(k -> true).stream()
+                    .filter(p -> !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                    .filter(p -> p.getPath().startsWith(prefix))
+                    .forEach(result::add);
+        }
+        if (includeAws) {
+            // AWS-managed policies are global (account-less arn:aws:iam::aws:policy/... ARN), so
+            // every caller sees the full set regardless of the request account — mirroring the
+            // getPolicy fix, and keeping the ListPolicies and GetPolicy read paths consistent.
+            awsManagedPolicies.values().stream()
+                    .filter(p -> p.getPath().startsWith(prefix))
+                    .forEach(result::add);
+        }
+        return result;
     }
 
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
-        int nextVersionNum = policy.getVersions().size() + 1;
-        if (nextVersionNum > 5) {
-            throw new AwsException("LimitExceeded",
-                    "A managed policy can have up to 5 versions.", 409);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        PolicyVersion version;
+        synchronized (versions) {
+            int nextVersionNum = versions.size() + 1;
+            if (nextVersionNum > 5) {
+                throw new AwsException("LimitExceeded",
+                        "A managed policy can have up to 5 versions.", 409);
+            }
+            String versionId = "v" + nextVersionNum;
+            version = new PolicyVersion(versionId, document, setAsDefault);
+            if (setAsDefault) {
+                versions.values().forEach(v -> v.setDefaultVersion(false));
+                policy.setDefaultVersionId(versionId);
+            }
+            versions.put(versionId, version);
         }
-        String versionId = "v" + nextVersionNum;
-        PolicyVersion version = new PolicyVersion(versionId, document, setAsDefault);
-        if (setAsDefault) {
-            policy.getVersions().values().forEach(v -> v.setDefaultVersion(false));
-            policy.setDefaultVersionId(versionId);
-        }
-        policy.getVersions().put(versionId, version);
         policy.setUpdateDate(Instant.now());
         policies.put(policyArn, policy);
         return version;
@@ -432,27 +573,36 @@ public class IamService {
             throw new AwsException("DeleteConflict",
                     "Cannot delete the default version of a policy.", 409);
         }
-        if (!policy.getVersions().containsKey(versionId)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            if (!versions.containsKey(versionId)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy version " + versionId + " does not exist.", 404);
+            }
+            versions.remove(versionId);
         }
-        policy.getVersions().remove(versionId);
         policies.put(policyArn, policy);
     }
 
     public List<PolicyVersion> listPolicyVersions(String policyArn) {
-        return new ArrayList<>(getPolicy(policyArn).getVersions().values());
+        Map<String, PolicyVersion> versions = getPolicy(policyArn).getVersions();
+        synchronized (versions) {
+            return new ArrayList<>(versions.values());
+        }
     }
 
     public void setDefaultPolicyVersion(String policyArn, String versionId) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
-        if (!policy.getVersions().containsKey(versionId)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            if (!versions.containsKey(versionId)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy version " + versionId + " does not exist.", 404);
+            }
+            versions.values().forEach(v -> v.setDefaultVersion(false));
+            versions.get(versionId).setDefaultVersion(true);
         }
-        policy.getVersions().values().forEach(v -> v.setDefaultVersion(false));
-        policy.getVersions().get(versionId).setDefaultVersion(true);
         policy.setDefaultVersionId(versionId);
         policies.put(policyArn, policy);
     }
@@ -505,7 +655,7 @@ public class IamService {
 
     public List<IamPolicy> listAttachedUserPolicies(String userName, String pathPrefix) {
         return getUser(userName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -540,7 +690,7 @@ public class IamService {
 
     public List<IamPolicy> listAttachedGroupPolicies(String groupName, String pathPrefix) {
         return getGroup(groupName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -575,7 +725,7 @@ public class IamService {
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
         return getRole(roleName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -777,13 +927,16 @@ public class IamService {
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         getRole(roleName); // validates existence
-        if (!profile.getRoleNames().contains(roleName)) {
-            if (!profile.getRoleNames().isEmpty()) {
-                throw new AwsException("LimitExceeded",
-                        "An instance profile can contain at most 1 role.", 409);
+        List<String> roleNames = profile.getRoleNames();
+        synchronized (roleNames) {
+            if (!roleNames.contains(roleName)) {
+                if (!roleNames.isEmpty()) {
+                    throw new AwsException("LimitExceeded",
+                            "An instance profile can contain at most 1 role.", 409);
+                }
+                roleNames.add(roleName);
+                instanceProfiles.put(instanceProfileName, profile);
             }
-            profile.getRoleNames().add(roleName);
-            instanceProfiles.put(instanceProfileName, profile);
         }
     }
 
@@ -809,7 +962,7 @@ public class IamService {
         if (fromAccessKey.isPresent()) {
             return fromAccessKey;
         }
-        return sessions.get(accessKeyId).map(SessionCredential::getSecretAccessKey);
+        return findSessionAnyAccount(accessKeyId).map(SessionCredential::getSecretAccessKey);
     }
 
     // =========================================================================
@@ -843,6 +996,60 @@ public class IamService {
     }
 
     /**
+     * Stores an assumed-role session and records {@code originAccountId} — the account of the
+     * caller that minted it. The origin lets {@link #resolveAccountId(String)} route temporary
+     * credentials that carry no role ARN (e.g. GetSessionToken) back to the caller's account.
+     */
+    public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
+                                java.time.Instant expiration, String sessionPolicyDocument,
+                                String originAccountId) {
+        sessions.put(sessionAccessKeyId,
+                new SessionCredential(sessionAccessKeyId, secretAccessKey, roleArn, expiration,
+                        sessionPolicyDocument, originAccountId));
+    }
+
+    /**
+     * Resolves the account a temporary access key belongs to: the account encoded in the
+     * session's role (or federated-user) ARN when present, otherwise the caller account captured
+     * at mint time. Returns empty for unknown or expired sessions so callers fall back to the
+     * default account.
+     */
+    @Override
+    public Optional<String> resolveAccountId(String accessKeyId) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
+        if (sessionOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        SessionCredential session = sessionOpt.get();
+        if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            return Optional.empty();
+        }
+        String account = AwsArnUtils.accountOrDefault(session.getRoleArn(), session.getOriginAccountId());
+        return account == null || account.isBlank() ? Optional.empty() : Optional.of(account);
+    }
+
+    /**
+     * Looks up a session by its temporary access key ID independent of the request's account.
+     *
+     * <p>Sessions are keyed by a globally-unique access key (e.g. {@code ASIA...}) but stored in
+     * the minting account's namespace. Account routing must resolve the session <em>before</em> the
+     * request's account is known, so a normal account-scoped {@code get} would miss it. This scans
+     * across all accounts; the access key's global uniqueness keeps the result unambiguous.
+     */
+    private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            return Optional.ofNullable(aware.scanAllAccountsAsMap().get(accessKeyId));
+        }
+        return sessions.get(accessKeyId);
+    }
+
+    /**
      * Resolves the full caller context for the given access key, including identity policies,
      * optional session policy, and optional permission boundary.
      *
@@ -858,12 +1065,13 @@ public class IamService {
             return new CallerContext(identityPolicies, null, boundaryDoc);
         }
 
-        // Check assumed-role sessions
-        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        // Check assumed-role sessions. These can be stored under the account that minted the
+        // session, while request routing for temporary credentials uses the role's account.
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
-                sessions.delete(accessKeyId);
+                deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
 
@@ -877,6 +1085,20 @@ public class IamService {
 
         // Unknown key — bypass
         return null;
+    }
+
+    private Optional<SessionCredential> findSessionForCallerContext(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> session = sessions.get(accessKeyId);
+        if (session.isPresent()) {
+            return session;
+        }
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        return findSessionAnyAccount(accessKeyId);
     }
 
     /**
@@ -893,10 +1115,74 @@ public class IamService {
         return ctx == null ? null : ctx.identityPolicies();
     }
 
+    public Optional<String> resolveCallerArn(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+
+        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        if (akOpt.isPresent()) {
+            String userName = akOpt.get().getUserName();
+            return users.get(userName).map(IamUser::getArn);
+        }
+
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
+        if (sessionOpt.isPresent()) {
+            SessionCredential session = sessionOpt.get();
+            if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
+                deleteSession(accessKeyId, session);
+                return Optional.empty();
+            }
+            String roleArn = session.getRoleArn();
+            String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
+            String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());
+        }
+
+        return Optional.empty();
+    }
+
+    private static boolean isTemporaryAccessKey(String accessKeyId) {
+        return accessKeyId != null && accessKeyId.startsWith(TEMPORARY_ACCESS_KEY_PREFIX);
+    }
+
+    private void deleteSession(String accessKeyId, SessionCredential session) {
+        String originAccountId = session.getOriginAccountId();
+        if (originAccountId != null && !originAccountId.isBlank()
+                && sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.deleteForAccount(originAccountId, accessKeyId);
+            return;
+        }
+        sessions.delete(accessKeyId);
+    }
+
+    public CallerContext resolvePrincipalContext(String principalArn) {
+        if (principalArn == null || principalArn.isBlank()) {
+            throw new AwsException("ValidationError", "PolicySourceArn is required.", 400);
+        }
+        if (principalArn.contains(":user/")) {
+            String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
+            List<String> identityPolicies = collectUserPolicies(userName);
+            if (identityPolicies == null) {
+                throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
+            }
+            return new CallerContext(identityPolicies, null, resolveUserBoundaryDocument(userName));
+        }
+        if (principalArn.contains(":role/")) {
+            String roleName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
+            List<String> identityPolicies = collectRolePolicies(principalArn);
+            if (identityPolicies == null) {
+                throw new AwsException("NoSuchEntity", "Role " + roleName + " cannot be found.", 404);
+            }
+            return new CallerContext(identityPolicies, null, resolveRoleBoundaryDocument(principalArn));
+        }
+        throw new AwsException("InvalidInput", "PolicySourceArn must identify an IAM user or role.", 400);
+    }
+
     private String resolveUserBoundaryDocument(String userName) {
         return users.get(userName)
                 .map(IamUser::getPermissionsBoundaryArn)
-                .flatMap(arn -> policies.get(arn))
+                .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
@@ -908,7 +1194,7 @@ public class IamService {
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
         return roles.get(roleName)
                 .map(IamRole::getPermissionsBoundaryArn)
-                .flatMap(arn -> policies.get(arn))
+                .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
@@ -967,7 +1253,7 @@ public class IamService {
 
         // User attached managed policies
         for (String arn : user.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = policies.get(arn);
+            Optional<IamPolicy> p = resolvePolicy(arn);
             if (p.isPresent() && p.get().getDefaultDocument() != null) {
                 docs.add(p.get().getDefaultDocument());
             }
@@ -980,7 +1266,7 @@ public class IamService {
             IamGroup group = groupOpt.get();
             docs.addAll(group.getInlinePolicies().values());
             for (String arn : group.getAttachedPolicyArns()) {
-                Optional<IamPolicy> p = policies.get(arn);
+                Optional<IamPolicy> p = resolvePolicy(arn);
                 if (p.isPresent() && p.get().getDefaultDocument() != null) {
                     docs.add(p.get().getDefaultDocument());
                 }
@@ -1007,7 +1293,7 @@ public class IamService {
 
         // Role attached managed policies
         for (String arn : role.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = policies.get(arn);
+            Optional<IamPolicy> p = resolvePolicy(arn);
             if (p.isPresent() && p.get().getDefaultDocument() != null) {
                 docs.add(p.get().getDefaultDocument());
             }

@@ -489,6 +489,12 @@ output "user_pool_arn" {
   value = aws_cognito_user_pool.pool.arn
 }
 
+# -- Cognito User Pool Client --------------------------------------------------
+resource "aws_cognito_user_pool_client" "client" {
+  name         = "floci-compat-pool-client"
+  user_pool_id = aws_cognito_user_pool.pool.id
+}
+
 # -- CloudWatch Alarms ---------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "cpu" {
   alarm_name          = "floci-compat-cpu-alarm"
@@ -636,4 +642,28 @@ output "zone_id" {
 
 output "health_check_id" {
   value = aws_route53_health_check.app.id
+}
+
+# -- Kinesis Firehose Delivery Stream (extended_s3, issue #1043) ---------------
+resource "aws_kinesis_firehose_delivery_stream" "events" {
+  name        = "floci-compat-firehose"
+  destination = "extended_s3"
+
+  extended_s3_configuration {
+    role_arn            = aws_iam_role.lambda_exec.arn
+    bucket_arn          = aws_s3_bucket.app.arn
+    prefix              = "events/data/"
+    error_output_prefix = "events/errors/"
+    compression_format  = "GZIP"
+    buffering_size      = 64
+    buffering_interval  = 120
+  }
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+output "firehose_stream_arn" {
+  value = aws_kinesis_firehose_delivery_stream.events.arn
 }

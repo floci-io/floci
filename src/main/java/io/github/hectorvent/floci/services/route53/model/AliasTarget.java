@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.route53.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public class AliasTarget {
 
     private String hostedZoneId;

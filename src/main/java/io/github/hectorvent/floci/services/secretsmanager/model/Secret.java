@@ -24,10 +24,22 @@ public class Secret {
     private List<Tag> tags;
     private Map<String, SecretVersion> versions;
     private String currentVersionId;
+    private String rotationLambdaArn;
+    private RotationRules rotationRules;
+    private Instant lastRotatedDate;
+    private Instant nextRotationDate;
+
+    @RegisterForReflection
+    public record RotationRules(
+            @JsonProperty("AutomaticallyAfterDays") Integer automaticallyAfterDays,
+            @JsonProperty("Duration") String duration,
+            @JsonProperty("ScheduleExpression") String scheduleExpression) {
+    }
 
     public Secret() {
     }
 
+    @RegisterForReflection
     public record Tag(
             @JsonProperty("Key") String key,
             @JsonProperty("Value") String value) {
@@ -127,5 +139,37 @@ public class Secret {
 
     public void setCurrentVersionId(String currentVersionId) {
         this.currentVersionId = currentVersionId;
+    }
+
+    public String getRotationLambdaArn() {
+        return rotationLambdaArn;
+    }
+
+    public void setRotationLambdaArn(String rotationLambdaArn) {
+        this.rotationLambdaArn = rotationLambdaArn;
+    }
+
+    public RotationRules getRotationRules() {
+        return rotationRules;
+    }
+
+    public void setRotationRules(RotationRules rotationRules) {
+        this.rotationRules = rotationRules;
+    }
+
+    public Instant getLastRotatedDate() {
+        return lastRotatedDate;
+    }
+
+    public void setLastRotatedDate(Instant lastRotatedDate) {
+        this.lastRotatedDate = lastRotatedDate;
+    }
+
+    public Instant getNextRotationDate() {
+        return nextRotationDate;
+    }
+
+    public void setNextRotationDate(Instant nextRotationDate) {
+        this.nextRotationDate = nextRotationDate;
     }
 }

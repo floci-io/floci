@@ -23,6 +23,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.SequencedSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Embedded UDP/53 DNS server that runs inside the Floci container and is injected
@@ -56,6 +58,8 @@ public class EmbeddedDnsServer {
     private static final int FORWARD_TIMEOUT_MS = 1500;
     public static final String DEFAULT_SUFFIX = "localhost.floci.io";
     public static final String LOCALSTACK_SUFFIX = "localhost.localstack.cloud";
+    private static final Pattern EC2_PRIVATE_DNS_NAME =
+            Pattern.compile("^ip-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})\\.ec2\\.internal$", Pattern.CASE_INSENSITIVE);
 
     // Well-known emulator wildcard DNS domains that always resolve to Floci's IP.
     // The suffix "localhost.X" covers "localhost.X" itself and "*.localhost.X" — it does
@@ -131,8 +135,9 @@ public class EmbeddedDnsServer {
             buf.getShort(); // qclass
             int questionEnd = buf.position();
 
-            if (qtype == 1 && matchesSuffix(qname)) {
-                byte[] response = buildAResponse(data, txId, questionOffset, questionEnd, myIp);
+            Optional<String> resolvedAddress = qtype == 1 ? resolveARecord(qname, myIp) : Optional.empty();
+            if (resolvedAddress.isPresent()) {
+                byte[] response = buildAResponse(data, txId, questionOffset, questionEnd, resolvedAddress.get());
                 socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
             } else {
                 forwardAsync(vertx, socket, data, senderHost, senderPort);
@@ -156,6 +161,36 @@ public class EmbeddedDnsServer {
             }
         }
         return false;
+    }
+
+    Optional<String> resolveARecord(String name, String myIp) {
+        if (matchesSuffix(name)) {
+            return Optional.of(myIp);
+        }
+        return resolveEc2PrivateDnsName(name);
+    }
+
+    Optional<String> resolveEc2PrivateDnsName(String name) {
+        if (name == null || name.isEmpty()) {
+            return Optional.empty();
+        }
+        Matcher matcher = EC2_PRIVATE_DNS_NAME.matcher(name);
+        if (!matcher.matches()) {
+            return Optional.empty();
+        }
+
+        StringBuilder address = new StringBuilder();
+        for (int i = 1; i <= 4; i++) {
+            int octet = Integer.parseInt(matcher.group(i));
+            if (octet > 255) {
+                return Optional.empty();
+            }
+            if (i > 1) {
+                address.append('.');
+            }
+            address.append(octet);
+        }
+        return Optional.of(address.toString());
     }
 
     String readName(ByteBuffer buf, byte[] data) {

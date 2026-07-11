@@ -20,6 +20,24 @@
 |---|---|---|
 | `FLOCI_SERVICES_STS_ENABLED` | `true` | Enable or disable the service |
 
+## Trust Policy Enforcement
+
+By default `AssumeRole` succeeds for any caller. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`,
+`AssumeRole` evaluates the target role's trust policy (`AssumeRolePolicyDocument`) against the caller
+and returns `AccessDenied` if it is not permitted. AWS principal forms are matched — `"*"`, an
+account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs — and an
+explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching
+`sts:AssumeRole`. Roles that Floci has no record of stay permissive, so this only affects roles
+created through IAM with a real trust policy.
+
+### Known limitations
+
+- **`Condition` blocks are not evaluated.** A trust policy that requires `sts:ExternalId` (the
+  confused-deputy guard) is matched on its principal alone, so the role is assumable without passing
+  `ExternalId`, and the `ExternalId` request parameter is ignored. This matches moto/LocalStack.
+- **Only the trust policy is checked.** Cross-account `AssumeRole` in AWS also requires the caller's
+  own identity policy to allow `sts:AssumeRole`; that side is not enforced.
+
 ## Examples
 
 ```bash
@@ -39,3 +57,5 @@ aws sts get-session-token --endpoint-url $AWS_ENDPOINT_URL
 ```
 
 `GetCallerIdentity` is commonly used in CI pipelines and integration tests as a quick connectivity check before running more complex tests.
+
+When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.

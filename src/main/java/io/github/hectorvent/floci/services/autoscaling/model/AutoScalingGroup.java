@@ -16,13 +16,16 @@ public class AutoScalingGroup {
     private String autoScalingGroupName;
     private String autoScalingGroupArn;
     private String launchConfigurationName;
+    private String launchTemplateId;
     private String launchTemplateName;
     private String launchTemplateVersion;
+    private MixedInstancesPolicy mixedInstancesPolicy;
     private int minSize;
     private int maxSize;
     private int desiredCapacity;
     private int defaultCooldown = 300;
     private List<String> availabilityZones = new ArrayList<>();
+    private List<String> subnetIds = new ArrayList<>();
     private List<String> loadBalancerNames = new ArrayList<>();
     private List<String> targetGroupARNs = new ArrayList<>();
     private String healthCheckType = "EC2";
@@ -32,6 +35,7 @@ public class AutoScalingGroup {
     private Instant createdTime;
     private String region;
     private Map<String, String> tags = new ConcurrentHashMap<>();
+    private Map<String, Boolean> tagPropagateAtLaunch = new ConcurrentHashMap<>();
     private String status;  // null = active, "Delete in progress" = deleting
 
     public AutoScalingGroup() {}
@@ -45,11 +49,17 @@ public class AutoScalingGroup {
     public String getLaunchConfigurationName() { return launchConfigurationName; }
     public void setLaunchConfigurationName(String v) { this.launchConfigurationName = v; }
 
+    public String getLaunchTemplateId() { return launchTemplateId; }
+    public void setLaunchTemplateId(String v) { this.launchTemplateId = v; }
+
     public String getLaunchTemplateName() { return launchTemplateName; }
     public void setLaunchTemplateName(String v) { this.launchTemplateName = v; }
 
     public String getLaunchTemplateVersion() { return launchTemplateVersion; }
     public void setLaunchTemplateVersion(String v) { this.launchTemplateVersion = v; }
+
+    public MixedInstancesPolicy getMixedInstancesPolicy() { return mixedInstancesPolicy; }
+    public void setMixedInstancesPolicy(MixedInstancesPolicy v) { this.mixedInstancesPolicy = v; }
 
     public int getMinSize() { return minSize; }
     public void setMinSize(int v) { this.minSize = v; }
@@ -65,6 +75,9 @@ public class AutoScalingGroup {
 
     public List<String> getAvailabilityZones() { return availabilityZones; }
     public void setAvailabilityZones(List<String> v) { this.availabilityZones = v; }
+
+    public List<String> getSubnetIds() { return subnetIds; }
+    public void setSubnetIds(List<String> v) { this.subnetIds = v; }
 
     public List<String> getLoadBalancerNames() { return loadBalancerNames; }
     public void setLoadBalancerNames(List<String> v) { this.loadBalancerNames = v; }
@@ -92,6 +105,9 @@ public class AutoScalingGroup {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> v) { this.tags = v; }
+
+    public Map<String, Boolean> getTagPropagateAtLaunch() { return tagPropagateAtLaunch; }
+    public void setTagPropagateAtLaunch(Map<String, Boolean> v) { this.tagPropagateAtLaunch = v; }
 
     public String getStatus() { return status; }
     public void setStatus(String v) { this.status = v; }

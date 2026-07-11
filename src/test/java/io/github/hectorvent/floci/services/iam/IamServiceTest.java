@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
@@ -10,6 +12,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
+import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -25,15 +28,29 @@ class IamServiceTest {
 
     @BeforeEach
     void setUp() {
-        iamService = new IamService(
+        iamService = iamService(false);
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal) {
+        return iamService(seedDeployerPrincipal, new InMemoryStorage<>());
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys) {
+        return iamService(seedDeployerPrincipal, accessKeys, new InMemoryStorage<>());
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys,
+                                         StorageBackend<String, SessionCredential> sessions) {
+        return new IamService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                accessKeys,
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000")
+                sessions,
+                new RegionResolver("us-east-1", "000000000000"),
+                seedDeployerPrincipal
         );
     }
 
@@ -407,6 +424,102 @@ class IamServiceTest {
     }
 
     // =========================================================================
+    // Session account routing (SessionAccountLookup)
+    // =========================================================================
+
+    @Test
+    void resolveAccountIdUsesRoleArnAccount() {
+        iamService.registerSession(
+                "ASIACROSSACCOUNT",
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().plusSeconds(3600),
+                null,
+                "111122223333"
+        );
+
+        assertEquals("222233334444", iamService.resolveAccountId("ASIACROSSACCOUNT").orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdFallsBackToOriginAccountWhenNoRoleArn() {
+        iamService.registerSession(
+                "ASIASESSIONTOKEN",
+                "temp-secret",
+                null,
+                Instant.now().plusSeconds(3600),
+                null,
+                "111122223333"
+        );
+
+        assertEquals("111122223333", iamService.resolveAccountId("ASIASESSIONTOKEN").orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdEmptyForUnknownKey() {
+        assertTrue(iamService.resolveAccountId("ASIANOTREGISTERED").isEmpty());
+        assertTrue(iamService.resolveAccountId(null).isEmpty());
+    }
+
+    @Test
+    void resolveAccountIdDoesNotScanSessionsForLongTermAccessKey() {
+        CountingAccountAwareSessionStorage sessions = new CountingAccountAwareSessionStorage();
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        assertTrue(service.resolveAccountId("AKIAIOSFODNN7EXAMPLE").isEmpty());
+        assertEquals(0, sessions.scanAllAccountsAsMapCalls);
+    }
+
+    private static final class CountingAccountAwareSessionStorage
+            extends AccountAwareStorageBackend<SessionCredential> {
+
+        private int scanAllAccountsAsMapCalls;
+
+        private CountingAccountAwareSessionStorage() {
+            super(new InMemoryStorage<>(), null, "000000000000");
+        }
+
+        @Override
+        public Map<String, SessionCredential> scanAllAccountsAsMap() {
+            scanAllAccountsAsMapCalls++;
+            return super.scanAllAccountsAsMap();
+        }
+    }
+
+    @Test
+    void resolveAccountIdEmptyForExpiredSession() {
+        iamService.registerSession(
+                "ASIAEXPIRED",
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().minusSeconds(60),
+                null,
+                "111122223333"
+        );
+
+        assertTrue(iamService.resolveAccountId("ASIAEXPIRED").isEmpty());
+    }
+
+    @Test
+    void resolveCallerContextDeletesExpiredCrossAccountSessionFromOriginAccount() {
+        String accessKeyId = "ASIAEXPIREDCROSSACCOUNT";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "222233334444");
+        sessions.putForAccount("111122223333", accessKeyId, new SessionCredential(
+                accessKeyId,
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().minusSeconds(60),
+                null,
+                "111122223333"));
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        assertNull(service.resolveCallerContext(accessKeyId));
+
+        assertTrue(sessions.getForAccount("111122223333", accessKeyId).isEmpty());
+    }
+
+    // =========================================================================
     // Instance Profiles
     // =========================================================================
 
@@ -481,6 +594,23 @@ class IamServiceTest {
                 "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
         assertEquals("AWSLambdaBasicExecutionRole", lambda.getPolicyName());
         assertEquals("/service-role/", lambda.getPath());
+
+        IamPolicy ssm = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore");
+        assertEquals("AmazonSSMManagedInstanceCore", ssm.getPolicyName());
+        assertEquals("/", ssm.getPath());
+
+        IamPolicy cloudWatchAgent = iamService.getPolicy("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy");
+        assertEquals("CloudWatchAgentServerPolicy", cloudWatchAgent.getPolicyName());
+        assertEquals("/", cloudWatchAgent.getPath());
+
+        IamPolicy ecrReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly");
+        assertEquals("AmazonEC2ContainerRegistryReadOnly", ecrReadOnly.getPolicyName());
+        assertEquals("/", ecrReadOnly.getPath());
+
+        IamPolicy rdsMonitoring = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole");
+        assertEquals("AmazonRDSEnhancedMonitoringRole", rdsMonitoring.getPolicyName());
+        assertEquals("/service-role/", rdsMonitoring.getPath());
     }
 
     @Test
@@ -495,6 +625,53 @@ class IamServiceTest {
     }
 
     @Test
+    void seedDefaultsDoesNotCreateDefaultDeployerPrincipalByDefault() {
+        iamService.seedDefaults();
+
+        assertThrows(AwsException.class, () -> iamService.getUser("floci-deployer"));
+        assertTrue(iamService.resolveCallerArn("floci").isEmpty());
+    }
+
+    @Test
+    void seedDefaultsCreatesConfiguredDefaultDeployerPrincipal() {
+        iamService = iamService(true);
+        iamService.seedDefaults();
+
+        IamUser user = iamService.getUser("floci-deployer");
+        assertEquals("arn:aws:iam::000000000000:user/floci-deployer", user.getArn());
+        assertTrue(user.getAttachedPolicyArns().contains("arn:aws:iam::aws:policy/AdministratorAccess"));
+        assertEquals(
+                "arn:aws:iam::000000000000:user/floci-deployer",
+                iamService.resolveCallerArn("floci").orElseThrow());
+        assertNotNull(iamService.resolveCallerContext("floci"));
+        assertNotNull(iamService.resolvePrincipalContext(user.getArn()));
+    }
+
+    @Test
+    void simulatePrincipalPolicyRejectsUnsupportedPrincipalArnType() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.resolvePrincipalContext("arn:aws:iam::000000000000:group/admins"));
+
+        assertEquals("InvalidInput", ex.getErrorCode());
+        assertEquals("PolicySourceArn must identify an IAM user or role.", ex.getMessage());
+    }
+
+    @Test
+    void seedDefaultsDoesNotReplaceExistingDeployerAccessKey() {
+        InMemoryStorage<String, AccessKey> accessKeys = new InMemoryStorage<>();
+        iamService = iamService(true, accessKeys);
+        iamService.createUser("existing", "/");
+        accessKeys.put("floci", new AccessKey("floci", "existing-secret", "existing"));
+
+        iamService.seedDefaults();
+
+        assertEquals(
+                "arn:aws:iam::000000000000:user/existing",
+                iamService.resolveCallerArn("floci").orElseThrow());
+        assertEquals("existing-secret", iamService.findSecretKey("floci").orElseThrow());
+    }
+
+    @Test
     void attachManagedPolicyToRole() {
         iamService.seedAwsManagedPolicies();
         iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
@@ -503,6 +680,58 @@ class IamServiceTest {
         iamService.attachRolePolicy("LambdaExec", policyArn);
 
         List<IamPolicy> attached = iamService.listAttachedRolePolicies("LambdaExec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachSsmManagedInstanceCorePolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachCloudWatchAgentServerPolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachEcrReadOnlyPolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachRdsEnhancedMonitoringRolePolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("RdsMonitor", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole";
+        iamService.attachRolePolicy("RdsMonitor", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("RdsMonitor", null);
         assertEquals(1, attached.size());
         assertEquals(policyArn, attached.getFirst().getArn());
     }

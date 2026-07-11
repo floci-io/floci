@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -26,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
-public class SqsService {
+public class SqsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SqsService.class);
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
@@ -126,6 +127,17 @@ public class SqsService {
         this.snsService = snsService;
         loadPersistedMessages();
         loadPersistedDedup();
+    }
+
+    public void clear() {
+        messagesByQueue.values().forEach(GuardedMessageQueue::close);
+        messagesByQueue.clear();
+        queueLocks.clear();
+        redrivePolicyCache.clear();
+        deduplicationCache.clear();
+        moveTaskCancellation.values().forEach(flag -> flag.set(true));
+        moveTaskCancellation.clear();
+        moveTasksByHandle.clear();
     }
 
     private void loadPersistedMessages() {
@@ -340,17 +352,17 @@ public class SqsService {
         return filtered;
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds, String region) {
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds, String region) {
         return sendMessage(queueUrl, body, delaySeconds, null, null, region);
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
                                String messageGroupId, String messageDeduplicationId,
                                String region) {
         return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, null, region);
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
                                String messageGroupId, String messageDeduplicationId,
                                Map<String, MessageAttributeValue> messageAttributes,
                                String region) {
@@ -358,7 +370,7 @@ public class SqsService {
                 messageAttributes, null, region);
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
                                String messageGroupId, String messageDeduplicationId,
                                Map<String, MessageAttributeValue> messageAttributes,
                                String awsTraceHeader,
@@ -381,15 +393,16 @@ public class SqsService {
         // Resolve the effective delay:
         //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
         //     so any per-message value is ignored and we always use the
-        //     queue attribute. Without this, FIFO silently dropped the
-        //     queue-level default (issue #475).
-        //   - Standard queues honor per-message DelaySeconds when provided
-        //     (> 0). Applying the queue-level default on the standard path
-        //     requires distinguishing "omitted" from "explicit 0" in the
-        //     handlers, which the current int-parameter API cannot express;
-        //     that's left as follow-up work -- this patch only addresses
-        //     the FIFO regression called out in the issue.
-        int effectiveDelaySeconds = queue.isFifo() ? queueDelaySeconds : delaySeconds;
+        //     queue attribute.
+        //   - Standard queues honor per-message DelaySeconds when explicitly
+        //     provided (non-null). When omitted (null), the queue-level
+        //     default applies.
+        int effectiveDelaySeconds;
+        if (queue.isFifo()) {
+            effectiveDelaySeconds = queueDelaySeconds;
+        } else {
+            effectiveDelaySeconds = (delaySeconds != null) ? delaySeconds : queueDelaySeconds;
+        }
 
         // FIFO queue validation
         if (queue.isFifo()) {
@@ -611,7 +624,7 @@ public class SqsService {
                 // to the new queue's consumers.
                 return Collections.emptyList();
             }
-            List<Message> result = doReceiveMessage(storageKey, maxMessages, visibilityTimeout, region);
+            List<Message> result = doReceiveMessage(storageKey, queueUrl, maxMessages, visibilityTimeout, region);
             if (!result.isEmpty() || maxWait <= 0) {
                 if (!result.isEmpty() && LOG.isTraceEnabled()) {
                     for (Message m : result) {
@@ -657,8 +670,8 @@ public class SqsService {
         });
     }
 
-    private List<Message> doReceiveMessage(String storageKey, int maxMessages, int visibilityTimeout, String region) {
-        Queue queue = queueStore.get(storageKey).orElse(null);
+    private List<Message> doReceiveMessage(String storageKey, String queueUrl, int maxMessages, int visibilityTimeout, String region) {
+        Queue queue = getQueueByUrl(storageKey, queueUrl).orElse(null);
         if (queue == null) {
             return Collections.emptyList();
         }
@@ -1120,7 +1133,7 @@ public class SqsService {
         ObjectNode principal = statement.putObject("Principal");
         ArrayNode awsArns = principal.putArray("AWS");
         for (String accountId : awsAccountIds) {
-            awsArns.add("arn:aws:iam::" + accountId + ":root");
+            awsArns.add(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         }
         ArrayNode actions = statement.putArray("Action");
         for (String action : actionNames) {

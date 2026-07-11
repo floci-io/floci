@@ -2,9 +2,9 @@
 
 **Protocol:** REST JSON
 **Endpoint:** `POST http://localhost:4566/{operation}`
-**Backing data plane:** Local RDS MySQL / MariaDB containers
+**Backing data plane:** Local RDS MySQL / MariaDB / PostgreSQL containers
 
-Floci implements the AWS RDS Data API routes used by AWS SDK clients and executes raw SQL against local RDS resources created through the RDS emulator. The first implementation focuses on MySQL / MariaDB compatibility for local development workflows that already use `ExecuteStatement` and transactions.
+Floci implements the AWS RDS Data API routes used by AWS SDK clients and executes raw SQL against local RDS resources created through the RDS emulator. It supports MySQL, MariaDB, and PostgreSQL resources for local development workflows that already use `ExecuteStatement` and transactions.
 
 For the upstream API shape, see the AWS RDS Data API documentation:
 
@@ -32,7 +32,7 @@ For the upstream API shape, see the AWS RDS Data API documentation:
 - `resourceArn` and `secretArn` are required on Data API requests. `resourceArn` must identify an existing local RDS cluster or instance.
 - `database` is optional when the resolved RDS resource has a database name; otherwise it must be provided. Transactional `ExecuteStatement` requests must use the same database as the active transaction when `database` is present.
 - Transaction requests validate `resourceArn` against the active transaction resource. Floci resolves accepted ARN aliases to the local resource before comparing transaction identity.
-- MySQL and MariaDB resources are supported. PostgreSQL Data API execution is not implemented yet.
+- MySQL, MariaDB, and PostgreSQL resources are supported. Aurora PostgreSQL resources resolve to the same PostgreSQL execution path.
 - SQL is sent directly to the local database engine through JDBC. `SqlParameter` binding is not implemented yet; send raw SQL strings. Non-empty or malformed `parameters` requests return `BadRequestException`.
 - Result records include Data API field variants such as `stringValue`, `longValue`, `blobValue`, `booleanValue`, `doubleValue`, and `isNull`.
 - SQL errors are returned as `DatabaseErrorException` so AWS SDK callers can handle database failures with normal AWS error decoding.

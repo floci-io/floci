@@ -104,6 +104,10 @@ public class ContainerLogStreamer {
         return LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/" + suffix;
     }
 
+    public void streamToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
+        forwardToCloudWatchLogs(logGroup, logStream, region, line);
+    }
+
     private void forwardToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
         try {
             Map<String, Object> event = new HashMap<>();

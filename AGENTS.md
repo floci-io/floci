@@ -269,6 +269,7 @@ When adding functionality:
 - Prefer self-explanatory code over comments
 - Avoid unnecessary comments
 - Always use braces in conditionals
+- Never leave a `catch` block empty. If an exception is intentionally tolerated, log it with enough context to diagnose it later.
 - Follow existing project patterns
 - Use modern Java features only when they improve clarity
 
