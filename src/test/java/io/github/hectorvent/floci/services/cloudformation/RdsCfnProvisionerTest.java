@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -173,6 +174,18 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-east-1", 0.5, 16.0);
+    }
+
+    @Test
+    void rejectsNonNumericServerlessV2Capacity() {
+        // A non-numeric capacity is invalid input, not an absent value: the stack fails rather than
+        // silently dropping the scaling configuration.
+        StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "ServerlessV2ScalingConfiguration":{"MinCapacity":"abc","MaxCapacity":16}}
+                """);
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("MinCapacity"), r.getStatusReason());
     }
 
     @Test

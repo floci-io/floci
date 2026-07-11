@@ -1067,7 +1067,8 @@ public class CloudFormationResourceProvisioner {
         try {
             return Double.valueOf(resolved.trim());
         } catch (NumberFormatException e) {
-            return null;
+            throw new AwsException("ValidationError",
+                    "ServerlessV2ScalingConfiguration " + field + " must be a number.", 400);
         }
     }
 

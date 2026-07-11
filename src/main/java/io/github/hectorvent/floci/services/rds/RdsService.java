@@ -739,13 +739,17 @@ public class RdsService implements Resettable {
      * 0.5–256, with MaxCapacity at least MinCapacity. A null capacity is left unset.
      */
     void validateServerlessV2Capacity(Double minCapacity, Double maxCapacity) {
-        if (minCapacity != null) {
-            validateAcu("MinCapacity", minCapacity, 0.0);
+        if (minCapacity == null && maxCapacity == null) {
+            return;
         }
-        if (maxCapacity != null) {
-            validateAcu("MaxCapacity", maxCapacity, 0.5);
+        // ServerlessV2ScalingConfiguration requires both bounds together; AWS rejects a partial one.
+        if (minCapacity == null || maxCapacity == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ServerlessV2ScalingConfiguration requires both MinCapacity and MaxCapacity.", 400);
         }
-        if (minCapacity != null && maxCapacity != null && maxCapacity < minCapacity) {
+        validateAcu("MinCapacity", minCapacity, 0.0);
+        validateAcu("MaxCapacity", maxCapacity, 0.5);
+        if (maxCapacity < minCapacity) {
             throw new AwsException("InvalidParameterCombination",
                     "MaxCapacity must be greater than or equal to MinCapacity.", 400);
         }

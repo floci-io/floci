@@ -486,6 +486,9 @@ class RdsServiceTest {
         assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(0.5, 128.0));
         // Both null is a no-op (not a Serverless v2 cluster).
         assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(null, null));
+        // A partial configuration is rejected: AWS requires both bounds together.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, null));
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(null, 16.0));
     }
 
     @Test
