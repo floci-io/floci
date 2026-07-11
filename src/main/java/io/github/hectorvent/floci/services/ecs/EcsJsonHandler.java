@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
+import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
@@ -1023,6 +1024,17 @@ public class EcsJsonHandler {
             n.set("environment", envArr);
         }
 
+        if (def.getSecrets() != null && !def.getSecrets().isEmpty()) {
+            ArrayNode secretsArr = objectMapper.createArrayNode();
+            for (Secret secret : def.getSecrets()) {
+                ObjectNode secretNode = objectMapper.createObjectNode();
+                secretNode.put("name", secret.name());
+                secretNode.put("valueFrom", secret.valueFrom());
+                secretsArr.add(secretNode);
+            }
+            n.set("secrets", secretsArr);
+        }
+
         if (def.getMountPoints() != null && !def.getMountPoints().isEmpty()) {
             ArrayNode mps = objectMapper.createArrayNode();
             for (MountPoint mp : def.getMountPoints()) {
@@ -1275,6 +1287,9 @@ public class EcsJsonHandler {
 
             def.setPortMappings(parsePortMappings(item.path("portMappings")));
             def.setEnvironment(parseKeyValuePairs(item.path("environment")));
+            if (item.has("secrets")) {
+                def.setSecrets(parseSecrets(item.path("secrets")));
+            }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
 
             if (item.has("command") && item.path("command").isArray()) {
@@ -1314,6 +1329,17 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             result.add(new KeyValuePair(item.path("name").asText(), item.path("value").asText()));
+        }
+        return result;
+    }
+
+    private List<Secret> parseSecrets(JsonNode node) {
+        List<Secret> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new Secret(item.path("name").asText(), item.path("valueFrom").asText()));
         }
         return result;
     }
