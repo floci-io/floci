@@ -638,6 +638,7 @@ public class S3Controller {
                               @HeaderParam("If-Modified-Since") String ifModifiedSince,
                               @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
                               @HeaderParam("Range") String rangeHeader,
+                              @HeaderParam("x-amz-checksum-mode") String checksumMode,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
@@ -698,11 +699,12 @@ public class S3Controller {
                         "Request specific response headers cannot be used for anonymous GET requests.", 400));
             }
 
+            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides);
+                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides, includeChecksum);
             }
 
-            return fullObjectResponse(bucket, key, versionId, obj, overrides);
+            return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
         } catch (AwsException e) {
             if (isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders)) {
                 try {
@@ -722,7 +724,8 @@ public class S3Controller {
     }
 
     private Response fullObjectResponse(String bucket, String key, String versionId,
-                                        S3Object obj, ResponseHeaderOverrides overrides) {
+                                        S3Object obj, ResponseHeaderOverrides overrides,
+                                        boolean includeChecksum) {
         StreamingOutput stream = output -> {
             try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
                 input.transferTo(output);
@@ -737,13 +740,14 @@ public class S3Controller {
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        appendObjectHeaders(resp, obj, overrides);
+        appendObjectHeaders(resp, obj, overrides, includeChecksum);
         return resp.build();
     }
 
     private Response handleRangeRequest(String bucket, String key, String versionId,
                                         S3Object obj, String rangeHeader,
-                                        ResponseHeaderOverrides overrides) {
+                                        ResponseHeaderOverrides overrides,
+                                        boolean includeChecksum) {
         long totalSize = obj.getSize();
         String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
 
@@ -775,7 +779,7 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(bucket, key, versionId, obj, overrides);
+                return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
             }
             return invalidRangeResponse(totalSize);
         }
@@ -848,6 +852,7 @@ public class S3Controller {
                                @HeaderParam("If-None-Match") String ifNoneMatch,
                                @HeaderParam("If-Modified-Since") String ifModifiedSince,
                                @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
+                               @HeaderParam("x-amz-checksum-mode") String checksumMode,
                                @Context UriInfo uriInfo,
                                @Context HttpHeaders httpHeaders) {
         try {
@@ -882,7 +887,8 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            appendObjectHeaders(resp, obj, overrides);
+            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
+            appendObjectHeaders(resp, obj, overrides, includeChecksum);
             return resp.build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1696,8 +1702,6 @@ public class S3Controller {
             String cacheControl,
             String contentDisposition,
             String contentEncoding) {
-        static final ResponseHeaderOverrides NONE = new ResponseHeaderOverrides(null, null, null, null, null, null);
-
         boolean hasAny() {
             return contentType != null || contentLanguage != null || expires != null
                     || cacheControl != null || contentDisposition != null || contentEncoding != null;
@@ -1718,10 +1722,6 @@ public class S3Controller {
         }
     }
 
-    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj) {
-        appendObjectHeaders(resp, obj, ResponseHeaderOverrides.NONE);
-    }
-
     // PutObject's response body is empty — body-describing headers and x-amz-meta-*
     // must not be emitted, or SDK clients will try to decompress and fail.
     private void appendPutObjectResponseHeaders(Response.ResponseBuilder resp, S3Object obj) {
@@ -1734,10 +1734,6 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
-    }
-
-    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides) {
-        appendObjectHeaders(resp, obj, overrides, true);
     }
 
     // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
