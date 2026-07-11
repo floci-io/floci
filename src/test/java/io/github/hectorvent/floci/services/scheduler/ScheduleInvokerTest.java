@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.NetworkConfiguration;
@@ -19,7 +20,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -108,6 +111,41 @@ class ScheduleInvokerTest {
 
         verify(snsService).publish(eq(TOPIC_ARN), isNull(), eq("{\"hello\":\"world\"}"),
                 eq("Scheduler"), eq("us-east-1"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventBusTargetUsesDeclaredDetailTypeAndSource() {
+        Target target = new Target();
+        target.setArn("arn:aws:events:us-east-1:000000000000:event-bus/my-bus");
+        target.setInput("{\"hello\":\"world\"}");
+        target.setEventBridgeParameters(new EventBridgeParameters("Order Placed", "my.app"));
+
+        invoker.invoke(target, "us-east-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("us-east-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertEquals("my-bus", entry.get("EventBusName"));
+        assertEquals("my.app", entry.get("Source"));
+        assertEquals("Order Placed", entry.get("DetailType"));
+        assertEquals("{\"hello\":\"world\"}", entry.get("Detail"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventBusTargetWithoutParametersFallsBackToDefaults() {
+        Target target = new Target();
+        target.setArn("arn:aws:events:us-east-1:000000000000:event-bus/my-bus");
+        target.setInput("{\"hello\":\"world\"}");
+
+        invoker.invoke(target, "us-east-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("us-east-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertEquals("aws.scheduler", entry.get("Source"));
+        assertEquals("Scheduled Event", entry.get("DetailType"));
     }
 
     @Test
