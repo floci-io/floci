@@ -49,6 +49,11 @@ public class TlsConfigSource implements ConfigSource {
     private static final String TLS_DIR = "tls";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    // host.docker.internal: how Lambda containers reach Floci when it runs on the host (not in a container).
+    private static final List<String> DEFAULT_SAN_HOSTNAMES = List.of(
+            "localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
+            "localhost.floci.io", "*.localhost.floci.io", "host.docker.internal");
+
     private final Map<String, String> properties = new HashMap<>();
 
     public TlsConfigSource() {
@@ -77,8 +82,7 @@ public class TlsConfigSource implements ConfigSource {
                 // Extract current hostname configuration
                 List<String> customHostnames = extractCustomHostnames();
                 List<String> currentHostnames = new ArrayList<>();
-                currentHostnames.addAll(List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                        "localhost.floci.io", "*.localhost.floci.io"));
+                currentHostnames.addAll(DEFAULT_SAN_HOSTNAMES);
                 currentHostnames.addAll(customHostnames);
                 
                 // Regenerate when the hostname config changed, or when the existing certificate
@@ -170,8 +174,7 @@ public class TlsConfigSource implements ConfigSource {
             // Extract custom hostnames and combine with defaults
             List<String> customHostnames = extractCustomHostnames();
             List<String> allSans = new ArrayList<>();
-            allSans.addAll(List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                    "localhost.floci.io", "*.localhost.floci.io"));
+            allSans.addAll(DEFAULT_SAN_HOSTNAMES);
             allSans.addAll(customHostnames);
 
             CertificateGenerator gen = new CertificateGenerator();
