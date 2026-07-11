@@ -1975,9 +1975,9 @@ public class AslExecutor {
                     throw new FailStateException("States.Runtime",
                             "States.JsonMerge requires exactly 3 arguments");
                 }
-                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
-                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
-                JsonNode deepArg = resolveIntrinsicArg(parts.get(2).trim(), root);
+                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                JsonNode deepArg = resolveIntrinsicArg(parts.get(2).trim(), root, context);
                 if (!deepArg.isBoolean()) {
                     // AWS rejects a non-boolean third argument rather than coercing it to false.
                     throw new FailStateException("States.Runtime",
