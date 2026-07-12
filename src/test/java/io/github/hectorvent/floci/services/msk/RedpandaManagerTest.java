@@ -29,6 +29,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
@@ -195,11 +196,13 @@ class RedpandaManagerTest {
 
         int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
         assertTrue(flagIndex >= 0, "cmd should contain --advertise-kafka-addr");
-        assertEquals("floci-msk-test-cluster:9092", spec.cmd().get(flagIndex + 1));
+        assertEquals("floci-msk-abc123:9092", spec.cmd().get(flagIndex + 1));
 
         assertFalse(spec.portBindings().containsKey(KAFKA_PORT), "container mode should not publish ports to host");
         assertTrue(spec.exposedPorts().contains(KAFKA_PORT));
         assertTrue(spec.exposedPorts().contains(RedpandaManager.ADMIN_PORT));
+        assertFalse(Files.exists(tempDir.resolve("msk").resolve("test-cluster")),
+                "container mode must not create host directories from inside the emulator container");
 
         verifyNoInteractions(portAllocator);
     }

@@ -176,6 +176,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `PUT` | `/v2/email/identities/{emailIdentity}/dkim` | `PutEmailIdentityDkimAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/feedback` | `PutEmailIdentityFeedbackAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/mail-from` | `PutEmailIdentityMailFromAttributes` |
+| `PUT` | `/v2/email/identities/{emailIdentity}/configuration-set` | `PutEmailIdentityConfigurationSetAttributes` |
 | `POST` | `/v2/email/outbound-emails` | `SendEmail` (simple / raw / templated) |
 | `POST` | `/v2/email/outbound-bulk-emails` | `SendBulkEmail` (templated, multiple destinations) |
 | `GET` | `/v2/email/account` | `GetAccount` |
@@ -206,6 +207,16 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/dedicated-ip-pools` | `ListDedicatedIpPools` |
 | `GET` | `/v2/email/dedicated-ip-pools/{PoolName}` | `GetDedicatedIpPool` |
 | `DELETE` | `/v2/email/dedicated-ip-pools/{PoolName}` | `DeleteDedicatedIpPool` |
+| `POST` | `/v2/email/contact-lists` | `CreateContactList` |
+| `GET` | `/v2/email/contact-lists` | `ListContactLists` |
+| `GET` | `/v2/email/contact-lists/{ContactListName}` | `GetContactList` |
+| `PUT` | `/v2/email/contact-lists/{ContactListName}` | `UpdateContactList` |
+| `DELETE` | `/v2/email/contact-lists/{ContactListName}` | `DeleteContactList` |
+| `POST` | `/v2/email/contact-lists/{ContactListName}/contacts` | `CreateContact` |
+| `POST` | `/v2/email/contact-lists/{ContactListName}/contacts/list` | `ListContacts` |
+| `GET` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `GetContact` |
+| `PUT` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `UpdateContact` |
+| `DELETE` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `DeleteContact` |
 | `PUT` | `/v2/email/suppression/addresses` | `PutSuppressedDestination` |
 | `GET` | `/v2/email/suppression/addresses/{EmailAddress}` | `GetSuppressedDestination` |
 | `DELETE` | `/v2/email/suppression/addresses/{EmailAddress}` | `DeleteSuppressedDestination` |

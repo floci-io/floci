@@ -5,12 +5,17 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
+import software.amazon.awssdk.services.autoscaling.model.AttachInstancesRequest;
 import software.amazon.awssdk.services.autoscaling.model.AutoScalingException;
 import software.amazon.awssdk.services.autoscaling.model.CreateAutoScalingGroupRequest;
 import software.amazon.awssdk.services.autoscaling.model.CreateLaunchConfigurationRequest;
+import software.amazon.awssdk.services.autoscaling.model.DesiredConfiguration;
 import software.amazon.awssdk.services.autoscaling.model.LaunchTemplateSpecification;
+import software.amazon.awssdk.services.autoscaling.model.StartInstanceRefreshRequest;
+import software.amazon.awssdk.services.autoscaling.model.UpdateAutoScalingGroupRequest;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.CreateLaunchTemplateRequest;
+import software.amazon.awssdk.services.ec2.model.CreateLaunchTemplateVersionRequest;
 import software.amazon.awssdk.services.ec2.model.RequestLaunchTemplateData;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,6 +29,8 @@ class AutoScalingTest {
     private static final String INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE =
             "Valid requests must contain either the InstanceID parameter "
                     + "or both the ImageId and InstanceType parameters.";
+    private static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
+            "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
     private static AutoScalingClient autoScaling;
     private static Ec2Client ec2;
@@ -118,6 +125,83 @@ class AutoScalingTest {
                     assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
                     assertThat(error.awsErrorDetails().errorMessage())
                             .isEqualTo(INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE);
+                });
+    }
+
+    @Test
+    @DisplayName("UpdateAutoScalingGroup rejects desired configuration changes during active instance refresh")
+    void activeInstanceRefreshDesiredConfigurationConflictMapsToSdkAutoScalingException() {
+        String launchTemplateName = TestFixtures.uniqueName("sdk-active-refresh");
+        String autoScalingGroupName = TestFixtures.uniqueName("sdk-active-refresh-asg");
+
+        ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
+                .launchTemplateName(launchTemplateName)
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-12345678")
+                        .instanceType("t3.micro")
+                        .build())
+                .build());
+        ec2.createLaunchTemplateVersion(CreateLaunchTemplateVersionRequest.builder()
+                .launchTemplateName(launchTemplateName)
+                .sourceVersion("1")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-12345678")
+                        .instanceType("t3.small")
+                        .build())
+                .build());
+        ec2.createLaunchTemplateVersion(CreateLaunchTemplateVersionRequest.builder()
+                .launchTemplateName(launchTemplateName)
+                .sourceVersion("1")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-12345678")
+                        .instanceType("t3.medium")
+                        .build())
+                .build());
+        autoScaling.createAutoScalingGroup(CreateAutoScalingGroupRequest.builder()
+                .autoScalingGroupName(autoScalingGroupName)
+                .launchTemplate(LaunchTemplateSpecification.builder()
+                        .launchTemplateName(launchTemplateName)
+                        .version("1")
+                        .build())
+                .minSize(0)
+                .maxSize(1)
+                .desiredCapacity(1)
+                .availabilityZones("us-east-1a")
+                .build());
+        autoScaling.attachInstances(AttachInstancesRequest.builder()
+                .autoScalingGroupName(autoScalingGroupName)
+                .instanceIds("i-sdk-active-refresh")
+                .build());
+        autoScaling.startInstanceRefresh(StartInstanceRefreshRequest.builder()
+                .autoScalingGroupName(autoScalingGroupName)
+                .desiredConfiguration(DesiredConfiguration.builder()
+                        .launchTemplate(LaunchTemplateSpecification.builder()
+                                .launchTemplateName(launchTemplateName)
+                                .version("2")
+                                .build())
+                        .build())
+                .build());
+
+        assertThatThrownBy(() -> autoScaling.updateAutoScalingGroup(UpdateAutoScalingGroupRequest.builder()
+                .autoScalingGroupName(autoScalingGroupName)
+                .launchTemplate(LaunchTemplateSpecification.builder()
+                        .launchTemplateName(launchTemplateName)
+                        .version("3")
+                        .build())
+                .build()))
+                .isInstanceOfSatisfying(AutoScalingException.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().serviceName()).isEqualTo("AutoScaling");
+                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo(ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE);
+                    assertThat(error.requestId()).isNotBlank();
+                    assertThat(error.getMessage()).contains(
+                            ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE,
+                            "Service: AutoScaling",
+                            "Status Code: 400",
+                            "Request ID: ",
+                            "SDK Attempt Count: 1");
                 });
     }
 }

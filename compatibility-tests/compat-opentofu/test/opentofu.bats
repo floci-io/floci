@@ -185,3 +185,10 @@ setup() {
     [ -n "$output" ]
     [ "$output" != "None" ]
 }
+
+@test "OpenTofu: Firehose extended_s3 delivery stream created with correct config" {
+    run aws_cmd firehose describe-delivery-stream --delivery-stream-name floci-compat-firehose \
+        --query "DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CompressionFormat" --output text
+    assert_success
+    assert_output "GZIP"
+}

@@ -46,7 +46,11 @@ class CloudFormationAutoScalingIntegrationTest {
                         "MinSize": 1,
                         "MaxSize": 3,
                         "DesiredCapacity": 2,
-                        "AvailabilityZones": ["us-east-1a"]
+                        "AvailabilityZones": ["us-east-1a"],
+                        "Tags": [
+                          {"Key": "cluster", "Value": "demo", "PropagateAtLaunch": true},
+                          {"Key": "control-plane", "Value": "only", "PropagateAtLaunch": false}
+                        ]
                       }
                     }
                   },
@@ -91,6 +95,12 @@ class CloudFormationAutoScalingIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString(asgName))
-            .body(containsString(lcName));
+            .body(containsString(lcName))
+            .body(containsString("<Key>cluster</Key>"))
+            .body(containsString("<Value>demo</Value>"))
+            .body(containsString("<PropagateAtLaunch>true</PropagateAtLaunch>"))
+            .body(containsString("<Key>control-plane</Key>"))
+            .body(containsString("<Value>only</Value>"))
+            .body(containsString("<PropagateAtLaunch>false</PropagateAtLaunch>"));
     }
 }

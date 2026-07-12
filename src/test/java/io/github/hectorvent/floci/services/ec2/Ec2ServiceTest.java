@@ -7,12 +7,15 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import org.junit.jupiter.api.Test;
@@ -64,6 +67,60 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesStoresArchitectureFromImageCatalog() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-ubuntu2404-cloud-arm64", "t4g.medium",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        assertEquals("arm64", reservation.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesKeepsX8664FallbackForUnknownImageAndType() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-unknown", "unknown.type",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        assertEquals("x86_64", reservation.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesFallsBackToInstanceTypeArchitectureForUnknownImage() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-unknown", "t4g.medium",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        assertEquals("arm64", reservation.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesRejectsIncompatibleImageAndInstanceTypeArchitectures() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.runInstances(
+                "us-east-1", "ami-ubuntu2404-amd64", "t4g.medium",
+                1, 1, null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
     void launchTemplateVersionInheritsOmittedFieldsFromRequestedSourceVersion() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -71,11 +128,12 @@ class Ec2ServiceTest {
                 new InMemoryStorageFactory());
         LaunchTemplate template = service.createLaunchTemplate("us-east-1", "app-template",
                 "ami-source", "t3.micro", "app-key", List.of("sg-source"),
-                "source-user-data", "arn:aws:iam::000000000000:instance-profile/app-profile",
+                "source-user-data", "c291cmNlLXVzZXItZGF0YQ==",
+                "arn:aws:iam::000000000000:instance-profile/app-profile",
                 List.of(), List.of(new Tag("Role", "source")));
 
         service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null,
-                "1", null, "t3.small", null, List.of(), null, null, List.of());
+                "1", null, "t3.small", null, List.of(), null, null, null, List.of());
 
         LaunchTemplate version = service.describeLaunchTemplateVersions(
                 "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst();
@@ -84,6 +142,7 @@ class Ec2ServiceTest {
         assertEquals("app-key", version.getKeyName());
         assertEquals(List.of("sg-source"), version.getSecurityGroupIds());
         assertEquals("source-user-data", version.getUserData());
+        assertEquals("c291cmNlLXVzZXItZGF0YQ==", version.getEncodedUserData());
         assertEquals("arn:aws:iam::000000000000:instance-profile/app-profile", version.getIamInstanceProfileArn());
         assertEquals("2", version.getLatestVersionNumber());
         assertEquals(1, version.getInstanceTags().size());
@@ -191,6 +250,71 @@ class Ec2ServiceTest {
         assertEquals("InvalidGroup.NotFound", error.getErrorCode());
     }
 
+    @Test
+    void registerImageNamesAreScopedToRegion() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.registerImage("us-east-1", "shared-name", null, null, null, List.of());
+        service.registerImage("us-west-2", "shared-name", null, null, null, List.of());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.registerImage("us-east-1", "shared-name", null, null, null, List.of()));
+        assertEquals("InvalidAMIName.Duplicate", error.getErrorCode());
+    }
+
+    @Test
+    void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.registerImage("us-east-1", "first-image", null, null, null,
+                List.of(blockDeviceMapping("snap-reused", 8)));
+        service.registerImage("us-east-1", "second-image", null, null, null,
+                List.of(blockDeviceMapping("snap-reused", 64)));
+
+        List<Snapshot> snapshots = service.describeSnapshots("us-east-1", List.of("snap-reused"), List.of(), Map.of());
+        assertEquals(1, snapshots.size());
+        assertEquals(8, snapshots.getFirst().getVolumeSize());
+        assertEquals("Created by RegisterImage for first-image", snapshots.getFirst().getDescription());
+    }
+
+    @Test
+    void describeSnapshotsDefaultsToOwnedSnapshots() {
+        InMemoryStorage<String, Snapshot> snapshotStore = new InMemoryStorage<>();
+        Snapshot foreign = new Snapshot();
+        foreign.setSnapshotId("snap-foreign");
+        foreign.setOwnerId("111111111111");
+        foreign.setRegion("us-east-1");
+        snapshotStore.put("us-east-1::snap-foreign", foreign);
+
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-snapshots.json", snapshotStore)));
+        service.registerImage("us-east-1", "owned-image", null, null, null,
+                List.of(blockDeviceMapping("snap-owned", 16)));
+
+        List<Snapshot> snapshots = service.describeSnapshots("us-east-1", List.of(), List.of(), Map.of());
+
+        assertEquals(1, snapshots.size());
+        assertEquals("snap-owned", snapshots.getFirst().getSnapshotId());
+    }
+
+    private static BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId(snapshotId);
+        ebs.setVolumeSize(volumeSize);
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName("/dev/sda1");
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -203,13 +327,25 @@ class Ec2ServiceTest {
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
+        private final Map<String, StorageBackend<String, ?>> overrides;
+
         private InMemoryStorageFactory() {
+            this(Map.of());
+        }
+
+        private InMemoryStorageFactory(Map<String, StorageBackend<String, ?>> overrides) {
             super(null, null);
+            this.overrides = overrides;
         }
 
         @Override
+        @SuppressWarnings("unchecked")
         public <V> StorageBackend<String, V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
+            StorageBackend<String, ?> override = overrides.get(fileName);
+            if (override != null) {
+                return (StorageBackend<String, V>) override;
+            }
             return new InMemoryStorage<>();
         }
     }

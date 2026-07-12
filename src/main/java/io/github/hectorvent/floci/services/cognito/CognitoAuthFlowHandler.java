@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
@@ -1010,11 +1011,6 @@ final class CognitoAuthFlowHandler {
     }
 
     private String regionForPool(UserPool pool) {
-        String arn = pool.getArn();
-        if (arn != null) {
-            String[] parts = arn.split(":", 6);
-            if (parts.length >= 4 && !parts[3].isBlank()) return parts[3];
-        }
-        return regionResolver.getDefaultRegion();
+        return AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion());
     }
 }

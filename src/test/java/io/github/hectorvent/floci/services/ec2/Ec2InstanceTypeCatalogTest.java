@@ -59,6 +59,7 @@ class Ec2InstanceTypeCatalogTest {
 
         assertEquals(2, instanceType.vcpu);
         assertEquals(8192, instanceType.memoryMib);
+        assertEquals(118, instanceType.localStorageGiB);
         assertEquals(List.of("arm64"), instanceType.supportedArchitectures);
         assertTrue(instanceType.currentGeneration);
     }
