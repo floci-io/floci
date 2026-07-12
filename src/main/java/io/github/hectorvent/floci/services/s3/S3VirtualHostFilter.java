@@ -51,9 +51,10 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
     /**
      * Builds the service-host suffix set from the DNS source of truth rather than
      * re-hardcoding it: {@code {"localhost"}} plus the {@link EmbeddedDnsServer} builtins
-     * plus any configured extra suffixes.
+     * plus any configured extra suffixes. Package-private so tests reuse the same
+     * derivation instead of duplicating the builtin list.
      */
-    private static Set<String> buildServiceHostSuffixes(Optional<List<String>> extraSuffixes) {
+    static Set<String> buildServiceHostSuffixes(Optional<List<String>> extraSuffixes) {
         Set<String> suffixes = new HashSet<>();
         suffixes.add("localhost");
         EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(s -> suffixes.add(s.toLowerCase()));

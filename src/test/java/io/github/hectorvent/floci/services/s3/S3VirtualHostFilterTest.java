@@ -10,6 +10,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.net.URI;
 
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,9 +23,13 @@ import static org.mockito.Mockito.when;
 
 class S3VirtualHostFilterTest {
 
-    /** Always-on service-host suffix set with no configured extra suffixes. */
+    /**
+     * Always-on service-host suffix set with no configured extra suffixes. Derived from the
+     * production factory so it stays in sync if a builtin suffix is ever added, rather than
+     * hardcoding a copy of {@code EmbeddedDnsServer.BUILTIN_SUFFIXES}.
+     */
     private static final Set<String> DEFAULT_SUFFIXES =
-            Set.of("localhost", "localhost.floci.io", "localhost.localstack.cloud");
+            S3VirtualHostFilter.buildServiceHostSuffixes(Optional.empty());
 
     // --- extractBucket with baseHostname ---
 
