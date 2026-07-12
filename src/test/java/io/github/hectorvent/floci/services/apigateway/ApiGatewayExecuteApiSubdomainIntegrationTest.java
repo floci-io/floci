@@ -120,6 +120,7 @@ class ApiGatewayExecuteApiSubdomainIntegrationTest {
                 .header("Host", "my-bucket.localhost:" + io.restassured.RestAssured.port)
                 .when().get("/prod/@connections/fake-connection")
                 .then()
-                .statusCode(not(410));
+                .statusCode(404)
+                .body(containsString("NoSuchBucket"));
     }
 }
