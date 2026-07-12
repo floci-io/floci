@@ -5,6 +5,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -14,9 +15,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class S3VirtualHostFilterTest {
 
-    /** Always-on service-host suffix set with no configured extra suffixes. */
+    /**
+     * Always-on service-host suffix set with no configured extra suffixes. Derived from the
+     * production factory so it stays in sync if a builtin suffix is ever added, rather than
+     * hardcoding a copy of {@code EmbeddedDnsServer.BUILTIN_SUFFIXES}.
+     */
     private static final Set<String> DEFAULT_SUFFIXES =
-            Set.of("localhost", "localhost.floci.io", "localhost.localstack.cloud");
+            S3VirtualHostFilter.buildServiceHostSuffixes(Optional.empty());
 
     // --- extractBucket with baseHostname ---
 
