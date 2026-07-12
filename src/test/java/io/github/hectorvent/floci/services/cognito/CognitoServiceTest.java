@@ -2203,6 +2203,54 @@ class CognitoServiceTest {
     }
 
     @Test
+    void emailAliasPoolResendByUuidRefreshesUser() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser created = service.adminCreateUser(pool.getId(), "resend@example.com",
+                new HashMap<>(Map.of("email", "resend@example.com")), "Temp123!", null);
+        String uuid = created.getUsername();
+        assertEquals("FORCE_CHANGE_PASSWORD", created.getUserStatus());
+
+        // RESEND addressed by the minted canonical UUID (not a valid email alias) must
+        // refresh the invitation, not throw InvalidParameterException.
+        CognitoUser resentByUuid = service.adminCreateUser(pool.getId(), uuid,
+                new HashMap<>(), null, "RESEND");
+        assertEquals(uuid, resentByUuid.getUsername(), "RESEND by UUID must return the same user");
+
+        // RESEND addressed by the email alias must keep working too.
+        CognitoUser resentByAlias = service.adminCreateUser(pool.getId(), "resend@example.com",
+                new HashMap<>(), null, "RESEND");
+        assertEquals(uuid, resentByAlias.getUsername(), "RESEND by alias must return the same user");
+    }
+
+    @Test
+    void emailAliasPoolRejectsMalformedEmail() {
+        UserPool pool = createEmailAliasPool();
+        for (String bad : List.of("@", "a@", "notvalid@", "@domain.com")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> service.adminCreateUser(pool.getId(), bad, new HashMap<>(), null),
+                    "malformed email must be rejected: " + bad);
+            assertEquals("InvalidParameterException", ex.getErrorCode(),
+                    "malformed email must be rejected: " + bad);
+        }
+    }
+
+    @Test
+    void emailAliasPoolMigrationIgnoresLambdaSuppliedSub() {
+        UserPool pool = createEmailAliasPool();
+        Map<String, String> lambdaAttributes = new HashMap<>(Map.of(
+                "email", "migrated@example.com", "sub", "attacker-controlled"));
+        service.adminCreateMigratedUser(pool.getId(), "migrated@example.com", "Passw0rd!",
+                lambdaAttributes, "CONFIRMED");
+
+        CognitoUser user = service.adminGetUser(pool.getId(), "migrated@example.com");
+        assertNotEquals("attacker-controlled", user.getUsername());
+        assertNotEquals("attacker-controlled", user.getAttributes().get("sub"));
+        assertTrue(isUuid(user.getUsername()), "migrated canonical username must be a generated UUID");
+        assertEquals(user.getUsername(), user.getAttributes().get("sub"), "username must equal sub");
+        assertEquals("migrated@example.com", user.getAttributes().get("email"));
+    }
+
+    @Test
     void phoneAliasPoolTokenDoesNotLeakUuidAsEmailClaim() {
         UserPool pool = service.createUserPool(
                 Map.of("PoolName", "PhonePool", "UsernameAttributes", List.of("phone_number")),

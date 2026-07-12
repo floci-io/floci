@@ -787,11 +787,13 @@ public class CognitoService {
 
         Map<String, String> resolvedAttributes = attributes == null
                 ? new HashMap<>() : new HashMap<>(attributes);
-        String aliasAttribute = aliasPool ? aliasAttributeForValue(pool, username) : null;
 
-        CognitoUser existing = aliasPool
-                ? findUserByAlias(userPoolId, aliasAttribute, username)
-                : userStore.get(userKey(userPoolId, username)).orElse(null);
+        CognitoUser existing = userStore.get(userKey(userPoolId, username)).orElse(null);
+        String aliasAttribute = null;
+        if (aliasPool && existing == null) {
+            aliasAttribute = aliasAttributeForValue(pool, username);
+            existing = findUserByAlias(userPoolId, aliasAttribute, username);
+        }
 
         if (resend) {
             if (existing == null) {
@@ -810,7 +812,7 @@ public class CognitoService {
         }
 
         if (existing != null) {
-            boolean incomingAliasVerified = aliasPool
+            boolean incomingAliasVerified = aliasAttribute != null
                     && "true".equalsIgnoreCase(resolvedAttributes.get(aliasAttribute + "_verified"));
             if (incomingAliasVerified) {
                 if (!forceAliasCreation) {
@@ -826,7 +828,7 @@ public class CognitoService {
             }
         }
 
-       String canonicalUsername = username;
+        String canonicalUsername = username;
         if (aliasPool) {
             resolvedAttributes.put(aliasAttribute, username);
             canonicalUsername = UUID.randomUUID().toString();
@@ -868,8 +870,8 @@ public class CognitoService {
             String aliasAttribute = aliasAttributeForValue(pool, username);
             resolvedAttributes.put(aliasAttribute, username);
             existing = findUserByAlias(userPoolId, aliasAttribute, username);
-            canonicalUsername = existing != null ? existing.getUsername()
-                    : resolvedAttributes.computeIfAbsent("sub", k -> UUID.randomUUID().toString());
+            canonicalUsername = existing != null ? existing.getUsername() : UUID.randomUUID().toString();
+            resolvedAttributes.put("sub", canonicalUsername);
         } else {
             canonicalUsername = username;
             existing = userStore.get(userKey(userPoolId, username)).orElse(null);
@@ -2683,7 +2685,7 @@ public class CognitoService {
         boolean allowsEmail = usernameAttributes.contains("email");
         boolean allowsPhone = usernameAttributes.contains("phone_number");
         if (value != null) {
-            if (allowsEmail && value.contains("@")) {
+            if (allowsEmail && value.matches("[^@\\s]+@[^@\\s]+\\.[^@\\s]+")) {
                 return "email";
             }
             if (allowsPhone && value.matches("\\+[0-9]{1,15}")) {
