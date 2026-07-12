@@ -1572,6 +1572,11 @@ public class Ec2Service {
 
     public KeyPair importKeyPair(String region, String keyName, String publicKeyMaterial) {
         ensureDefaultResources(region);
+        boolean exists = keyPairs.scan(k -> true).stream()
+                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
+        if (exists) {
+            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
+        }
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
