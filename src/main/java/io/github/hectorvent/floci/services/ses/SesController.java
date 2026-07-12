@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
@@ -416,6 +417,8 @@ public class SesController {
             List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
+            ListManagementOptions listManagement =
+                    parseListManagementOptions(request.path("ListManagementOptions"));
 
             JsonNode content = request.path("Content");
             String messageId;
@@ -431,7 +434,7 @@ public class SesController {
                             "At least one destination address is required.", 400);
                 }
                 messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
-                        configurationSetName, emailTags, region);
+                        configurationSetName, emailTags, listManagement, region);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -444,7 +447,7 @@ public class SesController {
                 List<MessageHeader> additionalHeaders = parseHeadersArray(simple.path("Headers"));
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
                         bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
-                        configurationSetName, emailTags, additionalHeaders, region);
+                        configurationSetName, emailTags, additionalHeaders, listManagement, region);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     throw new AwsException("BadRequestException", "Source cannot be empty", 400);
@@ -473,7 +476,7 @@ public class SesController {
                             : SesService.templateNameFromArn(templateArn);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
                             bccAddresses, replyToAddresses, resolvedName, templateData,
-                            configurationSetName, emailTags, additionalHeaders, region);
+                            configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
                     String subject = inline.path("Subject").asText(null);
@@ -482,7 +485,7 @@ public class SesController {
                     messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
                             ccAddresses, bccAddresses, replyToAddresses,
                             subject, text, html, templateData,
-                            configurationSetName, emailTags, additionalHeaders, region);
+                            configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 }
             } else {
                 throw new AwsException("BadRequestException",
@@ -2170,6 +2173,30 @@ public class SesController {
      * The {@code fieldName} parameter is reported in the error message when the node is
      * present but not an array.
      */
+    private static ListManagementOptions parseListManagementOptions(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isObject()) {
+            throw new AwsException("BadRequestException", "ListManagementOptions must be an object.", 400);
+        }
+        JsonNode listNode = node.path("ContactListName");
+        if (!listNode.isTextual() || listNode.textValue().isBlank()) {
+            throw new AwsException("BadRequestException",
+                    "ListManagementOptions.ContactListName is required.", 400);
+        }
+        JsonNode topicNode = node.path("TopicName");
+        String topicName = null;
+        if (!topicNode.isMissingNode() && !topicNode.isNull()) {
+            if (!topicNode.isTextual()) {
+                throw new AwsException("BadRequestException",
+                        "ListManagementOptions.TopicName must be a string.", 400);
+            }
+            topicName = topicNode.textValue();
+        }
+        return new ListManagementOptions(listNode.textValue(), topicName);
+    }
+
     private List<MessageTag> parseEmailTagsArray(JsonNode tagsNode, String fieldName) {
         if (tagsNode.isMissingNode() || tagsNode.isNull()) {
             return List.of();
