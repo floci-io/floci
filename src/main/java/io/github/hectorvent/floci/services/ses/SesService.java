@@ -106,9 +106,10 @@ public class SesService {
     // Serializes receipt-rule-set create (check-then-put) and set-active (clear-then-set) so the
     // one-active-per-region invariant and duplicate-name rejection hold under concurrency.
     private final Object receiptRuleSetLock = new Object();
-    // Guards the custom-verification-template check-then-create so concurrent creates for the same
-    // name can't both observe the key as absent and both succeed.
-    private final Object cvetCreateLock = new Object();
+    // Serializes custom-verification-template create/update/delete check-then-write so concurrent
+    // creates for the same name can't both succeed and an update can't resurrect a concurrently
+    // deleted template.
+    private final Object cvetMutationLock = new Object();
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -1046,7 +1047,7 @@ public class SesService {
         String key = cvetKey(region, template.getTemplateName());
         // Lock only the check-then-put so concurrent creates for the same name can't both observe
         // the key as absent; validation and logging stay outside the lock.
-        synchronized (cvetCreateLock) {
+        synchronized (cvetMutationLock) {
             if (cvetStore.get(key).isPresent()) {
                 throw new AwsException("AlreadyExistsException",
                         "Custom verification email template <" + template.getTemplateName() + "> already exists", 400);
@@ -1071,21 +1072,29 @@ public class SesService {
 
     public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
         String key = cvetKey(region, template.getTemplateName());
-        if (cvetStore.get(key).isEmpty()) {
-            throw cvetNotFound(template.getTemplateName());
+        // Guard the existence check and the put together so a concurrent delete can't slip between
+        // them and have the update resurrect the just-deleted template.
+        synchronized (cvetMutationLock) {
+            if (cvetStore.get(key).isEmpty()) {
+                throw cvetNotFound(template.getTemplateName());
+            }
+            validateCustomVerificationTemplate(template, region);
+            cvetStore.put(key, template);
         }
-        validateCustomVerificationTemplate(template, region);
-        cvetStore.put(key, template);
         LOG.infov("Updated custom verification email template {0} in region {1}",
                 template.getTemplateName(), region);
     }
 
     public void deleteCustomVerificationEmailTemplate(String templateName, String region) {
         String key = cvetKey(region, templateName);
-        if (cvetStore.get(key).isEmpty()) {
-            throw cvetNotFound(templateName);
+        // Guard the check-then-delete on the same lock as create/update so the three mutations
+        // serialize against each other.
+        synchronized (cvetMutationLock) {
+            if (cvetStore.get(key).isEmpty()) {
+                throw cvetNotFound(templateName);
+            }
+            cvetStore.delete(key);
         }
-        cvetStore.delete(key);
         LOG.infov("Deleted custom verification email template {0} in region {1}", templateName, region);
     }
 
