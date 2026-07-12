@@ -812,9 +812,9 @@ public class CognitoService {
         }
 
         if (existing != null) {
-            boolean incomingAliasVerified = aliasAttribute != null
-                    && "true".equalsIgnoreCase(resolvedAttributes.get(aliasAttribute + "_verified"));
-            if (incomingAliasVerified) {
+            boolean existingAliasVerified = aliasAttribute != null
+                    && "true".equalsIgnoreCase(existing.getAttributes().get(aliasAttribute + "_verified"));
+            if (existingAliasVerified) {
                 if (!forceAliasCreation) {
                     throw new AwsException("AliasExistsException",
                             "An account with the given " + aliasAttribute + " already exists.", 400);

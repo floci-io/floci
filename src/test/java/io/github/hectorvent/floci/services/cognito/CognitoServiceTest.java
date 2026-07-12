@@ -2308,6 +2308,52 @@ class CognitoServiceTest {
     }
 
     @Test
+    void emailAliasPoolAliasExistsUsesExistingVerificationNotIncoming() {
+        UserPool pool = createEmailAliasPool();
+        // Existing owner holds a *verified* alias.
+        service.adminCreateUser(pool.getId(), "owner@b.com",
+                new HashMap<>(Map.of("email", "owner@b.com", "email_verified", "true")), null);
+
+        // The second create omits email_verified from its own payload. The exception
+        // type must be driven by the existing owner's verified alias -> AliasExistsException.
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminCreateUser(pool.getId(), "owner@b.com",
+                        new HashMap<>(Map.of("email", "owner@b.com")), null));
+        assertEquals("AliasExistsException", ex.getErrorCode());
+    }
+
+    @Test
+    void emailAliasPoolIncomingVerifiedFlagCannotForceAliasExists() {
+        UserPool pool = createEmailAliasPool();
+        // Existing owner's alias is *unverified*, so the alias is not reserved.
+        service.adminCreateUser(pool.getId(), "unv@b.com",
+                new HashMap<>(Map.of("email", "unv@b.com")), null);
+
+        // A caller-supplied email_verified=true must not upgrade the decision:
+        // the existing owner is unverified -> UsernameExistsException, not AliasExistsException.
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminCreateUser(pool.getId(), "unv@b.com",
+                        new HashMap<>(Map.of("email", "unv@b.com", "email_verified", "true")), null));
+        assertEquals("UsernameExistsException", ex.getErrorCode());
+    }
+
+    @Test
+    void emailAliasPoolForceAliasCreationReclaimsWithoutIncomingVerifiedFlag() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser first = service.adminCreateUser(pool.getId(), "reclaim@b.com",
+                new HashMap<>(Map.of("email", "reclaim@b.com", "email_verified", "true")), null);
+
+        // ForceAliasCreation reclaim keys off the existing owner's verified alias and
+        // must not require the caller to re-send email_verified in the new payload.
+        CognitoUser second = service.adminCreateUser(pool.getId(), "reclaim@b.com",
+                new HashMap<>(Map.of("email", "reclaim@b.com")), null, null, true);
+
+        assertNotEquals(first.getUsername(), second.getUsername());
+        assertEquals(second.getUsername(), service.adminGetUser(pool.getId(), "reclaim@b.com").getUsername());
+        assertNull(service.adminGetUser(pool.getId(), first.getUsername()).getAttributes().get("email"));
+    }
+
+    @Test
     void emailAliasPoolForceAliasCreationMigratesVerifiedAlias() {
         UserPool pool = createEmailAliasPool();
         CognitoUser first = service.adminCreateUser(pool.getId(), "move@b.com",
