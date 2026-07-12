@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.annotation.Priority;
-import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.PreMatching;
@@ -32,10 +30,6 @@ public class ApiGatewayExecuteApiFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteApiFilter.class);
     private static final String EXECUTE_API_LABEL = "execute-api";
-
-    @Inject
-    public ApiGatewayExecuteApiFilter() {
-    }
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
