@@ -930,10 +930,9 @@ public class CognitoService {
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
 
-        // Confirm the pool and user actually exist before mutating the revocation store,
-        // matching the implicit validation AWS performs and the adminUserGlobalSignOut counterpart.
+        CognitoUser user;
         try {
-            adminGetUser(poolId, username);
+            user = adminGetUser(poolId, username);
         } catch (AwsException e) {
             if ("UserNotFoundException".equals(e.getErrorCode())
                     || "ResourceNotFoundException".equals(e.getErrorCode())) {
@@ -942,10 +941,9 @@ public class CognitoService {
             throw e;
         }
 
-        // Revoke all of the user's issued tokens (access, ID, refresh).
-        revokeAllUserTokens(poolId, username);
+        revokeAllUserTokens(poolId, user.getUsername());
 
-        LOG.infov("GlobalSignOut: revoked all tokens for user {0} in pool {1}", username, poolId);
+        LOG.infov("GlobalSignOut: revoked all tokens for user {0} in pool {1}", user.getUsername(), poolId);
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
@@ -1632,6 +1630,13 @@ public class CognitoService {
         }
         if (familyId == null) {
             return; // Nothing keyed to revoke (legacy token); revocation is idempotent.
+        }
+
+        try {
+            username = adminGetUser(poolId, username).getUsername();
+        } catch (AwsException e) {
+            LOG.debugv("RevokeToken: user {0} not resolvable in pool {1} ({2}); using token-embedded username",
+                    username, poolId, e.getErrorCode());
         }
 
         long nowMs = System.currentTimeMillis();
