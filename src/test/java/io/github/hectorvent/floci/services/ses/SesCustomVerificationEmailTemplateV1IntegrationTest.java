@@ -124,4 +124,11 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
                 .body("TemplateSubject", equalTo("Shared"))
                 .body("FromEmailAddress", equalTo(FROM));
     }
+
+    @Test
+    @Order(8)
+    void cleanup_deleteSharedTemplate() {
+        query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-shared")
+        .when().post("/").then().statusCode(200);
+    }
 }
