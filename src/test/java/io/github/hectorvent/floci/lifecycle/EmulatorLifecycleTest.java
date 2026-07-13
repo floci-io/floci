@@ -78,6 +78,7 @@ class EmulatorLifecycleTest {
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
     @Mock private io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker schemaCreationWorker;
+    @Mock private jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.core.common.ContainerTeardown> containerTeardowns;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -98,7 +99,9 @@ class EmulatorLifecycleTest {
                 rabbitMqManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
-                schemaCreationWorker);
+                schemaCreationWorker, containerTeardowns);
+        Mockito.lenient().when(containerTeardowns.iterator())
+                .thenReturn(java.util.Collections.emptyIterator());
     }
 
     private void stubStorageConfig() {

@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
@@ -77,7 +78,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 @ApplicationScoped
-public class Ec2Service {
+public class Ec2Service implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
@@ -900,6 +901,34 @@ public class Ec2Service {
             result.add(entry);
         }
         return result;
+    }
+
+    /**
+     * Stops the Docker containers of running instances on emulator shutdown. Without this
+     * they outlive the process as orphans. Instances flip to {@code stopped} — the container
+     * really is stopped, and the id is kept so StartInstances can revive it after a restart.
+     * Runs during the ShutdownEvent phase, so the state change is captured by the final flush.
+     */
+    @Override
+    public void stopManagedContainers() {
+        if (config.services().ec2().mock()) {
+            return;
+        }
+        for (String storeKey : Set.copyOf(instances.keys())) {
+            Instance inst = instances.get(storeKey).orElse(null);
+            if (inst == null || inst.getDockerContainerId() == null
+                    || inst.getState() == null || !"running".equals(inst.getState().getName())) {
+                continue;
+            }
+            try {
+                containerManager.stopForShutdown(inst);
+                inst.setState(InstanceState.stopped());
+                instances.put(storeKey, inst);
+            } catch (Exception e) {
+                LOG.warnv("Failed to stop EC2 instance container {0} on shutdown: {1}",
+                        inst.getDockerContainerId(), e.getMessage());
+            }
+        }
     }
 
     public List<Map<String, String>> stopInstances(String region, List<String> instanceIds) {
