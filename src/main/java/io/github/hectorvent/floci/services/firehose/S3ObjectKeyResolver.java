@@ -33,7 +33,8 @@ final class S3ObjectKeyResolver {
 
     private static final Logger LOG = Logger.getLogger(S3ObjectKeyResolver.class);
     private static final Pattern EXPRESSION = Pattern.compile("!\\{(?<namespace>[^:}]*)(?::(?<argument>[^}]*))?}");
-    private static final String DEFAULT_TIMESTAMP_PATTERN = "yyyy/MM/dd/HH/";
+    private static final DateTimeFormatter DEFAULT_TIME_PREFIX =
+            DateTimeFormatter.ofPattern("yyyy/MM/dd/HH/", Locale.ROOT);
     private static final DateTimeFormatter SUFFIX_TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd-HH-mm-ss", Locale.ROOT);
     private static final String RANDOM_STRING_ALPHABET =
@@ -58,7 +59,7 @@ final class S3ObjectKeyResolver {
         }
         matcher.appendTail(out);
         if (!expressionSeen) {
-            out.append(DateTimeFormatter.ofPattern(DEFAULT_TIMESTAMP_PATTERN, Locale.ROOT).format(time));
+            out.append(DEFAULT_TIME_PREFIX.format(time));
         }
         return out.toString();
     }
