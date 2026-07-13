@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.lifecycle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
+import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
@@ -85,6 +86,7 @@ public class EmulatorLifecycle {
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
     private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
+    private final PersistentPathValidator persistentPathValidator;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -111,7 +113,8 @@ public class EmulatorLifecycle {
                              FlociUiManager flociUiManager,
                              InitLifecycleState initLifecycleState,
                              SchemaCreationWorker schemaCreationWorker,
-                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns) {
+                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
+                             PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -138,6 +141,7 @@ public class EmulatorLifecycle {
         this.initLifecycleState = initLifecycleState;
         this.schemaCreationWorker = schemaCreationWorker;
         this.containerTeardowns = containerTeardowns;
+        this.persistentPathValidator = persistentPathValidator;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -157,6 +161,8 @@ public class EmulatorLifecycle {
             throw new IllegalStateException("Boot hook execution failed", e);
         }
         initLifecycleState.markBootCompleted();
+
+        persistentPathValidator.validateAtBoot();
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
