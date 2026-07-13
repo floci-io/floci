@@ -7,6 +7,8 @@ images:
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2
     name: amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2
     description: Amazon Linux 2 AMI
+    ownerId: "137112412989"
+    imageOwnerAlias: amazon
     architecture: x86_64
     creationDate: "2023-04-04T00:00:00.000Z"
 
@@ -16,6 +18,8 @@ images:
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64
     description: Amazon Linux 2023 AMI
+    ownerId: "137112412989"
+    imageOwnerAlias: amazon
     architecture: x86_64
     creationDate: "2023-03-15T00:00:00.000Z"
 
@@ -63,6 +67,8 @@ images:
     dockerImage: public.ecr.aws/docker/library/debian:12
     name: debian-12-amd64-20230411
     description: Debian 12 AMI
+    ownerId: "136693071363"
+    imageOwnerAlias: debian
     architecture: x86_64
     creationDate: "2023-04-11T00:00:00.000Z"
 
@@ -70,6 +76,8 @@ images:
     dockerImage: public.ecr.aws/docker/library/alpine:latest
     name: alpine-linux-latest-x86_64
     description: Alpine Linux AMI
+    ownerId: "538276071271"
+    imageOwnerAlias: alpine
     architecture: x86_64
     creationDate: "2023-04-01T00:00:00.000Z"
 
@@ -77,6 +85,8 @@ images:
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: Windows_Server-2022-English-Full-Base-2023.04.12
     description: Microsoft Windows Server 2022 Full Locale English AMI
+    ownerId: "801119661308"
+    imageOwnerAlias: amazon
     architecture: x86_64
     platform: windows
     creationDate: "2023-04-12T00:00:00.000Z"

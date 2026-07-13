@@ -1145,7 +1145,7 @@ public class Ec2Service {
         return imageCatalog.images().stream()
                 .filter(Ec2ImageCatalog.CatalogImage::advertised)
                 .filter(img -> img.matchesIdOrAlias(imageIds))
-                .filter(img -> img.matchesOwner(owners))
+                .filter(img -> img.matchesOwner(owners, accountId))
                 .filter(img -> matchesImageFilters(img, filters))
                 .map(Ec2ImageCatalog.CatalogImage::toImage)
                 .collect(Collectors.toList());

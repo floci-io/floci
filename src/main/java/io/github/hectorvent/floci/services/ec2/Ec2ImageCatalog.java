@@ -177,11 +177,31 @@ public class Ec2ImageCatalog {
         }
 
         public boolean matchesOwner(List<String> owners) {
+            return matchesOwner(owners, null);
+        }
+
+        public boolean matchesOwner(List<String> owners, String accountId) {
             if (owners == null || owners.isEmpty()) {
                 return true;
             }
             Image image = toImage();
-            return owners.contains(image.getOwnerId()) || owners.contains(image.getImageOwnerAlias());
+            for (String owner : owners) {
+                if ("self".equals(owner)) {
+                    if ("000000000000".equals(accountId)) {
+                        return true;
+                    }
+                    continue;
+                }
+                if (owner != null) {
+                    if (owner.equals(accountId) && "000000000000".equals(accountId)) {
+                        return true;
+                    }
+                    if (owner.equals(image.getOwnerId()) || owner.equalsIgnoreCase(image.getImageOwnerAlias())) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         public Image toImage() {

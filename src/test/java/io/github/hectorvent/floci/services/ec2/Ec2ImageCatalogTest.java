@@ -61,4 +61,21 @@ class Ec2ImageCatalogTest {
         assertFalse(imageCatalog.findByIdOrAlias("ami-unknown").isPresent());
         assertEquals(imageCatalog.defaultDockerImage(), amiImageResolver.resolve("ami-unknown"));
     }
+
+    @Test
+    void matchesOwnerChecksAliasesAndAccountId() {
+        Ec2ImageCatalog.CatalogImage amzn = imageCatalog.findByIdOrAlias("ami-0abcdef1234567890").orElseThrow();
+        assertTrue(amzn.matchesOwner(List.of("amazon")));
+        assertTrue(amzn.matchesOwner(List.of("AMAZON")));
+        assertTrue(amzn.matchesOwner(List.of("self"), "000000000000"));
+        assertFalse(amzn.matchesOwner(List.of("canonical")));
+        assertFalse(amzn.matchesOwner(List.of("self"), "111111111111"));
+
+        Ec2ImageCatalog.CatalogImage ubuntu = imageCatalog.findByIdOrAlias("ami-ubuntu2204").orElseThrow();
+        assertTrue(ubuntu.matchesOwner(List.of("canonical")));
+        assertTrue(ubuntu.matchesOwner(List.of("CANONICAL")));
+        assertTrue(ubuntu.matchesOwner(List.of("self"), "000000000000"));
+        assertFalse(ubuntu.matchesOwner(List.of("amazon")));
+        assertFalse(ubuntu.matchesOwner(List.of("self"), "111111111111"));
+    }
 }
