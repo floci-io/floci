@@ -5215,7 +5215,7 @@ class CloudFormationIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404);
+            .statusCode(400);
 
         given()
             .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
@@ -5224,7 +5224,7 @@ class CloudFormationIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404);
+            .statusCode(400);
     }
 
     @Test
@@ -5325,7 +5325,7 @@ class CloudFormationIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404);
+            .statusCode(400);
     }
 
     @Test
