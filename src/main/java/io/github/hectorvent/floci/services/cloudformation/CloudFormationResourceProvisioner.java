@@ -95,6 +95,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -271,8 +273,9 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::IAM::Role" -> provisionIamRole(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::User" -> provisionIamUser(resource, properties, engine, stackName);
                 case "AWS::IAM::AccessKey" -> provisionIamAccessKey(resource, properties, engine);
-                case "AWS::IAM::Policy", "AWS::IAM::ManagedPolicy" ->
-                        provisionIamPolicy(resource, properties, engine, accountId, stackName);
+                case "AWS::IAM::Policy" -> provisionIamPolicy(resource, properties, engine, stackName);
+                case "AWS::IAM::ManagedPolicy" ->
+                        provisionIamManagedPolicy(resource, properties, engine, stackName);
                 case "AWS::IAM::InstanceProfile" -> provisionInstanceProfile(resource, properties, engine, accountId, stackName);
                 case "AWS::SSM::Parameter" -> provisionSsmParameter(resource, properties, engine, region, stackName);
                 case "AWS::KMS::Key" -> provisionKmsKey(resource, properties, engine, region, accountId);
@@ -400,6 +403,11 @@ public class CloudFormationResourceProvisioner {
                     LOG.debugv("Error deleting nodegroup {0}: {1}", resource.getPhysicalId(), e.getMessage());
                 }
             }
+            return;
+        }
+        if ("AWS::IAM::Policy".equals(resourceType)
+                && resource.getAttributes().containsKey("PolicyName")) {
+            deleteIamInlinePolicy(resource);
             return;
         }
         delete(resourceType, resource.getPhysicalId(), region);
@@ -1893,8 +1901,44 @@ public class CloudFormationResourceProvisioner {
     // ── IAM Policy ────────────────────────────────────────────────────────────
 
     private void provisionIamPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                    String accountId, String stackName) {
+                                    String stackName) {
         String policyName = resolveOptional(props, "PolicyName", engine);
+        if (policyName == null || policyName.isBlank()) {
+            policyName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+        String document = props != null && props.has("PolicyDocument")
+                ? props.get("PolicyDocument").toString()
+                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+        List<String> roles = resolveIamPolicyEntities(props, "Roles", engine, iamService::getRole);
+        List<String> users = resolveIamPolicyEntities(props, "Users", engine, iamService::getUser);
+        List<String> groups = resolveIamPolicyEntities(props, "Groups", engine, iamService::getGroup);
+
+        deleteRemovedIamInlinePolicies(r, "Roles", roles, policyName, "role", iamService::deleteRolePolicy);
+        deleteRemovedIamInlinePolicies(r, "Users", users, policyName, "user", iamService::deleteUserPolicy);
+        deleteRemovedIamInlinePolicies(r, "Groups", groups, policyName, "group", iamService::deleteGroupPolicy);
+
+        for (String roleName : roles) {
+            iamService.putRolePolicy(roleName, policyName, document);
+        }
+        for (String userName : users) {
+            iamService.putUserPolicy(userName, policyName, document);
+        }
+        for (String groupName : groups) {
+            iamService.putGroupPolicy(groupName, policyName, document);
+        }
+
+        r.setPhysicalId(policyName);
+        r.getAttributes().remove("Arn");
+        r.getAttributes().put("PolicyName", policyName);
+        r.getAttributes().put("Roles", String.join("|", roles));
+        r.getAttributes().put("Users", String.join("|", users));
+        r.getAttributes().put("Groups", String.join("|", groups));
+    }
+
+    private void provisionIamManagedPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                           String stackName) {
+        String policyName = resolveOptional(props, "ManagedPolicyName", engine);
         if (policyName == null || policyName.isBlank()) {
             policyName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
@@ -1906,20 +1950,15 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(policy.getArn());
         r.getAttributes().put("Arn", policy.getArn());
 
-        // Attach to roles if specified
         if (props != null && props.has("Roles")) {
             for (JsonNode role : props.get("Roles")) {
                 try {
                     iamService.attachRolePolicy(engine.resolve(role), policy.getArn());
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    LOG.debugv("Could not attach managed policy {0} to role: {1}", policy.getArn(), e.getMessage());
                 }
             }
         }
-    }
-
-    private void provisionIamManagedPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String accountId, String stackName) {
-        provisionIamPolicy(r, props, engine, accountId, stackName);
     }
 
     // ── IAM Instance Profile ──────────────────────────────────────────────────
@@ -3811,6 +3850,62 @@ public class CloudFormationResourceProvisioner {
             iamService.deleteRole(roleName);
         } catch (Exception e) {
             LOG.debugv("Could not delete role {0}: {1}", roleName, e.getMessage());
+        }
+    }
+
+    private void deleteIamInlinePolicy(StackResource resource) {
+        String policyName = resource.getAttributes().get("PolicyName");
+        deleteIamInlinePolicies(iamPolicyEntities(resource, "Roles"), policyName,
+                "role", iamService::deleteRolePolicy);
+        deleteIamInlinePolicies(iamPolicyEntities(resource, "Users"), policyName,
+                "user", iamService::deleteUserPolicy);
+        deleteIamInlinePolicies(iamPolicyEntities(resource, "Groups"), policyName,
+                "group", iamService::deleteGroupPolicy);
+    }
+
+    private List<String> resolveIamPolicyEntities(JsonNode props, String property,
+                                                  CloudFormationTemplateEngine engine,
+                                                  Consumer<String> validateEntity) {
+        if (props == null || !props.has(property)) {
+            return List.of();
+        }
+        List<String> entities = new ArrayList<>();
+        for (JsonNode entity : props.get(property)) {
+            String entityName = engine.resolve(entity);
+            validateEntity.accept(entityName);
+            entities.add(entityName);
+        }
+        return entities;
+    }
+
+    private void deleteRemovedIamInlinePolicies(StackResource resource, String attribute,
+                                                 List<String> currentEntities, String currentPolicyName,
+                                                 String entityType, BiConsumer<String, String> deletePolicy) {
+        String previousPolicyName = resource.getAttributes().get("PolicyName");
+        if (previousPolicyName == null) {
+            return;
+        }
+        List<String> removedEntities = iamPolicyEntities(resource, attribute).stream()
+                .filter(entity -> !previousPolicyName.equals(currentPolicyName) || !currentEntities.contains(entity))
+                .toList();
+        deleteIamInlinePolicies(removedEntities, previousPolicyName, entityType, deletePolicy);
+    }
+
+    private List<String> iamPolicyEntities(StackResource resource, String attribute) {
+        return Arrays.stream(resource.getAttributes().getOrDefault(attribute, "").split("\\|"))
+                .filter(entity -> !entity.isBlank())
+                .toList();
+    }
+
+    private void deleteIamInlinePolicies(Collection<String> entityNames, String policyName, String entityType,
+                                         BiConsumer<String, String> deletePolicy) {
+        for (String entityName : entityNames) {
+            try {
+                deletePolicy.accept(entityName, policyName);
+            } catch (Exception e) {
+                LOG.debugv("Could not delete inline policy {0} from {1} {2}: {3}",
+                        policyName, entityType, entityName, e.getMessage());
+            }
         }
     }
 
