@@ -322,6 +322,71 @@ class SnsMobilePushTest {
         assertEquals("PlatformApplicationDisabled", e.getErrorCode());
     }
 
+    // --- Publish: topic broadcast to platform endpoints (Protocol="application") ---
+
+    @Test
+    void publish_topicBroadcastToApplicationEndpointsCapturesForEachDevice() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint deviceA = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-a", null, Map.of(), REGION);
+        PlatformEndpoint deviceB = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-b", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", deviceA.getArn(), REGION, Map.of());
+        snsService.subscribe(topicArn, "application", deviceB.getArn(), REGION, Map.of());
+
+        String envelope = "{"
+                + "\"default\":\"market open\","
+                + "\"GCM\":\"{\\\"notification\\\":{\\\"body\\\":\\\"market alert\\\"}}\""
+                + "}";
+        String messageId = snsService.publish(topicArn, null, null, envelope, null, "json",
+                null, null, null, REGION);
+        assertNotNull(messageId);
+
+        List<PushNotification> capturedA = snsService.peekPushNotifications(deviceA.getArn());
+        List<PushNotification> capturedB = snsService.peekPushNotifications(deviceB.getArn());
+        assertEquals(1, capturedA.size());
+        assertEquals(1, capturedB.size());
+        assertEquals("GCM", capturedA.get(0).platform());
+        assertEquals("fcm-token-a", capturedA.get(0).token());
+        assertEquals("fcm-token-b", capturedB.get(0).token());
+        assertTrue(capturedA.get(0).payload().contains("market alert"));
+        assertTrue(capturedB.get(0).payload().contains("market alert"));
+    }
+
+    @Test
+    void publish_topicBroadcastSkipsDisabledEndpointButDeliversToEnabled() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint enabled = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-live", null, Map.of(), REGION);
+        PlatformEndpoint disabled = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-dead", null, Map.of(), REGION);
+        snsService.setEndpointAttributes(disabled.getArn(), Map.of("Enabled", "false"), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", enabled.getArn(), REGION, Map.of());
+        snsService.subscribe(topicArn, "application", disabled.getArn(), REGION, Map.of());
+
+        assertDoesNotThrow(() -> snsService.publish(topicArn, null, null,
+                "{\"GCM\":\"hi\",\"default\":\"hi\"}", null, "json", null, null, null, REGION));
+
+        assertEquals(1, snsService.peekPushNotifications(enabled.getArn()).size());
+        assertTrue(snsService.peekPushNotifications(disabled.getArn()).isEmpty());
+    }
+
+    @Test
+    void publish_topicBroadcastFallsBackToDefaultWhenPlatformKeyMissing() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        snsService.publish(topicArn, null, null, "{\"default\":\"fallback body\"}", null, "json",
+                null, null, null, REGION);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(device.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("fallback body", captured.get(0).payload());
+    }
+
     // --- Inspection helpers ---
 
     @Test
