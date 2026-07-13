@@ -387,6 +387,38 @@ class SnsMobilePushTest {
         assertEquals("fallback body", captured.get(0).payload());
     }
 
+    @Test
+    void publish_topicBroadcastRejectsJsonStructureMissingDefaultBeforeFanOut() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                topicArn, null, null, "{\"GCM\":\"only gcm\"}", null, "json",
+                null, null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertTrue(e.getMessage().contains("default"));
+        assertTrue(snsService.peekPushNotifications(device.getArn()).isEmpty());
+    }
+
+    @Test
+    void publish_topicBroadcastRejectsInvalidJsonStructureBeforeFanOut() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                topicArn, null, null, "not json at all", null, "json",
+                null, null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(snsService.peekPushNotifications(device.getArn()).isEmpty());
+    }
+
     // --- Inspection helpers ---
 
     @Test

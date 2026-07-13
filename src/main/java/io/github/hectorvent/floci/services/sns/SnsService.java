@@ -404,6 +404,8 @@ public class SnsService implements Resettable {
         Topic topic = topicStore.get(topicStoreKey)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
 
+        validateTopicMessageStructure(message, messageStructure);
+
         boolean isFifo = "true".equals(topic.getAttributes().get("FifoTopic"));
         String dedupId = messageDeduplicationId;
         if (isFifo) {
@@ -683,6 +685,35 @@ public class SnsService implements Resettable {
                 "Invalid parameter: Message Reason: Messages must have a '" + platform
                         + "' or 'default' key.",
                 400);
+    }
+
+    /**
+     * Validates {@code MessageStructure="json"} on a topic {@code Publish} the way the real SNS
+     * API does: synchronously, before any fan-out. The message must be a JSON object carrying a
+     * top-level {@code default} entry. Validating here (rather than lazily inside per-subscriber
+     * delivery) means a malformed envelope surfaces to the caller as {@code InvalidParameter}
+     * instead of being silently swallowed while the {@code publish} call still reports success.
+     */
+    private void validateTopicMessageStructure(String message, String messageStructure) {
+        if (!"json".equals(messageStructure)) {
+            return;
+        }
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(message);
+        } catch (Exception e) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message Structure - JSON message body failed to parse", 400);
+        }
+        if (root == null || !root.isObject()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message Structure - JSON message body should be an object.", 400);
+        }
+        JsonNode defaultValue = root.get("default");
+        if (defaultValue == null || defaultValue.isNull()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message Structure - No default entry in JSON message body", 400);
+        }
     }
 
     private void recordPushNotification(PushNotification notification) {
