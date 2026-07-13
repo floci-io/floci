@@ -444,6 +444,7 @@ public class Ec2ContainerManager {
             // Generate host keys
             execInContainer(containerId, new String[]{"ssh-keygen", "-A"}, 10);
             // Start sshd without -D so it daemonizes itself and survives this exec session
+            execInContainer(containerId, new String[]{"mkdir", "-p", "/run/sshd"}, 5);
             execInContainer(containerId, new String[]{"/usr/sbin/sshd"}, 5);
             LOG.infov("Started sshd in EC2 instance {0}", instanceId);
         } catch (Exception e) {
