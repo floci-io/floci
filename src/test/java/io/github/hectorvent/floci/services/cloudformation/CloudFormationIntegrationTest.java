@@ -287,6 +287,16 @@ class CloudFormationIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-inline-policy-stack-a")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "GetRolePolicy")
             .formParam("RoleName", "cfn-inline-policy-role-a")
             .formParam("PolicyName", policyName)
@@ -296,6 +306,19 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(404);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", "cfn-inline-policy-role-b")
+            .formParam("PolicyName", policyName)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PolicyName>" + policyName + "</PolicyName>"));
 
         String invalidPolicyTemplate = """
             {
