@@ -495,15 +495,20 @@ public class ApiGatewayExecuteController {
                                      String httpMethod, String requestPath,
                                      String resourcePath, String resourceId, Stage stage, UriInfo uriInfo,
                                      String resolvedApiKey) {
+        // Recover the trailing slash the JAX-RS {proxy} binding strips, so the authorizer sees
+        // the same raw path the Lambda later receives from buildProxyEvent (AWS parity). Path
+        // matching and path-parameter extraction keep using the normalized requestPath.
+        String preservedPath = preserveTrailingSlash(requestPath, uriInfo.getRequestUri().getRawPath());
+
         ObjectNode node = objectMapper.createObjectNode();
         node.put("type", auth.getType());
-        node.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, requestPath));
+        node.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, preservedPath));
         if ("TOKEN".equals(auth.getType())) {
             String headerName = auth.getIdentitySource().replace("method.request.header.", "");
             node.put("authorizationToken", headers.getHeaderString(headerName));
         } else if ("REQUEST".equals(auth.getType())) {
             node.put("resource", resourcePath);
-            node.put("path", requestPath);
+            node.put("path", preservedPath);
             node.put("httpMethod", httpMethod);
             putSingleValueHeaders(node, headers);
             putMultiValueHeaders(node, headers);
@@ -530,7 +535,7 @@ public class ApiGatewayExecuteController {
             ctx.put("apiId", apiId);
             ctx.put("resourceId", resourceId != null ? resourceId : "");
             ctx.put("resourcePath", resourcePath);
-            ctx.put("path", requestPath);
+            ctx.put("path", preservedPath);
             ctx.put("httpMethod", httpMethod);
             ctx.put("stage", stageName);
             ctx.put("requestId", UUID.randomUUID().toString());
