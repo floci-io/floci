@@ -16,10 +16,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * WebSocket $connect over the AWS-native execute-api subdomain host
+ * Integration test for WebSocket $connect over the AWS-native execute-api subdomain host
  * ({@code {apiId}.execute-api.{region}.host/{stage}}).
  *
  * <p>Unlike the {@code /ws/{apiId}/{stage}} path form, the subdomain form carries the region in the
@@ -27,43 +26,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  * region. This lets an API created in a non-default region complete the handshake.
  */
 @QuarkusTest
-class WebSocketSubdomainConnectTest {
+class WebSocketSubdomainConnectIntegrationTest {
 
     @TestHTTPResource("/")
     URL baseUrl;
 
-    // ──────────────────────────── Host parser (unit) ────────────────────────────
-
-    @Test
-    void parsesApiIdAndRegionFromSubdomainHost() {
-        WebSocketHandler.ExecuteApiHost h =
-                WebSocketHandler.parseExecuteApiHost("abc123.execute-api.ap-northeast-2.localhost:4566");
-        assertNotNull(h);
-        assertEquals("abc123", h.apiId());
-        assertEquals("ap-northeast-2", h.region());
-    }
-
-    @Test
-    void regionIsNullWhenHostOmitsIt() {
-        WebSocketHandler.ExecuteApiHost h =
-                WebSocketHandler.parseExecuteApiHost("abc123.execute-api.localhost:4566");
-        assertNotNull(h);
-        assertEquals("abc123", h.apiId());
-        assertNull(h.region());
-    }
-
-    @Test
-    void returnsNullForNonExecuteApiHosts() {
-        assertNull(WebSocketHandler.parseExecuteApiHost("my-bucket.localhost:4566"));
-        assertNull(WebSocketHandler.parseExecuteApiHost("localhost:4566"));
-        assertNull(WebSocketHandler.parseExecuteApiHost(null));
-    }
-
-    // ──────────────────────── Subdomain $connect (integration) ────────────────────────
-
     @Test
     void subdomainUpgradeSucceedsForNonDefaultRegionApi() throws Exception {
-        // Default region is us-east-1; create the API in a different region.
         String region = "ap-northeast-2";
         String apiId = createWebSocketApiWithMockConnect(region);
 
@@ -73,11 +42,8 @@ class WebSocketSubdomainConnectTest {
                 "Subdomain WebSocket upgrade should complete (101) for an API in a non-default region");
     }
 
-    // ──────────────────────────── helpers ────────────────────────────
-
     /** Creates a WEBSOCKET API with a MOCK $connect route in the given region and returns its id. */
     private String createWebSocketApiWithMockConnect(String region) {
-        // The region is derived from the SigV4 credential scope in the Authorization header.
         String auth = "AWS4-HMAC-SHA256 Credential=test/20260714/" + region
                 + "/apigateway/aws4_request, SignedHeaders=host, Signature=deadbeef";
 
@@ -128,7 +94,7 @@ class WebSocketSubdomainConnectTest {
 
             BufferedReader in = new BufferedReader(
                     new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-            String statusLine = in.readLine(); // e.g. "HTTP/1.1 101 Switching Protocols"
+            String statusLine = in.readLine();
             assertNotNull(statusLine, "Expected an HTTP status line from the upgrade response");
             return Integer.parseInt(statusLine.split(" ")[1]);
         }
