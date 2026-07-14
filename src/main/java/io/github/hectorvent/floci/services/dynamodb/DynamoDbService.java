@@ -659,21 +659,25 @@ public class DynamoDbService {
         // Resolve key names: use GSI or table keys
         String pkName;
         String skName;
+        List<String> sortKeyNames;
         if (indexName != null) {
             var gsi = table.findGsi(indexName);
             if (gsi.isPresent()) {
                 pkName = gsi.get().getPartitionKeyName();
                 skName = gsi.get().getSortKeyName();
+                sortKeyNames = gsi.get().getSortKeyNames();
             } else {
                 var lsi = table.findLsi(indexName)
                         .orElseThrow(() -> new AwsException("ValidationException",
                                 "The table does not have the specified index: " + indexName, 400));
                 pkName = lsi.getPartitionKeyName();
                 skName = lsi.getSortKeyName();
+                sortKeyNames = lsi.getSortKeyNames();
             }
         } else {
             pkName = table.getPartitionKeyName();
             skName = table.getSortKeyName();
+            sortKeyNames = table.getSortKeyNames();
         }
 
         List<JsonNode> results = new ArrayList<>();
@@ -716,17 +720,25 @@ public class DynamoDbService {
         // Filter out TTL-expired items
         results = results.stream().filter(item -> !isExpired(item, table)).toList();
 
-        // Sort by sort key if present
-        if (skName != null) {
-            String finalSkName = skName;
+        // Sort by the full (possibly composite) sort key, comparing each attribute in key-schema
+        // order. Using only the first sort-key attribute would ignore the remaining components
+        // (e.g. a "requestStateQuery RANGE, createdAt RANGE" index would never order by createdAt),
+        // which in turn breaks ScanIndexForward=false. See floci-io/floci#1675.
+        if (!sortKeyNames.isEmpty()) {
+            List<String> finalSortKeyNames = sortKeyNames;
             results = new ArrayList<>(results);
             results.sort((a, b) -> {
-                JsonNode aAttr = a.get(finalSkName);
-                JsonNode bAttr = b.get(finalSkName);
-                if (aAttr == null && bAttr == null) return 0;
-                if (aAttr == null) return -1;
-                if (bAttr == null) return 1;
-                return ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                for (String name : finalSortKeyNames) {
+                    JsonNode aAttr = a.get(name);
+                    JsonNode bAttr = b.get(name);
+                    int cmp;
+                    if (aAttr == null && bAttr == null) cmp = 0;
+                    else if (aAttr == null) cmp = -1;
+                    else if (bAttr == null) cmp = 1;
+                    else cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                    if (cmp != 0) return cmp;
+                }
+                return 0;
             });
             if (Boolean.FALSE.equals(scanIndexForward)) {
                 Collections.reverse(results);
