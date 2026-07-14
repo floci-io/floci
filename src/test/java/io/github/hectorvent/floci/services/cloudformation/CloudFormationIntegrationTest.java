@@ -6531,6 +6531,88 @@ class CloudFormationIntegrationTest {
             .body("__type", containsString("StateMachineDoesNotExist"));
     }
 
+    @Test
+    void updateStack_stepFunctionsStateMachine_updatesInPlaceWithoutRecreateFailure() {
+        // Regression: a stack UPDATE that re-provisions a state machine must update it in place.
+        // Previously the provisioner always called CreateStateMachine, which failed with
+        // StateMachineAlreadyExists on the existing name and rolled the whole stack update back.
+        String template = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "cfn-sfn-update-pipeline",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-update-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"%s\\",\\"End\\":true}}}"
+                  }
+                }
+              },
+              "Outputs": {
+                "StateMachineArn": { "Value": { "Ref": "MyStateMachine" } }
+              }
+            }
+            """;
+
+        String stackName = "sfn-cfn-update-stack";
+        String expectedArn = "arn:aws:states:us-east-1:000000000000:stateMachine:cfn-sfn-update-pipeline";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("marker-v1"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Update the definition; the StateMachineName is unchanged, so this is an in-place update.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("marker-v2"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The stack update succeeded (no UPDATE_ROLLBACK), and the ARN is stable across the update.
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(describeXml, containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+        assertThat(describeXml, containsString("<OutputValue>" + expectedArn + "</OutputValue>"));
+
+        // The state machine kept its ARN and reflects the updated definition.
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("definition", containsString("marker-v2"))
+            .body("definition", not(containsString("marker-v1")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     // ── Issue #924: roll back failed stack creates (criterion #9) ────────────
 
     @Test

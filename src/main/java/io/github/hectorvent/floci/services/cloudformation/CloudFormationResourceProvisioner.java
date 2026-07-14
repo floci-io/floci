@@ -2437,7 +2437,14 @@ public class CloudFormationResourceProvisioner {
 
         String definition = resolveStateMachineDefinition(props, engine);
 
-        StateMachine sm = stepFunctionsService.createStateMachine(name, definition, roleArn, type, region, tags);
+        // On a stack update the resource already has a physical id (the state machine ARN);
+        // update it in place instead of calling CreateStateMachine, which rejects the existing name.
+        StateMachine sm;
+        if (r.getPhysicalId() != null) {
+            sm = stepFunctionsService.updateStateMachine(r.getPhysicalId(), definition, roleArn, tags);
+        } else {
+            sm = stepFunctionsService.createStateMachine(name, definition, roleArn, type, region, tags);
+        }
 
         r.setPhysicalId(sm.getStateMachineArn());
         r.getAttributes().put("Arn", sm.getStateMachineArn());

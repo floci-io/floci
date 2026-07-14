@@ -103,6 +103,27 @@ public class StepFunctionsService implements Resettable {
         return sm;
     }
 
+    public StateMachine updateStateMachine(String arn, String definition, String roleArn, Map<String, String> tags) {
+        StateMachine sm = stateMachineStore.get(arn)
+                .orElseThrow(() -> new AwsException("StateMachineDoesNotExist", "State machine does not exist: " + arn, 400));
+
+        if (definition != null) {
+            validateDefinition(definition);
+            sm.setDefinition(definition);
+        }
+        if (roleArn != null && !roleArn.isBlank()) {
+            sm.setRoleArn(roleArn);
+        }
+        if (tags != null && !tags.isEmpty()) {
+            sm.getTags().putAll(tags);
+        }
+
+        sm.setUpdateDate(System.currentTimeMillis() / 1000.0);
+        stateMachineStore.put(arn, sm);
+        LOG.infov("Updated State Machine: {0}", arn);
+        return sm;
+    }
+
     public StateMachine describeStateMachine(String arn) {
         return stateMachineStore.get(arn)
                 .orElseThrow(() -> new AwsException("StateMachineDoesNotExist", "State machine does not exist", 400));

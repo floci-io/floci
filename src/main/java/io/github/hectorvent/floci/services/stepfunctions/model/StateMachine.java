@@ -18,6 +18,7 @@ public class StateMachine {
     private String type = "STANDARD";
     private String status = "ACTIVE";
     private double creationDate;
+    private double updateDate;
     private Map<String, String> tags = new HashMap<>();
     private int versionCounter = 0;
     private List<StateMachineVersion> versions = new ArrayList<>();
@@ -46,6 +47,9 @@ public class StateMachine {
 
     public double getCreationDate() { return creationDate; }
     public void setCreationDate(double creationDate) { this.creationDate = creationDate; }
+
+    public double getUpdateDate() { return updateDate; }
+    public void setUpdateDate(double updateDate) { this.updateDate = updateDate; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

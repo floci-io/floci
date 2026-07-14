@@ -34,6 +34,7 @@ public class StepFunctionsJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "CreateStateMachine" -> handleCreateStateMachine(request, region);
+            case "UpdateStateMachine" -> handleUpdateStateMachine(request);
             case "DescribeStateMachine" -> handleDescribeStateMachine(request);
             case "ListStateMachines" -> handleListStateMachines(request, region);
             case "DeleteStateMachine" -> handleDeleteStateMachine(request);
@@ -77,6 +78,26 @@ public class StepFunctionsJsonHandler {
         response.put("stateMachineArn", sm.getStateMachineArn());
         response.put("creationDate", sm.getCreationDate());
         // Publishing a version on create is opt-in (publish=true).
+        if (request.path("publish").asBoolean(false)) {
+            var version = service.publishStateMachineVersion(sm.getStateMachineArn());
+            response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateStateMachine(JsonNode request) {
+        String definition = request.path("definition").asText(null);
+        String roleArn = request.path("roleArn").asText(null);
+        // AWS requires at least one updatable field; a bare stateMachineArn returns MissingRequiredParameter.
+        if (definition == null && roleArn == null) {
+            throw new AwsException("MissingRequiredParameter",
+                    "Either the definition or the roleArn must be specified.", 400);
+        }
+        StateMachine sm = service.updateStateMachine(
+                request.path("stateMachineArn").asText(), definition, roleArn, null);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("updateDate", sm.getUpdateDate());
+        // Publishing a version on update is opt-in (publish=true).
         if (request.path("publish").asBoolean(false)) {
             var version = service.publishStateMachineVersion(sm.getStateMachineArn());
             response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
