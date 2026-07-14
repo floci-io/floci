@@ -684,7 +684,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(21)
+    @Order(23)
     void describeSubnetsByCidrBlockFilter() {
         String isolatedVpcId = given()
             .formParam("Action", "CreateVpc")
