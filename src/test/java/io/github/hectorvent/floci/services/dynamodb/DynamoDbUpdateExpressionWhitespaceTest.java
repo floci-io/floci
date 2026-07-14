@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -32,11 +33,16 @@ class DynamoDbUpdateExpressionWhitespaceTest {
     }
 
     private void createAndSeed(String table) {
-        post("CreateTable", """
-            {"TableName":"%s","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
-             "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],
-             "BillingMode":"PAY_PER_REQUEST"}
-            """.formatted(table));
+        // Tolerate a table that already exists so the test is safe to re-run against a
+        // persisted store: a fresh store returns 200, an existing table returns 400
+        // (ResourceInUseException). PutItem then overwrites, so seeding stays deterministic.
+        given().header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(CT).body("""
+                {"TableName":"%s","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],
+                 "BillingMode":"PAY_PER_REQUEST"}
+                """.formatted(table))
+            .when().post("/").then().statusCode(anyOf(equalTo(200), equalTo(400)));
         post("PutItem", """
             {"TableName":"%s","Item":{"pk":{"S":"x"},"a":{"S":"old"},"b":{"N":"1"}}}
             """.formatted(table));
