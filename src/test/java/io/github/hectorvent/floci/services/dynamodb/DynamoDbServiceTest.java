@@ -13,7 +13,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -2347,5 +2349,320 @@ class DynamoDbServiceTest {
 
         JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
         assertEquals("2", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void addOnNestedPlaceholderPathIncrementsCounter() {
+        String region = "eu-west-1";
+        String tableName = "Users";
+
+        createUsersTable(region);
+
+        service.putItem(tableName, makeNestedCounterItem("u1", "5"), region);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#s", "stats");
+        exprNames.put("#c", "counters");
+        exprNames.put("#v", "visits");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":inc", attributeValue("N", "1"));
+
+        service.updateItem(
+                tableName,
+                userIdKey("u1"),
+                null,
+                "ADD #s.#c.#v :inc",
+                exprNames,
+                exprValues,
+                null,
+                region
+        );
+
+        JsonNode stored = service.getItem(tableName, userIdKey("u1"), region);
+
+        assertEquals(
+                "6", stored.get("stats").get("M").get("counters").get("M").get("visits").get("N").asText(),
+                "ADD on nested placeholder path should increment the nested counter"
+        );
+        assertFalse(
+                stored.has("#s.#c.#v"),
+                "no phantom top level attribute should be created"
+        );
+    }
+
+    @Test
+    void addOnNestedPlainDottedPathIncrementsCounter() {
+        String region = "eu-west-1";
+        String tableName = "Users";
+
+        createUsersTable(region);
+
+        service.putItem(tableName, makeNestedCounterItem("u2", "10"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":inc", attributeValue("N", "5"));
+
+        service.updateItem(
+                tableName,
+                userIdKey("u2"),
+                null,
+                "ADD stats.counters.visits :inc",
+                null,
+                exprValues,
+                null,
+                region
+        );
+
+        JsonNode stored = service.getItem(tableName, userIdKey("u2"), region);
+
+        assertEquals(
+                "15", stored.get("stats").get("M").get("counters").get("M").get("visits").get("N").asText(),
+                "ADD on plain path should increment the nested counter"
+        );
+    }
+
+    @Test
+    void addOnNestedPathCreatesMissingLeaf() {
+        String region = "eu-west-1";
+        String tableName = "Users";
+
+        createUsersTable(region);
+
+        ObjectNode seed = mapper.createObjectNode();
+        seed.set("userId", attributeValue("S", "u3"));
+
+        ObjectNode midMap = mapper.createObjectNode();
+        midMap.set("M", mapper.createObjectNode());
+
+        ObjectNode topInner = mapper.createObjectNode();
+        topInner.set("counters", midMap);
+
+        ObjectNode topMap = mapper.createObjectNode();
+        topMap.set("M", topInner);
+
+        seed.set("stats", topMap);
+        service.putItem(tableName, seed, region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":one", attributeValue("N", "1"));
+
+        service.updateItem(
+                tableName,
+                userIdKey("u3"),
+                null,
+                "ADD stats.counters.visits :one",
+                null,
+                exprValues,
+                null,
+                region
+        );
+
+        JsonNode stored = service.getItem(tableName, userIdKey("u3"), region);
+
+        assertEquals(
+                "1", stored.get("stats").get("M").get("counters").get("M").get("visits").get("N").asText(),
+                "ADD should create the missing leaf inside the nested map"
+        );
+    }
+
+    @Test
+    void addOnNestedPathAccumulatesAcrossCalls() {
+        String region = "eu-west-1";
+        String tableName = "Users";
+
+        createUsersTable(region);
+
+        service.putItem(tableName, makeNestedCounterItem("u4", "0"), region);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#s", "stats");
+        exprNames.put("#c", "counters");
+        exprNames.put("#v", "visits");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":one", attributeValue("N", "1"));
+
+        for (int i = 0; i < 3; i++) {
+            service.updateItem(
+                    tableName,
+                    userIdKey("u4"),
+                    null,
+                    "ADD #s.#c.#v :one",
+                    exprNames,
+                    exprValues,
+                    null,
+                    region
+            );
+        }
+
+        JsonNode stored = service.getItem(tableName, userIdKey("u4"), region);
+
+        assertEquals(
+                "3", stored.get("stats").get("M").get("counters").get("M").get("visits").get("N").asText(),
+                "repeated ADD on nested path should accumulate"
+        );
+    }
+
+    @Test
+    void deleteOnNestedPlaceholderPathRemovesFromStringSet() {
+        String region = "eu-west-1";
+        String tableName = "Users";
+
+        createUsersTable(region);
+
+        service.putItem(tableName, makeNestedSetItem("u5", "tags", "labels", SetType.STRING, "a", "b", "c"), region);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#s", "stats");
+        exprNames.put("#t", "tags");
+        exprNames.put("#l", "labels");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", stringSetAttributeValue("b"));
+
+        service.updateItem(
+                tableName,
+                userIdKey("u5"),
+                null,
+                "DELETE #s.#t.#l :val",
+                exprNames,
+                exprValues,
+                null,
+                region
+        );
+
+        JsonNode stored = service.getItem(tableName, userIdKey("u5"), region);
+        JsonNode labels = stored.get("stats").get("M").get("tags").get("M").get("labels").get("SS");
+
+        assertEquals(2, labels.size(), "DELETE should remove one element from the nested SS");
+
+        Set<String> remaining = new HashSet<>();
+        labels.forEach(n -> remaining.add(n.asText()));
+        assertTrue(remaining.contains("a"));
+        assertTrue(remaining.contains("c"));
+        assertFalse(remaining.contains("b"));
+    }
+
+    @Test
+    void deleteOnNestedPlainDottedPathRemovesFromNumberSet() {
+        String region = "eu-west-1";
+        String tableName = "Users";
+
+        createUsersTable(region);
+
+        service.putItem(tableName, makeNestedSetItem("u6", "scores", "marks", SetType.NUMBER, "1", "2", "3"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", numberSetAttributeValue("2"));
+
+        service.updateItem(
+                tableName,
+                userIdKey("u6"),
+                null,
+                "DELETE stats.scores.marks :val",
+                null,
+                exprValues,
+                null,
+                region
+        );
+
+        JsonNode stored = service.getItem(tableName, userIdKey("u6"), region);
+        JsonNode marks = stored.get("stats").get("M").get("scores").get("M").get("marks").get("NS");
+
+        assertEquals(2, marks.size(), "DELETE should remove one element from the nested NS");
+        java.util.Set<String> remaining = new java.util.HashSet<>();
+        marks.forEach(n -> remaining.add(n.asText()));
+        assertTrue(remaining.contains("1"));
+        assertTrue(remaining.contains("3"));
+        assertFalse(remaining.contains("2"));
+    }
+
+    @Test
+    void deleteOnNestedPathEmptiesSetAndRemovesAttribute() {
+        String region = "eu-west-1";
+        String tableName = "Users";
+
+        createUsersTable(region);
+
+        service.putItem(tableName, makeNestedSetItem("u7", "tags", "labels", SetType.STRING, "only"), region);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#s", "stats");
+        exprNames.put("#t", "tags");
+        exprNames.put("#l", "labels");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", stringSetAttributeValue("only"));
+
+        service.updateItem(
+                tableName,
+                userIdKey("u7"),
+                null,
+                "DELETE #s.#t.#l :val",
+                exprNames,
+                exprValues,
+                null,
+                region
+        );
+
+        JsonNode stored = service.getItem(tableName, userIdKey("u7"), region);
+        JsonNode tagsMap = stored.get("stats").get("M").get("tags").get("M");
+
+        assertFalse(
+                tagsMap.has("labels"),
+                "DELETE that empties the nested set should remove the attribute from the nested map"
+        );
+    }
+
+    private ObjectNode makeNestedCounterItem(String id, String value) {
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", id));
+
+        ObjectNode midInner = mapper.createObjectNode();
+
+        ObjectNode leafNode = attributeValue("N", value);
+        midInner.set("visits", leafNode);
+
+        ObjectNode midMap = mapper.createObjectNode();
+        midMap.set("M", midInner);
+
+        ObjectNode topInner = mapper.createObjectNode();
+        topInner.set("counters", midMap);
+
+        ObjectNode topMap = mapper.createObjectNode();
+        topMap.set("M", topInner);
+
+        item.set("stats", topMap);
+
+        return item;
+    }
+
+    enum SetType {
+        STRING,
+        NUMBER
+    }
+
+    private ObjectNode makeNestedSetItem(String id, String midLevel, String leaf,
+                                         SetType setType, String... values) {
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", id));
+
+        ObjectNode setNode = switch (setType) {
+            case STRING -> stringSetAttributeValue(values);
+            case NUMBER -> numberSetAttributeValue(values);
+        };
+
+        ObjectNode midInner = mapper.createObjectNode();
+        midInner.set(leaf, setNode);
+
+        ObjectNode midMap = mapper.createObjectNode();
+        midMap.set("M", midInner);
+
+        ObjectNode topInner = mapper.createObjectNode();
+        topInner.set(midLevel, midMap);
+
+        ObjectNode topMap = mapper.createObjectNode();
+        topMap.set("M", topInner);
+
+        item.set("stats", topMap);
+
+        return item;
     }
 }
