@@ -1757,12 +1757,28 @@ public class S3Service implements Resettable {
         objectStore.put(storeKey, obj);
     }
 
+    /**
+     * Returns the bucket's server-side encryption configuration as XML.
+     * <p>
+     * Buckets that have
+     * never been configured return the AWS default (SSE-S3 / {@code AES256});
+     * since January 2023 AWS applies SSE-S3 as the base level of encryption on
+     * every bucket and never returns 404 for {@code GetBucketEncryption}.
+     */
     public String getBucketEncryption(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         if (bucket.getEncryptionConfiguration() == null) {
-            throw new AwsException("ServerSideEncryptionConfigurationNotFoundError",
-                    "The server side encryption configuration was not found", 404);
+            return new XmlBuilder()
+                    .start("ServerSideEncryptionConfiguration", AwsNamespaces.S3)
+                      .start("Rule")
+                        .start("ApplyServerSideEncryptionByDefault")
+                          .elem("SSEAlgorithm", "AES256")
+                        .end("ApplyServerSideEncryptionByDefault")
+                        .elem("BucketKeyEnabled", "false")
+                      .end("Rule")
+                    .end("ServerSideEncryptionConfiguration")
+                    .build();
         }
         return bucket.getEncryptionConfiguration();
     }
