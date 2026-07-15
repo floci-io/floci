@@ -161,6 +161,57 @@ class BedrockProxyIntegrationTest {
     }
 
     @Test
+    void converse_mixedTextAndToolCallsPreservesBothBlocks() {
+        nextResponseBody.set("""
+            {
+              "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                  "role": "assistant",
+                  "content": "Let me check the weather for you.",
+                  "tool_calls": [{
+                    "id": "call_abc123",
+                    "type": "function",
+                    "function": {
+                      "name": "get_weather",
+                      "arguments": "{\\"city\\":\\"Kyiv\\"}"
+                    }
+                  }]
+                }
+              }],
+              "usage": {"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13}
+            }
+            """);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "messages": [{"role": "user", "content": [{"text": "weather in Kyiv?"}]}],
+                  "toolConfig": {
+                    "tools": [{
+                      "toolSpec": {
+                        "name": "get_weather",
+                        "description": "Get current weather for a city",
+                        "inputSchema": {"json": {"type": "object", "properties": {"city": {"type": "string"}}}}
+                      }
+                    }]
+                  }
+                }
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(200)
+            .body("output.message.content[0].text", equalTo("Let me check the weather for you."))
+            .body("output.message.content[1].toolUse.toolUseId", equalTo("call_abc123"))
+            .body("output.message.content[1].toolUse.name", equalTo("get_weather"))
+            .body("output.message.content[1].toolUse.input.city", equalTo("Kyiv"))
+            .body("stopReason", equalTo("tool_use"));
+    }
+
+    @Test
     void converse_toolCallsFinishReasonWithoutArray_fallsBackToText() {
         nextResponseBody.set("""
             {
