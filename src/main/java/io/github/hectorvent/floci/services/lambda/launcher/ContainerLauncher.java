@@ -18,14 +18,13 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 
 import java.io.Closeable;
@@ -663,38 +662,59 @@ public class ContainerLauncher {
     /**
      * Lists file names directly under {@link #EXTENSIONS_DIR} inside the container, or an empty
      * list if the directory doesn't exist or the probe fails (most functions have no extensions).
-     *
-     * <p>Uses Docker's archive API ({@code copyArchiveFromContainerCmd}) rather than {@code exec}ing
-     * a shell/{@code find}/{@code basename} pipeline inside the container: a minimal or distroless
-     * function image can have a valid extension binary under {@code /opt/extensions} without any of
-     * those utilities present, which would silently look like "no extensions" to a shell-based probe.
-     * The archive API only talks to the Docker daemon, so it works regardless of the image contents.
      */
     private List<String> listExtensionBinaries(DockerClient dockerClient, String containerId, String functionName) {
-        try (InputStream tarStream = dockerClient.copyArchiveFromContainerCmd(containerId, EXTENSIONS_DIR).exec();
-             TarArchiveInputStream tar = new TarArchiveInputStream(tarStream)) {
+        try {
+            // -maxdepth 1 -type f -perm -u+x: only regular, executable files directly under the
+            // directory (real AWS's documented layout — extension binaries, not subdirectories),
+            // so a stray non-executable file (e.g. a README dropped in by a layer) isn't fed into
+            // the exec loop below as if it were an extension.
+            var create = dockerClient.execCreateCmd(containerId)
+                    .withCmd("/bin/sh", "-c",
+                            "find " + EXTENSIONS_DIR + " -maxdepth 1 -type f -perm -u+x "
+                                    + "-exec basename {} \\; 2>/dev/null")
+                    .withAttachStdout(true)
+                    .withAttachStderr(false);
+            String execId = create.exec().getId();
+            var stdout = new java.io.ByteArrayOutputStream();
+            var latch = new java.util.concurrent.CountDownLatch(1);
+            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+                @Override
+                public void onNext(Frame frame) {
+                    if (frame.getStreamType() == StreamType.STDOUT && frame.getPayload() != null) {
+                        try {
+                            stdout.write(frame.getPayload());
+                        } catch (IOException e) {
+                            // ByteArrayOutputStream.write never actually throws IOException (its
+                            // Javadoc documents this), but the checked signature must be handled.
+                            LOG.debugv(e, "Unexpected write failure buffering /opt/extensions listing "
+                                    + "for function {0}", functionName);
+                        }
+                    }
+                }
 
-            List<String> names = new ArrayList<>();
-            TarArchiveEntry entry;
-            while ((entry = tar.getNextEntry()) != null) {
-                if (!tar.canReadEntryData(entry) || entry.isDirectory()) {
-                    continue;
+                @Override
+                public void onComplete() {
+                    latch.countDown();
                 }
-                // Docker wraps the requested directory itself as a leading path component (e.g.
-                // "extensions/lambda-adapter"); only direct children count as extension binaries,
-                // matching the real init system's non-recursive scan of the directory.
-                String name = entry.getName();
-                int slash = name.indexOf('/');
-                if (slash < 0 || name.indexOf('/', slash + 1) >= 0) {
-                    continue;
-                }
-                if ((entry.getMode() & 0111) == 0) {
-                    continue;
-                }
-                names.add(name.substring(slash + 1));
+            });
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                LOG.debugv("Timed out listing {0} for function {1}; assuming no extensions",
+                        EXTENSIONS_DIR, functionName);
+                return List.of();
             }
-            return names;
-        } catch (NotFoundException e) {
+            String listing = stdout.toString(java.nio.charset.StandardCharsets.UTF_8).trim();
+            if (listing.isEmpty()) {
+                return List.of();
+            }
+            return java.util.Arrays.stream(listing.split("\\R"))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .toList();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("Interrupted while listing {0} for function {1}; assuming no extensions",
+                    EXTENSIONS_DIR, functionName);
             return List.of();
         } catch (Exception e) {
             LOG.debugv("Could not list {0} for function {1} ({2}); assuming no extensions",
