@@ -1971,8 +1971,8 @@ public class AslExecutor {
             }
             case "States.JsonMerge" -> {
                 List<String> parts = splitIntrinsicArgs(argsStr);
-                if (parts.size() != 3) {
-                    throw new FailStateException("States.Runtime",
+                if (parts.size() != 3 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
                             "States.JsonMerge requires exactly 3 arguments");
                 }
                 JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root, context);
@@ -1980,7 +1980,7 @@ public class AslExecutor {
                 JsonNode deepArg = resolveIntrinsicArg(parts.get(2).trim(), root, context);
                 if (!deepArg.isBoolean()) {
                     // AWS rejects a non-boolean third argument rather than coercing it to false.
-                    throw new FailStateException("States.Runtime",
+                    throw new FailStateException("States.IntrinsicFailure",
                             "States.JsonMerge third argument must be a boolean");
                 }
                 boolean deep = deepArg.asBoolean();
@@ -1988,12 +1988,12 @@ public class AslExecutor {
                 // ordering: two non-objects passed with true yield "requires two JSON objects", not
                 // "shallow merge only".
                 if (!a.isObject() || !b.isObject()) {
-                    throw new FailStateException("States.Runtime",
+                    throw new FailStateException("States.IntrinsicFailure",
                             "States.JsonMerge requires two JSON objects");
                 }
                 if (deep) {
                     // AWS Step Functions only supports the shallow merge (third argument false).
-                    throw new FailStateException("States.Runtime",
+                    throw new FailStateException("States.IntrinsicFailure",
                             "States.JsonMerge supports only shallow merge (third argument must be false)");
                 }
                 // Shallow merge: second object's top-level fields override the first's.

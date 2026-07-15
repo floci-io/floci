@@ -88,10 +88,19 @@ class AslExecutorJsonMergeTest {
     }
 
     @Test
-    void wrongArgumentCountRejected() throws Exception {
+    void wrongArgumentCountUsesIntrinsicFailure() throws Exception {
         JsonNode root = mapper.readTree("{\"a\":{\"x\":1},\"b\":{\"y\":2}}");
-        assertThrows(RuntimeException.class,
+        AslExecutor.FailStateException exception = assertThrows(AslExecutor.FailStateException.class,
                 () -> executor.resolvePath("States.JsonMerge($.a, $.b)", root));
+        assertEquals("States.IntrinsicFailure", exception.error);
+    }
+
+    @Test
+    void trailingCommaUsesIntrinsicFailure() throws Exception {
+        JsonNode root = mapper.readTree("{\"a\":{\"x\":1},\"b\":{\"y\":2}}");
+        AslExecutor.FailStateException exception = assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.resolvePath("States.JsonMerge($.a, $.b, false,)", root));
+        assertEquals("States.IntrinsicFailure", exception.error);
     }
 
     @Test
