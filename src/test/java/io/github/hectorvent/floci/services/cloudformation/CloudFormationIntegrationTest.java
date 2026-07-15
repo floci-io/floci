@@ -5642,6 +5642,81 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_ecsTaskDefWithSecrets_resolvesRefToSecretArnInValueFrom() {
+        String template = """
+            {
+              "Resources": {
+                "DbPassword": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "Properties": {
+                    "Name": "cfn-ecs-secret",
+                    "SecretString": "password"
+                  }
+                },
+                "TaskDef": {
+                  "Type": "AWS::ECS::TaskDefinition",
+                  "Properties": {
+                    "Family": "cfn-ecs-secrets-taskdef",
+                    "ContainerDefinitions": [
+                      {
+                        "Name": "web",
+                        "Image": "nginx:latest",
+                        "Essential": true,
+                        "Secrets": [
+                          { "Name": "DB_PASSWORD", "ValueFrom": { "Ref": "DbPassword" } }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              "Outputs": {
+                "SecretArn": { "Value": { "Ref": "DbPassword" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-ecs-secrets-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        // Ref on AWS::SecretsManager::Secret resolves to the secret's ARN (confirmed independently
+        // via the stack Output above). The same ARN, not the literal {"Ref": "DbPassword"} JSON,
+        // must end up in the registered task definition's Secrets[].ValueFrom.
+        String secretArn = outputValue(describeXml, "SecretArn");
+        given()
+            .header("X-Amz-Target", ECS_TARGET_PREFIX + "DescribeTaskDefinition")
+            .contentType(ECS_CONTENT_TYPE)
+            .body("{\"taskDefinition\": \"cfn-ecs-secrets-taskdef\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn));
+    }
+
+    @Test
     void updateStack_ecsService_registersNewTaskDefRevisionAndUpdatesDesiredCount() {
         String stackName = "cfn-ecs-update-stack";
         String template = """
