@@ -671,7 +671,9 @@ public class ApiGatewayService {
             apiKey.setValue(sharedValue);
         } else {
             apiKey.setId(shortId(10));
-            apiKey.setValue(suppliedValue != null ? suppliedValue : UUID.randomUUID().toString().replace("-", ""));
+            apiKey.setValue((suppliedValue != null && !suppliedValue.isBlank())
+                    ? suppliedValue
+                    : UUID.randomUUID().toString().replace("-", ""));
         }
 
         Map<String, String> tags = new HashMap<>();
@@ -704,7 +706,7 @@ public class ApiGatewayService {
         ApiKey key = getApiKey(region, apiKeyId);
         if (patchOperations != null) {
             for (Map<String, String> op : patchOperations) {
-                if (!"replace".equals(op.get("op"))) continue;
+                if (!"replace".equals(op.get("op"))) { continue; }
                 switch (op.getOrDefault("path", "")) {
                     case "/name"        -> key.setName(op.get("value"));
                     case "/description" -> key.setDescription(op.get("value"));
@@ -720,9 +722,10 @@ public class ApiGatewayService {
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = request.get("tags") instanceof Map<?, ?> m
-                ? (Map<String, String>) m : new HashMap<>();
+        Map<String, String> tags = new HashMap<>();
+        if (request.get("tags") instanceof Map<?, ?> rawTags) {
+            rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
+        }
 
         String customId = tags.get("_custom_id_");
         String planId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
