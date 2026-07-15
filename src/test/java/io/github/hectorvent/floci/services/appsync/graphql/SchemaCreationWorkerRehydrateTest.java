@@ -49,6 +49,7 @@ class SchemaCreationWorkerRehydrateTest {
         worker.rehydrateSchemas();
 
         assertTrue(schemaRegistry.getSchema("api-1").isPresent());
+        assertTrue(schemaRegistry.getGraphQL("api-1").isPresent());
     }
 
     @Test
