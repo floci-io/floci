@@ -389,6 +389,21 @@ public class CloudFormationResourceProvisioner {
             }
             return;
         }
+        // Authorizer deletion needs the api id (a stored attribute, not the physical id, which is
+        // the authorizer id) — same shape as the Nodegroup case above. Without this, the generic
+        // type/physicalId delete path has no case for this type at all and silently no-ops,
+        // leaving the authorizer behind in AWS after the stack reports deleted.
+        if ("AWS::ApiGatewayV2::Authorizer".equals(resourceType)) {
+            String apiId = resource.getAttributes().get("ApiId");
+            if (apiId != null && !apiId.isBlank()) {
+                try {
+                    apiGatewayV2Service.deleteAuthorizer(region, apiId, resource.getPhysicalId());
+                } catch (Exception e) {
+                    LOG.debugv("Error deleting authorizer {0}: {1}", resource.getPhysicalId(), e.getMessage());
+                }
+            }
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
@@ -2830,6 +2845,10 @@ public class CloudFormationResourceProvisioner {
             authorizer = apiGatewayV2Service.updateAuthorizer(region, apiId, r.getPhysicalId(), req);
         }
         r.setPhysicalId(authorizer.getAuthorizerId());
+        r.getAttributes().put("AuthorizerId", authorizer.getAuthorizerId());
+        // ApiId is needed by delete(StackResource, region) to scope deleteAuthorizer — the
+        // type/physicalId-only delete overload has no apiId to call it with.
+        r.getAttributes().put("ApiId", apiId);
     }
 
     private void provisionApiGatewayV2Route(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,

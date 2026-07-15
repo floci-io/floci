@@ -6457,6 +6457,147 @@ class CloudFormationIntegrationTest {
                 .body("Items[0].IdentitySource", hasItem("$request.header.Authorization"));
     }
 
+    @Test
+    void createStack_apiGatewayV2RouteResolvesAuthorizerIdViaGetAtt() {
+        // Ref already resolved AuthorizerId via the physical id (covered above); Fn::GetAtt reads
+        // a separate attributes map that provisionApiGatewayV2Authorizer must also populate, or
+        // the route ends up wired to the literal placeholder string "Authorizer.AuthorizerId"
+        // instead of the real id.
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "cfn-apigwv2-authz-getatt-api", "ProtocolType": "HTTP" }
+                },
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "Name": "cfn-jwt-authorizer-getatt",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": ["$request.header.Authorization"],
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                },
+                "Integration": {
+                  "Type": "AWS::ApiGatewayV2::Integration",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "IntegrationType": "HTTP_PROXY",
+                    "IntegrationUri": "https://example.com",
+                    "PayloadFormatVersion": "1.0"
+                  }
+                },
+                "Route": {
+                  "Type": "AWS::ApiGatewayV2::Route",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "RouteKey": "GET /hello",
+                    "AuthorizationType": "JWT",
+                    "AuthorizerId": { "Fn::GetAtt": ["Authorizer", "AuthorizerId"] },
+                    "Target": { "Fn::Join": ["/", ["integrations", { "Ref": "Integration" }]] }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "HttpApi" } },
+                "AuthorizerId": { "Value": { "Ref": "Authorizer" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-authorizer-getatt-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+        String authorizerId = apigwOutputValue(createXml, "AuthorizerId");
+
+        // The route's GetAtt resolved to the real authorizer id, not the literal placeholder.
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId));
+    }
+
+    @Test
+    void deleteStack_apiGatewayV2AuthorizerOnNonStackOwnedApiIsRemoved() {
+        // The API is created out-of-band (not by this stack) and referenced by a plain literal
+        // id, the same shape as a template parameter — deliberately not { "Ref": ... } to an
+        // AWS::ApiGatewayV2::Api resource in this stack. This is the scenario the scoped delete
+        // path exists for: AWS::ApiGatewayV2::Api's own delete cascades to its authorizers, which
+        // would make a stack-owned-API test pass even with no delete case for the authorizer at
+        // all. Here the API survives stack deletion, so the authorizer's removal can only be
+        // attributed to the authorizer's own scoped delete case actually running.
+        String apiId = given()
+                .header("X-Amz-Target", "AmazonApiGatewayV2.CreateApi")
+                .contentType(APIGWV2_CONTENT_TYPE)
+                .body("{\"Name\": \"cfn-apigwv2-authz-delete-external-api\", \"ProtocolType\": \"HTTP\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(201)
+                .extract().path("ApiId");
+
+        String template = """
+            {
+              "Resources": {
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": "%s",
+                    "Name": "cfn-jwt-authorizer-delete",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": ["$request.header.Authorization"],
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(apiId);
+
+        String stackName = "cfn-apigwv2-authorizer-delete-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        getAuthorizers(apiId).body("Items.size()", equalTo(1));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The API was never part of the stack, so it (and GetAuthorizers against it) still works
+        // — the authorizer itself must be gone.
+        getAuthorizers(apiId).body("Items.size()", equalTo(0));
+    }
+
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
 
     @Test
