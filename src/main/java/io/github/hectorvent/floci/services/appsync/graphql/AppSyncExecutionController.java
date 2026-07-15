@@ -93,8 +93,7 @@ public class AppSyncExecutionController {
             throw e;
         } catch (RuntimeException e) {
             LOG.errorv(e, "Unexpected error executing GraphQL for API {0}", apiId);
-            return graphqlError(500, "InternalFailure",
-                    e.getMessage() != null ? e.getMessage() : "InternalFailure");
+            return graphqlError(500, "InternalFailure", "InternalFailure");
         }
     }
 
