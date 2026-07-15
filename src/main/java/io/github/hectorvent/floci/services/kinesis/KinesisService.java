@@ -112,6 +112,13 @@ public class KinesisService {
                 .toList();
     }
 
+    public List<KinesisStream> listStreamDetails(String region) {
+        String prefix = region + "::";
+        return store.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(KinesisStream::getStreamName))
+                .toList();
+    }
+
     public KinesisStream describeStream(String streamName, String region) {
         return resolveStream(streamName, region);
     }
@@ -475,6 +482,16 @@ public class KinesisService {
         response.put("NextShardIterator", nextIterator);
         response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
         return response;
+    }
+
+    public List<KinesisRecord> peekRecords(String streamName, String shardId, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        return stream.getShards().stream()
+                .filter(shard -> shardId == null || shardId.isBlank() || shard.getShardId().equals(shardId))
+                .flatMap(shard -> shard.getRecords().stream())
+                .sorted(Comparator.comparing(KinesisRecord::getApproximateArrivalTimestamp,
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
     }
 
     /**
