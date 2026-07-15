@@ -654,13 +654,25 @@ public class ApiGatewayService {
 
     public ApiKey createApiKey(String region, Map<String, Object> request) {
         ApiKey apiKey = new ApiKey();
-        apiKey.setId(shortId(10));
         apiKey.setName((String) request.get("name"));
-        apiKey.setValue((String) request.getOrDefault("value", UUID.randomUUID().toString().replace("-", "")));
         apiKey.setEnabled(!Boolean.FALSE.equals(request.get("enabled")));
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
         apiKey.setDescription((String) request.get("description"));
+
+        boolean generateDistinctId = !Boolean.FALSE.equals(request.get("generateDistinctId"));
+        String suppliedValue = (String) request.get("value");
+
+        if (!generateDistinctId) {
+            String sharedValue = (suppliedValue != null && !suppliedValue.isBlank())
+                    ? suppliedValue
+                    : UUID.randomUUID().toString().replace("-", "");
+            apiKey.setId(sharedValue);
+            apiKey.setValue(sharedValue);
+        } else {
+            apiKey.setId(shortId(10));
+            apiKey.setValue(suppliedValue != null ? suppliedValue : UUID.randomUUID().toString().replace("-", ""));
+        }
 
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {

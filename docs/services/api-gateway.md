@@ -30,6 +30,10 @@ Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
+### API Key Behaviour Notes
+
+`generateDistinctId` is honoured: when `false`, the key's `id` and `value` are set to the same string (caller-supplied `value` if provided, otherwise a generated UUID-derived string). When `true` or absent (the default), `id` and `value` are always distinct.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:

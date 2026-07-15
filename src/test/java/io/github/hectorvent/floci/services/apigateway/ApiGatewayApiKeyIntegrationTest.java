@@ -168,4 +168,26 @@ class ApiGatewayApiKeyIntegrationTest {
                 .body("__type", equalTo("NotFoundException"))
                 .body("message", equalTo("Invalid API Key identifier specified"));
     }
+
+    @Test @Order(12)
+    void createApiKey_generateDistinctIdFalse_idEqualsValue() {
+        String body = """
+                {"name":"shared-id-key","enabled":true,"generateDistinctId":false}
+                """;
+        String sharedId = given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/apikeys")
+                .then()
+                .statusCode(201)
+                .body("id", notNullValue())
+                .extract().path("id");
+
+        given()
+                .when().get("/apikeys/" + sharedId + "?includeValue=true")
+                .then()
+                .statusCode(200)
+                .body("id", equalTo(sharedId))
+                .body("value", equalTo(sharedId));
+    }
 }
