@@ -1260,10 +1260,12 @@ public class CognitoService {
 
             var signupDeliveryTarget = resolveSignUpDeliveryTarget(pool, user);
 
-            if ("email".equals(signupDeliveryTarget.attributeName())) {
-                user.getAttributes().put("email_verified", "true");
-            } else if ("phone_number".equals(signupDeliveryTarget.attributeName())) {
-                user.getAttributes().put("phone_number_verified", "true");
+            if (signupDeliveryTarget != null) {
+                if ("email".equals(signupDeliveryTarget.attributeName())) {
+                    user.getAttributes().put("email_verified", "true");
+                } else if ("phone_number".equals(signupDeliveryTarget.attributeName())) {
+                    user.getAttributes().put("phone_number_verified", "true");
+                }
             }
         }
         user.setUserStatus("CONFIRMED");
