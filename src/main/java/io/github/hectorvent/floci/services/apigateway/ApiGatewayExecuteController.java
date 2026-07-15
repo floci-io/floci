@@ -271,13 +271,17 @@ public class ApiGatewayExecuteController {
         ApiGatewayResource matched = null;
         MethodConfig method = null;
         for (ApiGatewayResource r : matchedResources) {
-            MethodConfig m = r.getResourceMethods().get(httpMethod.toUpperCase());
-            if (m == null) {
-                m = r.getResourceMethods().get("ANY");
-            }
-            if (m != null) {
-                matched = r;
-                method = m;
+            if (r.getResourceMethods() != null && !r.getResourceMethods().isEmpty()) {
+                MethodConfig m = r.getResourceMethods().get(httpMethod.toUpperCase());
+                if (m == null) {
+                    m = r.getResourceMethods().get("ANY");
+                }
+                if (m != null) {
+                    matched = r;
+                    method = m;
+                }
+                // Once we match a path that has methods configured, we must not fall back
+                // to less specific sibling resources (e.g. /{proxy+}), even on method mismatch.
                 break;
             }
         }

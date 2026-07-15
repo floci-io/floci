@@ -89,6 +89,45 @@ class ApiGatewayRoutingFallthroughIntegrationTest {
                 .extract().path("id");
 
         // NOTE: We do NOT create any methods on the /widgets resource! It is method-less.
+
+        // Create /devices resource
+        String devicesResourceId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"devices\"}")
+                .when().post("/restapis/" + apiId + "/resources/" + rootId)
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+
+        // Create method POST on /devices
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"authorizationType\":\"NONE\"}")
+                .when().put("/restapis/" + apiId + "/resources/" + devicesResourceId + "/methods/POST")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"responseParameters\":{}}")
+                .when().put("/restapis/" + apiId + "/resources/" + devicesResourceId + "/methods/POST/responses/200")
+                .then()
+                .statusCode(201);
+
+        // Put MOCK integration for /devices POST
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"type\":\"MOCK\",\"requestTemplates\":{\"application/json\":\"{\\\"statusCode\\\": 200}\"}}")
+                .when().put("/restapis/" + apiId + "/resources/" + devicesResourceId + "/methods/POST/integration")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"selectionPattern\":\"\",\"responseTemplates\":{\"application/json\":\"{\\\"matched\\\":\\\"devices-post\\\"}\"}}")
+                .when().put("/restapis/" + apiId + "/resources/" + devicesResourceId + "/methods/POST/integration/responses/200")
+                .then()
+                .statusCode(201);
     }
 
     @Test @Order(3)
@@ -144,6 +183,30 @@ class ApiGatewayRoutingFallthroughIntegrationTest {
     }
 
     @Test @Order(7)
+    void getDevicesReturns405() {
+        // Request GET /devices.
+        // /devices has POST but no GET, so it should return 405 Method Not Allowed,
+        // and NOT fall back to /{proxy+} ANY.
+        given()
+                .when().get("/execute-api/" + apiId + "/test/devices")
+                .then()
+                .statusCode(405)
+                .body("message", equalTo("Method Not Allowed"));
+    }
+
+    @Test @Order(8)
+    void postDevicesSucceeds() {
+        // Request POST /devices.
+        // /devices has POST, so it should succeed.
+        given()
+                .contentType(ContentType.JSON)
+                .when().post("/execute-api/" + apiId + "/test/devices")
+                .then()
+                .statusCode(200)
+                .body("matched", equalTo("devices-post"));
+    }
+
+    @Test @Order(9)
     void cleanup() {
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
     }
