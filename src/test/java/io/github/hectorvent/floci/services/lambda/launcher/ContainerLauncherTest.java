@@ -19,10 +19,13 @@ import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.CopyArchiveFromContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
-import com.github.dockerjava.api.model.StreamType;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -32,6 +35,7 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -572,39 +576,64 @@ class ContainerLauncherTest {
         verify(lifecycleManager, never()).startCreated(any(), any());
     }
 
-    /** Stubs container-123's /opt/extensions listing to return the given binary names (newline-joined
-     *  stdout, matching `ls -1`), and stubs exec of each resulting /opt/extensions/<name> path to
-     *  succeed immediately. Returns the exec-cmd mock passed to the listing (ls) call, if the caller
-     *  wants to verify the exact command used to discover extensions. */
-    private ExecCreateCmd stubExtensionDiscovery(String... binaryNames) {
-        String listing = String.join("\n", binaryNames);
+    /** Builds a tar archive matching what {@code docker cp}/{@code copyArchiveFromContainerCmd}
+     *  returns for a directory: the directory itself as a leading entry, then each name as a direct
+     *  child, executable. */
+    private static byte[] tarOf(String... binaryNames) throws IOException {
+        var entries = new java.util.LinkedHashMap<String, Boolean>();
+        for (String name : binaryNames) {
+            entries.put(name, true);
+        }
+        return tarOfRaw(entries);
+    }
 
-        ExecCreateCmd listCmd = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
-        ExecCreateCmdResponse listResponse = mock(ExecCreateCmdResponse.class);
-        when(listResponse.getId()).thenReturn("exec-list");
-        when(listCmd.exec()).thenReturn(listResponse);
-
-        ExecStartCmd listStart = mock(ExecStartCmd.class);
-        when(listStart.exec(any())).thenAnswer(invocation -> {
-            @SuppressWarnings("unchecked")
-            ResultCallback<Frame> callback = invocation.getArgument(0);
-            if (!listing.isEmpty()) {
-                callback.onNext(new Frame(StreamType.STDOUT, (listing + "\n").getBytes()));
+    /** Like {@link #tarOf}, but lets each entry's executable bit be controlled individually
+     *  (name -> executable), so filtering logic (non-executable files, nested paths) can be
+     *  exercised. Names containing "/" are written as-is (not prefixed), to model entries nested
+     *  more than one level below the extensions directory. */
+    private static byte[] tarOfRaw(java.util.Map<String, Boolean> nameToExecutable) throws IOException {
+        var bos = new java.io.ByteArrayOutputStream();
+        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+            TarArchiveEntry dir = new TarArchiveEntry("extensions/");
+            tar.putArchiveEntry(dir);
+            tar.closeArchiveEntry();
+            for (var e : nameToExecutable.entrySet()) {
+                TarArchiveEntry entry = new TarArchiveEntry("extensions/" + e.getKey());
+                entry.setMode(e.getValue() ? 0100755 : 0100644); // executable vs. non-executable regular file
+                entry.setSize(0);
+                tar.putArchiveEntry(entry);
+                tar.closeArchiveEntry();
             }
-            callback.onComplete();
-            return callback;
-        });
-        when(dockerClient.execStartCmd("exec-list")).thenReturn(listStart);
+        }
+        return bos.toByteArray();
+    }
 
-        // The first execCreateCmd call (launchExtensions' ls probe) returns listCmd; every
-        // subsequent call (one per discovered extension binary) gets its own fresh mock.
-        when(dockerClient.execCreateCmd("container-123"))
-                .thenReturn(listCmd)
+    /** Stubs container-123's /opt/extensions listing (via the Docker archive API, not exec) to
+     *  return the given binary names, and stubs exec of each resulting /opt/extensions/<name> path
+     *  to succeed immediately. */
+    private List<ExecCreateCmd> stubExtensionDiscovery(String... binaryNames) throws IOException {
+        return stubExtensionDiscoveryFromTar(tarOf(binaryNames));
+    }
+
+    /** Same as {@link #stubExtensionDiscovery}, but takes a caller-built tar so tests can exercise
+     *  {@code listExtensionBinaries}' entry filtering (non-executable files, nested paths) rather
+     *  than only the convenience all-executable-direct-children shape. Returns the {@code ExecCreateCmd}
+     *  mock for each launched binary, in launch order — pass it to {@link #capturedLaunchPaths} after
+     *  calling {@code launch()} to assert on exactly which discovered names were (and weren't) launched. */
+    private List<ExecCreateCmd> stubExtensionDiscoveryFromTar(byte[] tar) {
+        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class);
+        when(copyCmd.exec()).thenReturn(new java.io.ByteArrayInputStream(tar));
+        when(dockerClient.copyArchiveFromContainerCmd("container-123", "/opt/extensions"))
+                .thenReturn(copyCmd);
+
+        List<ExecCreateCmd> launchCmds = new java.util.ArrayList<>();
+        lenient().when(dockerClient.execCreateCmd("container-123"))
                 .thenAnswer(invocation -> {
                     ExecCreateCmd launchCmd = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
                     ExecCreateCmdResponse launchResponse = mock(ExecCreateCmdResponse.class);
                     when(launchResponse.getId()).thenReturn("exec-launch-" + java.util.UUID.randomUUID());
                     when(launchCmd.exec()).thenReturn(launchResponse);
+                    launchCmds.add(launchCmd);
                     return launchCmd;
                 });
         lenient().when(dockerClient.execStartCmd(argThat(id -> id != null && id.startsWith("exec-launch-"))))
@@ -618,7 +647,21 @@ class ContainerLauncherTest {
                     });
                     return start;
                 });
-        return listCmd;
+        // launcher.launch(fn) populates this list after this method returns.
+        return launchCmds;
+    }
+
+    /** Extracts the single command-line argument each mock in {@code launchCmds} was called with
+     *  via {@code withCmd(String...)}, in call order — the {@code /opt/extensions/<name>} path
+     *  each discovered extension binary was launched with. */
+    private static List<String> capturedLaunchPaths(List<ExecCreateCmd> launchCmds) {
+        List<String> paths = new java.util.ArrayList<>();
+        for (ExecCreateCmd cmd : launchCmds) {
+            ArgumentCaptor<String[]> captor = ArgumentCaptor.forClass(String[].class);
+            verify(cmd).withCmd(captor.capture());
+            paths.add(captor.getValue()[0]);
+        }
+        return paths;
     }
 
     @Test
@@ -632,19 +675,24 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        // The extension binary was execed by its full /opt/extensions path, after the container
-        // was started (real AWS starts extensions once the container is up, alongside the runtime).
-        ArgumentCaptor<String> execCmdCaptor = ArgumentCaptor.forClass(String.class);
-        verify(dockerClient, atLeast(2)).execCreateCmd(eq("container-123"));
+        // The extension binary was discovered via the archive API and execed by its full
+        // /opt/extensions path, after the container was started (real AWS starts extensions once
+        // the container is up, alongside the runtime).
+        verify(dockerClient).copyArchiveFromContainerCmd("container-123", "/opt/extensions");
+        verify(dockerClient, atLeastOnce()).execCreateCmd(eq("container-123"));
 
         InOrder inOrder = inOrder(lifecycleManager, dockerClient);
         inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
+        inOrder.verify(dockerClient).copyArchiveFromContainerCmd("container-123", "/opt/extensions");
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
     }
 
     @Test
     void launchFunction_noExtensionsDirectory_doesNotFailLaunch() throws Exception {
-        stubExtensionDiscovery(); // empty /opt/extensions listing
+        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class);
+        when(copyCmd.exec()).thenThrow(new NotFoundException("no such directory"));
+        when(dockerClient.copyArchiveFromContainerCmd("container-123", "/opt/extensions"))
+                .thenReturn(copyCmd);
 
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("no-extension-fn");
@@ -653,8 +701,42 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        // The discovery probe still runs (best-effort ls), but nothing beyond it — no extension
-        // binary path is ever execed since the listing was empty.
-        verify(dockerClient, times(1)).execCreateCmd("container-123");
+        // The discovery probe still runs (best-effort), but nothing beyond it — no extension
+        // binary path is ever execed since the directory doesn't exist.
+        verify(dockerClient, never()).execCreateCmd("container-123");
+    }
+
+    @Test
+    void launchFunction_extensionDiscovery_filtersNonExecutableAndNestedEntries() throws Exception {
+        var entries = new java.util.LinkedHashMap<String, Boolean>();
+        entries.put("lambda-adapter", true);           // direct child, executable: launched
+        entries.put("README.md", false);                // direct child, not executable: skipped
+        entries.put("nested/inner-binary", true);        // nested (not a direct child): skipped
+        List<ExecCreateCmd> launchCmds = stubExtensionDiscoveryFromTar(tarOfRaw(entries));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("mixed-extensions-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        assertEquals(List.of("/opt/extensions/lambda-adapter"), capturedLaunchPaths(launchCmds),
+                "only the direct, executable entry should be launched");
+    }
+
+    @Test
+    void launchFunction_multipleExtensionBinaries_allDiscoveredAndLaunched() throws Exception {
+        List<ExecCreateCmd> launchCmds = stubExtensionDiscoveryFromTar(tarOf("lambda-adapter", "otel-collector"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("multi-extension-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        assertEquals(List.of("/opt/extensions/lambda-adapter", "/opt/extensions/otel-collector"),
+                capturedLaunchPaths(launchCmds));
     }
 }
