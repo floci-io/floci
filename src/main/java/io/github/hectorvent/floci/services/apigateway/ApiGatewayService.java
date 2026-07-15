@@ -708,10 +708,18 @@ public class ApiGatewayService {
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = request.get("tags") instanceof Map<?, ?> m
+                ? (Map<String, String>) m : new HashMap<>();
+
+        String customId = tags.get("_custom_id_");
+        String planId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
+
         UsagePlan plan = new UsagePlan();
-        plan.setId(shortId(10));
+        plan.setId(planId);
         plan.setName((String) request.get("name"));
         plan.setDescription((String) request.get("description"));
+        plan.setTags(tags);
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");
