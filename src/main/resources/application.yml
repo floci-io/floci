@@ -56,7 +56,6 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
-      # graphql-java IdGenerator holds a static Random; AppSync execute makes it reachable for native builds
       - --initialize-at-run-time=graphql.util.IdGenerator
 
 
