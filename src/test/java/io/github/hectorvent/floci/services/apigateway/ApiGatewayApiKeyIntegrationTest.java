@@ -190,4 +190,48 @@ class ApiGatewayApiKeyIntegrationTest {
                 .body("id", equalTo(sharedId))
                 .body("value", equalTo(sharedId));
     }
+
+    @Test @Order(13)
+    void createApiKey_generateDistinctIdAbsent_idEqualsValue() {
+        String body = """
+                {"name":"default-id-key","enabled":true}
+                """;
+        String sharedId = given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/apikeys")
+                .then()
+                .statusCode(201)
+                .body("id", notNullValue())
+                .extract().path("id");
+
+        given()
+                .when().get("/apikeys/" + sharedId + "?includeValue=true")
+                .then()
+                .statusCode(200)
+                .body("id", equalTo(sharedId))
+                .body("value", equalTo(sharedId));
+    }
+
+    @Test @Order(14)
+    void createApiKey_generateDistinctIdTrue_idDistinctFromValue() {
+        String body = """
+                {"name":"distinct-id-key","enabled":true,"generateDistinctId":true}
+                """;
+        String keyId = given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/apikeys")
+                .then()
+                .statusCode(201)
+                .body("id", notNullValue())
+                .extract().path("id");
+
+        given()
+                .when().get("/apikeys/" + keyId + "?includeValue=true")
+                .then()
+                .statusCode(200)
+                .body("id", equalTo(keyId))
+                .body("value", not(equalTo(keyId)));
+    }
 }

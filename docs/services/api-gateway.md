@@ -32,7 +32,19 @@ Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
 ### API Key Behaviour Notes
 
-`generateDistinctId` is honoured: when `false`, the key's `id` and `value` are set to the same string (caller-supplied `value` if provided, otherwise a generated UUID-derived string). When `true` or absent (the default), `id` and `value` are always distinct.
+#### `generateDistinctId`
+
+Controls whether the key's `id` and `value` fields are distinct. AWS's undocumented default behaviour is that they are **the same string** unless `generateDistinctId=true` is explicitly requested.
+
+| `generateDistinctId` | `id` | `value` |
+|---|---|---|
+| absent (default) | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `false` | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `true` | opaque short token (`shortId`) | caller-supplied `value`, or a generated UUID-derived string |
+
+When `generateDistinctId` is absent or `false`, a single shared string is used for both `id` and `value`. If the caller supplies a `value` in the request body, that string is used for both; otherwise a UUID-derived string is generated and assigned to both.
+
+When `generateDistinctId=true`, `id` is set to an opaque short token independent of `value`.
 
 ### Not Implemented
 

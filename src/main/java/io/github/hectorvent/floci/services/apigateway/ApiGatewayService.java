@@ -660,7 +660,7 @@ public class ApiGatewayService {
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
         apiKey.setDescription((String) request.get("description"));
 
-        boolean generateDistinctId = !Boolean.FALSE.equals(request.get("generateDistinctId"));
+        boolean generateDistinctId = Boolean.TRUE.equals(request.get("generateDistinctId"));
         String suppliedValue = (String) request.get("value");
 
         if (!generateDistinctId) {
