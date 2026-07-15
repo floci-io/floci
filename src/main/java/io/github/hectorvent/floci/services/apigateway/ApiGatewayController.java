@@ -1662,6 +1662,9 @@ public class ApiGatewayController {
         node.put("name", k.getName());
         node.put("value", k.getValue());
         node.put("enabled", k.isEnabled());
+        if (k.getDescription() != null) {
+            node.put("description", k.getDescription());
+        }
         if (k.getTags() != null && !k.getTags().isEmpty()) {
             ObjectNode tags = node.putObject("tags");
             k.getTags().forEach(tags::put);
