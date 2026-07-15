@@ -112,6 +112,17 @@ public class CloudFormationService {
         stackBackend.deleteForAccount(storageAccount, key(stackName, region));
     }
 
+    /**
+     * Sets a stack's termination protection (CloudFormation {@code UpdateTerminationProtection}).
+     * Returns the stack so the caller can echo its {@code StackId}.
+     */
+    public Stack updateTerminationProtection(String stackName, boolean enabled, String region) {
+        Stack stack = getStackOrThrow(stackName, region);
+        stack.setEnableTerminationProtection(enabled);
+        persistStack(stack);
+        return stack;
+    }
+
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
     public List<Stack> describeStacks(String stackName, String region) {
@@ -289,6 +300,12 @@ public class CloudFormationService {
         Stack stack = resolveStack(stackName, region);
         if (stack == null) {
             return CompletableFuture.completedFuture(null); // Already gone — no-op
+        }
+        if (stack.isEnableTerminationProtection()) {
+            // Real AWS rejects deletion of a protected stack and leaves it unchanged.
+            throw new AwsException("ValidationError",
+                    "Stack [" + stack.getStackId()
+                            + "] cannot be deleted while TerminationProtection is enabled", 400);
         }
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),

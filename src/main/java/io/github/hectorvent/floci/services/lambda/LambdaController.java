@@ -24,6 +24,8 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriBuilder;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
@@ -79,6 +81,7 @@ public class LambdaController {
     @GET
     @Path("/functions/{functionName}")
     public Response getFunction(@Context HttpHeaders headers,
+                                @Context UriInfo uriInfo,
                                 @PathParam("functionName") String functionName) {
         String region = regionResolver.resolveRegion(headers);
         LambdaFunction fn = lambdaService.getFunction(region, functionName);
@@ -91,8 +94,13 @@ public class LambdaController {
             code.put("ImageUri", fn.getImageUri());
             code.put("ResolvedImageUri", fn.getImageUri());
         } else {
-            code.put("Location", "https://awslambda-" + region + "-tasks.s3." + region
-                    + ".amazonaws.com/" + fn.getFunctionName());
+            // Path-style URL to the package in Floci's own S3, built from the
+            // request so it targets the same endpoint the client is talking to.
+            String location = UriBuilder.fromUri(uriInfo.getBaseUri())
+                    .path(LambdaService.tasksBucketName(region))
+                    .path(LambdaService.codeObjectKey(fn))
+                    .build().toString();
+            code.put("Location", location);
             code.put("RepositoryType", "S3");
         }
 
@@ -322,6 +330,17 @@ public class LambdaController {
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
         ArrayNode responseTypes = node.putArray("FunctionResponseTypes");
+
+        if (esm.getBisectBatchOnFunctionError() != null) {
+            node.put("BisectBatchOnFunctionError", esm.getBisectBatchOnFunctionError());
+        }
+
+        if (esm.getDestinationConfig() != null && esm.getDestinationConfig().getOnFailure() != null) {
+            ObjectNode destinationConfig = node.putObject("DestinationConfig");
+            ObjectNode onFailure = destinationConfig.putObject("OnFailure");
+            onFailure.put("Destination", esm.getDestinationConfig().getOnFailure().getDestination());
+        }
+
         if (esm.getFunctionResponseTypes() != null) {
             esm.getFunctionResponseTypes().forEach(responseTypes::add);
         }

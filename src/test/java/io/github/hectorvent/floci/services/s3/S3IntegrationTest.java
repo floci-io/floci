@@ -87,7 +87,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-crc64nvme", notNullValue())
+            .header("x-amz-checksum-crc64nvme", nullValue())
             .body(equalTo("Hello World from S3!"));
     }
 
@@ -118,7 +118,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-crc64nvme", notNullValue());
+            .header("x-amz-checksum-crc64nvme", nullValue());
     }
 
     @Test
@@ -204,6 +204,7 @@ class S3IntegrationTest {
 
         // Verify the copy
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting-copy.txt")
         .then()
@@ -241,6 +242,7 @@ class S3IntegrationTest {
 
         // Verify the copy inherits the source checksum (CRC64NVME)
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting-copy-no-override.txt")
         .then()
@@ -274,6 +276,7 @@ class S3IntegrationTest {
 
         // Verify the source object has a SHA256 checksum
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/sha256-source.txt")
         .then()
@@ -293,6 +296,7 @@ class S3IntegrationTest {
 
         // Verify the copy preserves the source's SHA256 checksum
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/sha256-copy.txt")
         .then()
@@ -533,6 +537,62 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(118)
+    void getObjectWithChecksumModeReturnsChecksum() {
+        given()
+            .when()
+            .put("/checksum-mode-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("Hello World from S3!")
+        .when()
+            .put("/checksum-mode-bucket/greeting.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .get("/checksum-mode-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given().delete("/checksum-mode-bucket/greeting.txt");
+        given().delete("/checksum-mode-bucket");
+    }
+
+    @Test
+    @Order(119)
+    void headObjectWithChecksumModeReturnsChecksum() {
+        given()
+            .when()
+            .put("/checksum-mode-head-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("Hello World from S3!")
+        .when()
+            .put("/checksum-mode-head-bucket/greeting.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .head("/checksum-mode-head-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given().delete("/checksum-mode-head-bucket/greeting.txt");
+        given().delete("/checksum-mode-head-bucket");
+    }
+
+    @Test
     @Order(27)
     void getObjectWithFullRange() {
         given()
@@ -694,11 +754,42 @@ class S3IntegrationTest {
             .header("Content-Length", equalTo("0"))
             .header("Accept-Ranges", equalTo("bytes"))
             .header("x-amz-meta-kind", equalTo("empty"))
+            .header("x-amz-checksum-crc64nvme", nullValue())
             .body(equalTo(""));
 
         given()
         .when()
             .delete("/test-bucket/empty.txt")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(207)
+    void getObjectWithSuffixRangeForEmptyObjectAndChecksumModeIncludesChecksum() {
+        // The empty-object suffix-range path returns via fullObjectResponse (a full 200, not
+        // a 206), so it must honor x-amz-checksum-mode like any other full-object response.
+        given()
+            .header("x-amz-meta-kind", "empty")
+            .body(new byte[0])
+        .when()
+            .put("/test-bucket/empty-checksum.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Range", "bytes=-13")
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .get("/test-bucket/empty-checksum.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Length", equalTo("0"))
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given()
+        .when()
+            .delete("/test-bucket/empty-checksum.txt")
         .then()
             .statusCode(204);
     }
@@ -1853,6 +1944,35 @@ class S3IntegrationTest {
         .then()
             .statusCode(404)
             .body(containsString("NoSuchPublicAccessBlockConfiguration"));
+    }
+
+    @Test
+    @Order(104)
+    void malformedAuthorizationHeaderIsIgnoredWhenAuthEnforcementDisabled() {
+        String bucket = "auth-disabled-bucket";
+        String key = "greeting.txt";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("Hello World from S3!").when().put("/" + bucket + "/" + key).then().statusCode(200);
+        try {
+            given()
+                .header("Authorization", "not-a-valid-signature")
+            .when()
+                .get("/" + bucket + "/" + key)
+            .then()
+                .statusCode(200)
+                .body(equalTo("Hello World from S3!"));
+
+            given()
+                .header("Authorization", "not-a-valid-signature")
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>" + key + "</Key>"));
+        } finally {
+            given().when().delete("/" + bucket + "/" + key);
+            given().when().delete("/" + bucket);
+        }
     }
 
     // --- ListObjectsV2 pagination ---

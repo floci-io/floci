@@ -163,4 +163,215 @@ class S3AclIntegrationTest {
             .body(containsString("InvalidArgument"))
             .body(containsString("Unsupported x-amz-acl value"));
     }
+
+    // Regression coverage for PutObjectAcl/PutBucketAcl not reading canned/explicit ACL headers:
+    // AWS SDKs send canned and explicit-grant ACLs to the ?acl subresource as headers with an
+    // EMPTY body (there is no XML for those forms - only for a raw AccessControlPolicy document).
+    // Before this fix, the empty body was stored verbatim as the object's ACL, and the next
+    // GetObjectAcl returned that empty string, which SDK XML parsers reject outright.
+
+    @Test
+    @Order(8)
+    void putObjectAclAppliesCannedAclFromHeaderWithEmptyBody() {
+        given()
+            .body("acl subresource body")
+        .when()
+            .put("/" + BUCKET + "/acl-subresource.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-acl", "public-read")
+        .when()
+            .put("/" + BUCKET + "/acl-subresource.txt?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/acl-subresource.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(ALL_USERS_GROUP_URI))
+            .body(containsString("<Permission>READ</Permission>"))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
+
+    @Test
+    @Order(9)
+    void putObjectAclBucketOwnerFullControlReplacesPriorGrants() {
+        given()
+            .header("x-amz-acl", "public-read")
+            .body("owner-full-control target")
+        .when()
+            .put("/" + BUCKET + "/owner-full-control.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/owner-full-control.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(ALL_USERS_GROUP_URI));
+
+        given()
+            .header("x-amz-acl", "bucket-owner-full-control")
+        .when()
+            .put("/" + BUCKET + "/owner-full-control.txt?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/owner-full-control.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(ALL_USERS_GROUP_URI)))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
+
+    @Test
+    @Order(10)
+    void putBucketAclAppliesCannedAclFromHeaderWithEmptyBody() {
+        given()
+            .header("x-amz-acl", "public-read")
+        .when()
+            .put("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(ALL_USERS_GROUP_URI))
+            .body(containsString("<Permission>READ</Permission>"));
+    }
+
+    // Regression coverage for explicit ACL grant headers (x-amz-grant-*) being ignored entirely
+    // on PutObject/CopyObject - previously only canned ACLs (x-amz-acl) were applied.
+
+    @Test
+    @Order(11)
+    void putObjectAppliesExplicitGrantReadHeaderToAllUsersGroup() {
+        given()
+            .header("x-amz-grant-read", "uri=\"" + ALL_USERS_GROUP_URI + "\"")
+            .body("explicit grant body")
+        .when()
+            .put("/" + BUCKET + "/explicit-grant-put.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/explicit-grant-put.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(ALL_USERS_GROUP_URI))
+            .body(containsString("<Permission>READ</Permission>"))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
+
+    @Test
+    @Order(12)
+    void copyObjectAppliesExplicitGrantReadHeaderToAllUsersGroup() {
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/copy-source.txt")
+            .header("x-amz-grant-read", "uri=\"" + ALL_USERS_GROUP_URI + "\"")
+        .when()
+            .put("/" + BUCKET + "/explicit-grant-copy.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/explicit-grant-copy.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(ALL_USERS_GROUP_URI))
+            .body(containsString("<Permission>READ</Permission>"));
+    }
+
+    @Test
+    @Order(13)
+    void putObjectAppliesExplicitGrantHeaderWithMultipleGrantees() {
+        given()
+            .header("x-amz-grant-read", "uri=\"" + ALL_USERS_GROUP_URI + "\", uri=\"" + AUTHENTICATED_USERS_GROUP_URI + "\"")
+            .body("multi-grantee body")
+        .when()
+            .put("/" + BUCKET + "/explicit-grant-multi.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/explicit-grant-multi.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(ALL_USERS_GROUP_URI))
+            .body(containsString(AUTHENTICATED_USERS_GROUP_URI));
+    }
+
+    @Test
+    @Order(14)
+    void putObjectRejectsExplicitGrantByEmailAddress() {
+        given()
+            .header("x-amz-grant-read", "emailAddress=\"someone@example.com\"")
+            .body("unsupported grantee")
+        .when()
+            .put("/" + BUCKET + "/explicit-grant-email.txt")
+        .then()
+            .statusCode(501)
+            .body(containsString("NotImplemented"));
+    }
+
+    // Regression coverage for a second empty-body pitfall found in review: calling PutObjectAcl/
+    // PutBucketAcl with neither a canned/explicit ACL header NOR a body must not store the empty
+    // body as the ACL (that would break the next GetObjectAcl/GetBucketAcl the same way the
+    // header-with-empty-body bug did).
+
+    @Test
+    @Order(15)
+    void putObjectAclWithNoHeadersAndNoBodyKeepsDefaultAcl() {
+        given()
+            .body("acl no-op target")
+        .when()
+            .put("/" + BUCKET + "/acl-noop.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .put("/" + BUCKET + "/acl-noop.txt?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/acl-noop.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(ALL_USERS_GROUP_URI)))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
+
+    @Test
+    @Order(16)
+    void putBucketAclWithNoHeadersAndNoBodyKeepsDefaultAcl() {
+        given()
+        .when()
+            .put("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(ALL_USERS_GROUP_URI)))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
 }

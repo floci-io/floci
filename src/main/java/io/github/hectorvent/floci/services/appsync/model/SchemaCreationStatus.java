@@ -10,10 +10,14 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 public class SchemaCreationStatus {
     private SchemaCreationStatusType status;
     private String details;
+    private String accountId;
 
     public SchemaCreationStatusType getStatus() { return status; }
     public void setStatus(SchemaCreationStatusType status) { this.status = status; }
 
     public String getDetails() { return details; }
     public void setDetails(String details) { this.details = details; }
+
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
 }

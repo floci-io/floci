@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
+import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
+import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -11,7 +14,6 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -21,7 +23,9 @@ import java.util.Map;
 /**
  * EKS REST-JSON controller.
  *
- * <p>EKS uses standard HTTP verbs with JSON bodies — not JSON 1.1 (X-Amz-Target) or Query protocol.
+ * <p>
+ * EKS uses standard HTTP verbs with JSON bodies — not JSON 1.1 (X-Amz-Target)
+ * or Query protocol.
  */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -44,8 +48,7 @@ public class EksController {
 
     @GET
     @Path("/clusters")
-    public Response listClusters(@QueryParam("nextToken") String nextToken,
-                                 @QueryParam("maxResults") Integer maxResults) {
+    public Response listClusters() {
         List<String> clusterNames = eksService.listClusters();
         return Response.ok(Map.of("clusters", clusterNames)).build();
     }
@@ -64,37 +67,65 @@ public class EksController {
         return Response.ok(Map.of("cluster", cluster)).build();
     }
 
-    // Managed node groups. These explicit routes outrank S3's path-style catch-all
-    // (@Path("/{bucket}/{key: .+}")), which previously swallowed these paths (issue #1137).
-
+    // Keep these concrete EKS resource paths declared explicitly so they outrank
+    // the S3 catch-all route; see issue #1137.
     @POST
     @Path("/clusters/{name}/node-groups")
-    public Response createNodegroup(@PathParam("name") String name, Nodegroup request) {
-        Nodegroup nodegroup = eksService.createNodegroup(name, request);
-        return Response.ok(Map.of("nodegroup", nodegroup)).build();
+    public Response createNodeGroup(@PathParam("name") String name, CreateNodeGroupRequest request) {
+        Nodegroup nodeGroup = eksService.createNodeGroup(name, request);
+        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
     }
 
     @GET
     @Path("/clusters/{name}/node-groups")
-    public Response listNodegroups(@PathParam("name") String name) {
-        List<String> nodegroups = eksService.listNodegroups(name);
-        return Response.ok(Map.of("nodegroups", nodegroups)).build();
+    public Response listNodeGroups(@PathParam("name") String name) {
+        List<String> nodeGroupNames = eksService.listNodeGroups(name);
+        return Response.ok(Map.of("nodegroups", nodeGroupNames)).build();
     }
 
     @GET
     @Path("/clusters/{name}/node-groups/{nodegroupName}")
-    public Response describeNodegroup(@PathParam("name") String name,
-                                      @PathParam("nodegroupName") String nodegroupName) {
-        Nodegroup nodegroup = eksService.describeNodegroup(name, nodegroupName);
-        return Response.ok(Map.of("nodegroup", nodegroup)).build();
+    public Response describeNodeGroup(@PathParam("name") String name,
+            @PathParam("nodegroupName") String nodegroupName) {
+        Nodegroup nodeGroup = eksService.describeNodeGroup(name, nodegroupName);
+        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
     }
 
     @DELETE
     @Path("/clusters/{name}/node-groups/{nodegroupName}")
-    public Response deleteNodegroup(@PathParam("name") String name,
-                                    @PathParam("nodegroupName") String nodegroupName) {
-        Nodegroup nodegroup = eksService.deleteNodegroup(name, nodegroupName);
-        return Response.ok(Map.of("nodegroup", nodegroup)).build();
+    public Response deleteNodeGroup(@PathParam("name") String name,
+            @PathParam("nodegroupName") String nodegroupName) {
+        Nodegroup nodeGroup = eksService.deleteNodeGroup(name, nodegroupName);
+        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
     }
 
+    @POST
+    @Path("/clusters/{name}/fargate-profiles")
+    public Response createFargateProfile(@PathParam("name") String name, CreateFargateProfileRequest request) {
+        FargateProfile profile = eksService.createFargateProfile(name, request);
+        return Response.ok(Map.of("fargateProfile", profile)).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/fargate-profiles")
+    public Response listFargateProfiles(@PathParam("name") String name) {
+        List<String> profileNames = eksService.listFargateProfiles(name);
+        return Response.ok(Map.of("fargateProfileNames", profileNames)).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/fargate-profiles/{fargateProfileName}")
+    public Response describeFargateProfile(@PathParam("name") String name,
+            @PathParam("fargateProfileName") String fargateProfileName) {
+        FargateProfile profile = eksService.describeFargateProfile(name, fargateProfileName);
+        return Response.ok(Map.of("fargateProfile", profile)).build();
+    }
+
+    @DELETE
+    @Path("/clusters/{name}/fargate-profiles/{fargateProfileName}")
+    public Response deleteFargateProfile(@PathParam("name") String name,
+            @PathParam("fargateProfileName") String fargateProfileName) {
+        FargateProfile profile = eksService.deleteFargateProfile(name, fargateProfileName);
+        return Response.ok(Map.of("fargateProfile", profile)).build();
+    }
 }

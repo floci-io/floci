@@ -130,6 +130,21 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default memory (MB) when the task definition omits it |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
 
+### EFS volume ownership
+
+A task's `efsVolumeConfiguration` volumes are backed by shared local Docker volumes (Floci cannot mount a real EFS file system). A Docker named volume is created `root:root 0755`, so a task whose image runs as a non-root `USER` cannot write it. To emulate an [EFS access point](https://docs.aws.amazon.com/efs/latest/ug/efs-access-points.html)'s `RootDirectory.CreationInfo` and `PosixUser`, configure `floci.storage.efs.*` (all opt-in; the default is a plain named volume, so existing behaviour is unchanged):
+
+| Key (`floci.storage.efs.`) | Env | AWS equivalent | Description |
+|---|---|---|---|
+| `owner-uid` | `FLOCI_STORAGE_EFS_OWNER_UID` | `CreationInfo.OwnerUid` | Owner uid of the volume root (set together with `owner-gid`) |
+| `owner-gid` | `FLOCI_STORAGE_EFS_OWNER_GID` | `CreationInfo.OwnerGid` | Owner gid of the volume root (set together with `owner-uid`) |
+| `root-permissions` | `FLOCI_STORAGE_EFS_ROOT_PERMISSIONS` | `CreationInfo.Permissions` | 3-4 octal digits, e.g. `0777`, or `2775` for the setgid bit |
+| `mount-user` | `FLOCI_STORAGE_EFS_MOUNT_USER` | `PosixUser {Uid,Gid}` | Run mounting containers as `uid[:gid]` |
+| `mount-group-add` | `FLOCI_STORAGE_EFS_MOUNT_GROUP_ADD` | `PosixUser` supplementary | Supplementary gid added to mounting containers |
+| `init-image` | `FLOCI_STORAGE_EFS_INIT_IMAGE` | — | Image for the one-off `chown`/`chmod` of the volume root (default `busybox:stable`) |
+
+`owner-uid` and `owner-gid` must be set together (a partial `CreationInfo` is not valid on AWS). The volume root is initialised once per volume; express the setgid bit through a 4-digit `root-permissions` (e.g. `2775`) so subdirectories inherit the owner gid.
+
 ### Mock mode
 
 Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.

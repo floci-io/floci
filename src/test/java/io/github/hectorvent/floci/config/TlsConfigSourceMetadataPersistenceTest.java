@@ -83,6 +83,8 @@ class TlsConfigSourceMetadataPersistenceTest {
             "Metadata should contain 'localhost.floci.io'");
         assertTrue(metadata.getHostnames().contains("*.localhost.floci.io"),
             "Metadata should contain '*.localhost.floci.io'");
+        assertTrue(metadata.getHostnames().contains("host.docker.internal"),
+            "Metadata should contain 'host.docker.internal'");
     }
 
     /**

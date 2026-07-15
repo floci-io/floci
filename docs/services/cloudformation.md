@@ -12,6 +12,7 @@
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources |
+| `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
 | `DescribeChangeSet` | Get change set details (no computed diff/preview) |
 | `ExecuteChangeSet` | Apply a change set |

@@ -7,11 +7,14 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -63,9 +66,13 @@ class EcsContainerManagerOverridesTest {
         ContainerDetector containerDetector = mock(ContainerDetector.class);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         RegionResolver regionResolver = mock(RegionResolver.class);
+        LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
+        when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
+        SsmService ssmService = mock(SsmService.class);
+        SecretsManagerService secretsManagerService = mock(SecretsManagerService.class);
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver);
+                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService);
     }
 
     @Test

@@ -42,20 +42,24 @@ public class RdsQueryHandler {
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
+        return handle(action, params, null);
+    }
+
+    public Response handle(String action, MultivaluedMap<String, String> params, String region) {
         LOG.infov("RDS action: {0}", action);
         try {
             return switch (action) {
-                case "CreateDBInstance" -> handleCreateDbInstance(params);
+                case "CreateDBInstance" -> handleCreateDbInstance(params, region);
                 case "DescribeDBInstances" -> handleDescribeDbInstances(params);
                 case "DeleteDBInstance" -> handleDeleteDbInstance(params);
                 case "ModifyDBInstance" -> handleModifyDbInstance(params);
                 case "RebootDBInstance" -> handleRebootDbInstance(params);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
-                case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params);
-                case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params);
-                case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params);
+                case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params, region);
+                case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params, region);
+                case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params, region);
                 case "DeleteDBSubnetGroup" -> handleDeleteDbSubnetGroup(params);
-                case "CreateDBCluster" -> handleCreateDbCluster(params);
+                case "CreateDBCluster" -> handleCreateDbCluster(params, region);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DeleteDBCluster" -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster" -> handleModifyDbCluster(params);
@@ -88,7 +92,7 @@ public class RdsQueryHandler {
 
     // ── DB Instances ──────────────────────────────────────────────────────────
 
-    private Response handleCreateDbInstance(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbInstance(MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBInstanceIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue",
@@ -121,10 +125,11 @@ public class RdsQueryHandler {
         }
 
         try {
+            List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags);
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -175,7 +180,9 @@ public class RdsQueryHandler {
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         try {
-            DbInstance instance = service.modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName);
+            List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
+            DbInstance instance = service.modifyDbInstance(
+                    id, newPassword, iamEnabled, dbSubnetGroupName, vpcSecurityGroupIds);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -239,7 +246,7 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleCreateDbSubnetGroup(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbSubnetGroup(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBSubnetGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("MissingParameter",
@@ -248,7 +255,7 @@ public class RdsQueryHandler {
         String description = params.getFirst("DBSubnetGroupDescription");
         List<String> subnetIds = memberList(params, "SubnetIds");
         try {
-            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds);
+            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, region);
             return Response.ok(AwsQueryResponse.envelope("CreateDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -256,10 +263,10 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbSubnetGroups(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbSubnetGroups(MultivaluedMap<String, String> params, String region) {
         String filterName = params.getFirst("DBSubnetGroupName");
         try {
-            Collection<DbSubnetGroup> result = service.listDbSubnetGroups(filterName);
+            Collection<DbSubnetGroup> result = service.listDbSubnetGroups(filterName, region);
             XmlBuilder xml = new XmlBuilder().start("DBSubnetGroups");
             for (DbSubnetGroup group : result) {
                 xml.start("DBSubnetGroup").raw(dbSubnetGroupInnerXml(group)).end("DBSubnetGroup");
@@ -271,7 +278,7 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleModifyDbSubnetGroup(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbSubnetGroup(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBSubnetGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue",
@@ -279,7 +286,7 @@ public class RdsQueryHandler {
         }
         List<String> subnetIds = memberList(params, "SubnetIds");
         try {
-            DbSubnetGroup group = service.modifyDbSubnetGroup(name, subnetIds);
+            DbSubnetGroup group = service.modifyDbSubnetGroup(name, subnetIds, region);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -317,7 +324,7 @@ public class RdsQueryHandler {
 
     // ── DB Clusters ───────────────────────────────────────────────────────────
 
-    private Response handleCreateDbCluster(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbCluster(MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBClusterIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterIdentifier is required.", AwsNamespaces.RDS, 400);
@@ -341,7 +348,7 @@ public class RdsQueryHandler {
         try {
             DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, paramGroupName,
-                    dbSubnetGroupName, availabilityZone, multiAz);
+                    dbSubnetGroupName, availabilityZone, multiAz, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -650,12 +657,7 @@ public class RdsQueryHandler {
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
-               .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
+           .raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
@@ -676,6 +678,29 @@ public class RdsQueryHandler {
         writeTags(xml, i.getTags());
         xml.end("TagList");
         return xml.build();
+    }
+
+    private String vpcSecurityGroupsXml(DbInstance i) {
+        List<String> groupIds = i.getVpcSecurityGroupIds().isEmpty()
+                ? List.of("sg-00000000")
+                : i.getVpcSecurityGroupIds();
+        XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
+        for (String groupId : groupIds) {
+            xml.start("VpcSecurityGroupMembership")
+                    .elem("VpcSecurityGroupId", groupId)
+                    .elem("Status", "active")
+                    .end("VpcSecurityGroupMembership");
+        }
+        return xml.end("VpcSecurityGroups").build();
+    }
+
+    private static List<String> vpcSecurityGroupIds(MultivaluedMap<String, String> params) {
+        List<String> values = memberList(params, "VpcSecurityGroupIds");
+        if (values.isEmpty() && hasMemberKeys(params, "VpcSecurityGroupIds")) {
+            throw new AwsException("InvalidParameterValue",
+                    "VpcSecurityGroupIds must contain at least one non-empty VpcSecurityGroupId.", 400);
+        }
+        return values;
     }
 
     private static String dbParameterGroupsXml(DbInstance instance) {
@@ -812,26 +837,10 @@ public class RdsQueryHandler {
 
     private DbSubnetGroup dbSubnetGroupForInstance(DbInstance instance) {
         String groupName = instance.getDbSubnetGroupName();
-        if (groupName != null && !groupName.isBlank()) {
-            try {
-                DbSubnetGroup group = service.getDbSubnetGroup(groupName);
-                if (group != null) {
-                    return group;
-                }
-            } catch (AwsException ignored) {
-            }
+        if (groupName == null || groupName.isBlank() || "default".equalsIgnoreCase(groupName)) {
+            return fallbackSubnetGroup(instance, "default", "default subnet group");
         }
-        try {
-            DbSubnetGroup group = service.resolveDbSubnetGroupView(groupName);
-            if (group != null) {
-                return group;
-            }
-        } catch (AwsException ignored) {
-        }
-        if (groupName != null && !groupName.isBlank()) {
-            return fallbackSubnetGroup(instance, groupName, "DB subnet group " + groupName);
-        }
-        return fallbackSubnetGroup(instance, "default", "default");
+        return service.getDbSubnetGroup(groupName);
     }
 
     private DbSubnetGroup fallbackSubnetGroup(DbInstance instance, String name, String description) {
@@ -840,6 +849,7 @@ public class RdsQueryHandler {
         fallback.setDescription(description);
         fallback.setVpcId(instance.getVpcId() != null ? instance.getVpcId() : "vpc-00000000");
         fallback.setSubnetGroupStatus("Complete");
+        fallback.setDbSubnetGroupArn(subnetGroupArnForInstance(instance, name));
         Map<String, String> zones = instance.getSubnetAvailabilityZones();
         if (!zones.isEmpty()) {
             fallback.setSubnetIds(List.copyOf(zones.keySet()));
@@ -849,6 +859,18 @@ public class RdsQueryHandler {
             fallback.setSubnetAvailabilityZones(Map.of("subnet-00000000", config.defaultAvailabilityZone()));
         }
         return fallback;
+    }
+
+    private static String subnetGroupArnForInstance(DbInstance instance, String name) {
+        String arn = instance.getDbInstanceArn();
+        if (arn == null || arn.isBlank()) {
+            return null;
+        }
+        String[] parts = arn.split(":", 6);
+        if (parts.length < 6) {
+            return null;
+        }
+        return String.join(":", parts[0], parts[1], parts[2], parts[3], parts[4], "subgrp:" + name);
     }
 
     private String paramGroupInnerXml(DbParameterGroup g) {
@@ -901,12 +923,24 @@ public class RdsQueryHandler {
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
         return params.keySet().stream()
-                .filter(key -> key.matches(java.util.regex.Pattern.quote(baseName)
-                        + "(\\.member|\\.SubnetIdentifier)?\\.\\d+"))
+                .filter(key -> key.matches(memberKeyRegex(baseName)))
                 .sorted(java.util.Comparator.comparingInt(RdsQueryHandler::numericSuffix))
                 .map(params::getFirst)
                 .filter(value -> value != null && !value.isBlank())
                 .toList();
+    }
+
+    private static boolean hasMemberKeys(MultivaluedMap<String, String> params, String baseName) {
+        return params.keySet().stream().anyMatch(key -> key.matches(memberKeyRegex(baseName)));
+    }
+
+    private static String memberKeyRegex(String baseName) {
+        String quoted = java.util.regex.Pattern.quote(baseName);
+        return switch (baseName) {
+            case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
+            case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+            default -> quoted + "(\\.member)?\\.\\d+";
+        };
     }
 
     private static int numericSuffix(String key) {

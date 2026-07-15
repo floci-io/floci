@@ -266,6 +266,38 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void importKeyPairRejectsDuplicateKeyName() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.importKeyPair("us-east-1", "duplicate-key", "c3NoLXJzYSBBQUFB");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.importKeyPair("us-east-1", "duplicate-key", "c3NoLXJzYSBBQUFB"));
+        assertEquals("InvalidKeyPair.Duplicate", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+
+        // same name in another region is allowed
+        service.importKeyPair("us-west-2", "duplicate-key", "c3NoLXJzYSBBQUFB");
+    }
+
+    @Test
+    void importKeyPairRejectsNameAlreadyUsedByCreateKeyPair() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "shared-key-name");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.importKeyPair("us-east-1", "shared-key-name", "c3NoLXJzYSBBQUFB"));
+        assertEquals("InvalidKeyPair.Duplicate", error.getErrorCode());
+    }
+
+    @Test
     void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -48,6 +49,7 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
     private static final int LISTENER_PORT = 7782;
 
     private static String lbArn;
+    private static String lbDnsName;
     private static String tgArn;
     private static String listenerArn;
     private static String functionArn;
@@ -96,7 +98,7 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
     @Test
     @Order(2)
     void createLoadBalancer() {
-        lbArn = given()
+        Response response = given()
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "alb-dataplane-lb")
                 .formParam("Type", "application")
@@ -106,7 +108,9 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
             .then()
                 .statusCode(200)
                 .extract()
-                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+                .response();
+        lbArn = response.path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+        lbDnsName = response.path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.DNSName");
     }
 
     @Test
@@ -165,7 +169,7 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
     @Order(5)
     void httpRequestThroughListenerInvokesLambda() {
         given()
-                .baseUri("http://localhost")
+                .baseUri("http://" + lbDnsName)
                 .port(LISTENER_PORT)
                 .contentType("text/plain")
                 .body("hello")

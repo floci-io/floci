@@ -111,6 +111,7 @@ nav:
     - EKS: services/eks.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
+    - Lightsail: services/lightsail.md
     - AppConfig: services/appconfig.md
     - Bedrock Runtime: services/bedrock-runtime.md
     - ELB v2: services/elb.md
