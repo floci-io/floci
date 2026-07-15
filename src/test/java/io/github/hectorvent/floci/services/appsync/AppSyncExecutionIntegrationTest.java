@@ -107,6 +107,7 @@ class AppSyncExecutionIntegrationTest {
             .post("/v1/apis/" + apiId + "/graphql")
         .then()
             .statusCode(400)
+            .header("x-amzn-errortype", containsString("MalformedHttpRequestException"))
             .body("errors[0].errorType", equalTo("MalformedHttpRequestException"))
             .body("errors[0].message", equalTo(AppSyncErrorFormatter.MSG_EMPTY_BODY));
     }
@@ -162,7 +163,8 @@ class AppSyncExecutionIntegrationTest {
         .when()
             .post("/v1/apis/does-not-exist-xyz/graphql")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .header("x-amzn-errortype", containsString("NotFoundException"));
     }
 
     @Test

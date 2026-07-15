@@ -1,7 +1,8 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import graphql.schema.GraphQLSchema;
+import graphql.GraphQL;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -53,8 +54,8 @@ class AppSyncExecutionControllerTest {
     @Test
     void unexpectedExecutorFailureReturns500InternalFailure() {
         when(appSyncService.getGraphqlApi("api-1")).thenReturn(new GraphqlApi());
-        when(schemaRegistry.getSchema("api-1")).thenReturn(Optional.of(mock(GraphQLSchema.class)));
-        when(queryExecutor.execute(any(GraphQLSchema.class), eq("{ hello }"), isNull(), isNull()))
+        when(schemaRegistry.getGraphQL("api-1")).thenReturn(Optional.of(mock(GraphQL.class)));
+        when(queryExecutor.execute(any(GraphQL.class), eq("{ hello }"), isNull(), isNull()))
                 .thenThrow(new RuntimeException("boom"));
 
         Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
@@ -68,5 +69,35 @@ class AppSyncExecutionControllerTest {
         Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
         assertEquals("InternalFailure", error.get("errorType"));
         assertEquals("boom", error.get("message"));
+    }
+
+    @Test
+    void emptyBodyReturns400WithErrorTypeHeader() {
+        Response response = controller.execute("api-1", jsonHeaders, "");
+
+        assertEquals(400, response.getStatus());
+        assertEquals("MalformedHttpRequestException", response.getHeaderString("x-amzn-errortype"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getEntity();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
+        assertEquals("MalformedHttpRequestException", error.get("errorType"));
+        assertEquals(AppSyncErrorFormatter.MSG_EMPTY_BODY, error.get("message"));
+    }
+
+    @Test
+    void unknownApiReturns404WithErrorTypeHeader() {
+        when(appSyncService.getGraphqlApi("missing"))
+                .thenThrow(new AwsException("NotFoundException", "API not found", 404));
+
+        Response response = controller.execute("missing", jsonHeaders, "{\"query\":\"{ hello }\"}");
+
+        assertEquals(404, response.getStatus());
+        assertEquals("NotFoundException", response.getHeaderString("x-amzn-errortype"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getEntity();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
+        assertEquals("NotFoundException", error.get("errorType"));
     }
 }

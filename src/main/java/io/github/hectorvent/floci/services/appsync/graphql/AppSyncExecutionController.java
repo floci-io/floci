@@ -76,19 +76,15 @@ public class AppSyncExecutionController {
                 throw e;
             }
 
-            var schemaOpt = schemaRegistry.getSchema(apiId);
-            if (schemaOpt.isEmpty()) {
-                return Response.status(502)
-                        .header(HEADER_ERROR_TYPE, "GraphQLSchemaException")
-                        .type(MediaType.APPLICATION_JSON)
-                        .entity(errorFormatter.transportError("GraphQLSchemaException",
-                                AppSyncErrorFormatter.MSG_NO_SCHEMA))
-                        .build();
+            var graphQLOpt = schemaRegistry.getGraphQL(apiId);
+            if (graphQLOpt.isEmpty()) {
+                return graphqlError(502, "GraphQLSchemaException",
+                        AppSyncErrorFormatter.MSG_NO_SCHEMA);
             }
 
             try {
                 Map<String, Object> result = queryExecutor.execute(
-                        schemaOpt.get(), parsed.query(), parsed.variables(), parsed.operationName());
+                        graphQLOpt.get(), parsed.query(), parsed.variables(), parsed.operationName());
                 return Response.ok(result).type(MediaType.APPLICATION_JSON).build();
             } catch (AppSyncTransportException e) {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
@@ -171,13 +167,11 @@ public class AppSyncExecutionController {
     }
 
     private Response graphqlError(int status, String errorType, String message) {
-        Response.ResponseBuilder builder = Response.status(status)
+        return Response.status(status)
+                .header(HEADER_ERROR_TYPE, errorType)
                 .type(MediaType.APPLICATION_JSON)
-                .entity(errorFormatter.transportError(errorType, message));
-        if (status >= 500 || "GraphQLSchemaException".equals(errorType)) {
-            builder.header(HEADER_ERROR_TYPE, errorType);
-        }
-        return builder.build();
+                .entity(errorFormatter.transportError(errorType, message))
+                .build();
     }
 
     private record ParsedRequest(String query, Map<String, Object> variables, String operationName) {}

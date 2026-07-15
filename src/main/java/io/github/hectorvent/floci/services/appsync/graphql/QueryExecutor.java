@@ -6,9 +6,6 @@ import graphql.ExecutionResult;
 import graphql.ExecutionResultImpl;
 import graphql.GraphQL;
 import graphql.GraphqlErrorBuilder;
-import graphql.execution.AsyncExecutionStrategy;
-import graphql.execution.AsyncSerialExecutionStrategy;
-import graphql.execution.SubscriptionExecutionStrategy;
 import graphql.language.Document;
 import graphql.language.OperationDefinition;
 import graphql.parser.InvalidSyntaxException;
@@ -33,6 +30,11 @@ public class QueryExecutor {
 
     public Map<String, Object> execute(GraphQLSchema schema, String query,
                                        Map<String, Object> variables, String operationName) {
+        return execute(SchemaRegistry.buildGraphQL(schema), query, variables, operationName);
+    }
+
+    public Map<String, Object> execute(GraphQL graphQL, String query,
+                                       Map<String, Object> variables, String operationName) {
         List<OperationDefinition> operations = parseOperations(query);
         if (operations.size() > 1 && (operationName == null || operationName.isBlank())) {
             throw new AppSyncTransportException(400, "BadRequestException",
@@ -49,12 +51,6 @@ public class QueryExecutor {
                     .build();
             return formatter.format(rejected);
         }
-
-        GraphQL graphQL = GraphQL.newGraphQL(schema)
-                .queryExecutionStrategy(new AsyncExecutionStrategy())
-                .mutationExecutionStrategy(new AsyncSerialExecutionStrategy())
-                .subscriptionExecutionStrategy(new SubscriptionExecutionStrategy())
-                .build();
 
         ExecutionInput.Builder inputBuilder = ExecutionInput.newExecutionInput().query(query);
         if (variables != null) {
