@@ -39,7 +39,8 @@ public class RestAssuredJsonUtils {
         RestAssured.config = RestAssured.config().encoderConfig(
                 EncoderConfig.encoderConfig()
                         .encodeContentTypeAs(CONTENT_TYPE_AWS_JSON_1_0, ContentType.JSON)
-                        .encodeContentTypeAs(CONTENT_TYPE_AWS_JSON_1_1, ContentType.JSON));
+                        .encodeContentTypeAs(CONTENT_TYPE_AWS_JSON_1_1, ContentType.JSON)
+                        .encodeContentTypeAs("application/graphql", ContentType.JSON));
 
         if (!RestAssured.filters().contains(AWS_CONTENT_TYPE_FILTER)) {
             RestAssured.filters(AWS_CONTENT_TYPE_FILTER);

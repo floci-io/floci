@@ -133,7 +133,9 @@ Floci implements the AWS AppSync Management API, providing local emulation of Gr
 
 ## Schema Registry
 
-`StartSchemaCreation` validates the provided GraphQL SDL using [graphql-java](https://github.com/graphql-java/graphql-java). Invalid schemas are rejected with a `BadRequestException` (400) at registration time, preventing them from being caught later during query execution.
+`StartSchemaCreation` validates the provided GraphQL SDL using [graphql-java](https://github.com/graphql-java/graphql-java). Invalid schemas are rejected asynchronously (status `FAILED` with details after `PROCESSING`). Valid schemas are registered in an in-memory `SchemaRegistry` and persisted to the schema store.
+
+On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs from the schema store into `SchemaRegistry` so `POST /v1/apis/{apiId}/graphql` works across restarts (memory/persistent/hybrid/wal).
 
 The following **AWS scalar types** are pre-registered and available in any schema without requiring explicit `scalar` declarations:
 
@@ -173,6 +175,30 @@ The following **AppSync directives** are pre-defined and recognized in schemas:
 Unknown directives are rejected during schema registration.
 
 Schema extensions (`extend type Query { ... }`) are supported natively through graphql-java.
+
+## GraphQL execute (data-plane)
+
+| Surface | Path | Content-Types |
+|---|---|---|
+| HTTP GraphQL | `POST /v1/apis/{apiId}/graphql` | `application/json`, `application/graphql` (+ charset) |
+
+Execute is a **separate** data-plane endpoint from the management API. Request body is GraphQL-over-HTTP JSON: `{ "query", "variables?", "operationName?" }`.
+
+Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[]` with top-level `errorType` / `errorInfo`). Most GraphQL syntax and validation errors return **HTTP 200** with `errors[]`.
+
+| Case | HTTP | Notes |
+|---|---|---|
+| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Nullable fields may be `null` until DataFetchers (Phase 8) |
+| HTTP subscription operation | 200 | `OperationNotSupported` (realtime WebSocket is a later phase) |
+| Empty body / `{}` / `[]` / unparseable JSON / bad Content-Type | 400 | `MalformedHttpRequestException` |
+| Missing `operationName` with multiple operations | 400 | `BadRequestException` — `Missing operation name.` |
+| Unknown `apiId` | 404 | `NotFoundException` |
+| API exists but no executable schema (incl. PROCESSING) | **502** | `GraphQLSchemaException` — `No schema definition exists.` + `x-amzn-errortype` |
+| Unexpected failure | 500 | `InternalFailure` |
+
+**Evidence for data-plane statuses** (empty/`[]`/`{}` → 400; missing schema → 502): AppSync team sample in [graphql/graphql-over-http#81](https://github.com/graphql/graphql-over-http/issues/81) (@robzhu). The management API Reference lists `GraphQLSchemaException` as HTTP 400 for “schema not valid” on management operations — a different surface than the GraphQL execute data plane.
+
+Auth on the execute endpoint, DataFetcher/resolver dispatch, data-source adapters, guardrails, and WebSocket subscriptions are later phases.
 
 ## Pagination
 
@@ -215,15 +241,14 @@ This matches AWS behavior where deleting an API removes its entire configuration
 
 ## Not Implemented
 
-These AWS AppSync operations are not yet implemented and are tracked in future phases:
+These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
-- **Execution engine** (Phase 5): GraphQL query execution, resolver dispatch, VTL template evaluation
-- **Data source adapters** (Phase 7): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
-- **Pipeline resolvers** (Phase 8): Function chaining with `$prev` and `$stash`
-- **Subscriptions** (Phase 9): WebSocket real-time subscriptions
-- **Caching** (Phase 10): API-level and per-resolver caching
-- **Authentication** (Phase 4): API key validation on the GraphQL endpoint
-- **Introspection** (Phase 6): `__schema` and `__type` queries
+- **Authentication on execute** (Phase 7): API key / IAM / Cognito validation on the GraphQL endpoint
+- **DataFetcher / resolver dispatch** (Phase 8): resolver mapping templates and field resolution with non-null values
+- **Data source adapters** (Phase 9): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
+- **Guardrails** (Phase 10): query depth / complexity limits and related errors
+- **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions
+- **Caching**: API-level and per-resolver caching
 - **Merged API source management**: `AssociateMergedGraphqlApi`, `AssociateSourceGraphqlApi`, `StartSchemaMerge`, `ListTypesByAssociation`
 - **Data source introspection**: `StartDataSourceIntrospection`, `GetDataSourceIntrospection`
 
@@ -286,6 +311,11 @@ aws appsync associate-api \
   --domain-name api.example.com \
   --api-id API_ID \
   --endpoint-url $AWS_ENDPOINT_URL
+
+# Execute a GraphQL query (data-plane; null fields OK until resolvers)
+curl -s -X POST "$AWS_ENDPOINT_URL/v1/apis/API_ID/graphql" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ hello }"}'
 
 # Create a channel namespace
 aws appsync create-channel-namespace \

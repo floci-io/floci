@@ -167,6 +167,7 @@ public class EmulatorLifecycle {
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
         schemaCreationWorker.recoverOrphans();
+        schemaCreationWorker.rehydrateSchemas();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
