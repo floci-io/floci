@@ -90,4 +90,63 @@ class ApiGatewayApiKeyIntegrationTest {
                 .body("__type", equalTo("NotFoundException"))
                 .body("message", equalTo("Invalid API Key identifier specified"));
     }
+
+    @Test @Order(6)
+    void updateApiKeyName() {
+        String body = """
+                {"patchOperations":[{"op":"replace","path":"/name","value":"updated-name"}]}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().patch("/apikeys/" + apiKeyId)
+                .then()
+                .statusCode(200)
+                .body("id", equalTo(apiKeyId))
+                .body("name", equalTo("updated-name"));
+    }
+
+    @Test @Order(7)
+    void updateApiKeyDescription() {
+        String body = """
+                {"patchOperations":[{"op":"replace","path":"/description","value":"a test key"}]}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().patch("/apikeys/" + apiKeyId)
+                .then()
+                .statusCode(200)
+                .body("description", equalTo("a test key"));
+    }
+
+    @Test @Order(8)
+    void updateApiKeyEnabled() {
+        String body = """
+                {"patchOperations":[{"op":"replace","path":"/enabled","value":"false"}]}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().patch("/apikeys/" + apiKeyId)
+                .then()
+                .statusCode(200)
+                .body("enabled", equalTo(false));
+    }
+
+    @Test @Order(9)
+    void updateApiKeyNotFound() {
+        String body = """
+                {"patchOperations":[{"op":"replace","path":"/name","value":"x"}]}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().patch("/apikeys/doesnotexist")
+                .then()
+                .statusCode(404)
+                .contentType(ContentType.JSON)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Invalid API Key identifier specified"));
+    }
 }

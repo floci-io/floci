@@ -642,6 +642,23 @@ public class ApiGatewayController {
         return Response.ok(node.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
+    @PATCH
+    @Path("/apikeys/{apiKeyId}")
+    public Response updateApiKey(@Context HttpHeaders headers,
+                                 @PathParam("apiKeyId") String apiKeyId,
+                                 String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
+            ApiKey key = service.updateApiKey(region, apiKeyId, patchOperations);
+            return Response.ok(toApiKeyNode(key).toString()).type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
     @POST
     @Path("/usageplans")
     public Response createUsagePlan(@Context HttpHeaders headers, String body) {
