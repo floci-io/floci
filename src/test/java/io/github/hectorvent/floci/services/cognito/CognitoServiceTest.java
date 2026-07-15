@@ -2005,7 +2005,7 @@ class CognitoServiceTest {
     // =========================================================================
 
     @ParameterizedTest
-    @CsvSource( {
+    @CsvSource({
             "use-name,basic-client",
             "prepend-to-name:prepended-,prepended-basic-client",
             "append-to-name:-appended,basic-client-appended",
@@ -2022,7 +2022,7 @@ class CognitoServiceTest {
                 "us-east-1"
         );
 
-        assertEquals("test",pool.getUserPoolTags().get("env"));
+        assertEquals("test", pool.getUserPoolTags().get("env"));
         assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY));
         assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY));
 
@@ -2041,7 +2041,7 @@ class CognitoServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource( {
+    @CsvSource({
             "prepend-to-name: prepended- ,secret",
             "append-to-name: -appended ,secret",
             "append-to-name:-appended,",
@@ -2049,7 +2049,7 @@ class CognitoServiceTest {
     })
     void createUserPoolWithInvalidOverrideForClientIdAndClientSecret(String overrideClientId, String secret) {
         Map<String, Object> createUserPool = new HashMap<>();
-        Map<String,String> userPoolTags = new HashMap<>();
+        Map<String, String> userPoolTags = new HashMap<>();
         userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, overrideClientId);
         userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY, secret);
         createUserPool.put("PoolName", "InvalidOverridesPool");
@@ -2231,6 +2231,37 @@ class CognitoServiceTest {
                     "ConfirmSignUp should not set email_verified when no verification service is configured");
             assertFalse(user.getAttributes().containsKey("phone_number_verified"),
                     "ConfirmSignUp should not set phone_number_verified when no verification service is configured");
+        }
+
+        @Test
+        void confirmSignUpDoesNotSetVerifiedFlagsWhenDeliveryTargetIsNull() {
+            String poolName = "NullDeliveryTargetPool";
+            String username = "email-only@example.com";
+            String password = "Passw0rd!";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+            svc.updateUserPool(Map.of(
+                    "UserPoolId", pool.getId(),
+                    "AutoVerifiedAttributes", List.of("phone_number")
+            ), "us-east-1");
+
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the user has no matching attribute for the updated auto verified attribute");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when the delivery target is null");
         }
 
         private CognitoService createVerificationEnabledService() {
