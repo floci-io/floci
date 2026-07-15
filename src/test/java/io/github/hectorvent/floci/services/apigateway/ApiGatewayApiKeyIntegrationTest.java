@@ -149,4 +149,23 @@ class ApiGatewayApiKeyIntegrationTest {
                 .body("__type", equalTo("NotFoundException"))
                 .body("message", equalTo("Invalid API Key identifier specified"));
     }
+
+    @Test @Order(10)
+    void deleteApiKey() {
+        given()
+                .when().delete("/apikeys/" + apiKeyId)
+                .then()
+                .statusCode(202);
+    }
+
+    @Test @Order(11)
+    void deleteApiKeyAlreadyGone() {
+        given()
+                .when().delete("/apikeys/" + apiKeyId)
+                .then()
+                .statusCode(404)
+                .contentType(ContentType.JSON)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Invalid API Key identifier specified"));
+    }
 }

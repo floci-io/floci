@@ -659,6 +659,15 @@ public class ApiGatewayController {
         }
     }
 
+    @DELETE
+    @Path("/apikeys/{apiKeyId}")
+    public Response deleteApiKey(@Context HttpHeaders headers,
+                                 @PathParam("apiKeyId") String apiKeyId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteApiKey(region, apiKeyId);
+        return Response.accepted().build();
+    }
+
     @POST
     @Path("/usageplans")
     public Response createUsagePlan(@Context HttpHeaders headers, String body) {
