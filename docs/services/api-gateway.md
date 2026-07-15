@@ -100,6 +100,24 @@ aws apigateway create-deployment \
 curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 ```
 
+### Usage Plan Tags and Custom IDs
+
+Usage plans support arbitrary tags and the `_custom_id_` tag for deterministic IDs:
+
+```bash
+# Create a usage plan with a custom ID and additional tags
+aws apigateway create-usage-plan \
+  --name "my-plan" \
+  --tags '{"_custom_id_":"my-plan-id","env":"staging"}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# The plan is now accessible at its custom ID
+aws apigateway get-usage-plans --endpoint-url $AWS_ENDPOINT_URL
+```
+
+When `_custom_id_` is present in the `tags` map, it is used as the usage plan's `id`.
+Tags are persisted and returned in all usage plan responses.
+
 ---
 
 ## Configuration
