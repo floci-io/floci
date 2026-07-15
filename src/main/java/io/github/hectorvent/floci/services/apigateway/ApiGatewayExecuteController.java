@@ -37,6 +37,7 @@ import org.jboss.logging.Logger;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -1867,7 +1868,7 @@ public class ApiGatewayExecuteController {
      * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
      */
     List<ApiGatewayResource> matchResources(List<ApiGatewayResource> resources, String requestPath) {
-        List<ApiGatewayResource> matches = new java.util.ArrayList<>();
+        List<ApiGatewayResource> matches = new ArrayList<>();
         // 1. Exact match
         for (ApiGatewayResource r : resources) {
             if (requestPath.equals(r.getPath())) {
@@ -1884,7 +1885,7 @@ public class ApiGatewayExecuteController {
         }
         // 3. Proxy+ wildcard — {proxy+} matches longest parent prefix
         // Requires at least one path segment after the parent prefix (except root /{proxy+})
-        List<ApiGatewayResource> proxyMatches = new java.util.ArrayList<>();
+        List<ApiGatewayResource> proxyMatches = new ArrayList<>();
         for (ApiGatewayResource r : resources) {
             if (r.getPath() == null || !r.getPath().contains("{proxy+}")) continue;
             String parentPrefix = r.getPath().substring(0, r.getPath().indexOf("{proxy+}"));
