@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.batch.BatchService;
@@ -135,30 +136,89 @@ public class EventBridgeInvoker {
         if (template == null) {
             return eventJson;
         }
-        String result = template;
+        Map<String, JsonNode> resolved = new LinkedHashMap<>();
         for (var e : transformer.getInputPathsMap().entrySet()) {
-            String value = extractJsonPath(e.getValue(), eventJson);
-            result = result.replace("<" + e.getKey() + ">", value != null ? value : "");
+            resolved.put(e.getKey(), extractNode(e.getValue(), eventJson));
         }
-        return result;
+        StringBuilder out = new StringBuilder(template.length() + 32);
+        boolean inString = false;
+        for (int i = 0; i < template.length(); i++) {
+            char c = template.charAt(i);
+            if (c == '<') {
+                int close = template.indexOf('>', i + 1);
+                if (close > i) {
+                    String name = template.substring(i + 1, close);
+                    if (resolved.containsKey(name)) {
+                        JsonNode node = resolved.get(name);
+                        out.append(inString ? rawValue(node) : jsonValue(node));
+                        i = close;
+                        continue;
+                    }
+                }
+                out.append(c);
+                continue;
+            }
+            if (c == '"' && !isEscaped(template, i)) {
+                inString = !inString;
+            }
+            out.append(c);
+        }
+        return out.toString();
+    }
+
+    // JSON representation for a value-position placeholder: strings quoted+escaped, objects/arrays/
+    // numbers/bools literal JSON, missing/null empty.
+    private String jsonValue(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return "";
+        }
+        return node.toString();
+    }
+
+    // Raw value for a placeholder inside a quoted string: JSON-escaped, no surrounding quotes.
+    private String rawValue(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return "";
+        }
+        String raw = node.isValueNode() ? node.asText() : node.toString();
+        try {
+            String quoted = objectMapper.writeValueAsString(raw); // "escaped"
+            return quoted.substring(1, quoted.length() - 1);       // strip surrounding quotes
+        } catch (Exception e) {
+            return raw;
+        }
+    }
+
+    private static boolean isEscaped(String s, int i) {
+        int backslashes = 0;
+        for (int j = i - 1; j >= 0 && s.charAt(j) == '\\'; j--) {
+            backslashes++;
+        }
+        return (backslashes & 1) == 1;
+    }
+
+    JsonNode extractNode(String jsonPath, String eventJson) {
+        if (jsonPath == null || eventJson == null) {
+            return MissingNode.getInstance();
+        }
+        try {
+            return objectMapper.readTree(eventJson).at(toPointer(jsonPath));
+        } catch (Exception e) {
+            LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
+            return MissingNode.getInstance();
+        }
+    }
+
+    private static String toPointer(String jsonPath) {
+        return (jsonPath.startsWith("$") ? jsonPath.substring(1) : jsonPath).replace('.', '/');
     }
 
     String extractJsonPath(String jsonPath, String eventJson) {
-        if (jsonPath == null || eventJson == null) {
+        JsonNode node = extractNode(jsonPath, eventJson);
+        if (node.isMissingNode() || node.isNull()) {
             return null;
         }
-        try {
-            String pointer = (jsonPath.startsWith("$") ? jsonPath.substring(1) : jsonPath)
-                    .replace('.', '/');
-            JsonNode node = objectMapper.readTree(eventJson).at(pointer);
-            if (node.isMissingNode() || node.isNull()) {
-                return null;
-            }
-            return node.isTextual() ? node.asText() : node.toString();
-        } catch (Exception e) {
-            LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
-            return null;
-        }
+        return node.isTextual() ? node.asText() : node.toString();
     }
 
     private Map<String, String> parametersFromBatchPayload(String payload) {
