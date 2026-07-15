@@ -253,6 +253,29 @@ class RdsServiceTest {
     }
 
     @Test
+    void listDbInstancesDoesNotMatchForeignArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertTrue(rdsService.listDbInstances(
+                "arn:aws:rds:us-east-1:999999999999:db:mydb").isEmpty(), "cross-account ARN must not match");
+        assertTrue(rdsService.listDbInstances(
+                "arn:aws:rds:eu-west-1:123456789012:db:mydb").isEmpty(), "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbClustersDoesNotMatchForeignArn() {
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertTrue(rdsService.listDbClusters(
+                "arn:aws:rds:us-east-1:999999999999:cluster:cluster1").isEmpty(), "cross-account ARN must not match");
+        assertTrue(rdsService.listDbClusters(
+                "arn:aws:rds:eu-west-1:123456789012:cluster:cluster1").isEmpty(), "cross-region ARN must not match");
+    }
+
+    @Test
     void modifyDbInstanceBlankPasswordDoesNotOverwriteExistingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",

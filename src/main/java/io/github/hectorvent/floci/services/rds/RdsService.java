@@ -353,17 +353,6 @@ public class RdsService implements Resettable {
         return resourceName;
     }
 
-    private static String dbClusterIdentifierFromResourceName(String resourceName) {
-        if (resourceName == null || resourceName.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
-        }
-        int marker = resourceName.lastIndexOf(":cluster:");
-        if (marker >= 0) {
-            return resourceName.substring(marker + ":cluster:".length());
-        }
-        return resourceName;
-    }
-
     private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
         if (secretsManagerService == null) {
             throw new AwsException("InvalidParameterCombination",
@@ -410,10 +399,16 @@ public class RdsService implements Resettable {
 
     public Collection<DbInstance> listDbInstances(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
-            // DBInstanceIdentifier also accepts an ARN per the AWS model, so match
-            // on the bare identifier extracted from a db ARN as well as a plain id.
-            String id = dbInstanceIdentifierFromResourceName(filterId);
-            return instances.scan(k -> k.equalsIgnoreCase(id));
+            // DBInstanceIdentifier also accepts an ARN per the AWS model. Match the
+            // full ARN against each instance's stored ARN rather than reducing it to
+            // the bare identifier, so a cross-account or cross-region ARN does not
+            // resolve a same-named local instance.
+            if (filterId.startsWith("arn:")) {
+                return instances.scan(k -> true).stream()
+                        .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
+                        .toList();
+            }
+            return instances.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return instances.scan(k -> true);
     }
@@ -619,10 +614,16 @@ public class RdsService implements Resettable {
 
     public Collection<DbCluster> listDbClusters(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
-            // DBClusterIdentifier also accepts an ARN per the AWS model, so match
-            // on the bare identifier extracted from a cluster ARN as well as a plain id.
-            String id = dbClusterIdentifierFromResourceName(filterId);
-            return clusters.scan(k -> k.equalsIgnoreCase(id));
+            // DBClusterIdentifier also accepts an ARN per the AWS model. Match the
+            // full ARN against each cluster's stored ARN rather than reducing it to
+            // the bare identifier, so a cross-account or cross-region ARN does not
+            // resolve a same-named local cluster.
+            if (filterId.startsWith("arn:")) {
+                return clusters.scan(k -> true).stream()
+                        .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
+                        .toList();
+            }
+            return clusters.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return clusters.scan(k -> true);
     }
