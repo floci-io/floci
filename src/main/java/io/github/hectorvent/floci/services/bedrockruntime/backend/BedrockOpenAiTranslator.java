@@ -205,6 +205,13 @@ final class BedrockOpenAiTranslator {
         ArrayNode content = outMessage.putArray("content");
 
         if (hasToolCalls) {
+            // Some OpenAI-compatible backends emit assistant text alongside tool_calls (e.g. a
+            // preamble like "Let me check that for you") — preserve it as a leading text block
+            // instead of dropping it.
+            String leadingText = extractMessageText(message);
+            if (!leadingText.isBlank()) {
+                content.addObject().put("text", leadingText);
+            }
             for (JsonNode toolCall : toolCallsNode) {
                 ObjectNode toolUse = content.addObject().putObject("toolUse");
                 toolUse.put("toolUseId", toolCall.path("id").asText(""));
