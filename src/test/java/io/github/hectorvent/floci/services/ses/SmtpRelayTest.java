@@ -33,7 +33,7 @@ class SmtpRelayTest {
         assertFalse(relay.isEnabled());
 
         relay.relay("from@example.com", List.of("to@example.com"),
-                null, null, null, "Subject", "text", null);
+                null, null, null, "Subject", "text", null, List.of());
 
         verify(mailClient, never()).sendMail(any(MailMessage.class));
     }
@@ -49,7 +49,7 @@ class SmtpRelayTest {
                 List.of("reply@example.com"),
                 "Test Subject",
                 "plain text",
-                "<p>html</p>");
+                "<p>html</p>", List.of());
 
         ArgumentCaptor<MailMessage> captor = ArgumentCaptor.forClass(MailMessage.class);
         verify(mailClient).sendMail(captor.capture());
@@ -70,7 +70,7 @@ class SmtpRelayTest {
         SmtpRelay relay = enabledRelay();
 
         relay.relay("from@example.com", List.of("to@example.com"),
-                null, null, null, "Subject", "text", null);
+                null, null, null, "Subject", "text", null, List.of());
 
         ArgumentCaptor<MailMessage> captor = ArgumentCaptor.forClass(MailMessage.class);
         verify(mailClient).sendMail(captor.capture());
@@ -82,7 +82,7 @@ class SmtpRelayTest {
         SmtpRelay relay = enabledRelay();
 
         relay.relay("from@example.com", List.of("to@example.com"),
-                null, null, null, "Subject", "only text", null);
+                null, null, null, "Subject", "only text", null, List.of());
 
         ArgumentCaptor<MailMessage> captor = ArgumentCaptor.forClass(MailMessage.class);
         verify(mailClient).sendMail(captor.capture());
@@ -95,7 +95,7 @@ class SmtpRelayTest {
         SmtpRelay relay = enabledRelay();
 
         relay.relay("from@example.com", List.of("to@example.com"),
-                null, null, null, "Subject", null, "<b>html</b>");
+                null, null, null, "Subject", null, "<b>html</b>", List.of());
 
         ArgumentCaptor<MailMessage> captor = ArgumentCaptor.forClass(MailMessage.class);
         verify(mailClient).sendMail(captor.capture());
@@ -110,7 +110,7 @@ class SmtpRelayTest {
                 .thenReturn(Future.failedFuture(new RuntimeException("SMTP refused")));
 
         assertDoesNotThrow(() -> relay.relay("from@example.com",
-                List.of("to@example.com"), null, null, null, "Subject", "text", null));
+                List.of("to@example.com"), null, null, null, "Subject", "text", null, List.of()));
     }
 
     // ── Raw relay ──

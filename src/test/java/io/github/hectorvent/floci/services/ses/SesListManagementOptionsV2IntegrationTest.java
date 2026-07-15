@@ -132,7 +132,9 @@ class SesListManagementOptionsV2IntegrationTest {
                 .body(org.hamcrest.Matchers.containsString("/_aws/ses/unsubscribe?"))
                 .body(org.hamcrest.Matchers.containsString("contactList=" + LIST))
                 .body(org.hamcrest.Matchers.containsString("topic=Sports"))
-                .body(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("amazonSESUnsubscribeUrl")));
+                .body(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("amazonSESUnsubscribeUrl")))
+                // the stored message also carries the List-Unsubscribe header
+                .body(org.hamcrest.Matchers.containsString("List-Unsubscribe"));
     }
 
     @Test

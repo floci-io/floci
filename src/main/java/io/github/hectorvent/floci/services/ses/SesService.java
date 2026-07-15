@@ -336,6 +336,9 @@ public class SesService {
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
+        if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
+            email.setHeaders(additionalHeaders);
+        }
         emailStore.put("email::" + region + "::" + messageId, email);
 
         List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
@@ -343,7 +346,7 @@ public class SesService {
         List<String> relayedBcc = filterUnsuppressed(bccAddresses, suppressedReasons);
         if (sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
             smtpRelay.relay(source, relayedTo, relayedCc, relayedBcc,
-                    replyToAddresses, subject, bodyText, bodyHtml);
+                    replyToAddresses, subject, bodyText, bodyHtml, additionalHeaders);
         } else {
             LOG.infov("SES email accepted but not relayed (all recipients suppressed): messageId={0}",
                     messageId);
@@ -2834,7 +2837,17 @@ public class SesService {
     }
 
     private static List<MessageHeader> withUnsubscribeHeaders(List<MessageHeader> headers, String url) {
-        List<MessageHeader> out = new ArrayList<>(headers == null ? List.of() : headers);
+        List<MessageHeader> out = new ArrayList<>();
+        // Override any caller-supplied unsubscribe headers rather than appending a duplicate, matching
+        // AWS ("SES will override these headers if they are present in the email").
+        if (headers != null) {
+            for (MessageHeader h : headers) {
+                if (!"List-Unsubscribe".equalsIgnoreCase(h.name())
+                        && !"List-Unsubscribe-Post".equalsIgnoreCase(h.name())) {
+                    out.add(h);
+                }
+            }
+        }
         out.add(new MessageHeader("List-Unsubscribe", "<" + url + ">"));
         out.add(new MessageHeader("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"));
         return out;
@@ -3346,6 +3359,13 @@ public class SesService {
         StringBuilder out = new StringBuilder();
         while (matcher.find()) {
             String key = matcher.group(1);
+            if ("amazonSESUnsubscribeUrl".equals(key)) {
+                // Reserved list-management placeholder: leave it intact for post-render replacement
+                // in the send path, so a templated body can carry {{amazonSESUnsubscribeUrl}} without
+                // failing as a missing rendering attribute.
+                matcher.appendReplacement(out, Matcher.quoteReplacement(matcher.group(0)));
+                continue;
+            }
             if (data == null || !data.hasNonNull(key)) {
                 throw new AwsException("MissingRenderingAttribute",
                         "Attribute '" + key + "' is not present in the rendering data.", 400);

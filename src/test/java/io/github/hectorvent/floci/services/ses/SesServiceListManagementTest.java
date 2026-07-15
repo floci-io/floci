@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
+import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
@@ -92,7 +93,7 @@ class SesServiceListManagementTest {
     @SuppressWarnings("unchecked")
     private List<String> capturedRelayTo() {
         ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
-        verify(smtpRelay).relay(any(), captor.capture(), any(), any(), any(), any(), any(), any());
+        verify(smtpRelay).relay(any(), captor.capture(), any(), any(), any(), any(), any(), any(), any());
         return captor.getValue();
     }
 
@@ -119,7 +120,7 @@ class SesServiceListManagementTest {
     void topicDefaultOptOut_suppressesContactWithNoExplicitPreference() {
         // Promos defaults OPT_OUT and noprefs has no explicit Promos preference -> suppressed.
         send(List.of("noprefs@example.com"), "Promos");
-        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -225,7 +226,44 @@ class SesServiceListManagementTest {
     @SuppressWarnings("unchecked")
     private String capturedRelayBodyHtml() {
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(smtpRelay).relay(any(), any(), any(), any(), any(), any(), any(), captor.capture());
+        verify(smtpRelay).relay(any(), any(), any(), any(), any(), any(), any(), captor.capture(), any());
         return captor.getValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<MessageHeader> capturedRelayHeaders() {
+        ArgumentCaptor<List<MessageHeader>> captor = ArgumentCaptor.forClass(List.class);
+        verify(smtpRelay).relay(any(), any(), any(), any(), any(), any(), any(), any(), captor.capture());
+        return captor.getValue();
+    }
+
+    @Test
+    void singleRecipient_addsListUnsubscribeHeadersToRelay() {
+        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null,
+                "Subject", "text", "<p>x</p>", null, List.of(), List.of(),
+                new ListManagementOptions(LIST, "Sports"), REGION);
+        List<MessageHeader> headers = capturedRelayHeaders();
+        assertTrue(headers.stream().anyMatch(h -> "List-Unsubscribe".equals(h.name())
+                && h.value().contains("/_aws/ses/unsubscribe")), "List-Unsubscribe header must reach the relay");
+        assertTrue(headers.stream().anyMatch(h -> "List-Unsubscribe-Post".equals(h.name())
+                && "List-Unsubscribe=One-Click".equals(h.value())));
+    }
+
+    @Test
+    void callerSuppliedUnsubscribeHeader_isOverriddenNotDuplicated() {
+        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null,
+                "Subject", "text", "<p>x</p>", null, List.of(),
+                List.of(new MessageHeader("List-Unsubscribe", "<https://caller.example/u>")),
+                new ListManagementOptions(LIST, "Sports"), REGION);
+        long count = capturedRelayHeaders().stream()
+                .filter(h -> "List-Unsubscribe".equalsIgnoreCase(h.name())).count();
+        assertEquals(1L, count);
+    }
+
+    @Test
+    void applyTemplateData_leavesUnsubscribePlaceholderIntact() {
+        String rendered = SesService.applyTemplateData("<p>{{amazonSESUnsubscribeUrl}} {{name}}</p>",
+                new ObjectMapper().createObjectNode().put("name", "Bob"));
+        assertEquals("<p>{{amazonSESUnsubscribeUrl}} Bob</p>", rendered);
     }
 }

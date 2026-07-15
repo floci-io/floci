@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.vertx.ext.mail.MailClient;
 import io.vertx.ext.mail.MailConfig;
 import io.vertx.ext.mail.MailMessage;
@@ -127,13 +128,14 @@ public class SmtpRelay {
      */
     public void relay(String from, List<String> toAddresses, List<String> ccAddresses,
                       List<String> bccAddresses, List<String> replyToAddresses,
-                      String subject, String bodyText, String bodyHtml) {
+                      String subject, String bodyText, String bodyHtml,
+                      List<MessageHeader> additionalHeaders) {
         if (!enabled) {
             return;
         }
         try {
             relayExecutor.execute(() -> doRelay(from, toAddresses, ccAddresses,
-                    bccAddresses, replyToAddresses, subject, bodyText, bodyHtml));
+                    bccAddresses, replyToAddresses, subject, bodyText, bodyHtml, additionalHeaders));
         } catch (java.util.concurrent.RejectedExecutionException e) {
             LOG.warnv("SMTP relay skipped (executor shutting down) for from={0}", from);
         }
@@ -141,7 +143,8 @@ public class SmtpRelay {
 
     private void doRelay(String from, List<String> toAddresses, List<String> ccAddresses,
                          List<String> bccAddresses, List<String> replyToAddresses,
-                         String subject, String bodyText, String bodyHtml) {
+                         String subject, String bodyText, String bodyHtml,
+                         List<MessageHeader> additionalHeaders) {
         try {
             MailMessage mail = new MailMessage();
             mail.setFrom(from);
@@ -156,6 +159,13 @@ public class SmtpRelay {
             }
             if (replyToAddresses != null && !replyToAddresses.isEmpty()) {
                 mail.addHeader("Reply-To", String.join(", ", replyToAddresses));
+            }
+            if (additionalHeaders != null) {
+                for (MessageHeader header : additionalHeaders) {
+                    if (header.name() != null && header.value() != null) {
+                        mail.addHeader(header.name(), header.value());
+                    }
+                }
             }
             mail.setSubject(subject != null ? subject : "");
             if (bodyText != null) {
