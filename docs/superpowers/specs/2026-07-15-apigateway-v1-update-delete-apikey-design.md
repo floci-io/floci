@@ -83,6 +83,18 @@ Extend the existing ordered test class (currently orders 1–5) with:
 | 10 | `deleteApiKey` | DELETE known id → 202 Accepted |
 | 11 | `deleteApiKeyAlreadyGone` | DELETE same id again → 404 NotFoundException |
 
+### 5. Service Docs — `docs/services/api-gateway.md`
+
+Two changes to the v1 operations table and Not Implemented list:
+
+**Supported Operations table — API Keys row** (line 23):
+- Before: `CreateApiKey, GetApiKeys`
+- After: `CreateApiKey, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey`
+
+**Not Implemented list** (line 39):
+- Before: `- API key detail: GetApiKey, UpdateApiKey, DeleteApiKey, ImportApiKeys`
+- After: `- API key detail: ImportApiKeys`
+
 ## AWS API Contract
 
 | Operation | Method | Path | Success | Error |
