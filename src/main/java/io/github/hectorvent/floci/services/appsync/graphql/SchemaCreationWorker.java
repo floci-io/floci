@@ -149,4 +149,30 @@ public class SchemaCreationWorker {
             LOG.infov("Recovered {0} orphan schema creation(s) on startup", recovered);
         }
     }
+
+    /**
+     * Rehydrates executable schemas from persisted SDL into {@link SchemaRegistry}
+     * after storage load / orphan recovery so GraphQL execute works across restarts.
+     * Parse failures are logged and skipped.
+     */
+    public void rehydrateSchemas() {
+        int loaded = 0;
+        int skipped = 0;
+        for (String apiId : schemaStore.keys()) {
+            Optional<String> sdl = schemaStore.get(apiId);
+            if (sdl.isEmpty() || sdl.get().isBlank()) {
+                continue;
+            }
+            try {
+                schemaRegistry.register(apiId, sdl.get());
+                loaded++;
+            } catch (RuntimeException e) {
+                skipped++;
+                LOG.warnv(e, "Skipping rehydrate of schema for API {0}: {1}", apiId, e.getMessage());
+            }
+        }
+        if (loaded > 0 || skipped > 0) {
+            LOG.infov("Rehydrated {0} schema(s) into registry ({1} skipped)", loaded, skipped);
+        }
+    }
 }
