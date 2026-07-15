@@ -218,13 +218,9 @@ public class RuntimeApiServer {
         });
 
         // GET /extension/event/next — blocks until the next INVOKE or SHUTDOWN event for this
-        // extension. Runs as a blockingHandler (a real wait on a worker thread, not the event
-        // loop) using the same synchronized-wait/notify long-poll shape as
-        // SqsService.receiveMessage: the poller always waits on the extension's lock and
-        // rechecks pendingEvents/stopped after waking, rather than racing a queue poll against a
-        // separately-tracked parked-request reference. That makes "an event was queued" and "the
-        // poller observed it" atomic by construction — see RegisteredExtension's class doc.
-        router.get(EXTENSION_NEXT_PATH).blockingHandler(ctx -> {
+        // extension. Mirrors NEXT_PATH's park/dispatch pattern, scoped per-extension since each
+        // extension has its own independent event queue.
+        router.get(EXTENSION_NEXT_PATH).handler(ctx -> {
             String identifier = ctx.request().getHeader(EXTENSION_ID_HEADER);
             RegisteredExtension extension = identifier != null ? extensions.get(identifier) : null;
             if (extension == null) {
@@ -233,14 +229,39 @@ public class RuntimeApiServer {
                         .end("{\"errorMessage\":\"Unknown or missing Lambda-Extension-Identifier\"}");
                 return;
             }
-
-            ExtensionEvent event = awaitExtensionEvent(extension);
+            // Poll before checking stopped: stop() offers a SHUTDOWN event to pendingEvents for any
+            // extension it doesn't find already parked, so a request arriving just after stopped is
+            // set (but after that offer landed) must still see it — otherwise it gets a bare 204 and
+            // the queued SHUTDOWN is orphaned, never delivered.
+            ExtensionEvent event = extension.getPendingEvents().poll();
             if (event != null) {
                 sendExtensionEvent(ctx, event);
-            } else {
-                ctx.response().setStatusCode(204).end();
+                return;
             }
-        }, false);
+            if (stopped) {
+                ctx.response().setStatusCode(204).end();
+                return;
+            }
+            extension.setWaitingContext(ctx);
+            // Re-check races the same way NEXT_PATH does: an event or stop() may have landed
+            // between our poll() and setWaitingContext().
+            if (stopped && extension.takeWaitingContext() != null) {
+                ctx.response().setStatusCode(204).end();
+                return;
+            }
+            ExtensionEvent raced = extension.getPendingEvents().poll();
+            if (raced != null) {
+                if (extension.takeWaitingContext() != null) {
+                    sendExtensionEvent(ctx, raced);
+                } else {
+                    // A concurrent notifyExtensionsOfInvoke/stop() already consumed the waiting
+                    // context (dispatching directly via runOnContext rather than the queue) between
+                    // our poll() and this check — raced is a real event we already removed from the
+                    // queue, so it must go back or it's silently lost for this extension.
+                    extension.getPendingEvents().offer(raced);
+                }
+            }
+        });
 
         // POST /extension/init/error, /extension/exit/error — an extension reports it can't
         // continue. Floci doesn't restart the execution environment on this (unlike real AWS);
@@ -306,17 +327,22 @@ public class RuntimeApiServer {
             });
         }
 
-        // Queue a SHUTDOWN event for every extension subscribed to it, and wake every extension's
-        // awaitExtensionEvent poller (subscribed or not) so none of them sit blocked until their
-        // own timeout just because the server already stopped.
+        // Notify every extension subscribed to SHUTDOWN, same park/dispatch pattern as the
+        // runtime poller above.
         ExtensionEvent shutdownEvent = ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN");
         extensions.values().forEach(ext -> {
-            synchronized (ext.getLock()) {
-                if (ext.isSubscribedTo(ExtensionEvent.Type.SHUTDOWN)) {
-                    ext.offer(shutdownEvent);
-                } else {
-                    ext.getLock().notifyAll();
-                }
+            if (!ext.isSubscribedTo(ExtensionEvent.Type.SHUTDOWN)) {
+                return;
+            }
+            RoutingContext ctx = ext.takeWaitingContext();
+            if (ctx != null) {
+                vertx.runOnContext(v -> {
+                    if (!ctx.response().ended()) {
+                        sendExtensionEvent(ctx, shutdownEvent);
+                    }
+                });
+            } else {
+                ext.getPendingEvents().offer(shutdownEvent);
             }
         });
 
@@ -392,7 +418,8 @@ public class RuntimeApiServer {
                 .end(body);
     }
 
-    /** Fans an INVOKE event out to every extension subscribed to it. */
+    /** Fans an INVOKE event out to every extension subscribed to it, same park/dispatch pattern
+     *  used for the runtime's own /next queue, scoped per-extension. */
     private void notifyExtensionsOfInvoke(PendingInvocation invocation) {
         if (extensions.isEmpty()) {
             return;
@@ -403,46 +430,17 @@ public class RuntimeApiServer {
             if (!ext.isSubscribedTo(ExtensionEvent.Type.INVOKE)) {
                 continue;
             }
-            synchronized (ext.getLock()) {
-                ext.offer(event);
-            }
-        }
-    }
-
-    // Longest an /extension/event/next call blocks before returning 204 with no event. Real AWS
-    // has no fixed cap here (it blocks up to the next invocation or the environment's own
-    // shutdown). This handler runs on a Vert.x worker thread (blockingHandler), and Vert.x's own
-    // blocked-thread checker warns by default once a worker task runs longer than
-    // DEFAULT_MAX_WORKER_EXECUTE_TIME (60s) — matching that value here means a long-idle
-    // extension re-polls before ever tripping that warning, rather than defining a new,
-    // unrelated threshold. Package-private (not final) so tests can shrink it rather than
-    // waiting out the real duration.
-    static long extensionEventMaxWaitMs = 60_000;
-
-    /** Blocks the calling (worker) thread until an event is queued for {@code extension} or the
-     *  server stops, whichever comes first, and returns it (or {@code null} on timeout/stop).
-     *  Must run off the Vert.x event loop — see the {@code EXTENSION_NEXT_PATH} blockingHandler. */
-    private ExtensionEvent awaitExtensionEvent(RegisteredExtension extension) {
-        long deadline = System.currentTimeMillis() + extensionEventMaxWaitMs;
-        synchronized (extension.getLock()) {
-            while (true) {
-                ExtensionEvent event = extension.poll();
-                if (event != null) {
-                    return event;
-                }
-                if (stopped) {
-                    return null;
-                }
-                long remaining = deadline - System.currentTimeMillis();
-                if (remaining <= 0) {
-                    return null;
-                }
-                try {
-                    extension.getLock().wait(remaining);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return null;
-                }
+            RoutingContext waitingCtx = ext.takeWaitingContext();
+            if (waitingCtx != null) {
+                vertx.runOnContext(v -> {
+                    if (!waitingCtx.response().ended()) {
+                        sendExtensionEvent(waitingCtx, event);
+                    } else {
+                        ext.getPendingEvents().offer(event);
+                    }
+                });
+            } else {
+                ext.getPendingEvents().offer(event);
             }
         }
     }
@@ -477,12 +475,5 @@ public class RuntimeApiServer {
                 .setStatusCode(202)
                 .putHeader("Content-Type", "application/json")
                 .end(STATUS_OK_BODY);
-    }
-
-    /** Package-private accessor for tests that want to reach a registered extension's
-     *  delivery-state lock directly, to deterministically reproduce the
-     *  stop()/awaitExtensionEvent race window. */
-    RegisteredExtension extension(String identifier) {
-        return extensions.get(identifier);
     }
 }

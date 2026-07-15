@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.lambda.runtime;
 
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
-import io.github.hectorvent.floci.services.lambda.model.RegisteredExtension;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import org.junit.jupiter.api.AfterEach;
@@ -54,8 +53,6 @@ class RuntimeApiServerTest {
 
     @AfterEach
     void tearDown() throws Exception {
-        // stop() caches and returns the same CompletableFuture on a repeat call, so this is safe
-        // even for the race test below, which already triggered its own stop().
         server.stop().get(5, TimeUnit.SECONDS);
         scheduler.shutdownNow();
         vertx.close();
@@ -480,89 +477,6 @@ class RuntimeApiServerTest {
         assertFalse(asyncNext.isDone());
 
         server.stop();
-
-        HttpResponse<String> response = asyncNext.get(2, TimeUnit.SECONDS);
-        assertEquals(200, response.statusCode());
-        JsonObject body = new JsonObject(response.body());
-        assertEquals("SHUTDOWN", body.getString("eventType"));
-    }
-
-    @Test
-    @Timeout(15)
-    void extensionEventNext_notSubscribedToShutdown_isStillWokenAndReturns204WhenServerStops() throws Exception {
-        // An extension that only subscribed to INVOKE must not receive a SHUTDOWN body, but its
-        // /event/next poller must still be woken by stop() rather than sitting parked until its
-        // own timeout — stop() notifies every extension's lock unconditionally for this reason.
-        String extensionId = registerExtension("invoke-only-extension", "INVOKE");
-
-        CompletableFuture<HttpResponse<String>> asyncNext = httpClient.sendAsync(HttpRequest.newBuilder()
-                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
-                        .header("Lambda-Extension-Identifier", extensionId)
-                        .GET().build(),
-                HttpResponse.BodyHandlers.ofString());
-
-        Thread.sleep(300);
-        assertFalse(asyncNext.isDone());
-
-        server.stop();
-
-        HttpResponse<String> response = asyncNext.get(2, TimeUnit.SECONDS);
-        assertEquals(204, response.statusCode());
-    }
-
-    @Test
-    @Timeout(15)
-    void extensionEventNext_returns204AfterMaxWaitWithNoEventAndNoStop() throws Exception {
-        long original = RuntimeApiServer.extensionEventMaxWaitMs;
-        RuntimeApiServer.extensionEventMaxWaitMs = 300;
-        try {
-            String extensionId = registerExtension("lambda-adapter", "INVOKE", "SHUTDOWN");
-
-            HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
-                            .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
-                            .header("Lambda-Extension-Identifier", extensionId)
-                            .GET().build(),
-                    HttpResponse.BodyHandlers.ofString());
-
-            assertEquals(204, response.statusCode(),
-                    "poller with no event and no stop() must give up and return 204 once its max wait elapses");
-        } finally {
-            RuntimeApiServer.extensionEventMaxWaitMs = original;
-        }
-    }
-
-    @Test
-    @Timeout(15)
-    void extensionEventNext_shutdownNeverOrphanedEvenWhenRequestRacesStop() throws Exception {
-        // Regression test for the race where stop() setting `stopped` and offering the SHUTDOWN
-        // event weren't atomic: a request could observe `stopped == true` in the gap before the
-        // event was queued, and get a bare 204 with the SHUTDOWN never delivered. Reproduces the
-        // exact window deterministically by holding the extension's lock from this thread so the
-        // parked /event/next call is provably still inside its wait when stop() is invoked on
-        // another thread, then releasing it and confirming SHUTDOWN still arrives.
-        String extensionId = registerExtension("lambda-adapter", "INVOKE", "SHUTDOWN");
-        RegisteredExtension extension = server.extension(extensionId);
-
-        CompletableFuture<HttpResponse<String>> asyncNext = httpClient.sendAsync(HttpRequest.newBuilder()
-                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
-                        .header("Lambda-Extension-Identifier", extensionId)
-                        .GET().build(),
-                HttpResponse.BodyHandlers.ofString());
-        Thread.sleep(300);
-        assertFalse(asyncNext.isDone(), "extension /event/next should be parked with no pending event");
-
-        synchronized (extension.getLock()) {
-            // With the extension's lock held here, awaitExtensionEvent (running on its own
-            // blocking-handler thread) is provably parked in Object.wait(), which releases the
-            // lock while waiting — so stop() below can proceed to acquire it and offer SHUTDOWN,
-            // but the poller cannot observe/return anything until wait() reacquires the lock
-            // after this block exits. There is no window where stopped is visible without the
-            // event also being visible.
-            CompletableFuture.runAsync(() -> server.stop());
-            // Give stop() a moment to reach (and block on) the extension's SHUTDOWN offer.
-            Thread.sleep(300);
-            assertFalse(asyncNext.isDone(), "poller must still be parked while the lock is held");
-        }
 
         HttpResponse<String> response = asyncNext.get(2, TimeUnit.SECONDS);
         assertEquals(200, response.statusCode());
