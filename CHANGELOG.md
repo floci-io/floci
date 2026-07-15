@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.33] - 2026-07-15
+
+### Added
+
+- **eks:** support managed node groups and Fargate profiles (create/describe/list/delete) ([#1523](https://github.com/floci-io/floci/pull/1523))
+- **stepfunctions:** support JSONata workflow variables (`Assign`) ([#1824](https://github.com/floci-io/floci/pull/1824))
+- **cognito:** implement GlobalSignOut ([#1701](https://github.com/floci-io/floci/pull/1701))
+- **cognito:** emit `jti`/`origin_jti` claims and support RevokeToken ([#1705](https://github.com/floci-io/floci/pull/1705))
+- **cloudformation:** parse secrets in ECS ContainerDefinitions ([#1874](https://github.com/floci-io/floci/pull/1874))
+
+### Fixed
+
+- **s3:** fail fast on unwritable data root instead of opaque 500s ([#1868](https://github.com/floci-io/floci/pull/1868))
+- **s3:** handle DeleteBucketReplication instead of deleting the whole bucket ([#1837](https://github.com/floci-io/floci/pull/1837))
+- **s3:** return default SSE-S3 from GetBucketEncryption instead of 404 ([#1838](https://github.com/floci-io/floci/pull/1838))
+- **s3:** honor ACL headers and explicit grants ([#1768](https://github.com/floci-io/floci/pull/1768))
+- **lifecycle:** tear down process-bound containers on shutdown ([#1869](https://github.com/floci-io/floci/pull/1869))
+- **ec2:** reject duplicate key pair names in ImportKeyPair ([#1848](https://github.com/floci-io/floci/pull/1848))
+- **iam:** pass S3 list condition context to IAM enforcement ([#1748](https://github.com/floci-io/floci/pull/1748))
+- **scheduler:** forward MessageAttributes in universal sns:publish target ([#1706](https://github.com/floci-io/floci/pull/1706))
+- **elbv2:** expose target health reason parity ([#1743](https://github.com/floci-io/floci/pull/1743))
+- **rds:** return DBSubnetGroupNotFoundFault for missing DescribeDBSubnetGroups name ([#1870](https://github.com/floci-io/floci/pull/1870))
+- **cloudformation:** carry PackageType through SAM Function expansion ([#1772](https://github.com/floci-io/floci/pull/1772))
+- **eks:** register FargateProfileStatus for native-image reflection ([#1876](https://github.com/floci-io/floci/pull/1876))
+
+## [1.5.32] - 2026-07-11
+
+### Fixed
+
+- **iam:** default UserName to the calling access key's owner ([#1801](https://github.com/floci-io/floci/pull/1801))
+- **lambda:** register EventSourceMapping nested types for native-image reflection ([#1826](https://github.com/floci-io/floci/pull/1826))
+- **lambda:** return event source mapping failure config ([#1629](https://github.com/floci-io/floci/pull/1629))
+- **lambda:** return a downloadable GetFunction Code.Location ([#1718](https://github.com/floci-io/floci/pull/1718))
+- **ec2:** serialize concurrent mutations of shared resources per resource ([#1786](https://github.com/floci-io/floci/pull/1786))
+- **ec2:** round-trip create-time tags and route/SG-rule attributes ([#1763](https://github.com/floci-io/floci/pull/1763))
+- **ecs:** assign awsvpc tasks dynamic host ports to avoid collisions ([#1785](https://github.com/floci-io/floci/pull/1785))
+- **elbv2:** dispatch same-port listeners by host ([#1700](https://github.com/floci-io/floci/pull/1700))
+- **autoscaling:** propagate ASG tags at launch ([#1734](https://github.com/floci-io/floci/pull/1734))
+- **s3:** omit checksum headers from GetObject/HeadObject unless `x-amz-checksum-mode: ENABLED` ([#1633](https://github.com/floci-io/floci/pull/1633)); support S3 auth enforcement ([#1689](https://github.com/floci-io/floci/pull/1689))
+- **ses:** populate VerificationStatus in v2 ListEmailIdentities ([#1722](https://github.com/floci-io/floci/pull/1722))
+- **rds:** preserve network placement metadata ([#1735](https://github.com/floci-io/floci/pull/1735))
+- **neptune:** roll back proxy port and container on failed provisioning ([#1742](https://github.com/floci-io/floci/pull/1742))
+- **secretsmanager:** return partial result for missing secrets in batch ([#1591](https://github.com/floci-io/floci/pull/1591))
+- **scheduler:** honor target EventBridgeParameters DetailType/Source ([#1489](https://github.com/floci-io/floci/pull/1489))
+- **tls:** add host.docker.internal to self-signed cert SANs ([#1821](https://github.com/floci-io/floci/pull/1821))
+- **aws-core:** register persisted model types for native-image reflection ([#1781](https://github.com/floci-io/floci/pull/1781))
+
 ## [1.5.31] - 2026-07-07
 
 ### Added
@@ -1178,7 +1225,9 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.31...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.33...HEAD
+[1.5.33]: https://github.com/floci-io/floci/compare/1.5.32...1.5.33
+[1.5.31]: https://github.com/floci-io/floci/compare/1.5.31...1.5.32
 [1.5.31]: https://github.com/floci-io/floci/compare/1.5.30...1.5.31
 [1.5.30]: https://github.com/floci-io/floci/compare/1.5.29...1.5.30
 [1.5.29]: https://github.com/floci-io/floci/compare/1.5.28...1.5.29

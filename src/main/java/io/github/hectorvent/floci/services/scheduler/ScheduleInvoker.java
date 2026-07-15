@@ -9,10 +9,13 @@ import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
+import io.github.hectorvent.floci.services.sns.SnsMessageAttributes;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -94,7 +97,7 @@ public class ScheduleInvoker {
             deliverToEcsRunTask(target, targetRegion);
             LOG.debugv("Scheduler delivered to ECS RunTask: {0}", arn);
         } else if (isEventBridgePutEventsArn(arn)) {
-            deliverToEventBridge(arn, payload, targetRegion);
+            deliverToEventBridge(target, payload, targetRegion);
             LOG.debugv("Scheduler delivered to EventBridge: {0}", arn);
         } else {
             LOG.warnv("Scheduler: unsupported target ARN type: {0}", arn);
@@ -167,8 +170,9 @@ public class ScheduleInvoker {
                 String subject = text(params, "Subject");
                 String messageGroupId = text(params, "MessageGroupId");
                 String messageDeduplicationId = text(params, "MessageDeduplicationId");
+                Map<String, MessageAttributeValue> messageAttributes = SnsMessageAttributes.parse(params.path("MessageAttributes"));
                 String snsRegion = extractRegion(topicArn != null ? topicArn : targetArn, region);
-                snsService.publish(topicArn, targetArn, null, message, subject, null,
+                snsService.publish(topicArn, targetArn, null, message, subject, messageAttributes,
                         messageGroupId, messageDeduplicationId, snsRegion);
                 LOG.debugv("Scheduler delivered to SNS (universal target): {0}", topicArn);
             }
@@ -193,12 +197,23 @@ public class ScheduleInvoker {
         return arn.contains(":events:") && arn.contains(":event-bus/");
     }
 
-    private void deliverToEventBridge(String busArn, String payload, String region) {
+    private void deliverToEventBridge(Target target, String payload, String region) {
+        String busArn = target.getArn();
         String busName = busArn.substring(busArn.indexOf(":event-bus/") + ":event-bus/".length());
+
+        // AWS requires DetailType and Source on the target's EventBridgeParameters for
+        // event-bus targets; honor them. Keep the historical defaults as a fallback for
+        // schedules created without those parameters.
+        EventBridgeParameters ebp = target.getEventBridgeParameters();
+        String source = ebp != null && ebp.getSource() != null && !ebp.getSource().isBlank()
+                ? ebp.getSource() : "aws.scheduler";
+        String detailType = ebp != null && ebp.getDetailType() != null && !ebp.getDetailType().isBlank()
+                ? ebp.getDetailType() : "Scheduled Event";
+
         Map<String, Object> entry = new HashMap<>();
         entry.put("EventBusName", busName);
-        entry.put("Source", "aws.scheduler");
-        entry.put("DetailType", "Scheduled Event");
+        entry.put("Source", source);
+        entry.put("DetailType", detailType);
         entry.put("Detail", asDetail(payload));
         eventBridgeService.putEvents(List.of(entry), region);
     }

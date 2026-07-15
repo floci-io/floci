@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.s3.model.*;
@@ -39,13 +40,15 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class S3Service implements Resettable {
     private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
-    private static final String ALL_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AllUsers";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
+    private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
@@ -56,6 +59,12 @@ public class S3Service implements Resettable {
     }
 
     private static final Logger LOG = Logger.getLogger(S3Service.class);
+
+    record RequestAuthorization(boolean signed, String accessKeyId) {
+        static RequestAuthorization unsigned() {
+            return new RequestAuthorization(false, null);
+        }
+    }
 
     private final StorageBackend<String, Bucket> bucketStore;
     private final StorageBackend<String, S3Object> objectStore;
@@ -75,6 +84,8 @@ public class S3Service implements Resettable {
     private final RegionResolver regionResolver;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
+    private final boolean enforceAuth;
+    private final IamService iamService;
 
     @Inject
     public S3Service(StorageFactory storageFactory, EmulatorConfig config,
@@ -83,7 +94,8 @@ public class S3Service implements Resettable {
                      EventBridgeService eventBridgeService,
                      Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
                      RegionResolver regionResolver,
-                     ObjectMapper objectMapper) {
+                     ObjectMapper objectMapper,
+                     IamService iamService) {
         this(
                 storageFactory.create("s3", "s3-buckets.json",
                         new TypeReference<Map<String, Bucket>>() {
@@ -96,7 +108,8 @@ public class S3Service implements Resettable {
                 sqsService, snsService, null, lambdaServiceProvider, null,
                 eventBridgeService, s3UpdatedEvent,
                 regionResolver,
-                config.effectiveBaseUrl(), objectMapper
+                config.effectiveBaseUrl(), objectMapper,
+                config.services().s3().enforceAuth(), iamService
         );
     }
 
@@ -107,7 +120,7 @@ public class S3Service implements Resettable {
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory) {
         this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper());
+                null, "http://localhost:4566", new ObjectMapper(), false, null);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -116,7 +129,7 @@ public class S3Service implements Resettable {
               LambdaService lambdaService,
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper());
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -125,7 +138,7 @@ public class S3Service implements Resettable {
               LambdaInvoker lambdaInvoker,
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper());
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null);
     }
 
     private S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -136,7 +149,8 @@ public class S3Service implements Resettable {
                       LambdaInvoker lambdaInvoker,
                       EventBridgeService eventBridgeService,
                       Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
-                      RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper) {
+                      RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper,
+                      boolean enforceAuth, IamService iamService) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
         this.dataRoot = dataRoot;
@@ -151,6 +165,8 @@ public class S3Service implements Resettable {
         this.regionResolver = regionResolver;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
+        this.enforceAuth = enforceAuth;
+        this.iamService = iamService;
         if (!inMemory) {
             try {
                 Files.createDirectories(dataRoot);
@@ -356,7 +372,9 @@ public class S3Service implements Resettable {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
         }
-        object.setAcl(cannedObjectAclXml(effectiveOptions.getAcl()));
+        object.setAcl(resolveObjectAclXml(effectiveOptions.getAcl(), effectiveOptions.getGrantRead(),
+                effectiveOptions.getGrantWrite(), effectiveOptions.getGrantFullControl(),
+                effectiveOptions.getGrantReadAcp(), effectiveOptions.getGrantWriteAcp()));
         if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
             object.setTags(new HashMap<>(effectiveOptions.getTagging()));
         }
@@ -456,6 +474,115 @@ public class S3Service implements Resettable {
             normalized = normalized.substring(1, normalized.length() - 1);
         }
         return normalized;
+    }
+
+    public void authorizeListBucket(String bucketName, RequestAuthorization authorization) {
+        authorizeBucketRead(bucketName, "s3:ListBucket", authorization);
+    }
+
+    public void authorizeGetObject(String bucketName, String key, String versionId, RequestAuthorization authorization) {
+        String action = versionId != null ? "s3:GetObjectVersion" : "s3:GetObject";
+        if (enforceAuth && versionId == null && isUnsignedRequest(authorization) && !readableObjectExists(bucketName, key)) {
+            authorizeMissingObjectRead(bucketName, authorization);
+            return;
+        }
+        authorizeObjectRead(bucketName, key, versionId, action, authorization);
+    }
+
+    void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+        authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
+    }
+
+    void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
+        String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        authorizeS3Read(bucketName, key, versionId, action, objectArn, authorization);
+    }
+
+    boolean isAuthEnforced() {
+        return enforceAuth;
+    }
+
+    private void authorizeS3Read(String bucketName, String key, String versionId, String action, String resourceArn, RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+
+        RequestAuthorization requestAuthorization = authorization != null
+                ? authorization
+                : RequestAuthorization.unsigned();
+
+        if (requestAuthorization.signed()) {
+            if (isKnownAccessKey(requestAuthorization.accessKeyId())) {
+                return;
+            }
+            throw new AwsException("InvalidAccessKeyId",
+                    "The AWS Access Key Id you provided does not exist in our records.", 403);
+        }
+
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
+                S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, resourceArn);
+        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.ALLOW) {
+            return;
+        }
+        if (key != null && isObjectDataReadAction(action) && publicObjectAclAllowsRead(bucketName, key, versionId)) {
+            return;
+        }
+        if (key == null && "s3:ListBucket".equals(action) && publicBucketAclAllowsRead(bucket)) {
+            return;
+        }
+
+        throw new AwsException("AccessDenied", "Access Denied", 403);
+    }
+
+    private boolean readableObjectExists(String bucketName, String key) {
+        ensureBucketExists(bucketName);
+        return objectStore.get(objectKey(bucketName, key))
+                .filter(object -> !object.isDeleteMarker())
+                .isPresent();
+    }
+
+    private void authorizeMissingObjectRead(String bucketName, RequestAuthorization authorization) {
+        authorizeListBucket(bucketName, authorization);
+    }
+
+    private static boolean isObjectDataReadAction(String action) {
+        return "s3:GetObject".equals(action) || "s3:GetObjectVersion".equals(action);
+    }
+
+    private static boolean isUnsignedRequest(RequestAuthorization authorization) {
+        return authorization == null || !authorization.signed();
+    }
+
+    private boolean isKnownAccessKey(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return false;
+        }
+        if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
+            return true;
+        }
+        return iamService != null && iamService.findSecretKey(accessKeyId).isPresent();
+    }
+
+    private boolean publicBucketAclAllowsRead(Bucket bucket) {
+        return Optional.ofNullable(bucket.getAcl())
+                .map(S3AclPublicAccessEvaluator::aclAllowsPublicRead)
+                .orElse(false);
+    }
+
+    private boolean publicObjectAclAllowsRead(String bucketName, String key, String versionId) {
+        String storeKey = versionId != null ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
+        return objectStore.get(storeKey)
+                .filter(object -> !object.isDeleteMarker())
+                .map(S3Object::getAcl)
+                .map(S3AclPublicAccessEvaluator::aclAllowsPublicRead)
+                .orElse(false);
     }
 
     private void applyObjectLock(S3Object object, Bucket bucket,
@@ -1615,10 +1742,12 @@ public class S3Service implements Resettable {
         return bucket.getAcl() != null ? bucket.getAcl() : defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
     }
 
-    public void putBucketAcl(String bucketName, String acl) {
+    public void putBucketAcl(String bucketName, String bodyAcl, String cannedAcl, String grantRead,
+                              String grantWrite, String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        bucket.setAcl(acl);
+        String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
+        bucket.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         bucketStore.put(bucketName, bucket);
     }
 
@@ -1627,19 +1756,38 @@ public class S3Service implements Resettable {
         return obj.getAcl() != null ? obj.getAcl() : defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
     }
 
-    public void putObjectAcl(String bucketName, String key, String versionId, String acl) {
+    public void putObjectAcl(String bucketName, String key, String versionId, String bodyAcl, String cannedAcl,
+                              String grantRead, String grantWrite, String grantFullControl,
+                              String grantReadAcp, String grantWriteAcp) {
         S3Object obj = getObject(bucketName, key, versionId);
-        obj.setAcl(acl);
+        String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
+        obj.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         String storeKey = (versionId != null) ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
         objectStore.put(storeKey, obj);
     }
 
+    /**
+     * Returns the bucket's server-side encryption configuration as XML.
+     * <p>
+     * Buckets that have
+     * never been configured return the AWS default (SSE-S3 / {@code AES256});
+     * since January 2023 AWS applies SSE-S3 as the base level of encryption on
+     * every bucket and never returns 404 for {@code GetBucketEncryption}.
+     */
     public String getBucketEncryption(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         if (bucket.getEncryptionConfiguration() == null) {
-            throw new AwsException("ServerSideEncryptionConfigurationNotFoundError",
-                    "The server side encryption configuration was not found", 404);
+            return new XmlBuilder()
+                    .start("ServerSideEncryptionConfiguration", AwsNamespaces.S3)
+                      .start("Rule")
+                        .start("ApplyServerSideEncryptionByDefault")
+                          .elem("SSEAlgorithm", "AES256")
+                        .end("ApplyServerSideEncryptionByDefault")
+                        .elem("BucketKeyEnabled", "false")
+                      .end("Rule")
+                    .end("ServerSideEncryptionConfiguration")
+                    .build();
         }
         return bucket.getEncryptionConfiguration();
     }
@@ -1772,6 +1920,68 @@ public class S3Service implements Resettable {
                 .build();
     }
 
+    /**
+     * Resolves the ACL to store for an object/bucket from a canned ACL and/or the explicit
+     * ACL grant headers (x-amz-grant-read, x-amz-grant-write, x-amz-grant-full-control,
+     * x-amz-grant-read-acp, x-amz-grant-write-acp). If both are somehow present, the canned ACL
+     * takes precedence - real S3 instead rejects that combination with 400 "Conflicting header
+     * values", but Floci doesn't model that validation yet. Returns null if neither is set, so
+     * callers can fall back to a pre-existing ACL (e.g. an explicit AccessControlPolicy XML body).
+     */
+    String resolveObjectAclXml(String cannedAcl, String grantRead, String grantWrite,
+                                String grantFullControl, String grantReadAcp, String grantWriteAcp) {
+        if (cannedAcl != null && !cannedAcl.isBlank()) {
+            return cannedObjectAclXml(cannedAcl);
+        }
+        if (isBlank(grantRead) && isBlank(grantWrite) && isBlank(grantFullControl)
+                && isBlank(grantReadAcp) && isBlank(grantWriteAcp)) {
+            return null;
+        }
+        List<String> grants = new ArrayList<>();
+        grants.add(ownerFullControlGrant());
+        appendGrantHeader(grants, grantRead, "READ");
+        appendGrantHeader(grants, grantWrite, "WRITE");
+        appendGrantHeader(grants, grantFullControl, "FULL_CONTROL");
+        appendGrantHeader(grants, grantReadAcp, "READ_ACP");
+        appendGrantHeader(grants, grantWriteAcp, "WRITE_ACP");
+        return objectAclXml(grants.toArray(new String[0]));
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    // Matches a single grantee token from an x-amz-grant-* header value, e.g.
+    // uri="http://acs.amazonaws.com/groups/global/AllUsers" or id="<canonical-id>". AWS allows
+    // a comma-separated list of these per header.
+    private static final Pattern GRANTEE_TOKEN_PATTERN = Pattern.compile("(uri|id|emailAddress)=\"([^\"]*)\"");
+
+    private void appendGrantHeader(List<String> grants, String headerValue, String permission) {
+        if (isBlank(headerValue)) {
+            return;
+        }
+        Matcher matcher = GRANTEE_TOKEN_PATTERN.matcher(headerValue);
+        boolean matched = false;
+        while (matcher.find()) {
+            matched = true;
+            grants.add(granteeGrant(matcher.group(1), matcher.group(2), permission));
+        }
+        if (!matched) {
+            throw new AwsException("InvalidArgument", "Malformed ACL grant header: " + headerValue, 400);
+        }
+    }
+
+    private String granteeGrant(String granteeType, String granteeValue, String permission) {
+        return switch (granteeType) {
+            case "uri" -> groupGrant(granteeValue, permission);
+            // Floci has no directory of external accounts, so an explicit CanonicalUser grant is
+            // stored using the caller-supplied ID verbatim as both ID and display name.
+            case "id" -> canonicalUserGrant(granteeValue, granteeValue, permission);
+            default -> throw new AwsException("NotImplemented",
+                    "Explicit ACL grants by emailAddress are not supported.", 501);
+        };
+    }
+
     String cannedObjectAclXml(String cannedAcl) {
         if (cannedAcl == null || cannedAcl.isBlank()) {
             return null;
@@ -1784,11 +1994,11 @@ public class S3Service implements Resettable {
             case "aws-exec-read" -> defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
             case "public-read" -> objectAclXml(
                     ownerFullControlGrant(),
-                    groupGrant(ALL_USERS_GROUP_URI, "READ"));
+                    groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "READ"));
             case "public-read-write" -> objectAclXml(
                     ownerFullControlGrant(),
-                    groupGrant(ALL_USERS_GROUP_URI, "READ"),
-                    groupGrant(ALL_USERS_GROUP_URI, "WRITE"));
+                    groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "READ"),
+                    groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "WRITE"));
             case "authenticated-read" -> objectAclXml(
                     ownerFullControlGrant(),
                     groupGrant(AUTHENTICATED_USERS_GROUP_URI, "READ"));
@@ -2472,6 +2682,11 @@ public class S3Service implements Resettable {
                         .withSseCustomerKey(effectiveOptions.getSseCustomerKey())
                         .withSseCustomerKeyMd5(effectiveOptions.getSseCustomerKeyMd5())
                         .withAcl(effectiveOptions.getAcl())
+                        .withGrantRead(effectiveOptions.getGrantRead())
+                        .withGrantWrite(effectiveOptions.getGrantWrite())
+                        .withGrantFullControl(effectiveOptions.getGrantFullControl())
+                        .withGrantReadAcp(effectiveOptions.getGrantReadAcp())
+                        .withGrantWriteAcp(effectiveOptions.getGrantWriteAcp())
                         .withChecksumAlgorithm(copyChecksumAlgorithm)
                         .withTagging(effectiveTags));
         copy.setETag(source.getETag());

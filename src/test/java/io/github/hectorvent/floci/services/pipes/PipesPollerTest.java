@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.vertx.core.Vertx;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -27,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -55,6 +57,91 @@ class PipesPollerTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         poller = new PipesPoller(vertx, sqsService, kinesisService, dynamoDbStreamService,
                 kafkaConsumerManager, targetInvoker, new PipesFilterMatcher(MAPPER), MAPPER, config);
+    }
+
+    @Test
+    void asEventArrayWrapsSingleObjectInBatchArray() throws Exception {
+        // Pipes delivers events to a target as a batch array; a single-object enrichment response
+        // must become a one-element array so a target like "InputPath": "$.[0]" can unwrap it.
+        String wrapped = PipesPoller.asEventArray(MAPPER, "{\"systemId\":\"S1\",\"solutions\":[1]}");
+        JsonNode node = MAPPER.readTree(wrapped);
+        assertTrue(node.isArray());
+        assertEquals(1, node.size());
+        assertEquals("S1", node.get(0).path("systemId").asText());
+    }
+
+    @Test
+    void asEventArrayLeavesArrayResponseUnchanged() throws Exception {
+        String out = PipesPoller.asEventArray(MAPPER, "[{\"a\":1},{\"a\":2}]");
+        JsonNode node = MAPPER.readTree(out);
+        assertTrue(node.isArray());
+        assertEquals(2, node.size());
+        assertEquals(2, node.get(1).path("a").asInt());
+    }
+
+    @Test
+    void asEventArrayWrapsNonJsonAsSingleStringEvent() throws Exception {
+        String out = PipesPoller.asEventArray(MAPPER, "not-json");
+        JsonNode node = MAPPER.readTree(out);
+        assertTrue(node.isArray());
+        assertEquals(1, node.size());
+        assertEquals("not-json", node.get(0).asText());
+    }
+
+    @Test
+    void pollSqs_enrichmentToNonLambdaTargetForwardsRawResponse() throws Exception {
+        // A non-Lambda target (here Step Functions) must receive the raw enrichment response, not a
+        // one-element batch array — array-wrapping would start the execution with [{...}] instead of {...}.
+        Pipe pipe = new Pipe();
+        pipe.setName("enrich-sfn");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setEnrichment("arn:aws:lambda:us-east-1:000000000000:function:enrich");
+        pipe.setTarget("arn:aws:states:us-east-1:000000000000:stateMachine:tgt");
+
+        Message msg = new Message("{\"orderId\":\"o1\"}");
+        msg.setMessageId("m1");
+        msg.setReceiptHandle("rh1");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(msg));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn("{\"systemId\":\"S1\"}");
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode delivered = MAPPER.readTree(payload.getValue());
+        assertFalse(delivered.isArray(),
+                "non-Lambda target must receive the raw enrichment response, not a batch array");
+        assertEquals("S1", delivered.path("systemId").asText());
+    }
+
+    @Test
+    void pollSqs_enrichmentToLambdaTargetWrapsResponseInBatchArray() throws Exception {
+        // A Lambda target expects the SQSRecord[]-style batch, so a single-object enrichment response
+        // is wrapped in a one-element array.
+        Pipe pipe = new Pipe();
+        pipe.setName("enrich-lambda");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setEnrichment("arn:aws:lambda:us-east-1:000000000000:function:enrich");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:tgt");
+
+        Message msg = new Message("{\"orderId\":\"o1\"}");
+        msg.setMessageId("m1");
+        msg.setReceiptHandle("rh1");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(msg));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn("{\"systemId\":\"S1\"}");
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode delivered = MAPPER.readTree(payload.getValue());
+        assertTrue(delivered.isArray(), "Lambda target must receive the batch array shape");
+        assertEquals(1, delivered.size());
+        assertEquals("S1", delivered.get(0).path("systemId").asText());
     }
 
     @Test

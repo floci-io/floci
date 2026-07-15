@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -96,6 +97,31 @@ class ContainerBuilderTest {
                 .build();
 
         assertEquals("host", spec.cgroupnsMode());
+    }
+
+    @Test
+    void withUserAndGroupAddRoundTripIntoSpec() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withUser("1001:1001")
+                .withGroupAdd("1001")
+                .withGroupAdd("2000")
+                .withGroupAdd("   ")   // blank ignored
+                .build();
+
+        assertEquals("1001:1001", spec.user());
+        assertEquals(List.of("1001", "2000"), spec.groupAdd());
+    }
+
+    @Test
+    void userAndGroupAddDefaultToUnset() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine").build();
+
+        assertNull(spec.user());
+        assertEquals(List.of(), spec.groupAdd());
     }
 
     @Test
