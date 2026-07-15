@@ -68,7 +68,7 @@ class AppSyncExecutionControllerTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
         assertEquals("InternalFailure", error.get("errorType"));
-        assertEquals("boom", error.get("message"));
+        assertEquals("InternalFailure", error.get("message"));
     }
 
     @Test
