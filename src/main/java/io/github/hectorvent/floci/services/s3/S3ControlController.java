@@ -15,6 +15,8 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
+import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 import jakarta.ws.rs.core.Response;
 
 import java.net.URLDecoder;
@@ -34,6 +36,8 @@ import java.util.UUID;
 @Path("/v20180820")
 @Produces(MediaType.APPLICATION_XML)
 public class S3ControlController {
+
+    private static final Logger LOG = Logger.getLogger(S3ControlController.class);
 
     private static final String AMZ_REQUEST_ID = "x-amz-request-id";
     private static final String AMZN_REQUEST_ID = "x-amzn-RequestId";
@@ -213,6 +217,20 @@ public class S3ControlController {
      * bare {@code <Error>} collapses to "UnknownError" at the SDK layer.
      * See issue #557.
      */
+    // Same protocol safety net as S3Controller: unhandled failures on S3 Control routes
+    // must render the REST-XML error contract, not Quarkus's plain-text error page.
+    @ServerExceptionMapper
+    public Response mapUnhandledThrowable(Throwable t) {
+        LOG.error("Unhandled exception processing S3 Control request", t);
+        return xmlErrorResponse(new AwsException("InternalError",
+                "We encountered an internal error. Please try again.", 500));
+    }
+
+    @ServerExceptionMapper
+    public Response mapEscapedAwsException(AwsException e) {
+        return xmlErrorResponse(e);
+    }
+
     private Response xmlErrorResponse(AwsException e) {
         String requestId = UUID.randomUUID().toString();
         String xml = new XmlBuilder()
