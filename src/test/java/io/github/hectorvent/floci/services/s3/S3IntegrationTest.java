@@ -1881,6 +1881,61 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(115)
+    void listObjectsV2DoesNotDoubleDecodePercentEscapes() {
+        String bucket = "double-decode-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            // Put object with literal '%20' in key (urlencoded to %2520 in PUT request)
+            given()
+                .urlEncodingEnabled(false)
+                .body("data")
+            .when()
+                .put("/" + bucket + "/percent%2520test/f.log")
+            .then()
+                .statusCode(200);
+
+            // 1. GET/HEAD object using %2520 should succeed
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "/percent%2520test/f.log")
+            .then()
+                .statusCode(200)
+                .body(equalTo("data"));
+
+            // 2. list-objects-v2 without encoding-type should return key with literal '%20'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>percent%20test/f.log</Key>"));
+
+            // 3. list-objects-v2 with encoding-type=url should return key with '%2520'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>percent%2520test%2Ff.log</Key>"));
+
+            // 4. list-objects-v2 with prefix with '%20' should return correct fields without double-decoding
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url&prefix=percent%2520test/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Prefix>percent%2520test%2F</Prefix>"))
+                .body(containsString("<Key>percent%2520test%2Ff.log</Key>"));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/percent%2520test/f.log");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(113)
     void cleanupPaginationBucket() {
         given().when().delete("/pag-test-bucket/a.txt");

@@ -306,12 +306,12 @@ public class S3Controller {
                                 @Context UriInfo uriInfo) {
         try {
             validateRawUri();
-            String decodedPrefix = decodeQueryParam(prefix);
-            String decodedDelimiter = decodeQueryParam(delimiter);
-            String decodedMarker = decodeQueryParam(marker);
-            String decodedStartAfter = decodeQueryParam(startAfter);
-            String decodedContinuationToken = decodeQueryParam(continuationToken);
-            String decodedKeyMarker = decodeQueryParam(keyMarker);
+            String decodedPrefix = prefix;
+            String decodedDelimiter = delimiter;
+            String decodedMarker = marker;
+            String decodedStartAfter = startAfter;
+            String decodedContinuationToken = continuationToken;
+            String decodedKeyMarker = keyMarker;
 
             if (hasQueryParam(uriInfo, "uploads")) {
                 return handleListMultipartUploads(bucket);
@@ -2668,16 +2668,5 @@ public class S3Controller {
                     .replace("%7E", "~");
         }
         return val;
-    }
-
-    private String decodeQueryParam(String val) {
-        if (val == null) {
-            return null;
-        }
-        try {
-            return URLDecoder.decode(val.replace("+", "%2B"), StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            return val;
-        }
     }
 }
