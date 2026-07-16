@@ -161,10 +161,10 @@ floci:
   security:
     # Comma-separated browser origins allowed by the global CORS filter.
     # Env var: EXTRA_CORS_ALLOWED_ORIGINS=http://localhost:3000
-    # extra-cors-allowed-origins:
+    extra-cors-allowed-origins: ${EXTRA_CORS_ALLOWED_ORIGINS:}
     # Extra request/response CORS header names for browser clients.
-    # extra-cors-allowed-headers:
-    # extra-cors-expose-headers:
+    extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
+    extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
     # Grant Private Network Access preflights (Access-Control-Allow-Private-Network)
     # so a page on a public/secure origin can reach this loopback backend.

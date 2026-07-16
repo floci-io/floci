@@ -42,6 +42,33 @@ class GlobalCorsFilterIntegrationTest {
     }
 
     @Test
+    void preflightS3ObjectReturnsCorsHeaders() {
+        given()
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "PUT")
+        .when()
+            .options("/my-bucket/some-key")
+        .then()
+            .statusCode(204)
+            .header("Access-Control-Allow-Origin", equalTo("http://localhost:3000"));
+    }
+
+    @Test
+    void preflightS3ObjectVirtualHostReturnsCorsHeaders() {
+        given()
+            .header("Host", "my-bucket.s3.localhost.floci.io:4566")
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "PUT")
+        .when()
+            .options("/some-key")
+        .then()
+            .statusCode(204)
+            .header("Access-Control-Allow-Origin", equalTo("http://localhost:3000"));
+    }
+
+
+
+    @Test
     void preflightRequestingPrivateNetworkAccessIsGranted() {
         given()
             .header("Origin", "http://localhost:3000")
