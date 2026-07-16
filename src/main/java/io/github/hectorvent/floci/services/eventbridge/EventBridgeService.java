@@ -913,7 +913,9 @@ public class EventBridgeService {
                 JsonNode anythingBut = element.get("anything-but");
                 if (anythingBut.isArray()) {
                     for (JsonNode v : anythingBut) {
-                        if (matchesExactValue(v, actual)) return false;
+                        if (matchesExactValue(v, actual)) {
+                            return false;
+                        }
                     }
                     return actual != null && !actual.isNull();
                 }
@@ -946,9 +948,9 @@ public class EventBridgeService {
             return actual.isBoolean() && expected.booleanValue() == actual.booleanValue();
         }
         if (expected.isNumber()) {
-            // AWS exact numeric matching compares string representations:
-            // 300, 300.0 and 3.0e2 are NOT considered equal.
-            return actual.isNumber() && expected.asText().equals(actual.asText());
+            // AWS normalizes numbers before comparing: 300, 300.0 and 3.0e2
+            // are all considered equal.
+            return actual.isNumber() && expected.decimalValue().compareTo(actual.decimalValue()) == 0;
         }
         return false;
     }

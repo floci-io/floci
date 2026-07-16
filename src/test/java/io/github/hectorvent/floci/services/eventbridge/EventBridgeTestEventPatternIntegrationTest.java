@@ -220,9 +220,8 @@ class EventBridgeTestEventPatternIntegrationTest {
     }
 
     @Test
-    void detailNumberMatchIsByStringRepresentation() {
-        // AWS exact numeric matching compares string representations:
-        // 300 and 300.0 are NOT considered equal.
+    void detailNumberMatchIsByNumericValue() {
+        // AWS normalizes numbers before comparing: 300 and 300.0 are equal.
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)
             .header("X-Amz-Target", TARGET)
@@ -236,7 +235,25 @@ class EventBridgeTestEventPatternIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Result", equalTo(false));
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailNumberScientificNotationMatchesDecimal() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[3.0e2]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":300.0}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
     }
 
     @Test
