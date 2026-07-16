@@ -114,8 +114,8 @@ public class StepFunctionsService implements Resettable {
         if (roleArn != null && !roleArn.isBlank()) {
             sm.setRoleArn(roleArn);
         }
-        if (tags != null && !tags.isEmpty()) {
-            sm.getTags().putAll(tags);
+        if (tags != null) {
+            sm.setTags(new HashMap<>(tags));
         }
 
         sm.setUpdateDate(System.currentTimeMillis() / 1000.0);

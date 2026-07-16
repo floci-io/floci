@@ -54,6 +54,27 @@ class StepFunctionsUpdateStateMachineIntegrationTest {
     }
 
     @Test
+    void directUpdatePreservesExistingTags() {
+        String name = "upd-tags-" + System.currentTimeMillis();
+        String arn = call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r1\","
+                        + "\"tags\":[{\"key\":\"owner\",\"value\":\"platform\"},"
+                        + "{\"key\":\"stage\",\"value\":\"test\"}]}")
+                .then().statusCode(200).extract().jsonPath().getString("stateMachineArn");
+
+        call("UpdateStateMachine",
+                "{\"stateMachineArn\":\"" + arn + "\",\"definition\":\"" + DEF2 + "\"}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"resourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("tags.size()", is(2))
+                .body("tags.find { it.key == 'owner' }.value", is("platform"))
+                .body("tags.find { it.key == 'stage' }.value", is("test"));
+    }
+
+    @Test
     void updateMissingStateMachineReturnsStateMachineDoesNotExist() {
         String missing = "arn:aws:states:us-east-1:000000000000:stateMachine:missing-" + System.currentTimeMillis();
         call("UpdateStateMachine", "{\"stateMachineArn\":\"" + missing + "\",\"definition\":\"" + DEF + "\"}")

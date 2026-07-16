@@ -6804,6 +6804,105 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
+    @Test
+    void updateStack_stepFunctionsStateMachine_replacesAndClearsTags() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-cfn-tags-" + suffix;
+        String stateMachineName = "cfn-sfn-tags-" + suffix;
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:" + stateMachineName;
+        String template = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-tags-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"%s\\",\\"End\\":true}}}"%s
+                  }
+                }
+              }
+            }
+            """;
+        String initialTags = """
+            ,
+                    "Tags": [
+                      {"Key": "removed", "Value": "old"},
+                      {"Key": "retained", "Value": "v1"}
+                    ]
+            """;
+        String replacementTags = """
+            ,
+                    "Tags": [
+                      {"Key": "retained", "Value": "v2"},
+                      {"Key": "added", "Value": "new"}
+                    ]
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(stateMachineName, "marker-v1", initialTags))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(stateMachineName, "marker-v2", replacementTags))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.ListTagsForResource")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"resourceArn\":\"" + stateMachineArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("tags.size()", equalTo(2))
+            .body("tags.find { it.key == 'retained' }.value", equalTo("v2"))
+            .body("tags.find { it.key == 'added' }.value", equalTo("new"))
+            .body("tags.find { it.key == 'removed' }", nullValue());
+
+        // Omitting Tags from the new CloudFormation resource model removes all previously managed tags.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(stateMachineName, "marker-v3", ""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.ListTagsForResource")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"resourceArn\":\"" + stateMachineArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("tags.size()", equalTo(0));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     // ── Issue #924: roll back failed stack creates (criterion #9) ────────────
 
     @Test
