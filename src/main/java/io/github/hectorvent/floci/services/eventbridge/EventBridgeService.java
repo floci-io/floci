@@ -1132,6 +1132,67 @@ public class EventBridgeService {
         });
     }
 
+    // ──────────────────────────── Connections ────────────────────────────
+
+    private static final java.util.regex.Pattern CONNECTION_NAME_PATTERN =
+            java.util.regex.Pattern.compile("[\\.\\-_A-Za-z0-9]+");
+
+    public Connection createConnection(String name, String description, String authorizationType,
+                                       String authParameters, String invocationConnectivityParameters,
+                                       String kmsKeyIdentifier, String region) {
+        validateConnectionName(name);
+        validateAuthorizationType(authorizationType);
+        if (authParameters == null) {
+            throw new AwsException("ValidationException", "AuthParameters is required.", 400);
+        }
+        String key = connectionKey(region, name);
+        if (connectionStore.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Connection " + name + " already exists.", 400);
+        }
+        String connectionId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+        Connection connection = new Connection();
+        connection.setName(name);
+        connection.setConnectionArn(regionResolver.buildArn("events", region,
+                "connection/" + name + "/" + connectionId));
+        connection.setDescription(description);
+        connection.setAuthorizationType(authorizationType);
+        connection.setAuthParameters(authParameters);
+        connection.setInvocationConnectivityParameters(invocationConnectivityParameters);
+        connection.setKmsKeyIdentifier(kmsKeyIdentifier);
+        connection.setSecretArn(regionResolver.buildArn("secretsmanager", region,
+                "secret:events!connection/" + name + "/" + connectionId));
+        connection.setConnectionState(ConnectionState.AUTHORIZED);
+        connection.setCreationTime(now);
+        connection.setLastModifiedTime(now);
+        connection.setLastAuthorizedTime(now);
+        connectionStore.put(key, connection);
+        LOG.infov("Created connection: {0} with authorization type {1}", name, authorizationType);
+        return connection;
+    }
+
+    private static void validateConnectionName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Connection name is required.", 400);
+        }
+        if (name.length() > 64 || !CONNECTION_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("ValidationException",
+                    "Connection name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.", 400);
+        }
+    }
+
+    private static void validateAuthorizationType(String authorizationType) {
+        if (authorizationType == null || authorizationType.isBlank()) {
+            throw new AwsException("ValidationException", "AuthorizationType is required.", 400);
+        }
+        switch (authorizationType) {
+            case "BASIC", "OAUTH_CLIENT_CREDENTIALS", "API_KEY" -> { }
+            default -> throw new AwsException("ValidationException",
+                    "AuthorizationType must be one of BASIC, OAUTH_CLIENT_CREDENTIALS, API_KEY.", 400);
+        }
+    }
+
     private void captureToArchives(Map<String, Object> entry, String busStoreKey,
                                    String eventId, String region, String accountId) {
         EventBus bus = accountGet(busStore, accountId, busStoreKey).orElse(null);
