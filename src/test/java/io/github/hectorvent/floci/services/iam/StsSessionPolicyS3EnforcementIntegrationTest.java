@@ -52,6 +52,42 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
                 .body(containsString("<Code>AccessDenied</Code>"));
     }
 
+    @Test
+    void assumeRoleSessionPolicyListBucketPrefixConditionRestrictsListObjects() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "session-policy-prefix-" + suffix;
+        String roleName = "SessionPolicyPrefixRole" + suffix;
+        String allowedPrefix = "my_namespace/table_" + suffix + "/";
+
+        createBucket(bucket);
+        createRole(roleName);
+        putBroadS3RolePolicy(roleName, bucket);
+        putObject(bucket, allowedPrefix + "metadata.json");
+        putObject(bucket, "other_namespace/table_" + suffix + "/metadata.json");
+
+        String accessKeyId = assumeRoleWithS3ListPrefixSessionPolicy(roleName, bucket, allowedPrefix);
+
+        given()
+                .header("Authorization", auth(accessKeyId, "s3"))
+                .queryParam("list-type", "2")
+                .queryParam("prefix", allowedPrefix)
+        .when()
+                .get("/" + bucket)
+        .then()
+                .statusCode(200)
+                .body(containsString("<Key>" + allowedPrefix + "metadata.json</Key>"));
+
+        given()
+                .header("Authorization", auth(accessKeyId, "s3"))
+                .queryParam("list-type", "2")
+                .queryParam("prefix", "other_namespace/table_" + suffix + "/")
+        .when()
+                .get("/" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
     private static void createBucket(String bucket) {
         given()
                 .header("Authorization", auth(ROLE_ACCOUNT_ID, "s3"))
@@ -112,6 +148,17 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
                 .statusCode(200);
     }
 
+    private static void putObject(String bucket, String key) {
+        given()
+                .header("Authorization", auth(ROLE_ACCOUNT_ID, "s3"))
+                .contentType("application/json")
+                .body("{}")
+        .when()
+                .put("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200);
+    }
+
     private static String assumeRoleWithS3SessionPolicy(String roleName, String bucket) {
         return given()
                 .formParam("Action", "AssumeRole")
@@ -137,6 +184,50 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
                       ]
                     }
                     """.formatted(bucket))
+                .header("Authorization", auth(CALLER_ACCOUNT_ID, "sts"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"))
+                .extract()
+                .path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+    }
+
+    private static String assumeRoleWithS3ListPrefixSessionPolicy(String roleName, String bucket, String allowedPrefix) {
+        return given()
+                .formParam("Action", "AssumeRole")
+                .formParam("RoleArn", "arn:aws:iam::" + ROLE_ACCOUNT_ID + ":role/" + roleName)
+                .formParam("RoleSessionName", "session-policy-prefix-test")
+                .formParam("Policy", """
+                    {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                        {
+                          "Effect": "Allow",
+                          "Action": "s3:ListBucket",
+                          "Resource": "arn:aws:s3:::%1$s",
+                          "Condition": {
+                            "StringLike": {
+                              "s3:prefix": [
+                                "%2$s",
+                                "%2$s*"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "Effect": "Allow",
+                          "Action": [
+                            "s3:GetObject",
+                            "s3:PutObject",
+                            "s3:DeleteObject"
+                          ],
+                          "Resource": "arn:aws:s3:::%1$s/%2$s*"
+                        }
+                      ]
+                    }
+                    """.formatted(bucket, allowedPrefix))
                 .header("Authorization", auth(CALLER_ACCOUNT_ID, "sts"))
         .when()
                 .post("/")
