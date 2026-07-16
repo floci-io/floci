@@ -4,33 +4,54 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ManagedContext;
+import io.quarkus.runtime.ShutdownEvent;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayOutputStream;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class FirehoseService {
 
     private static final Logger LOG = Logger.getLogger(FirehoseService.class);
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
-    private static final int DEFAULT_FLUSH_COUNT = 5;
+    // How often the background flusher checks buffers against their stream's
+    // IntervalInSeconds. Delivery therefore lands within interval + 1s.
+    private static final long FLUSH_TICK_MILLIS = 1_000L;
+    // Bounds retries of a persistently failing destination so the in-memory
+    // buffer can't grow without limit; AWS likewise gives up eventually
+    // (retry window, then error output) rather than buffering forever.
+    private static final int MAX_DELIVERY_ATTEMPTS = 10;
 
     private final StorageBackend<String, DeliveryStreamDescription> streamStore;
-    private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
+    // Keyed per account to mirror the account-prefixed streamStore, so
+    // same-named streams in different accounts don't share a buffer.
+    private final Map<BufferKey, StreamBuffer> buffers = new ConcurrentHashMap<>();
     private final S3Service s3Service;
     private final RegionResolver regionResolver;
+    private ScheduledExecutorService flushScheduler;
 
     @Inject
     public FirehoseService(StorageFactory storageFactory, S3Service s3Service, RegionResolver regionResolver) {
@@ -38,6 +59,23 @@ public class FirehoseService {
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.s3Service = s3Service;
         this.regionResolver = regionResolver;
+    }
+
+    void onStart(@Observes StartupEvent ev) {
+        flushScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "floci-firehose-flusher");
+            t.setDaemon(true);
+            return t;
+        });
+        flushScheduler.scheduleAtFixedRate(this::flushDueBuffers,
+                FLUSH_TICK_MILLIS, FLUSH_TICK_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    void onStop(@Observes ShutdownEvent ev) {
+        if (flushScheduler != null) {
+            flushScheduler.shutdownNow();
+            flushScheduler = null;
+        }
     }
 
     public String createDeliveryStream(String name, S3Destination s3Config) {
@@ -50,6 +88,10 @@ public class FirehoseService {
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
                                        String deliveryStreamType) {
+        if (streamStore.get(name).isPresent()) {
+            throw new AwsException("ResourceInUseException",
+                    "Firehose " + name + " under accountId " + regionResolver.getAccountId() + " already exists", 400);
+        }
         validateBufferingHints(s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
         DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config);
@@ -59,7 +101,7 @@ public class FirehoseService {
             description.setDeliveryStreamType(deliveryStreamType);
         }
         streamStore.put(name, description);
-        buffers.put(name, Collections.synchronizedList(new ArrayList<>()));
+        buffers.put(bufferKey(name), new StreamBuffer());
         LOG.infov("Created Firehose delivery stream: {0}", name);
         return arn;
     }
@@ -124,6 +166,20 @@ public class FirehoseService {
                     "If you specify a value for SizeInMBs, you must also specify a value for IntervalInSeconds, and vice versa.",
                     400);
         }
+        // Ranges from the BufferingHints API reference: SizeInMBs 1-128, IntervalInSeconds 0-900.
+        requireRange(hints.getSizeInMBs(), 1, 128, "bufferingHints.sizeInMBs");
+        requireRange(hints.getIntervalInSeconds(), 0, 900, "bufferingHints.intervalInSeconds");
+    }
+
+    private static void requireRange(Integer value, int min, int max, String member) {
+        if (value == null || (value >= min && value <= max)) {
+            return;
+        }
+        throw new AwsException("ValidationException",
+                "1 validation error detected: Value '" + value + "' at '" + member
+                        + "' failed to satisfy constraint: Member must have value "
+                        + (value < min ? "greater than or equal to " + min : "less than or equal to " + max),
+                400);
     }
 
     private static void mergeDestination(S3Destination current, S3Destination update) {
@@ -199,7 +255,9 @@ public class FirehoseService {
     public void deleteDeliveryStream(String name) {
         describeDeliveryStream(name);
         streamStore.delete(name);
-        buffers.remove(name);
+        // Undelivered buffered data is dropped, matching AWS: deleting a
+        // delivery stream can lose data that hasn't reached the destination.
+        buffers.remove(bufferKey(name));
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
     }
 
@@ -209,41 +267,119 @@ public class FirehoseService {
     }
 
     public void putRecord(String streamName, Record record) {
-        DeliveryStreamDescription stream = describeDeliveryStream(streamName);
-        buffers.computeIfAbsent(streamName, k -> Collections.synchronizedList(new ArrayList<>()))
-               .add(record.getData());
-
-        if (buffers.get(streamName).size() >= DEFAULT_FLUSH_COUNT) {
-            flush(streamName, stream);
-        }
+        putRecordBatch(streamName, List.of(record));
     }
 
     public void putRecordBatch(String streamName, List<Record> records) {
         DeliveryStreamDescription stream = describeDeliveryStream(streamName);
-        List<byte[]> buffer = buffers.computeIfAbsent(
-                streamName, k -> Collections.synchronizedList(new ArrayList<>()));
+        StreamBuffer buffer = buffers.computeIfAbsent(bufferKey(streamName), k -> new StreamBuffer());
         for (Record r : records) {
-            buffer.add(r.getData());
+            buffer.add(r.getData() == null ? new byte[0] : r.getData());
         }
-        if (buffer.size() >= DEFAULT_FLUSH_COUNT) {
-            flush(streamName, stream);
-        }
+        flushIfSizeReached(streamName, stream, buffer);
     }
 
     public void flush(String streamName) {
         streamStore.get(streamName).ifPresent(stream -> flush(streamName, stream));
     }
 
+    /** Size half of BufferingHints: deliver as soon as SizeInMBs worth of data is buffered. */
+    private void flushIfSizeReached(String streamName, DeliveryStreamDescription stream, StreamBuffer buffer) {
+        DeliveryStreamDescription.BufferingHints hints = bufferingHints(stream);
+        long thresholdBytes = hints.getSizeInMBs() * 1024L * 1024L;
+        if (buffer.byteCount() >= thresholdBytes) {
+            flush(streamName, stream);
+        }
+    }
+
+    /**
+     * Interval half of BufferingHints: runs on the background flusher thread every
+     * {@link #FLUSH_TICK_MILLIS} and delivers any buffer whose oldest record has
+     * been waiting at least the stream's IntervalInSeconds.
+     */
+    private void flushDueBuffers() {
+        for (Map.Entry<BufferKey, StreamBuffer> entry : buffers.entrySet()) {
+            try {
+                flushIfDue(entry.getKey(), entry.getValue());
+            } catch (RuntimeException e) {
+                LOG.errorv("Firehose flush tick failed for stream {0}: {1}",
+                        entry.getKey().streamName(), e.getMessage());
+            }
+        }
+    }
+
+    private void flushIfDue(BufferKey key, StreamBuffer buffer) {
+        Instant oldest = buffer.oldestRecordAt();
+        if (oldest == null) {
+            return;
+        }
+        DeliveryStreamDescription stream = streamForAccount(key);
+        if (stream == null) {
+            // Stream deleted outside the request path that owned the buffer: drop the
+            // orphaned buffer — conditionally, since the stream (and a fresh buffer)
+            // may have been re-created concurrently.
+            buffers.remove(key, buffer);
+            return;
+        }
+        int interval = bufferingHints(stream).getIntervalInSeconds();
+        if (Duration.between(oldest, Instant.now()).getSeconds() < interval) {
+            return;
+        }
+        // Only the actual delivery needs the synthetic request scope: the S3 write
+        // resolves buckets through account-aware storage, which reads the calling
+        // account from the active request context, and this thread has none.
+        runUnderAccount(key.accountId(), () -> flush(key.streamName(), stream));
+    }
+
+    /**
+     * Async-worker read of the stream store: outside a request scope the
+     * account-aware backend would fall back to the default account, so use the
+     * explicit per-account overload with the buffer's owning account.
+     */
+    private DeliveryStreamDescription streamForAccount(BufferKey key) {
+        if (streamStore instanceof AccountAwareStorageBackend<DeliveryStreamDescription> accountAware) {
+            return accountAware.getForAccount(key.accountId(), key.streamName()).orElse(null);
+        }
+        return streamStore.get(key.streamName()).orElse(null);
+    }
+
+    /**
+     * Activates a synthetic CDI request scope bound to {@code accountId} and runs
+     * {@code body} inside it (same pattern as {@code CurEmissionScheduler}): the
+     * account-aware storage backends used by the stream store and S3 read the
+     * calling account from the active request context. If a scope was already
+     * active, the previous account is restored afterwards so it isn't left
+     * behind on a reused thread.
+     */
+    private void runUnderAccount(String accountId, Runnable body) {
+        ManagedContext requestContext = Arc.container().requestContext();
+        boolean alreadyActive = requestContext.isActive();
+        if (!alreadyActive) {
+            requestContext.activate();
+        }
+        RequestContext ctx = Arc.container().instance(RequestContext.class).get();
+        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
+        try {
+            ctx.setAccountId(accountId);
+            body.run();
+        } finally {
+            if (!alreadyActive) {
+                requestContext.terminate();
+            } else {
+                ctx.setAccountId(previousAccountId);
+            }
+        }
+    }
+
     private void flush(String streamName, DeliveryStreamDescription stream) {
-        List<byte[]> buffer = buffers.get(streamName);
-        if (buffer == null || buffer.isEmpty()) {
+        StreamBuffer buffer = buffers.get(bufferKey(streamName));
+        if (buffer == null) {
             return;
         }
 
-        List<byte[]> toFlush;
-        synchronized (buffer) {
-            toFlush = new ArrayList<>(buffer);
-            buffer.clear();
+        List<byte[]> toFlush = buffer.drain();
+        if (toFlush.isEmpty()) {
+            return;
         }
 
         try {
@@ -253,20 +389,110 @@ public class FirehoseService {
 
             ensureBucket(bucket);
 
-            StringBuilder sb = new StringBuilder();
+            // Assemble the newline-delimited body on raw bytes: record data is an
+            // arbitrary binary blob, so a String round-trip would corrupt non-UTF-8
+            // payloads (and copy every byte twice for nothing).
+            ByteArrayOutputStream body = new ByteArrayOutputStream();
             for (byte[] data : toFlush) {
-                sb.append(new String(data, StandardCharsets.UTF_8));
-                if (!sb.isEmpty() && sb.charAt(sb.length() - 1) != '\n') {
-                    sb.append('\n');
+                body.write(data, 0, data.length);
+                if (data.length > 0 && data[data.length - 1] != '\n') {
+                    body.write('\n');
                 }
             }
 
-            byte[] body = sb.toString().getBytes(StandardCharsets.UTF_8);
-            s3Service.putObject(bucket, key, body, "application/x-ndjson", Map.of());
+            s3Service.putObject(bucket, key, body.toByteArray(), "application/x-ndjson", Map.of());
+            buffer.markDelivered();
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3}",
                     toFlush.size(), streamName, bucket, key);
         } catch (Exception e) {
-            LOG.errorv("Failed to flush Firehose stream {0}: {1}", streamName, e.getMessage());
+            // Put the drained records back (ahead of anything buffered meanwhile,
+            // preserving order) so the next interval tick retries instead of
+            // silently dropping them — up to MAX_DELIVERY_ATTEMPTS, after which the
+            // batch is dropped so a permanently failing destination can't grow the
+            // in-memory buffer without bound.
+            if (buffer.restoreForRetry(toFlush, MAX_DELIVERY_ATTEMPTS)) {
+                LOG.errorv("Failed to flush Firehose stream {0}, will retry: {1}", streamName, e.getMessage());
+            } else {
+                LOG.errorv("Failed to flush Firehose stream {0} after {1} attempts, dropping {2} records: {3}",
+                        streamName, MAX_DELIVERY_ATTEMPTS, toFlush.size(), e.getMessage());
+            }
+        }
+    }
+
+    private BufferKey bufferKey(String streamName) {
+        return new BufferKey(regionResolver.getAccountId(), streamName);
+    }
+
+    /** Effective hints for delivery decisions: the stream's own, or the AWS defaults (5 MiB / 300 s). */
+    private static DeliveryStreamDescription.BufferingHints bufferingHints(DeliveryStreamDescription stream) {
+        S3Destination s3 = stream.s3Destination();
+        if (s3 != null && s3.getBufferingHints() != null
+                && s3.getBufferingHints().getSizeInMBs() != null
+                && s3.getBufferingHints().getIntervalInSeconds() != null) {
+            return s3.getBufferingHints();
+        }
+        return DeliveryStreamDescription.BufferingHints.defaults();
+    }
+
+    /** Identifies one stream's buffer: the owning account plus the stream name. */
+    private record BufferKey(String accountId, String streamName) {}
+
+    /**
+     * In-memory delivery buffer for one stream: the pending record payloads plus
+     * the byte count (drives the SizeInMBs trigger) and the arrival time of the
+     * oldest pending record (drives the IntervalInSeconds trigger).
+     */
+    private static final class StreamBuffer {
+        private final List<byte[]> records = new ArrayList<>();
+        private long byteCount;
+        private Instant oldestRecordAt;
+        private int failedAttempts;
+
+        synchronized void add(byte[] data) {
+            if (records.isEmpty()) {
+                oldestRecordAt = Instant.now();
+            }
+            records.add(data);
+            byteCount += data.length;
+        }
+
+        synchronized List<byte[]> drain() {
+            List<byte[]> drained = new ArrayList<>(records);
+            records.clear();
+            byteCount = 0;
+            oldestRecordAt = null;
+            return drained;
+        }
+
+        synchronized void markDelivered() {
+            failedAttempts = 0;
+        }
+
+        /**
+         * Puts a failed batch back at the head of the buffer for a later retry.
+         * Returns false — and drops the batch — once maxAttempts deliveries of it
+         * have failed.
+         */
+        synchronized boolean restoreForRetry(List<byte[]> drained, int maxAttempts) {
+            if (++failedAttempts >= maxAttempts) {
+                failedAttempts = 0;
+                return false;
+            }
+            records.addAll(0, drained);
+            for (byte[] data : drained) {
+                byteCount += data.length;
+            }
+            // Pace retries by the stream's interval rather than retrying every tick.
+            oldestRecordAt = Instant.now();
+            return true;
+        }
+
+        synchronized long byteCount() {
+            return byteCount;
+        }
+
+        synchronized Instant oldestRecordAt() {
+            return oldestRecordAt;
         }
     }
 
