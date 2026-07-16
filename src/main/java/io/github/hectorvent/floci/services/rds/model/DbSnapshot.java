@@ -17,6 +17,7 @@ public class DbSnapshot {
     private int allocatedStorage;
     private String status;
     private String masterUsername;
+    private String masterPassword;
     private String availabilityZone;
     private String vpcId;
     private Instant instanceCreateTime;
@@ -29,7 +30,7 @@ public class DbSnapshot {
 
     public DbSnapshot(String dbSnapshotIdentifier, String dbInstanceIdentifier, Instant snapshotCreateTime,
                       DatabaseEngine engine, String engineVersion, int allocatedStorage, String status,
-                      String masterUsername, String availabilityZone, String vpcId, Instant instanceCreateTime,
+                      String masterUsername, String masterPassword, String availabilityZone, String vpcId, Instant instanceCreateTime,
                       int port, boolean iamDatabaseAuthenticationEnabled, String dbiResourceId) {
         this.dbSnapshotIdentifier = dbSnapshotIdentifier;
         this.dbInstanceIdentifier = dbInstanceIdentifier;
@@ -39,6 +40,7 @@ public class DbSnapshot {
         this.allocatedStorage = allocatedStorage;
         this.status = status;
         this.masterUsername = masterUsername;
+        this.masterPassword = masterPassword;
         this.availabilityZone = availabilityZone;
         this.vpcId = vpcId;
         this.instanceCreateTime = instanceCreateTime;
@@ -70,6 +72,9 @@ public class DbSnapshot {
 
     public String getMasterUsername() { return masterUsername; }
     public void setMasterUsername(String masterUsername) { this.masterUsername = masterUsername; }
+
+    public String getMasterPassword() { return masterPassword; }
+    public void setMasterPassword(String masterPassword) { this.masterPassword = masterPassword; }
 
     public String getAvailabilityZone() { return availabilityZone; }
     public void setAvailabilityZone(String availabilityZone) { this.availabilityZone = availabilityZone; }

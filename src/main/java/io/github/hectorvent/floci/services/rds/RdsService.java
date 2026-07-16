@@ -390,7 +390,7 @@ public class RdsService implements Resettable {
 
         DbSnapshot snapshot = new DbSnapshot(snapshotId, instanceId, Instant.now(), instance.getEngine(),
                 instance.getEngineVersion(), instance.getAllocatedStorage(), "available",
-                instance.getMasterUsername(), instance.getAvailabilityZone(), instance.getVpcId(),
+                instance.getMasterUsername(), instance.getMasterPassword(), instance.getAvailabilityZone(), instance.getVpcId(),
                 instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
                 instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId());
 
@@ -412,7 +412,7 @@ public class RdsService implements Resettable {
         
         // Use the parameters from the snapshot
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
-                snapshot.getMasterUsername(), "password", // default password
+                snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 null, targetClass, snapshot.getAllocatedStorage(), snapshot.isIamDatabaseAuthenticationEnabled(),
                 null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds);
 
