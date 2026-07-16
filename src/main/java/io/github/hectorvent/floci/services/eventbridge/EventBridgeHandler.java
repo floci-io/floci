@@ -836,7 +836,9 @@ public class EventBridgeHandler {
     }
 
     private ConnectionState parseConnectionState(String state) {
-        if (state == null || state.isBlank()) return null;
+        if (state == null || state.isBlank()) {
+            return null;
+        }
         try {
             return ConnectionState.valueOf(state);
         } catch (IllegalArgumentException e) {

@@ -110,6 +110,23 @@ class EventBridgeConnectionIntegrationTest {
 
     @Test
     @Order(5)
+    void updateChangingAuthTypeWithoutAuthParametersFails() {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.UpdateConnection")
+                .body("""
+                        {
+                          "Name": "test-http-ingress-connection",
+                          "AuthorizationType": "BASIC"
+                        }
+                        """)
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(6)
     void updateConnection() {
         given()
                 .contentType(EB_CT)
@@ -142,7 +159,7 @@ class EventBridgeConnectionIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void listConnections() {
         given()
                 .contentType(EB_CT)
@@ -158,7 +175,7 @@ class EventBridgeConnectionIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void describeMissingConnectionFails() {
         given()
                 .contentType(EB_CT)
@@ -170,7 +187,7 @@ class EventBridgeConnectionIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void invalidAuthorizationTypeFails() {
         given()
                 .contentType(EB_CT)
@@ -190,7 +207,7 @@ class EventBridgeConnectionIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void deleteConnection() {
         given()
                 .contentType(EB_CT)

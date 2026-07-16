@@ -35,6 +35,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class EventBridgeService {
@@ -1134,8 +1135,8 @@ public class EventBridgeService {
 
     // ──────────────────────────── Connections ────────────────────────────
 
-    private static final java.util.regex.Pattern CONNECTION_NAME_PATTERN =
-            java.util.regex.Pattern.compile("[\\.\\-_A-Za-z0-9]+");
+    private static final Pattern CONNECTION_NAME_PATTERN =
+            Pattern.compile("[\\.\\-_A-Za-z0-9]+");
 
     public Connection createConnection(String name, String description, String authorizationType,
                                        String authParameters, String invocationConnectivityParameters,
@@ -1187,6 +1188,10 @@ public class EventBridgeService {
                         "Connection " + name + " does not exist.", 404));
         if (authorizationType != null) {
             validateAuthorizationType(authorizationType);
+            if (!authorizationType.equals(connection.getAuthorizationType()) && authParameters == null) {
+                throw new AwsException("ValidationException",
+                        "AuthParameters must be provided when changing AuthorizationType.", 400);
+            }
             connection.setAuthorizationType(authorizationType);
         }
         if (description != null) {
