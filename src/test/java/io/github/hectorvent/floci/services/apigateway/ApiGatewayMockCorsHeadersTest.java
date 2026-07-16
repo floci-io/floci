@@ -2,10 +2,9 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
-import org.junit.jupiter.api.MethodOrderer;
-import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -23,15 +22,20 @@ import static org.hamcrest.Matchers.notNullValue;
  * header mappings entirely.
  */
 @QuarkusTest
-@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayMockCorsHeadersTest {
 
-    private static String apiId;
-    private static String rootId;
-    private static String resourceId;
+    private String apiId;
+    private String rootId;
+    private String resourceId;
 
-    @Test @Order(1)
-    void createRestApi() {
+    @BeforeEach
+    void setup() {
+        createRestApi();
+        setupOptionsMockIntegration();
+        createDeploymentAndStage();
+    }
+
+    private void createRestApi() {
         apiId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"name\":\"mock-cors-test-api\"}")
@@ -42,8 +46,7 @@ class ApiGatewayMockCorsHeadersTest {
                 .extract().path("id");
     }
 
-    @Test @Order(2)
-    void setupOptionsMockIntegration() {
+    private void setupOptionsMockIntegration() {
         rootId = given()
                 .when().get("/restapis/" + apiId + "/resources")
                 .then()
@@ -94,8 +97,7 @@ class ApiGatewayMockCorsHeadersTest {
                 .statusCode(201);
     }
 
-    @Test @Order(3)
-    void createDeploymentAndStage() {
+    private void createDeploymentAndStage() {
         String deploymentId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"description\":\"v1\"}")
@@ -112,7 +114,7 @@ class ApiGatewayMockCorsHeadersTest {
                 .statusCode(201);
     }
 
-    @Test @Order(4)
+    @Test
     void optionsPreflightReturnsCorsHeaders() {
         given()
                 .when().options("/execute-api/" + apiId + "/api/cors")
@@ -123,7 +125,7 @@ class ApiGatewayMockCorsHeadersTest {
                 .header("Access-Control-Allow-Headers", equalTo("Content-Type,Authorization,X-Custom-CFN-Header"));
     }
 
-    @Test @Order(5)
+    @Test
     void alsoViaUserRequestPath() {
         given()
                 .when().options("/restapis/" + apiId + "/api/_user_request_/cors")
@@ -132,8 +134,10 @@ class ApiGatewayMockCorsHeadersTest {
                 .header("Access-Control-Allow-Origin", equalTo("*"));
     }
 
-    @Test @Order(6)
+    @AfterEach
     void cleanup() {
-        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+        if (apiId != null) {
+            given().when().delete("/restapis/" + apiId).then().statusCode(202);
+        }
     }
 }

@@ -2,10 +2,9 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
-import org.junit.jupiter.api.MethodOrderer;
-import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
 
@@ -20,15 +19,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * single value for that header, not two (the responseParameters value must be skipped).
  */
 @QuarkusTest
-@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayMockVtlHeaderPrecedenceTest {
 
-    private static String apiId;
-    private static String rootId;
-    private static String resourceId;
+    private String apiId;
+    private String rootId;
+    private String resourceId;
 
-    @Test @Order(1)
-    void createRestApi() {
+    @BeforeEach
+    void setup() {
+        createRestApi();
+        setupPostMockWithVtlOverrideAndResponseParameters();
+        deploy();
+    }
+
+    private void createRestApi() {
         apiId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"name\":\"mock-vtl-precedence-api\"}")
@@ -37,8 +41,7 @@ class ApiGatewayMockVtlHeaderPrecedenceTest {
                 .extract().path("id");
     }
 
-    @Test @Order(2)
-    void setupPostMockWithVtlOverrideAndResponseParameters() {
+    private void setupPostMockWithVtlOverrideAndResponseParameters() {
         rootId = given().when().get("/restapis/" + apiId + "/resources")
                 .then().statusCode(200).extract().path("item[0].id");
 
@@ -74,8 +77,7 @@ class ApiGatewayMockVtlHeaderPrecedenceTest {
                 .then().statusCode(201);
     }
 
-    @Test @Order(3)
-    void deploy() {
+    private void deploy() {
         String deploymentId = given().contentType(ContentType.JSON)
                 .body("{\"description\":\"v1\"}")
                 .when().post("/restapis/" + apiId + "/deployments")
@@ -86,7 +88,7 @@ class ApiGatewayMockVtlHeaderPrecedenceTest {
                 .then().statusCode(201);
     }
 
-    @Test @Order(4)
+    @Test
     void vtlResponseOverrideWinsWithoutDuplicatingTheHeader() {
         List<String> values = given()
                 .contentType(ContentType.JSON).body("{}")
@@ -98,8 +100,10 @@ class ApiGatewayMockVtlHeaderPrecedenceTest {
         assertEquals("from-vtl", values.get(0));
     }
 
-    @Test @Order(5)
+    @AfterEach
     void cleanup() {
-        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+        if (apiId != null) {
+            given().when().delete("/restapis/" + apiId).then().statusCode(202);
+        }
     }
 }
