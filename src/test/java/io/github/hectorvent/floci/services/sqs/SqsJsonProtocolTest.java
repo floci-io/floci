@@ -360,6 +360,36 @@ class SqsJsonProtocolTest {
 
     @Test
     @Order(7)
+    void sendMessageToStandardQueueRetainsMessageGroupId() {
+        String groupQueueName = QUEUE_NAME + "-group";
+        String groupQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"" + groupQueueName + "\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + groupQueueUrl + "\","
+                    + "\"MessageBody\":\"fair-queues message\","
+                    + "\"MessageGroupId\":\"tenant-1\"}")
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + groupQueueUrl + "\","
+                    + "\"MaxNumberOfMessages\":1,"
+                    + "\"VisibilityTimeout\":0,"
+                    + "\"MessageSystemAttributeNames\":[\"MessageGroupId\"]}")
+        .when().post("/").then().statusCode(200)
+            .body("Messages[0].Attributes.MessageGroupId", equalTo("tenant-1"));
+    }
+
+    @Test
+    @Order(7)
     void tagQueueWithJsonNullValueIsRejected() {
         String tagBody = "{\"QueueUrl\":\"" + queueUrl + "\","
                 + "\"Tags\":{\"NullTag\":null,\"RealTag\":\"value\"}}";
