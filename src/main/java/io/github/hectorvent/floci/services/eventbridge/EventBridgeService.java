@@ -1178,6 +1178,47 @@ public class EventBridgeService {
                         "Connection " + name + " does not exist.", 404));
     }
 
+    public Connection updateConnection(String name, String description, String authorizationType,
+                                       String authParameters, String invocationConnectivityParameters,
+                                       String kmsKeyIdentifier, String region) {
+        String key = connectionKey(region, name);
+        Connection connection = connectionStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + name + " does not exist.", 404));
+        if (authorizationType != null) {
+            validateAuthorizationType(authorizationType);
+            connection.setAuthorizationType(authorizationType);
+        }
+        if (description != null) {
+            connection.setDescription(description);
+        }
+        if (authParameters != null) {
+            connection.setAuthParameters(authParameters);
+        }
+        if (invocationConnectivityParameters != null) {
+            connection.setInvocationConnectivityParameters(invocationConnectivityParameters);
+        }
+        if (kmsKeyIdentifier != null) {
+            connection.setKmsKeyIdentifier(kmsKeyIdentifier);
+        }
+        Instant now = Instant.now();
+        connection.setConnectionState(ConnectionState.AUTHORIZED);
+        connection.setLastModifiedTime(now);
+        connection.setLastAuthorizedTime(now);
+        connectionStore.put(key, connection);
+        return connection;
+    }
+
+    public Connection deleteConnection(String name, String region) {
+        String key = connectionKey(region, name);
+        Connection connection = connectionStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + name + " does not exist.", 404));
+        connectionStore.delete(key);
+        LOG.infov("Deleted connection: {0}", name);
+        return connection;
+    }
+
     public List<Connection> listConnections(String namePrefix, ConnectionState state, String region) {
         String prefix = "connection:" + region + ":";
         return connectionStore.scan(k -> {
