@@ -60,6 +60,7 @@ import javax.xml.stream.XMLStreamReader;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 
 /**
  * S3 controller handling REST-style S3 API requests.
@@ -227,7 +228,13 @@ public class S3Controller {
                         .build();
             }
             if (hasQueryParam(uriInfo, "acl")) {
-                s3Service.putBucketAcl(bucket, new String(body, StandardCharsets.UTF_8));
+                s3Service.putBucketAcl(bucket, new String(body, StandardCharsets.UTF_8),
+                        httpHeaders.getHeaderString("x-amz-acl"),
+                        httpHeaders.getHeaderString("x-amz-grant-read"),
+                        httpHeaders.getHeaderString("x-amz-grant-write"),
+                        httpHeaders.getHeaderString("x-amz-grant-full-control"),
+                        httpHeaders.getHeaderString("x-amz-grant-read-acp"),
+                        httpHeaders.getHeaderString("x-amz-grant-write-acp"));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "encryption")) {
@@ -549,7 +556,13 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "acl")) {
                 s3Service.putObjectAcl(bucket, key, uriInfo.getQueryParameters().getFirst("versionId"),
-                        new String(body, StandardCharsets.UTF_8));
+                        new String(body, StandardCharsets.UTF_8),
+                        httpHeaders.getHeaderString("x-amz-acl"),
+                        httpHeaders.getHeaderString("x-amz-grant-read"),
+                        httpHeaders.getHeaderString("x-amz-grant-write"),
+                        httpHeaders.getHeaderString("x-amz-grant-full-control"),
+                        httpHeaders.getHeaderString("x-amz-grant-read-acp"),
+                        httpHeaders.getHeaderString("x-amz-grant-write-acp"));
                 return Response.ok().build();
             }
 
@@ -606,6 +619,11 @@ public class S3Controller {
                             .withSseCustomerKey(sseCustomerKey)
                             .withSseCustomerKeyMd5(sseCustomerKeyMd5)
                             .withAcl(cannedAcl)
+                            .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
+                            .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
+                            .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
+                            .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
+                            .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
                             .withChecksumAlgorithm(checksumAlgorithm)
                             .withClientChecksum(extractChecksumFromHeaders(httpHeaders))
                             .withIfMatch(ifMatch)
@@ -1866,7 +1884,12 @@ public class S3Controller {
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
                         .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
-                        .withAcl(cannedAcl));
+                        .withAcl(cannedAcl)
+                        .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
+                        .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
+                        .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
+                        .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
+                        .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp")));
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyObjectResult", AwsNamespaces.S3)
@@ -2143,6 +2166,23 @@ public class S3Controller {
         return "<html><head><title>" + title + "</title></head>\n"
                 + "<body><h1>" + title + "</h1>\n"
                 + "<ul><li>Code: " + code + "</li><li>Message: " + message + "</li></ul></body></html>";
+    }
+
+    // Unhandled failures on S3 routes (e.g. lazy CDI bean instantiation throwing inside an
+    // endpoint body) must render S3's InternalError XML contract, never Quarkus's plain-text
+    // error page, which SDK REST-XML parsers cannot read. Class-scoped: S3 endpoints only.
+    @ServerExceptionMapper
+    public Response mapUnhandledThrowable(Throwable t) {
+        LOG.error("Unhandled exception processing S3 request", t);
+        return xmlErrorResponse(new AwsException("InternalError",
+                "We encountered an internal error. Please try again.", 500));
+    }
+
+    // An AwsException escaping an endpoint body would otherwise hit the global JSON
+    // AwsExceptionMapper (exact-type match wins over the class-scoped Throwable mapper).
+    @ServerExceptionMapper
+    public Response mapEscapedAwsException(AwsException e) {
+        return xmlErrorResponse(e);
     }
 
     private Response xmlErrorResponse(AwsException e) {

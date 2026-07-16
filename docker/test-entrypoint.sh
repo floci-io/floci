@@ -84,5 +84,35 @@ else
     printf '[SKIP] empty argv prefers the native binary when present (/app not writable)\n'
 fi
 
+# --- unwritable state dir prints a warning but still execs the command ---
+RO_DIR="${WORK}/ro-data"
+mkdir -p "${RO_DIR}"
+chmod 555 "${RO_DIR}"
+RO_ERR="${WORK}/ro-err.txt"
+assert_eq "unwritable state dir still execs the command" \
+    "ok" \
+    "$(FLOCI_STORAGE_PERSISTENT_PATH="${RO_DIR}" LOCALSTACK_PARITY=false sh "${SCRIPT}" echo ok 2>"${RO_ERR}")"
+if grep -q 'not writable' "${RO_ERR}"; then
+    printf '[PASS] unwritable state dir prints a loud warning\n'
+    PASS=$((PASS + 1))
+else
+    printf '[FAIL] unwritable state dir prints a loud warning\n  stderr was:\n%s\n' "$(cat "${RO_ERR}")"
+    FAIL=$((FAIL + 1))
+fi
+chmod 755 "${RO_DIR}"
+
+# --- writable state dir stays quiet and leaves no probe behind ---
+RW_DIR="${WORK}/rw-data"
+mkdir -p "${RW_DIR}"
+RW_ERR="${WORK}/rw-err.txt"
+FLOCI_STORAGE_PERSISTENT_PATH="${RW_DIR}" LOCALSTACK_PARITY=false sh "${SCRIPT}" echo ok >/dev/null 2>"${RW_ERR}"
+if ! grep -q 'not writable' "${RW_ERR}" && [ -z "$(ls -A "${RW_DIR}")" ]; then
+    printf '[PASS] writable state dir stays quiet and leaves no probe file\n'
+    PASS=$((PASS + 1))
+else
+    printf '[FAIL] writable state dir stays quiet and leaves no probe file\n'
+    FAIL=$((FAIL + 1))
+fi
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]
