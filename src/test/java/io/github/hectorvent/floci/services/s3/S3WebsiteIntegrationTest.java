@@ -213,11 +213,13 @@ class S3WebsiteIntegrationTest {
 
     @Test
     @Order(15)
-    void directoryRequestServesIndexDocument() {
+    void directoryRequestServesIndexDocumentWithQueryString() {
         // GET /docs/ on the website endpoint serves docs/index.html (AWS index-document resolution),
-        // not the error document.
+        // not the error document. Website endpoints expose only object GET/HEAD behavior, so a query
+        // name that is an S3 REST subresource must remain an ordinary website query string.
         given()
             .header("Host", websiteHost())
+            .queryParam("tagging", "")
         .when()
             .get("/docs/")
         .then()
