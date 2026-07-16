@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -9,18 +10,21 @@ import java.util.Map;
 
 /**
  * Tagging for AgentCore resources, dispatched from the shared {@code /tags/{resourceArn}}
- * route. AgentCore uses the default AWS shape (a {@code "tags"} map, {@code "tagKeys"}
- * query parameter, POST), so only {@link #serviceKey()} and the three operations are
- * overridden.
+ * route. All AgentCore resources share the ARN service segment {@code bedrock-agentcore},
+ * so this handler further dispatches by the resource type in the ARN. AWS supports tagging
+ * for runtimes and gateways.
  */
 @ApplicationScoped
 public class BedrockAgentCoreTagHandler implements TagHandler {
 
-    private final BedrockAgentCoreControlService service;
+    private final BedrockAgentCoreControlService runtimeService;
+    private final BedrockAgentCoreGatewayService gatewayService;
 
     @Inject
-    public BedrockAgentCoreTagHandler(BedrockAgentCoreControlService service) {
-        this.service = service;
+    public BedrockAgentCoreTagHandler(BedrockAgentCoreControlService runtimeService,
+                                      BedrockAgentCoreGatewayService gatewayService) {
+        this.runtimeService = runtimeService;
+        this.gatewayService = gatewayService;
     }
 
     @Override
@@ -30,16 +34,38 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        return service.getTagsByArn(region, arn);
+        return isGateway(arn) ? gatewayService.getTagsByArn(region, arn)
+                : runtimeService.getTagsByArn(region, arn);
     }
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        service.tagByArn(region, arn, tags);
+        if (isGateway(arn)) {
+            gatewayService.tagByArn(region, arn, tags);
+        } else {
+            runtimeService.tagByArn(region, arn, tags);
+        }
     }
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        service.untagByArn(region, arn, tagKeys);
+        if (isGateway(arn)) {
+            gatewayService.untagByArn(region, arn, tagKeys);
+        } else {
+            runtimeService.untagByArn(region, arn, tagKeys);
+        }
+    }
+
+    private static boolean isGateway(String arn) {
+        String[] parts = arn == null ? new String[0] : arn.split(":");
+        if (parts.length >= 6 && parts[5].startsWith("gateway/")) {
+            return true;
+        }
+        if (parts.length >= 6 && parts[5].startsWith("agent/")) {
+            return false;
+        }
+        // Neither runtime nor gateway → not a taggable AgentCore resource.
+        throw new AwsException("ValidationException",
+                "Tagging is not supported for this AgentCore resource: " + arn, 400);
     }
 }

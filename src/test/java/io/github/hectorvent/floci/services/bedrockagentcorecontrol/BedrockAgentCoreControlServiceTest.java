@@ -6,9 +6,13 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeVersion;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.ListResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.HashSet;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -116,6 +120,65 @@ class BedrockAgentCoreControlServiceTest {
         ListResult<AgentRuntime> page2 = service.listAgentRuntimes(2, page1.nextToken(), REGION);
         assertEquals(1, page2.items().size());
         assertNull(page2.nextToken());
+    }
+
+    @Test
+    void listVersionsPaginatesPastNineVersionsWithoutCycling() {
+        // Regression for the numeric-sort / lexicographic-cursor pagination bug (issue #7).
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        for (int i = 0; i < 11; i++) {
+            service.updateAgentRuntime(id, artifact(), network(),
+                    "arn:aws:iam::000000000000:role/agent", "d", null, null, null, REGION);
+        }
+        // 12 versions ("1".."12"). Page with maxResults=5 and follow the cursor.
+        Set<String> seen = new HashSet<>();
+        String token = null;
+        int pages = 0;
+        do {
+            ListResult<AgentRuntimeVersion> page = service.listAgentRuntimeVersions(id, 5, token, REGION);
+            page.items().forEach(v -> seen.add(v.getVersion()));
+            token = page.nextToken();
+            assertTrue(++pages <= 5, "pagination did not terminate (cycled)");
+        } while (token != null);
+        assertEquals(12, seen.size());
+        assertTrue(seen.contains("10") && seen.contains("11") && seen.contains("12"));
+    }
+
+    @Test
+    void versionSnapshotCapturesAuthorizerAndProtocolConfig() {
+        // Regression for the version-config leak (issue #8).
+        ObjectNode authA = mapper.createObjectNode();
+        authA.putObject("customJWTAuthorizer").put("discoveryUrl", "A");
+        ObjectNode authB = mapper.createObjectNode();
+        authB.putObject("customJWTAuthorizer").put("discoveryUrl", "B");
+
+        AgentRuntime rt = service.createAgentRuntime("myAgent", artifact(), network(),
+                "arn:aws:iam::000000000000:role/agent", "d", null, authA, null, REGION);
+        String id = rt.getAgentRuntimeId();
+        service.updateAgentRuntime(id, artifact(), network(),
+                "arn:aws:iam::000000000000:role/agent", "d", null, authB, null, REGION);
+
+        AgentRuntime fresh = service.getAgentRuntime(id, REGION);
+        assertEquals("A", service.resolveVersion(fresh, "1").getAuthorizerConfiguration()
+                .path("customJWTAuthorizer").path("discoveryUrl").asText());
+        assertEquals("B", service.resolveVersion(fresh, "2").getAuthorizerConfiguration()
+                .path("customJWTAuthorizer").path("discoveryUrl").asText());
+    }
+
+    @Test
+    void listRejectsOutOfRangeMaxResults() {
+        create("agentA");
+        assertEquals(400, assertThrows(AwsException.class,
+                () -> service.listAgentRuntimes(101, null, REGION)).getHttpStatus());
+        assertEquals(400, assertThrows(AwsException.class,
+                () -> service.listAgentRuntimes(-1, null, REGION)).getHttpStatus());
+    }
+
+    @Test
+    void listRejectsMalformedNextToken() {
+        assertEquals(400, assertThrows(AwsException.class,
+                () -> service.listAgentRuntimes(0, "!!!not-base64!!!", REGION)).getHttpStatus());
     }
 
     @Test

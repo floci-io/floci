@@ -62,6 +62,35 @@ class BedrockAgentCoreTagIdentityTest {
     }
 
     @Test
+    @Order(3)
+    void gatewayTagRoundTripViaSdk() {
+        String gwName = "gwtag" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String gatewayArn = client.createGateway(CreateGatewayRequest.builder()
+                .name(gwName)
+                .protocolType(GatewayProtocolType.MCP)
+                .authorizerType(AuthorizerType.AWS_IAM)
+                .roleArn("arn:aws:iam::000000000000:role/gw")
+                .build()).gatewayArn();
+        try {
+            client.tagResource(TagResourceRequest.builder()
+                    .resourceArn(gatewayArn).tags(Map.of("env", "prod")).build());
+            assertThat(client.listTagsForResource(ListTagsForResourceRequest.builder()
+                    .resourceArn(gatewayArn).build()).tags()).containsEntry("env", "prod");
+            client.untagResource(UntagResourceRequest.builder()
+                    .resourceArn(gatewayArn).tagKeys(List.of("env")).build());
+            assertThat(client.listTagsForResource(ListTagsForResourceRequest.builder()
+                    .resourceArn(gatewayArn).build()).tags()).doesNotContainKey("env");
+        } finally {
+            // gatewayIdentifier is the id form; derive it from the ARN's last segment.
+            String gatewayId = gatewayArn.substring(gatewayArn.lastIndexOf('/') + 1);
+            try {
+                client.deleteGateway(DeleteGatewayRequest.builder().gatewayIdentifier(gatewayId).build());
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @Test
     @Order(2)
     void workloadIdentityCrud() {
         CreateWorkloadIdentityResponse created = client.createWorkloadIdentity(

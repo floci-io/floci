@@ -92,11 +92,15 @@ public class BedrockAgentCoreMemoryService {
     }
 
     public ListResult<Memory> list(int maxResults, String nextToken, String region) {
+        if (maxResults < 0 || maxResults > MAX_PAGE) {
+            throw new AwsException("ValidationException",
+                    "maxResults must be between 1 and " + MAX_PAGE, 400);
+        }
         String prefix = keyPrefix(region);
         List<Memory> all = storage.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(Memory::getMemoryId))
                 .collect(Collectors.toList());
-        int limit = maxResults > 0 ? Math.min(maxResults, MAX_PAGE) : MAX_PAGE;
+        int limit = maxResults > 0 ? maxResults : MAX_PAGE;
         String after = decode(nextToken);
         int start = 0;
         if (after != null) {

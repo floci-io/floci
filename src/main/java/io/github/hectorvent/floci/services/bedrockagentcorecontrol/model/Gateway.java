@@ -6,7 +6,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /** An AgentCore gateway. Metadata registry only — no real MCP routing. */
 @RegisterForReflection
@@ -26,6 +28,7 @@ public class Gateway {
     private Instant createdAt;
     private Instant updatedAt;
     private String accountId;
+    private Map<String, String> tags = new HashMap<>();
     private List<GatewayTarget> targets = new ArrayList<>();
 
     public String getGatewayId() {
@@ -122,6 +125,14 @@ public class Gateway {
 
     public void setAccountId(String accountId) {
         this.accountId = accountId;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags;
     }
 
     public List<GatewayTarget> getTargets() {

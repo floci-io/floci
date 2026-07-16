@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -47,7 +48,8 @@ public class BedrockAgentCoreGatewayService {
         this.regionResolver = regionResolver;
     }
 
-    public Gateway create(String name, String authorizerType, String roleArn, String description, String region) {
+    public Gateway create(String name, String authorizerType, String roleArn, String description,
+                          Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "name is required", 400);
         }
@@ -73,8 +75,37 @@ public class BedrockAgentCoreGatewayService {
         gateway.setCreatedAt(now);
         gateway.setUpdatedAt(now);
         gateway.setAccountId(regionResolver.getAccountId());
+        if (tags != null) {
+            gateway.getTags().putAll(tags);
+        }
         storage.put(key(region, id), gateway);
         return gateway;
+    }
+
+    // ── Tagging ──
+
+    public Map<String, String> getTagsByArn(String region, String arn) {
+        return new HashMap<>(findByArn(region, arn).getTags());
+    }
+
+    public void tagByArn(String region, String arn, Map<String, String> tags) {
+        Gateway gateway = findByArn(region, arn);
+        gateway.getTags().putAll(tags);
+        storage.put(key(region, gateway.getGatewayId()), gateway);
+    }
+
+    public void untagByArn(String region, String arn, List<String> keys) {
+        Gateway gateway = findByArn(region, arn);
+        keys.forEach(gateway.getTags()::remove);
+        storage.put(key(region, gateway.getGatewayId()), gateway);
+    }
+
+    private Gateway findByArn(String region, String arn) {
+        String[] parts = arn == null ? new String[0] : arn.split(":");
+        if (parts.length < 6 || !parts[5].startsWith("gateway/")) {
+            throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
+        }
+        return get(parts[5].substring("gateway/".length()), region);
     }
 
     public Gateway get(String id, String region) {
@@ -189,7 +220,11 @@ public class BedrockAgentCoreGatewayService {
     }
 
     private <T> ListResult<T> paginate(List<T> all, Function<T, String> cursorOf, int maxResults, String nextToken) {
-        int limit = maxResults > 0 ? Math.min(maxResults, MAX_PAGE) : MAX_PAGE;
+        if (maxResults < 0 || maxResults > MAX_PAGE) {
+            throw new AwsException("ValidationException",
+                    "maxResults must be between 1 and " + MAX_PAGE, 400);
+        }
+        int limit = maxResults > 0 ? maxResults : MAX_PAGE;
         String after = decode(nextToken);
         int start = 0;
         if (after != null) {

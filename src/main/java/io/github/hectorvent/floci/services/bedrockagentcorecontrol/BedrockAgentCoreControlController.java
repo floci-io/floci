@@ -138,11 +138,11 @@ public class BedrockAgentCoreControlController {
             if (snap.getNetworkConfiguration() != null) {
                 out.set("networkConfiguration", snap.getNetworkConfiguration());
             }
-            if (runtime.getAuthorizerConfiguration() != null) {
-                out.set("authorizerConfiguration", runtime.getAuthorizerConfiguration());
+            if (snap.getAuthorizerConfiguration() != null) {
+                out.set("authorizerConfiguration", snap.getAuthorizerConfiguration());
             }
-            if (runtime.getProtocolConfiguration() != null) {
-                out.set("protocolConfiguration", runtime.getProtocolConfiguration());
+            if (snap.getProtocolConfiguration() != null) {
+                out.set("protocolConfiguration", snap.getProtocolConfiguration());
             }
             if (snap.getRoleArn() != null) {
                 out.put("roleArn", snap.getRoleArn());

@@ -24,6 +24,8 @@ public class AgentRuntimeVersion {
     private String description;
     private JsonNode agentRuntimeArtifact;
     private JsonNode networkConfiguration;
+    private JsonNode authorizerConfiguration;
+    private JsonNode protocolConfiguration;
     private Map<String, String> environmentVariables;
 
     public String getVersion() {
@@ -72,6 +74,22 @@ public class AgentRuntimeVersion {
 
     public void setNetworkConfiguration(JsonNode networkConfiguration) {
         this.networkConfiguration = networkConfiguration;
+    }
+
+    public JsonNode getAuthorizerConfiguration() {
+        return authorizerConfiguration;
+    }
+
+    public void setAuthorizerConfiguration(JsonNode authorizerConfiguration) {
+        this.authorizerConfiguration = authorizerConfiguration;
+    }
+
+    public JsonNode getProtocolConfiguration() {
+        return protocolConfiguration;
+    }
+
+    public void setProtocolConfiguration(JsonNode protocolConfiguration) {
+        this.protocolConfiguration = protocolConfiguration;
     }
 
     public Map<String, String> getEnvironmentVariables() {

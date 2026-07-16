@@ -91,4 +91,42 @@ class BedrockAgentCoreTaggingIdentityIntegrationTest {
                 .then().statusCode(200)
                 .body("name", equalTo(name));
     }
+
+    @Test
+    @Order(5)
+    void gatewayTagRoundTrip() {
+        // Regression for issue #9: gateways are AWS-taggable.
+        String gwArn = given().contentType("application/json")
+                .body("{\"name\":\"tagGw\",\"authorizerType\":\"AWS_IAM\","
+                        + "\"roleArn\":\"arn:aws:iam::000000000000:role/gw\",\"tags\":{\"team\":\"core\"}}")
+                .when().post("/gateways/")
+                .then().statusCode(202)
+                .extract().path("gatewayArn");
+
+        // tags provided at create time are retained
+        given().when().get("/tags/" + gwArn)
+                .then().statusCode(200).body("tags.team", equalTo("core"));
+
+        given().contentType("application/json").body("{\"tags\":{\"env\":\"prod\"}}")
+                .when().post("/tags/" + gwArn).then().statusCode(204);
+        given().when().get("/tags/" + gwArn)
+                .then().statusCode(200)
+                .body("tags.env", equalTo("prod"))
+                .body("tags.team", equalTo("core"));
+
+        given().when().delete("/tags/" + gwArn + "?tagKeys=env").then().statusCode(204);
+        given().when().get("/tags/" + gwArn)
+                .then().statusCode(200)
+                .body("tags.env", nullValue())
+                .body("tags.team", equalTo("core"));
+    }
+
+    @Test
+    @Order(6)
+    void taggingUnsupportedResourceReturns400() {
+        // Memory/endpoint ARNs are not taggable (AWS: runtime + gateway only).
+        given().contentType("application/json").body("{\"tags\":{\"x\":\"y\"}}")
+                .when().post("/tags/arn:aws:bedrock-agentcore:us-east-1:000000000000:memory/mymem-abc1234567")
+                .then().statusCode(400);
+    }
 }

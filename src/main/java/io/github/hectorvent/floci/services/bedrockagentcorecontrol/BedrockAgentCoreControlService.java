@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -196,10 +197,13 @@ public class BedrockAgentCoreControlService {
     public ListResult<AgentRuntimeVersion> listAgentRuntimeVersions(String id, int maxResults, String nextToken,
                                                                     String region) {
         AgentRuntime runtime = getAgentRuntime(id, region);
-        List<AgentRuntimeVersion> all = runtime.getVersions().stream()
-                .sorted(Comparator.comparingInt(v -> Integer.parseInt(v.getVersion())))
-                .collect(Collectors.toList());
-        return paginate(all, AgentRuntimeVersion::getVersion, maxResults, nextToken);
+        // Cursor must be zero-padded so lexicographic order matches numeric version order;
+        // paginate() sorts by the cursor, keeping sort order and resume order consistent.
+        return paginate(runtime.getVersions(), v -> pad(v.getVersion()), maxResults, nextToken);
+    }
+
+    private static String pad(String version) {
+        return String.format("%05d", Integer.parseInt(version));
     }
 
     public String arn(AgentRuntime runtime, String version, String region) {
@@ -338,28 +342,36 @@ public class BedrockAgentCoreControlService {
         snap.setDescription(runtime.getDescription());
         snap.setAgentRuntimeArtifact(runtime.getAgentRuntimeArtifact());
         snap.setNetworkConfiguration(runtime.getNetworkConfiguration());
+        snap.setAuthorizerConfiguration(runtime.getAuthorizerConfiguration());
+        snap.setProtocolConfiguration(runtime.getProtocolConfiguration());
         snap.setEnvironmentVariables(runtime.getEnvironmentVariables() != null
                 ? new HashMap<>(runtime.getEnvironmentVariables()) : null);
         return snap;
     }
 
-    private <T> ListResult<T> paginate(List<T> all, java.util.function.Function<T, String> cursorOf,
+    private <T> ListResult<T> paginate(List<T> all, Function<T, String> cursorOf,
                                        int maxResults, String nextToken) {
-        int limit = maxResults > 0 ? Math.min(maxResults, MAX_PAGE) : DEFAULT_PAGE;
+        if (maxResults < 0 || maxResults > MAX_PAGE) {
+            throw new AwsException("ValidationException",
+                    "maxResults must be between 1 and " + MAX_PAGE, 400);
+        }
+        int limit = maxResults > 0 ? maxResults : DEFAULT_PAGE;
+        // Sort by the same key used as the pagination cursor so resume order always matches.
+        List<T> sorted = all.stream().sorted(Comparator.comparing(cursorOf)).collect(Collectors.toList());
         String after = decodeToken(nextToken);
         int start = 0;
         if (after != null) {
-            for (int i = 0; i < all.size(); i++) {
-                if (cursorOf.apply(all.get(i)).compareTo(after) > 0) {
+            for (int i = 0; i < sorted.size(); i++) {
+                if (cursorOf.apply(sorted.get(i)).compareTo(after) > 0) {
                     start = i;
                     break;
                 }
                 start = i + 1;
             }
         }
-        List<T> page = all.stream().skip(start).limit(limit).collect(Collectors.toList());
+        List<T> page = sorted.stream().skip(start).limit(limit).collect(Collectors.toList());
         String outToken = null;
-        if (start + limit < all.size() && !page.isEmpty()) {
+        if (start + limit < sorted.size() && !page.isEmpty()) {
             outToken = encodeToken(cursorOf.apply(page.get(page.size() - 1)));
         }
         return new ListResult<>(page, outToken);

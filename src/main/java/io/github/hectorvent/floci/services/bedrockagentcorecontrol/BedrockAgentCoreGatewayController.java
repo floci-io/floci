@@ -55,7 +55,7 @@ public class BedrockAgentCoreGatewayController {
         try {
             JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
             Gateway gateway = service.create(text(req, "name"), text(req, "authorizerType"),
-                    text(req, "roleArn"), text(req, "description"), region);
+                    text(req, "roleArn"), text(req, "description"), stringMap(req.get("tags")), region);
             ObjectNode out = objectMapper.createObjectNode();
             out.put("gatewayArn", service.gatewayArn(gateway, region));
             out.put("gatewayId", gateway.getGatewayId());
@@ -298,6 +298,15 @@ public class BedrockAgentCoreGatewayController {
     private static JsonNode obj(JsonNode node, String field) {
         JsonNode v = node.get(field);
         return (v == null || v.isNull() || v.isMissingNode()) ? null : v;
+    }
+
+    private static java.util.Map<String, String> stringMap(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
+        return map;
     }
 
     private Response error(Exception e, String action) {
