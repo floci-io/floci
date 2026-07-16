@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecs;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -49,7 +50,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class EcsService {
+public class EcsService implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
     private static final String DEFAULT_CLUSTER = "default";
@@ -159,7 +160,40 @@ public class EcsService {
 
     @PreDestroy
     void shutdown() {
+        stopManagedContainers();
+    }
+
+    /**
+     * Stops the Docker containers of all still-running tasks on emulator shutdown.
+     * Task state is transient (memory-only), so without this the containers outlive
+     * the process as orphans. The reconciler is shut down first — and any in-flight
+     * tick awaited — so it cannot restart drained tasks between this teardown and
+     * the final storage flush. Handles are claimed atomically to avoid racing an
+     * explicit StopTask.
+     */
+    @Override
+    public void stopManagedContainers() {
         reconciler.shutdownNow();
+        try {
+            reconciler.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
+            EcsTaskHandle claimed = taskHandles.remove(taskArn);
+            if (claimed == null) {
+                continue;
+            }
+            try {
+                containerManager.stopTask(claimed);
+            } catch (Exception e) {
+                LOG.warnv("Failed to stop ECS task {0} on shutdown: {1}", taskArn, e.getMessage());
+            }
+        }
+    }
+
+    boolean isReconcilerShutdown() {
+        return reconciler.isShutdown();
     }
 
     // ── Clusters ─────────────────────────────────────────────────────────────

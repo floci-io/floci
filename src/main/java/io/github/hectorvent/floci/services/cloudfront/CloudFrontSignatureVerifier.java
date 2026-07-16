@@ -142,7 +142,7 @@ public final class CloudFrontSignatureVerifier {
                 return Result.deny("The signed request is not yet valid");
             }
             JsonNode ip = condition.path("IpAddress").path("AWS:SourceIp");
-            if (ip.isTextual() && sourceIp != null && !ipInCidr(sourceIp, ip.asText())) {
+            if (ip.isTextual() && (sourceIp == null || !ipInCidr(sourceIp, ip.asText()))) {
                 return Result.deny("Source IP is not permitted by the policy");
             }
             return Result.allow();
@@ -164,14 +164,14 @@ public final class CloudFrontSignatureVerifier {
         return Base64.getDecoder().decode(standard);
     }
 
-    /** CloudFront resource wildcards: {@code *} matches any run of characters, {@code ?} matches one. */
+    /** CloudFront resource wildcards: {@code *} matches any run and {@code ?} one non-separator. */
     static boolean wildcardMatches(String pattern, String value) {
         StringBuilder regex = new StringBuilder();
         for (int i = 0; i < pattern.length(); i++) {
             char c = pattern.charAt(i);
             switch (c) {
                 case '*' -> regex.append(".*");
-                case '?' -> regex.append('.');
+                case '?' -> regex.append("[^/]");
                 default -> {
                     if ("\\.[]{}()+-^$|".indexOf(c) >= 0) {
                         regex.append('\\');

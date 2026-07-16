@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
@@ -10,13 +11,16 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end tests for CloudFront distribution request-serving: a viewer request addressed to a
@@ -143,28 +147,41 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
-    void returnsBadGatewayWhenCustomOriginIsUnreachable() {
+    void blocksPrivateCustomOriginBeforeConnecting() throws Exception {
         String suffix = suffix();
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer privateOrigin = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        privateOrigin.createContext("/", exchange -> {
+            hits.incrementAndGet();
+            exchange.sendResponseHeaders(200, 0);
+            exchange.close();
+        });
+        privateOrigin.start();
 
-        Map<String, Object> customOriginConfig = new LinkedHashMap<>();
-        customOriginConfig.put("HTTPPort", "1");
-        customOriginConfig.put("HTTPSPort", "443");
-        customOriginConfig.put("OriginProtocolPolicy", "http-only");
-        Origin custom = new Origin();
-        custom.setId("custom-origin");
-        custom.setDomainName("127.0.0.1");
-        custom.setCustomOriginConfig(customOriginConfig);
+        try {
+            Map<String, Object> customOriginConfig = new LinkedHashMap<>();
+            customOriginConfig.put("HTTPPort", String.valueOf(privateOrigin.getAddress().getPort()));
+            customOriginConfig.put("HTTPSPort", "443");
+            customOriginConfig.put("OriginProtocolPolicy", "http-only");
+            Origin custom = new Origin();
+            custom.setId("custom-origin");
+            custom.setDomainName("127.0.0.1");
+            custom.setCustomOriginConfig(customOriginConfig);
 
-        DistributionConfig cfg = new DistributionConfig();
-        cfg.setEnabled(true);
-        cfg.setDefaultRootObject("index.html");
-        cfg.setOrigins(List.of(custom));
-        cfg.setDefaultCacheBehavior(defaultBehavior("custom-origin"));
+            DistributionConfig cfg = new DistributionConfig();
+            cfg.setEnabled(true);
+            cfg.setDefaultRootObject("index.html");
+            cfg.setOrigins(List.of(custom));
+            cfg.setDefaultCacheBehavior(defaultBehavior("custom-origin"));
 
-        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+            Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
 
-        given().header("Host", dist.getDomainName()).when().get("/")
-                .then().statusCode(502);
+            given().header("Host", dist.getDomainName()).when().get("/")
+                    .then().statusCode(502);
+            assertEquals(0, hits.get(), "blocked private origins must not receive a connection");
+        } finally {
+            privateOrigin.stop(0);
+        }
     }
 
     @Test

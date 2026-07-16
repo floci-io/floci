@@ -1,6 +1,6 @@
 # CloudFront
 
-CloudFront management-plane emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, CloudFront Functions, invalidations, and tagging. Actual content delivery is not emulated — this is a management-plane-only implementation.
+CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, CloudFront Functions, invalidations, tagging, and GET/HEAD delivery from S3 or custom origins.
 
 **Protocol:** REST XML  
 **API version:** `2020-05-31`  
@@ -118,6 +118,8 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 - All list-type sub-elements in XML follow CloudFront's `<Quantity>N</Quantity><Items>...</Items>` wrapper pattern.
 - OAI `CallerReference` uniqueness is enforced — duplicate `CallerReference` values return `CloudFrontOriginAccessIdentityAlreadyExists` (409).
 - `AssociateAlias` attaches a CNAME alias to the target distribution's config.
+- Viewer GET/HEAD requests addressed to a generated distribution domain or alias are routed to the matching S3 or custom origin. Custom origins forward the raw query string and end-to-end response headers; redirects are not followed.
+- Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
 
 ## Configuration
 
@@ -125,6 +127,7 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 |---|---|---|---|
 | `floci.services.cloudfront.enabled` | `FLOCI_SERVICES_CLOUDFRONT_ENABLED` | `true` | Enable or disable the service |
 | `floci.services.cloudfront.domain-suffix` | `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX` | `cloudfront.net` | Domain suffix for generated distribution domain names |
+| `floci.services.cloudfront.allowed-private-origin-hosts` | `FLOCI_SERVICES_CLOUDFRONT_ALLOWED_PRIVATE_ORIGIN_HOSTS` | `[]` | Exact custom-origin hosts permitted to resolve to private/non-routable addresses (comma-separated in the environment variable) |
 
 ## CLI Examples
 

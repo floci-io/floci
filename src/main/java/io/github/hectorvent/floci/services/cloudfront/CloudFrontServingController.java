@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
@@ -17,14 +19,20 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.net.IDN;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Serves viewer requests routed to a CloudFront distribution (via {@link CloudFrontDistributionFilter})
@@ -52,6 +60,10 @@ public class CloudFrontServingController {
 
     private static final Logger LOG = Logger.getLogger(CloudFrontServingController.class);
     private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
+    private static final Set<String> NON_FORWARDED_RESPONSE_HEADERS = Set.of(
+            "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+            "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "via",
+            "content-length", "content-type");
 
     // Instance (not static) field: a static HttpClient initialized at class-init time lands in the
     // GraalVM native-image build heap (jdk.internal.net.http.HttpClientFacade is initialized at run
@@ -68,13 +80,16 @@ public class CloudFrontServingController {
 
     private final CloudFrontService service;
     private final S3Service s3Service;
-    private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
+    private final EmulatorConfig emulatorConfig;
+    private final CurrentVertxRequest currentVertxRequest;
 
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
-                                       io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest) {
+                                       EmulatorConfig emulatorConfig,
+                                       CurrentVertxRequest currentVertxRequest) {
         this.service = service;
         this.s3Service = s3Service;
+        this.emulatorConfig = emulatorConfig;
         this.currentVertxRequest = currentVertxRequest;
     }
 
@@ -82,17 +97,18 @@ public class CloudFrontServingController {
     @Path("/{proxy:.*}")
     public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                         @Context UriInfo uriInfo) {
-        return serve(distId, proxy, true, uriInfo);
+        return serve(distId, proxy, currentVertxRequest.getCurrent().request().query(), true, uriInfo);
     }
 
     @HEAD
     @Path("/{proxy:.*}")
     public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                          @Context UriInfo uriInfo) {
-        return serve(distId, proxy, false, uriInfo);
+        return serve(distId, proxy, currentVertxRequest.getCurrent().request().query(), false, uriInfo);
     }
 
-    private Response serve(String distId, String proxy, boolean includeBody, UriInfo uriInfo) {
+    private Response serve(String distId, String proxy, String rawQuery, boolean includeBody,
+                           UriInfo uriInfo) {
         Distribution dist;
         try {
             dist = service.getDistribution(distId);
@@ -106,6 +122,7 @@ public class CloudFrontServingController {
 
         String viewerPath = "/" + (proxy == null ? "" : proxy);
         String normalized = CloudFrontRequestRouter.normalizePath(viewerPath);
+        String originQuery = rawQuery;
 
         // Private content: when the matched cache behavior trusts key groups, the request must carry a
         // valid CloudFront signature (signed URL or signed cookies), otherwise CloudFront returns 403.
@@ -117,9 +134,11 @@ public class CloudFrontServingController {
                         dist.getId(), viewerPath, verdict.reason());
                 return textError(403, "Access denied: " + verdict.reason());
             }
+            // CloudFront consumes its signed-URL fields and never exposes them to the origin.
+            originQuery = stripCloudFrontSigningParams(rawQuery);
         }
 
-        OriginResponse origin = route(config, normalized, includeBody);
+        OriginResponse origin = route(config, normalized, originQuery, includeBody);
 
         if (origin.status() >= 400) {
             Response fallback = applyCustomError(config, origin, includeBody);
@@ -175,23 +194,31 @@ public class CloudFrontServingController {
         if (rawPath.isEmpty()) {
             rawPath = "/";
         }
-        return scheme + "://" + host + rawPath + rawAppQuery(uriInfo.getRequestUri().getRawQuery());
+        return scheme + "://" + host + rawPath + rawAppQuery(request.query());
     }
 
     /** The raw (encoding-preserved) query string minus the CloudFront signing params. */
     private static String rawAppQuery(String rawQuery) {
+        String appQuery = stripCloudFrontSigningParams(rawQuery);
+        return appQuery == null || appQuery.isEmpty() ? "" : "?" + appQuery;
+    }
+
+    static String stripCloudFrontSigningParams(String rawQuery) {
         if (rawQuery == null || rawQuery.isEmpty()) {
             return "";
         }
         StringBuilder appQuery = new StringBuilder();
-        for (String pair : rawQuery.split("&")) {
+        for (String pair : rawQuery.split("&", -1)) {
             int eq = pair.indexOf('=');
             String name = java.net.URLDecoder.decode(eq >= 0 ? pair.substring(0, eq) : pair,
                     StandardCharsets.UTF_8);
             if (CLOUDFRONT_SIGNING_PARAMS.contains(name)) {
                 continue;
             }
-            appQuery.append(appQuery.length() == 0 ? '?' : '&').append(pair);
+            if (appQuery.length() > 0) {
+                appQuery.append('&');
+            }
+            appQuery.append(pair);
         }
         return appQuery.toString();
     }
@@ -211,7 +238,8 @@ public class CloudFrontServingController {
     }
 
     /** Resolves the target origin for a normalized path and fetches the content. */
-    private OriginResponse route(DistributionConfig config, String normalized, boolean includeBody) {
+    private OriginResponse route(DistributionConfig config, String normalized, String rawQuery,
+                                 boolean includeBody) {
         String originId = CloudFrontRequestRouter.matchTargetOriginId(config, normalized);
         Origin origin = CloudFrontRequestRouter.findOrigin(config, originId);
         if (origin == null) {
@@ -224,7 +252,7 @@ public class CloudFrontServingController {
         }
         String forwardUri = CloudFrontRequestRouter.resolveForwardUri(
                 origin.getOriginPath(), normalized, config.getDefaultRootObject());
-        return fetchFromCustomOrigin(origin, forwardUri, includeBody);
+        return fetchFromCustomOrigin(origin, forwardUri, rawQuery, includeBody);
     }
 
     private OriginResponse fetchFromS3(Origin origin, String key, boolean includeBody) {
@@ -236,17 +264,18 @@ public class CloudFrontServingController {
             if (includeBody) {
                 S3Object obj = s3Service.getObject(bucket, key);
                 byte[] data = obj.getData() != null ? obj.getData() : new byte[0];
-                return new OriginResponse(200, contentType(obj), data, data.length);
+                return new OriginResponse(200, contentType(obj), data, data.length, Map.of());
             }
             S3Object meta = s3Service.headObject(bucket, key);
-            return new OriginResponse(200, contentType(meta), null, meta.getSize());
+            return new OriginResponse(200, contentType(meta), null, meta.getSize(), Map.of());
         } catch (AwsException e) {
             return OriginResponse.error(e.getHttpStatus(), e.getMessage());
         }
     }
 
     /** Fetches from a custom (non-S3) origin. {@code forwardUri} already includes the origin path. */
-    private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri, boolean includeBody) {
+    private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri, String rawQuery,
+                                                 boolean includeBody) {
         Map<String, Object> coc = origin.getCustomOriginConfig();
         String policy = coc != null ? str(coc.get("OriginProtocolPolicy")) : "";
         String protocol;
@@ -259,11 +288,16 @@ public class CloudFrontServingController {
             port = intOrDefault(coc, "HTTPPort", 80);
         }
 
-        String target = protocol + "://" + origin.getDomainName() + ":" + port + forwardUri;
-
         try {
+            URI target = buildCustomOriginUri(
+                    protocol, origin.getDomainName(), port, forwardUri, rawQuery);
+            String host = normalizeOriginHost(origin.getDomainName());
+            if (!isOriginAddressAllowed(host)) {
+                LOG.warnv("Blocked CloudFront custom origin host {0}: private or non-routable address", host);
+                return OriginResponse.error(502, "Bad Gateway.");
+            }
             HttpRequest.Builder rb = HttpRequest.newBuilder()
-                    .uri(URI.create(target))
+                    .uri(target)
                     .timeout(Duration.ofSeconds(30));
             if (includeBody) {
                 rb.GET();
@@ -273,10 +307,134 @@ public class CloudFrontServingController {
             HttpResponse<byte[]> resp = httpClient.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             byte[] body = resp.body() != null ? resp.body() : new byte[0];
-            return new OriginResponse(resp.statusCode(), ct, includeBody ? body : null, body.length);
+            long contentLength = includeBody ? body.length : responseContentLength(resp);
+            return new OriginResponse(resp.statusCode(), ct, includeBody ? body : null,
+                    contentLength, resp.headers().map());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warnv("CloudFront custom origin fetch was interrupted for host {0}",
+                    safeOriginName(origin));
+            return OriginResponse.error(502, "Bad Gateway.");
         } catch (Exception e) {
-            LOG.warnv("CloudFront custom origin fetch failed for {0}: {1}", target, e.getMessage());
-            return OriginResponse.error(502, "Bad Gateway: " + e.getMessage());
+            // Do not log the target URI: forwarded query strings can contain credentials or tokens.
+            LOG.warnv("CloudFront custom origin fetch failed for host {0}: {1}",
+                    safeOriginName(origin), e.getClass().getSimpleName());
+            return OriginResponse.error(502, "Bad Gateway.");
+        }
+    }
+
+    private boolean isOriginAddressAllowed(String host) throws UnknownHostException {
+        boolean explicitlyAllowed = emulatorConfig.services().cloudfront().allowedPrivateOriginHosts()
+                .orElse(List.of()).stream()
+                .map(CloudFrontServingController::normalizeHost)
+                .anyMatch(host::equals);
+        if (explicitlyAllowed) {
+            return true;
+        }
+        InetAddress[] addresses = InetAddress.getAllByName(host);
+        if (addresses.length == 0) {
+            return false;
+        }
+        for (InetAddress address : addresses) {
+            if (isBlockedOriginAddress(address)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static boolean isBlockedOriginAddress(InetAddress address) {
+        if (address.isAnyLocalAddress() || address.isLoopbackAddress()
+                || address.isLinkLocalAddress() || address.isSiteLocalAddress()
+                || address.isMulticastAddress()) {
+            return true;
+        }
+        byte[] bytes = address.getAddress();
+        if (bytes.length == 4) {
+            int first = Byte.toUnsignedInt(bytes[0]);
+            int second = Byte.toUnsignedInt(bytes[1]);
+            int third = Byte.toUnsignedInt(bytes[2]);
+            return first == 0
+                    || (first == 100 && second >= 64 && second <= 127)
+                    || (first == 192 && second == 0 && third == 0)
+                    || (first == 192 && second == 0 && third == 2)
+                    || (first == 198 && (second == 18 || second == 19))
+                    || (first == 198 && second == 51 && third == 100)
+                    || (first == 203 && second == 0 && third == 113)
+                    || first >= 240;
+        }
+        if (bytes.length == 16) {
+            int first = Byte.toUnsignedInt(bytes[0]);
+            boolean uniqueLocal = (first & 0xfe) == 0xfc;
+            boolean documentation = first == 0x20
+                    && Byte.toUnsignedInt(bytes[1]) == 0x01
+                    && Byte.toUnsignedInt(bytes[2]) == 0x0d
+                    && Byte.toUnsignedInt(bytes[3]) == 0xb8;
+            return uniqueLocal || documentation;
+        }
+        return true;
+    }
+
+    static URI buildCustomOriginUri(String protocol, String domainName, int port,
+                                    String forwardUri, String rawQuery) {
+        if (port < 1 || port > 65535) {
+            throw new IllegalArgumentException("Custom origin port is outside the valid range");
+        }
+        String host = normalizeOriginHost(domainName);
+        String path = forwardUri == null || forwardUri.isBlank() ? "/" : forwardUri;
+        if (!path.startsWith("/") || path.indexOf('?') >= 0 || path.indexOf('#') >= 0) {
+            throw new IllegalArgumentException("Custom origin path is invalid");
+        }
+        String authorityHost = host.indexOf(':') >= 0 ? "[" + host + "]" : host;
+        return URI.create(protocol + "://" + authorityHost + ":" + port + path
+                + (rawQuery == null || rawQuery.isEmpty() ? "" : "?" + rawQuery));
+    }
+
+    static String normalizeOriginHost(String domainName) {
+        if (domainName == null || domainName.isBlank()) {
+            throw new IllegalArgumentException("Custom origin domain name is empty");
+        }
+        URI authority = URI.create("//" + domainName.trim());
+        if (authority.getRawUserInfo() != null
+                || (authority.getRawPath() != null && !authority.getRawPath().isEmpty())
+                || authority.getRawQuery() != null || authority.getRawFragment() != null
+                || authority.getHost() == null) {
+            throw new IllegalArgumentException("Custom origin domain name is not a valid authority");
+        }
+        return normalizeHost(authority.getHost());
+    }
+
+    private static String normalizeHost(String host) {
+        String normalized = host.trim();
+        if (normalized.startsWith("[") && normalized.endsWith("]")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        while (normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException("Custom origin host is empty");
+        }
+        if (normalized.indexOf(':') < 0) {
+            normalized = IDN.toASCII(normalized);
+        }
+        return normalized.toLowerCase(Locale.ROOT);
+    }
+
+    private static long responseContentLength(HttpResponse<?> response) {
+        try {
+            return response.headers().firstValueAsLong("content-length").orElse(-1L);
+        } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring invalid custom-origin Content-Length: {0}", e.getMessage());
+            return -1L;
+        }
+    }
+
+    private static String safeOriginName(Origin origin) {
+        try {
+            return normalizeOriginHost(origin.getDomainName());
+        } catch (RuntimeException e) {
+            return "<invalid>";
         }
     }
 
@@ -306,7 +464,7 @@ public class CloudFrontServingController {
         if (pagePath.isBlank()) {
             // ResponseCode override with no custom page: keep the origin body, change the status.
             return toResponse(new OriginResponse(responseCode, origin.contentType(), origin.body(),
-                    origin.contentLength()), includeBody);
+                    origin.contentLength(), origin.headers()), includeBody);
         }
 
         String errNormalized = CloudFrontRequestRouter.normalizePath(pagePath);
@@ -322,7 +480,7 @@ public class CloudFrontServingController {
             page = fetchFromS3(errOrigin, key, includeBody);
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
-            page = fetchFromCustomOrigin(errOrigin, forwardUri, includeBody);
+            page = fetchFromCustomOrigin(errOrigin, forwardUri, null, includeBody);
         }
         if (page.status() >= 400) {
             // Custom error page unavailable → return the status received from the error-page origin
@@ -330,7 +488,7 @@ public class CloudFrontServingController {
             return toResponse(page, includeBody);
         }
         return toResponse(new OriginResponse(responseCode, page.contentType(), page.body(),
-                page.contentLength()), includeBody);
+                page.contentLength(), page.headers()), includeBody);
     }
 
     private Map<String, Object> matchCustomError(DistributionConfig config, int status) {
@@ -348,12 +506,27 @@ public class CloudFrontServingController {
 
     private Response toResponse(OriginResponse origin, boolean includeBody) {
         Response.ResponseBuilder rb = Response.status(origin.status());
+        Set<String> excludedHeaders = new HashSet<>(NON_FORWARDED_RESPONSE_HEADERS);
+        origin.headers().forEach((name, values) -> {
+            if ("connection".equalsIgnoreCase(name)) {
+                values.forEach(value -> {
+                    for (String token : value.split(",")) {
+                        excludedHeaders.add(token.trim().toLowerCase(Locale.ROOT));
+                    }
+                });
+            }
+        });
+        origin.headers().forEach((name, values) -> {
+            if (!excludedHeaders.contains(name.toLowerCase(Locale.ROOT))) {
+                values.forEach(value -> rb.header(name, value));
+            }
+        });
         if (origin.contentType() != null) {
             rb.type(origin.contentType());
         }
         if (includeBody && origin.body() != null) {
             rb.entity(origin.body());
-        } else {
+        } else if (origin.contentLength() >= 0) {
             rb.header("Content-Length", origin.contentLength());
         }
         return rb.build();
@@ -385,15 +558,17 @@ public class CloudFrontServingController {
         try {
             return Integer.parseInt(value.toString().trim());
         } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring non-integer CloudFront configuration value {0}: {1}", value, e.getMessage());
             return dflt;
         }
     }
 
-    /** The result of fetching from an origin: status, content type, optional body, and length. */
-    private record OriginResponse(int status, String contentType, byte[] body, long contentLength) {
+    /** The result of fetching from an origin, including end-to-end response headers. */
+    private record OriginResponse(int status, String contentType, byte[] body, long contentLength,
+                                  Map<String, List<String>> headers) {
         static OriginResponse error(int status, String message) {
             byte[] b = message == null ? new byte[0] : message.getBytes(StandardCharsets.UTF_8);
-            return new OriginResponse(status, MediaType.TEXT_PLAIN, b, b.length);
+            return new OriginResponse(status, MediaType.TEXT_PLAIN, b, b.length, Map.of());
         }
     }
 }

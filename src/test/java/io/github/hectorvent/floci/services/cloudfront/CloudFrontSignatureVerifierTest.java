@@ -170,8 +170,19 @@ class CloudFrontSignatureVerifierTest {
 
         assertTrue(CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), "203.0.113.5", trusted(), now).allowed());
         assertFalse(CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), "198.51.100.5", trusted(), now).allowed());
+        assertFalse(CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now).allowed());
         // An IPv6 client must not bypass an IPv4-only allow-list (containment fails closed).
         assertFalse(CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), "2001:db8::1", trusted(), now).allowed());
+    }
+
+    @Test
+    void resourceQuestionMarkWildcardDoesNotCrossAPathSeparator() {
+        String pattern = "https://d123.cloudfront.net/private/?ile.jpg";
+
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
+                pattern, "https://d123.cloudfront.net/private/file.jpg"));
+        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+                pattern, "https://d123.cloudfront.net/private//ile.jpg"));
     }
 
     @Test
@@ -193,5 +204,14 @@ class CloudFrontSignatureVerifierTest {
                 "CloudFront-Key-Pair-Id", KEY_ID);
 
         assertTrue(CloudFrontSignatureVerifier.verify(RESOURCE, Map.of(), cookies, null, trusted(), now).allowed());
+    }
+
+    @Test
+    void signingParametersAreRemovedFromTheOriginQuery() {
+        String rawQuery = "color=blue&Policy=opaque&Signature=sig&Key-Pair-Id=key"
+                + "&Hash-Algorithm=SHA256&encoded=a%2Fb";
+
+        assertEquals("color=blue&encoded=a%2Fb",
+                CloudFrontServingController.stripCloudFrontSigningParams(rawQuery));
     }
 }
