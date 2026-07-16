@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -858,8 +859,7 @@ public class EventBridgeService {
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {
-                String actualStr = actualField != null ? actualField.asText(null) : null;
-                if (!matchesArrayField(expected, actualStr)) {
+                if (!matchesArrayField(expected, actualField)) {
                     return false;
                 }
             } else if (expected.isObject()) {
@@ -883,25 +883,23 @@ public class EventBridgeService {
     }
 
     private boolean matchesArrayField(JsonNode arrayNode, String value) {
+        JsonNode actual = value != null ? TextNode.valueOf(value) : null;
+        return matchesArrayField(arrayNode, actual);
+    }
+
+    private boolean matchesArrayField(JsonNode arrayNode, JsonNode actual) {
         for (JsonNode element : arrayNode) {
-            if (matchesSingleElement(element, value)) {
+            if (matchesSingleElement(element, actual)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean matchesSingleElement(JsonNode element, String value) {
-        // Exact string match
-        if (element.isTextual()) {
-            return value != null && value.equals(element.asText());
-        }
-        // Null literal match
-        if (element.isNull()) {
-            return value == null;
-        }
+    private boolean matchesSingleElement(JsonNode element, JsonNode actual) {
         // Content filter object
         if (element.isObject()) {
+            String value = actual != null && actual.isTextual() ? actual.asText() : null;
             if (element.has("prefix")) {
                 return value != null && value.startsWith(element.get("prefix").asText());
             }
@@ -915,9 +913,9 @@ public class EventBridgeService {
                 JsonNode anythingBut = element.get("anything-but");
                 if (anythingBut.isArray()) {
                     for (JsonNode v : anythingBut) {
-                        if (v.isTextual() && v.asText().equals(value)) return false;
+                        if (matchesExactValue(v, actual)) return false;
                     }
-                    return value != null;
+                    return actual != null && !actual.isNull();
                 }
                 if (anythingBut.isObject() && anythingBut.has("prefix")) {
                     return value != null && !value.startsWith(anythingBut.get("prefix").asText());
@@ -925,8 +923,32 @@ public class EventBridgeService {
             }
             if (element.has("exists")) {
                 boolean shouldExist = element.get("exists").asBoolean();
-                return shouldExist ? (value != null) : (value == null);
+                boolean present = actual != null && !actual.isNull();
+                return shouldExist == present;
             }
+            return false;
+        }
+        // Exact literal match (string, null, boolean, number)
+        return matchesExactValue(element, actual);
+    }
+
+    private boolean matchesExactValue(JsonNode expected, JsonNode actual) {
+        if (expected.isNull()) {
+            return actual == null || actual.isNull();
+        }
+        if (actual == null) {
+            return false;
+        }
+        if (expected.isTextual()) {
+            return actual.isTextual() && expected.asText().equals(actual.asText());
+        }
+        if (expected.isBoolean()) {
+            return actual.isBoolean() && expected.booleanValue() == actual.booleanValue();
+        }
+        if (expected.isNumber()) {
+            // AWS exact numeric matching compares string representations:
+            // 300, 300.0 and 3.0e2 are NOT considered equal.
+            return actual.isNumber() && expected.asText().equals(actual.asText());
         }
         return false;
     }
