@@ -10,10 +10,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.lang.reflect.Field;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.mockito.ArgumentMatchers.any;
@@ -40,29 +37,33 @@ class WarmPoolTest {
     }
 
     @Test
-    void shutdownHookRegisteredAfterInit() throws Exception {
+    void stopManagedContainersDrainsPool() {
+        // Lifecycle-driven teardown replaces the old raw JVM shutdown hook: the pool
+        // drains when EmulatorLifecycle.onStop invokes the ContainerTeardown contract.
         WarmPool pool = buildPool();
         pool.init();
 
-        Field hookField = WarmPool.class.getDeclaredField("shutdownHook");
-        hookField.setAccessible(true);
-        Thread hook = (Thread) hookField.get(pool);
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("drain-fn");
+        ContainerHandle handle = new ContainerHandle("cid-drain", "drain-fn", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(handle);
 
-        assertNotNull(hook);
+        pool.release(pool.acquire(fn));
+        pool.stopManagedContainers();
+        verify(containerLauncher).stop(handle);
+
+        // Idempotent: a second drain (e.g. the @PreDestroy fallback) is a no-op.
+        pool.stopManagedContainers();
+        verify(containerLauncher, times(1)).stop(handle);
         pool.shutdown();
     }
 
     @Test
-    void shutdownHookDrainsEmptyPool() throws Exception {
+    void stopManagedContainersOnEmptyPoolIsNoOp() {
         WarmPool pool = buildPool();
         pool.init();
 
-        Field hookField = WarmPool.class.getDeclaredField("shutdownHook");
-        hookField.setAccessible(true);
-        Thread hook = (Thread) hookField.get(pool);
-
-        // Running the hook on an empty pool must not throw
-        hook.run();
+        pool.stopManagedContainers();
 
         pool.shutdown();
     }

@@ -39,6 +39,23 @@ class S3ServiceTest {
     }
 
     @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    void constructorThrowsWhenDataRootUncreatable() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
+                "root ignores directory write permissions");
+        Path readOnlyParent = tempDir.resolve("ro");
+        Files.createDirectories(readOnlyParent);
+        assertTrue(readOnlyParent.toFile().setWritable(false));
+        try {
+            Path dataRoot = readOnlyParent.resolve("s3");
+            assertThrows(java.io.UncheckedIOException.class,
+                    () -> new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false));
+        } finally {
+            assertTrue(readOnlyParent.toFile().setWritable(true));
+        }
+    }
+
+    @Test
     void createBucket() {
         Bucket bucket = s3Service.createBucket("test-bucket", "us-east-1");
         assertEquals("test-bucket", bucket.getName());
