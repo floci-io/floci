@@ -308,7 +308,8 @@ public class KmsJsonHandler {
         Map<String, String> sourceContext = readEncryptionContext(request.path("SourceEncryptionContext"));
         Map<String, String> destContext = readEncryptionContext(request.path("DestinationEncryptionContext"));
 
-        KmsService.DecryptResult source = service.decryptAndResolveKey(ciphertext, sourceContext, region, null);
+        String sourceKeyId = request.path("SourceKeyId").asText(null);
+        KmsService.DecryptResult source = service.decryptAndResolveKey(ciphertext, sourceContext, region, sourceKeyId);
         byte[] newCiphertext = service.encrypt(destKeyId, source.plaintext(), destContext, region);
 
         ObjectNode response = objectMapper.createObjectNode();

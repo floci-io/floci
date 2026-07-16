@@ -253,3 +253,75 @@ teardown() {
     aws_cmd kms schedule-key-deletion --key-id "$key_a" --pending-window-in-days 7 >/dev/null 2>&1 || true
     aws_cmd kms schedule-key-deletion --key-id "$key_b" --pending-window-in-days 7 >/dev/null 2>&1 || true
 }
+
+@test "KMS: reencrypt with matching SourceKeyId re-wraps ciphertext" {
+    out_a=$(aws_cmd kms create-key --description "bats-reencrypt-match-a")
+    key_a=$(json_get "$out_a" '.KeyMetadata.KeyId')
+    out_b=$(aws_cmd kms create-key --description "bats-reencrypt-match-b")
+    key_b=$(json_get "$out_b" '.KeyMetadata.KeyId')
+
+    plaintext_file=$(mktemp)
+    ciphertext_file=$(mktemp)
+    reencrypted_file=$(mktemp)
+    decrypted_file=$(mktemp)
+    echo -n "reencrypt test data" > "$plaintext_file"
+
+    run aws_cmd kms encrypt \
+        --key-id "$key_a" \
+        --plaintext "fileb://$plaintext_file" \
+        --output text \
+        --query CiphertextBlob
+    assert_success
+    echo "$output" | base64 -d > "$ciphertext_file"
+
+    run aws_cmd kms re-encrypt \
+        --ciphertext-blob "fileb://$ciphertext_file" \
+        --source-key-id "$key_a" \
+        --destination-key-id "$key_b" \
+        --output text \
+        --query CiphertextBlob
+    assert_success
+    echo "$output" | base64 -d > "$reencrypted_file"
+
+    run aws_cmd kms decrypt \
+        --ciphertext-blob "fileb://$reencrypted_file" \
+        --output text \
+        --query Plaintext
+    assert_success
+    echo "$output" | base64 -d > "$decrypted_file"
+    [ "$(cat "$decrypted_file")" = "reencrypt test data" ]
+
+    rm -f "$plaintext_file" "$ciphertext_file" "$reencrypted_file" "$decrypted_file"
+    aws_cmd kms schedule-key-deletion --key-id "$key_a" --pending-window-in-days 7 >/dev/null 2>&1 || true
+    aws_cmd kms schedule-key-deletion --key-id "$key_b" --pending-window-in-days 7 >/dev/null 2>&1 || true
+}
+
+@test "KMS: reencrypt with mismatched SourceKeyId returns IncorrectKeyException" {
+    out_a=$(aws_cmd kms create-key --description "bats-reencrypt-mismatch-a")
+    key_a=$(json_get "$out_a" '.KeyMetadata.KeyId')
+    out_b=$(aws_cmd kms create-key --description "bats-reencrypt-mismatch-b")
+    key_b=$(json_get "$out_b" '.KeyMetadata.KeyId')
+
+    plaintext_file=$(mktemp)
+    ciphertext_file=$(mktemp)
+    echo -n "reencrypt test data" > "$plaintext_file"
+
+    run aws_cmd kms encrypt \
+        --key-id "$key_a" \
+        --plaintext "fileb://$plaintext_file" \
+        --output text \
+        --query CiphertextBlob
+    assert_success
+    echo "$output" | base64 -d > "$ciphertext_file"
+
+    run aws_cmd kms re-encrypt \
+        --ciphertext-blob "fileb://$ciphertext_file" \
+        --source-key-id "$key_b" \
+        --destination-key-id "$key_a"
+    assert_failure
+    [[ "$output" == *"IncorrectKeyException"* ]]
+
+    rm -f "$plaintext_file" "$ciphertext_file"
+    aws_cmd kms schedule-key-deletion --key-id "$key_a" --pending-window-in-days 7 >/dev/null 2>&1 || true
+    aws_cmd kms schedule-key-deletion --key-id "$key_b" --pending-window-in-days 7 >/dev/null 2>&1 || true
+}
