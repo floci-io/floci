@@ -7,7 +7,6 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.PreMatching;
-import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
@@ -68,9 +67,15 @@ public class CloudFrontDistributionFilter implements ContainerRequestFilter {
         // rawPath supplies the separator (root "/" becomes /_cloudfront/{id}/).
         String newPath = "/_cloudfront/" + dist.getId() + rawPath;
 
-        URI newUri = UriBuilder.fromUri(originalUri)
-                .replacePath(newPath)
-                .build();
+        StringBuilder rewritten = new StringBuilder();
+        if (originalUri.getScheme() != null) {
+            rewritten.append(originalUri.getScheme()).append("://").append(originalUri.getRawAuthority());
+        }
+        rewritten.append(newPath);
+        if (originalUri.getRawQuery() != null) {
+            rewritten.append('?').append(originalUri.getRawQuery());
+        }
+        URI newUri = URI.create(rewritten.toString());
 
         LOG.debugv("CloudFront distribution routing: {0}{1} -> {2}", host, rawPath, newUri.getPath());
         requestContext.setRequestUri(newUri);
