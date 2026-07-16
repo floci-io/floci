@@ -1,8 +1,11 @@
 name: Publish Docker to GHCR
 
-# Fork-only utility: builds a Floci Docker image from a chosen ref and pushes it to
-# this fork's GitHub Container Registry namespace (ghcr.io/<owner>/floci). Kept off
-# the feature branch so it never lands in the upstream PR. Trigger manually.
+# Fork-only utility: builds a multi-arch Floci Docker image (linux/amd64 +
+# linux/arm64) from a chosen ref and pushes it to this fork's GHCR namespace
+# (ghcr.io/<owner>/floci). Kept off the feature branch so it never lands in the
+# upstream PR. Trigger manually. Each arch builds on a native runner, then the two
+# are merged into a single manifest list so both CI (amd64) and Apple Silicon
+# (arm64) can pull it.
 
 on:
   workflow_dispatch:
@@ -20,22 +23,32 @@ permissions:
   contents: read
   packages: write
 
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/floci
+
 jobs:
-  publish:
-    name: Build & push ${{ inputs.tag }}
-    runs-on: ubuntu-latest
+  build:
+    name: build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout ${{ inputs.ref }}
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Compute short SHA
-        id: meta
-        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Platform slug
+        id: slug
+        run: echo "value=${{ matrix.platform }}" | tr '/' '-' >> "$GITHUB_OUTPUT"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -44,25 +57,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push (JVM image)
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/floci:${{ inputs.tag }}
-            ghcr.io/${{ github.repository_owner }}/floci:${{ inputs.tag }}-${{ steps.meta.outputs.sha }}
-          cache-from: type=gha,scope=floci-jvm
-          cache-to: type=gha,scope=floci-jvm,mode=max
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=floci-${{ steps.slug.outputs.value }}
+          cache-to: type=gha,scope=floci-${{ steps.slug.outputs.value }},mode=max
 
-      - name: Summary
+      - name: Export digest
         run: |
-          {
-            echo "### Published"
-            echo ""
-            echo "- \`ghcr.io/${{ github.repository_owner }}/floci:${{ inputs.tag }}\`"
-            echo "- \`ghcr.io/${{ github.repository_owner }}/floci:${{ inputs.tag }}-${{ steps.meta.outputs.sha }}\`"
-            echo ""
-            echo "Built from \`${{ inputs.ref }}\` @ ${{ steps.meta.outputs.sha }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.slug.outputs.value }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: merge manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve short SHA of ${{ inputs.ref }}
+        id: sha
+        run: echo "short=$(git ls-remote https://github.com/${{ github.repository }} ${{ inputs.ref }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE }}:${{ inputs.tag }} \
+            -t ${{ env.IMAGE }}:${{ inputs.tag }}-${{ steps.sha.outputs.short }} \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ inputs.tag }}
