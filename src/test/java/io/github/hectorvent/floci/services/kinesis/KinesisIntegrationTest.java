@@ -1030,6 +1030,29 @@ class KinesisIntegrationTest {
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    @Test
+    @Order(63)
+    void putRecordRejectsRecordOverSizeLimit() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"size-limit-test\", \"ShardCount\": 1}")
+        .when().post("/")
+        .then().statusCode(200);
+
+        String oversized = java.util.Base64.getEncoder().encodeToString(new byte[1_048_577]);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"size-limit-test\","
+                + "\"Data\": \"" + oversized + "\","
+                + "\"PartitionKey\": \"pk1\"}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
     private JsonNode decodeFirstEventStreamMessage(byte[] data) throws Exception {
         ByteBuffer buf = ByteBuffer.wrap(data);
         // Skip the first message (initial-response)
