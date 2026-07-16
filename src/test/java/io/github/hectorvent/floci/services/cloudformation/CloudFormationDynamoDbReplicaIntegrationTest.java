@@ -5,9 +5,13 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -29,6 +33,8 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/dynamodb/aws4_request";
     private static final String DDB_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String REPLICA_REGION = "us-west-2";
+    private static final Duration STACK_DELETE_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration STACK_DELETE_POLL_INTERVAL = Duration.ofMillis(50);
 
     @BeforeAll
     static void configureRestAssured() {
@@ -107,6 +113,21 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
                 "DescribeTable should no longer list the removed replica, was: " + afterRemove);
     }
 
+    @Test
+    void updateTableRejectsBlankReplicaRegion() {
+        String tableName = "gt-invalid-region-" + Long.toString(System.nanoTime(), 36);
+        createTable(tableName);
+
+        given()
+            .contentType(DDB_CONTENT_TYPE)
+            .header("Authorization", DDB_AUTH)
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .body("{\"TableName\":\"" + tableName + "\","
+                    + "\"ReplicaUpdates\":[{\"Create\":{\"RegionName\":\"\"}}]}")
+        .when().post("/").then().statusCode(400)
+            .body("__type", containsString("ValidationException"));
+    }
+
     /** Mirrors the CDK legacy global-table synth: a table plus a Custom::DynamoDBReplica for a peer region. */
     private static String tableAndReplicaTemplate(String tableName) {
         return """
@@ -160,7 +181,7 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
     }
 
     @Test
-    void deletingStackDetachesReplicaFromSurvivingTable() throws InterruptedException {
+    void deletingStackDetachesReplicaFromSurvivingTable() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String tableName = "gt-ext-table-" + suffix;
         String stackName = "gt-ext-replica-stack-" + suffix;
@@ -211,22 +232,21 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
             .body(not(containsString(REPLICA_REGION)));
     }
 
-    private void awaitStackGone(String stackName) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stackName + " was not deleted within the timeout");
+    private void awaitStackGone(String stackName) {
+        await()
+            .atMost(STACK_DELETE_TIMEOUT)
+            .pollInterval(STACK_DELETE_POLL_INTERVAL)
+            .untilAsserted(() -> {
+                String body = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DescribeStacks")
+                    .formParam("StackName", stackName)
+                .when().post("/").then().extract().asString();
+                if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
+                    fail("stack delete failed: " + body);
+                }
+                assertTrue(body.contains("does not exist"), "stack still exists: " + body);
+            });
     }
 }

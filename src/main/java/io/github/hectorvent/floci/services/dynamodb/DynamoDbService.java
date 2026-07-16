@@ -1299,6 +1299,8 @@ public class DynamoDbService {
      */
     public TableDefinition applyReplicaUpdates(String tableName, List<String> addRegions,
                                                List<String> removeRegions, String region) {
+        validateReplicaRegions(addRegions);
+        validateReplicaRegions(removeRegions);
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -1318,6 +1320,17 @@ public class DynamoDbService {
         tableStore.put(storageKey, table);
         LOG.infov("Updated replicas for table {0} in region {1}: {2}", canonicalTableName, region, replicas);
         return table;
+    }
+
+    private static void validateReplicaRegions(List<String> replicaRegions) {
+        if (replicaRegions == null) {
+            return;
+        }
+        for (String replicaRegion : replicaRegions) {
+            if (replicaRegion == null || replicaRegion.isBlank()) {
+                throw new AwsException("ValidationException", "Replica RegionName must not be empty", 400);
+            }
+        }
     }
 
     // --- TTL ---

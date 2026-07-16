@@ -3124,22 +3124,24 @@ public class CloudFormationResourceProvisioner {
             throw new AwsException("ValidationError",
                     "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing TableName", 400);
         }
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing Region", 400);
+        }
         String priorRegion = r.getPhysicalId();
-        if (replicaRegion != null && !replicaRegion.isBlank()) {
-            dynamoDbService.applyReplicaUpdates(tableName, List.of(replicaRegion), List.of(), region);
-            // On a stack UPDATE that changes Region, CloudFormation replaces the resource; drop the
-            // prior replica region so it is not left dangling in the table metadata (and unreachable
-            // by delete once the physical id is overwritten below).
-            if (priorRegion != null && !priorRegion.isBlank() && !priorRegion.equals(replicaRegion)) {
-                try {
-                    dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(priorRegion), region);
-                } catch (Exception e) {
-                    LOG.debugv("Could not remove prior replica {0} from table {1}: {2}",
-                            priorRegion, tableName, e.getMessage());
-                }
+        dynamoDbService.applyReplicaUpdates(tableName, List.of(replicaRegion), List.of(), region);
+        // On a stack UPDATE that changes Region, CloudFormation replaces the resource; drop the
+        // prior replica region so it is not left dangling in the table metadata (and unreachable
+        // by delete once the physical id is overwritten below).
+        if (priorRegion != null && !priorRegion.isBlank() && !priorRegion.equals(replicaRegion)) {
+            try {
+                dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(priorRegion), region);
+            } catch (Exception e) {
+                LOG.debugv("Could not remove prior replica {0} from table {1}: {2}",
+                        priorRegion, tableName, e.getMessage());
             }
         }
-        r.setPhysicalId(replicaRegion != null && !replicaRegion.isBlank() ? replicaRegion : tableName);
+        r.setPhysicalId(replicaRegion);
         r.getAttributes().put("TableName", tableName);
     }
 

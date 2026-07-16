@@ -120,6 +120,17 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void applyReplicaUpdatesRejectsBlankRegion() {
+        createUsersTable("us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> service.applyReplicaUpdates("Users", List.of(" "), List.of(), "us-east-1"));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
     void deleteTable() {
         String region = "eu-west-1";
         createUsersTable(region);

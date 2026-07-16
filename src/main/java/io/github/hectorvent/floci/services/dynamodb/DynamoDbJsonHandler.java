@@ -1199,12 +1199,16 @@ public class DynamoDbJsonHandler {
             List<String> removeRegions = new ArrayList<>();
             for (JsonNode update : replicaUpdates) {
                 JsonNode create = update.path("Create");
-                if (create.isObject() && create.hasNonNull("RegionName")) {
-                    addRegions.add(create.get("RegionName").asText());
+                if (create.isObject()) {
+                    String replicaRegion = create.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    addRegions.add(replicaRegion);
                 }
                 JsonNode delete = update.path("Delete");
-                if (delete.isObject() && delete.hasNonNull("RegionName")) {
-                    removeRegions.add(delete.get("RegionName").asText());
+                if (delete.isObject()) {
+                    String replicaRegion = delete.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    removeRegions.add(replicaRegion);
                 }
             }
             if (!addRegions.isEmpty() || !removeRegions.isEmpty()) {
@@ -1215,6 +1219,12 @@ public class DynamoDbJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
+    }
+
+    private static void validateReplicaRegion(String replicaRegion) {
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationException", "Replica RegionName must not be empty", 400);
+        }
     }
 
     private Response handleDescribeTimeToLive(JsonNode request, String region) {

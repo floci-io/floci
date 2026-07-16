@@ -7,9 +7,11 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.CreateReplicationGroupMemberAction;
 import software.amazon.awssdk.services.dynamodb.model.CreateTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.CreateTableResponse;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.DeleteReplicationGroupMemberAction;
 import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
@@ -29,6 +31,7 @@ import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
+import software.amazon.awssdk.services.dynamodb.model.ReplicationGroupUpdate;
 import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
@@ -250,6 +253,36 @@ class DynamoDbTest {
 
     @Test
     @Order(12)
+    void updateTableReplicaLifecycle() {
+        String replicaRegion = "us-west-2";
+
+        UpdateTableResponse added = ddb.updateTable(UpdateTableRequest.builder()
+                .tableName(TABLE_NAME)
+                .replicaUpdates(ReplicationGroupUpdate.builder()
+                        .create(CreateReplicationGroupMemberAction.builder().regionName(replicaRegion).build())
+                        .build())
+                .build());
+
+        assertThat(added.tableDescription().replicas())
+                .anyMatch(replica -> replicaRegion.equals(replica.regionName())
+                        && "ACTIVE".equals(replica.replicaStatusAsString()));
+        assertThat(ddb.describeTable(DescribeTableRequest.builder().tableName(TABLE_NAME).build())
+                .table().replicas())
+                .anyMatch(replica -> replicaRegion.equals(replica.regionName()));
+
+        UpdateTableResponse removed = ddb.updateTable(UpdateTableRequest.builder()
+                .tableName(TABLE_NAME)
+                .replicaUpdates(ReplicationGroupUpdate.builder()
+                        .delete(DeleteReplicationGroupMemberAction.builder().regionName(replicaRegion).build())
+                        .build())
+                .build());
+
+        assertThat(removed.tableDescription().replicas())
+                .noneMatch(replica -> replicaRegion.equals(replica.regionName()));
+    }
+
+    @Test
+    @Order(13)
     void describeTimeToLive() {
         DescribeTimeToLiveResponse response = ddb.describeTimeToLive(
                 DescribeTimeToLiveRequest.builder().tableName(TABLE_NAME).build());
@@ -259,7 +292,7 @@ class DynamoDbTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void tagResource() {
         Assumptions.assumeTrue(tableArn != null);
 
@@ -273,7 +306,7 @@ class DynamoDbTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void listTagsOfResource() {
         Assumptions.assumeTrue(tableArn != null);
 
@@ -286,7 +319,7 @@ class DynamoDbTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void untagResource() {
         Assumptions.assumeTrue(tableArn != null);
 
@@ -302,7 +335,7 @@ class DynamoDbTest {
     }
 
     @Test
-    @Order(16)
+    @Order(17)
     void batchWriteItemDelete() {
         ddb.batchWriteItem(BatchWriteItemRequest.builder()
                 .requestItems(Map.of(TABLE_NAME, List.of(
@@ -324,7 +357,7 @@ class DynamoDbTest {
     }
 
     @Test
-    @Order(17)
+    @Order(18)
     void deleteItem() {
         ddb.deleteItem(DeleteItemRequest.builder()
                 .tableName(TABLE_NAME)
@@ -336,7 +369,7 @@ class DynamoDbTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void deleteTable() {
         ddb.deleteTable(DeleteTableRequest.builder().tableName(TABLE_NAME).build());
 
