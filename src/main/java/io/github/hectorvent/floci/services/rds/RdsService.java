@@ -756,7 +756,7 @@ public class RdsService implements Resettable {
     }
 
     private static void validateAcu(String field, double value, double smallest) {
-        if (value < smallest || value > 256.0) {
+        if (!Double.isFinite(value) || value < smallest || value > 256.0) {
             throw new AwsException("InvalidParameterValue",
                     field + " must be between " + smallest + " and 256.0 ACUs.", 400);
         }

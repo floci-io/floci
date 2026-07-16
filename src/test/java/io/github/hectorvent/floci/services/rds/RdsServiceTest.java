@@ -497,6 +497,13 @@ class RdsServiceTest {
         assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.3, 16.0));
         // Above the 256-ACU ceiling.
         assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, 300.0));
+        // Non-finite values are not valid AWS Query numbers.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(Double.NaN, 16.0));
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, Double.NaN));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2Capacity(0.5, Double.POSITIVE_INFINITY));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2Capacity(Double.NEGATIVE_INFINITY, 16.0));
         // MaxCapacity below MinCapacity.
         assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(16.0, 8.0));
         // Valid: 0 (auto-pause), the 256 ceiling, and half-step values.
