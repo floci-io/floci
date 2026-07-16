@@ -211,6 +211,20 @@ class ElbV2ServiceTest {
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
     }
 
+    @Test
+    void describeTargetHealthReturnsUnusedForExplicitUnregisteredTarget() {
+        String tgArn = createTargetGroup("sample-tg");
+        TargetDescription target = new TargetDescription();
+        target.setId("i-1234567890abcdef0");
+        target.setPort(9999);
+
+        var health = service.describeTargetHealth(REGION, tgArn, List.of(target)).getFirst();
+
+        assertEquals("unused", health.getState());
+        assertEquals("Target.NotRegistered", health.getReason());
+        assertEquals("Target is not registered to the target group", health.getDescription());
+    }
+
     private String createTargetGroup(String name) {
         return service.createTargetGroup(
                 REGION, name, "HTTP", "HTTP1", 9999, "vpc-a", "instance",

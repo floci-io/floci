@@ -13,6 +13,14 @@ EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Targe
 | `DescribeCluster` | Describe a cluster by name |
 | `ListClusters` | List all cluster names |
 | `DeleteCluster` | Delete a cluster |
+| `CreateNodegroup` | Create node group metadata for a cluster |
+| `DescribeNodegroup` | Describe a node group by cluster and name |
+| `ListNodegroups` | List node group names for a cluster |
+| `DeleteNodegroup` | Delete a node group |
+| `CreateFargateProfile` | Create Fargate profile metadata for a cluster |
+| `DescribeFargateProfile` | Describe a Fargate profile by cluster and name |
+| `ListFargateProfiles` | List Fargate profile names for a cluster |
+| `DeleteFargateProfile` | Delete a Fargate profile |
 | `TagResource` | Add tags to a cluster |
 | `UntagResource` | Remove tags from a cluster |
 | `ListTagsForResource` | List tags on a cluster |
@@ -144,6 +152,18 @@ services:
 arn:aws:eks:<region>:<accountId>:cluster/<clusterName>
 ```
 
+Node groups use:
+
+```
+arn:aws:eks:<region>:<accountId>:nodegroup/<clusterName>/<nodegroupName>/<id>
+```
+
+Fargate profiles use:
+
+```
+arn:aws:eks:<region>:<accountId>:fargateprofile/<clusterName>/<fargateProfileName>/<id>
+```
+
 ## Examples
 
 ```bash
@@ -164,6 +184,59 @@ aws eks describe-cluster --name my-cluster
 
 # List clusters
 aws eks list-clusters
+
+# Create a node group
+curl -s -X POST "$AWS_ENDPOINT_URL/clusters/my-cluster/node-groups" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "nodegroupName": "my-nodegroup",
+    "nodeRole": "arn:aws:iam::000000000000:role/eks-node-role",
+    "subnets": ["subnet-123", "subnet-456"],
+    "instanceTypes": ["t3.medium"],
+    "scalingConfig": {
+      "minSize": 1,
+      "maxSize": 3,
+      "desiredSize": 1
+    }
+  }'
+
+# Describe the node group
+curl -s "$AWS_ENDPOINT_URL/clusters/my-cluster/node-groups/my-nodegroup"
+
+# List node groups
+curl -s "$AWS_ENDPOINT_URL/clusters/my-cluster/node-groups"
+
+# Delete the node group
+curl -s -X DELETE "$AWS_ENDPOINT_URL/clusters/my-cluster/node-groups/my-nodegroup"
+
+# Create a Fargate profile
+curl -s -X POST "$AWS_ENDPOINT_URL/clusters/my-cluster/fargate-profiles" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fargateProfileName": "my-fargate-profile",
+    "podExecutionRoleArn": "arn:aws:iam::000000000000:role/eks-fargate-role",
+    "subnets": ["subnet-123", "subnet-456"],
+    "selectors": [
+      {
+        "namespace": "default",
+        "labels": {
+          "app": "api"
+        }
+      }
+    ],
+    "tags": {
+      "env": "dev"
+    }
+  }'
+
+# Describe the Fargate profile
+curl -s "$AWS_ENDPOINT_URL/clusters/my-cluster/fargate-profiles/my-fargate-profile"
+
+# List Fargate profiles
+curl -s "$AWS_ENDPOINT_URL/clusters/my-cluster/fargate-profiles"
+
+# Delete the Fargate profile
+curl -s -X DELETE "$AWS_ENDPOINT_URL/clusters/my-cluster/fargate-profiles/my-fargate-profile"
 
 # Tag a cluster
 aws eks tag-resource \
@@ -203,6 +276,8 @@ System.out.println(described.cluster().status()); // ACTIVE
 // List clusters
 List<String> names = eks.listClusters(r -> {}).clusters();
 
+// Node group and Fargate profile support are currently exposed through the REST paths.
+
 // Tag resource
 eks.tagResource(r -> r
     .resourceArn(created.cluster().arn())
@@ -216,8 +291,6 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 
 The following EKS features are not yet supported:
 
-- Node groups (`CreateNodegroup`, `DescribeNodegroup`, `ListNodegroups`, `DeleteNodegroup`)
-- Fargate profiles
 - `UpdateClusterConfig` / `UpdateClusterVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs
