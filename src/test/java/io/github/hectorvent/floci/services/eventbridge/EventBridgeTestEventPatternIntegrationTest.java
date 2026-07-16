@@ -275,6 +275,115 @@ class EventBridgeTestEventPatternIntegrationTest {
     }
 
     @Test
+    void detailNullLiteralMatchesNullValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[null]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"field\\":null}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailNullLiteralDoesNotMatchMissingField() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[null]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"other\\":1}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailExistsTrueMatchesNullValue() {
+        // A key carrying the JSON literal null still exists in AWS.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":true}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"field\\":null}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailExistsFalseDoesNotMatchNullValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":false}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"field\\":null}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailExistsFalseMatchesMissingField() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":false}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"other\\":1}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailExistsTrueDoesNotMatchMissingField() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":true}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"other\\":1}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
     void detailAnythingButNumberValue() {
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)

@@ -925,7 +925,7 @@ public class EventBridgeService {
             }
             if (element.has("exists")) {
                 boolean shouldExist = element.get("exists").asBoolean();
-                boolean present = actual != null && !actual.isNull();
+                boolean present = actual != null;
                 return shouldExist == present;
             }
             return false;
@@ -936,7 +936,7 @@ public class EventBridgeService {
 
     private boolean matchesExactValue(JsonNode expected, JsonNode actual) {
         if (expected.isNull()) {
-            return actual == null || actual.isNull();
+            return actual != null && actual.isNull();
         }
         if (actual == null) {
             return false;
