@@ -359,7 +359,7 @@ class SqsJsonProtocolTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     void sendMessageToStandardQueueRetainsMessageGroupId() {
         String groupQueueName = QUEUE_NAME + "-group";
         String groupQueueUrl = given()
