@@ -1172,6 +1172,29 @@ public class EventBridgeService {
         return connection;
     }
 
+    public Connection describeConnection(String name, String region) {
+        return connectionStore.get(connectionKey(region, name))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + name + " does not exist.", 404));
+    }
+
+    public List<Connection> listConnections(String namePrefix, ConnectionState state, String region) {
+        String prefix = "connection:" + region + ":";
+        return connectionStore.scan(k -> {
+            if (!k.startsWith(prefix)) return false;
+            Connection c = connectionStore.get(k).orElse(null);
+            if (c == null) return false;
+            if (namePrefix != null && !namePrefix.isBlank()
+                    && !c.getName().startsWith(namePrefix)) {
+                return false;
+            }
+            if (state != null && state != c.getConnectionState()) {
+                return false;
+            }
+            return true;
+        });
+    }
+
     private static void validateConnectionName(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "Connection name is required.", 400);
