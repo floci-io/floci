@@ -46,6 +46,7 @@ import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
+import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
@@ -396,7 +397,7 @@ public class CloudFormationResourceProvisioner {
             String clusterName = resource.getAttributes().get("ClusterName");
             if (clusterName != null && !clusterName.isBlank()) {
                 try {
-                    eksService.deleteNodegroup(clusterName, resource.getPhysicalId());
+                    eksService.deleteNodeGroup(clusterName, resource.getPhysicalId());
                 } catch (Exception e) {
                     LOG.debugv("Error deleting nodegroup {0}: {1}", resource.getPhysicalId(), e.getMessage());
                 }
@@ -1117,7 +1118,7 @@ public class CloudFormationResourceProvisioner {
             }
         }
         request.setSubnets(subnets);
-        var nodegroup = eksService.createNodegroup(clusterName, request);
+        var nodegroup = eksService.createNodeGroup(clusterName, request);
         r.setPhysicalId(nodegroup.getNodegroupName());
         r.getAttributes().put("ClusterName", nodegroup.getClusterName());
         r.getAttributes().put("NodegroupName", nodegroup.getNodegroupName());
@@ -3423,6 +3424,7 @@ public class CloudFormationResourceProvisioner {
             }
             def.setPortMappings(parseCfnPortMappings(item.path("PortMappings")));
             def.setEnvironment(parseCfnEnvironment(item.path("Environment")));
+            def.setSecrets(parseCfnSecrets(item.path("Secrets")));
             if (item.path("Command").isArray()) {
                 List<String> cmd = new ArrayList<>();
                 item.path("Command").forEach(c -> cmd.add(c.asText()));
@@ -3459,6 +3461,17 @@ public class CloudFormationResourceProvisioner {
         }
         for (JsonNode item : node) {
             result.add(new KeyValuePair(item.path("Name").asText(), item.path("Value").asText()));
+        }
+        return result;
+    }
+
+    private List<Secret> parseCfnSecrets(JsonNode node) {
+        List<Secret> result = new ArrayList<>();
+        if (node == null || !node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new Secret(item.path("Name").asText(), item.path("ValueFrom").asText()));
         }
         return result;
     }
