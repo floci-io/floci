@@ -374,8 +374,8 @@ public class KinesisService {
     }
 
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey, String region) {
-        validateRecordSize(data, partitionKey);
         KinesisStream stream = resolveStream(streamName, region);
+        validateRecordSize(data, partitionKey);
         KinesisShard shard = selectShard(stream, partitionKey);
 
         String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());

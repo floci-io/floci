@@ -421,28 +421,37 @@ public class KinesisJsonHandler {
 
     private Response handlePutRecords(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
+        service.describeStream(streamName, region);
         JsonNode recordsNode = request.path("Records");
 
         // An oversized record fails the whole request before anything is
         // written — per-record ErrorCode is reserved for throughput/internal
-        // failures.
+        // failures. Successful decodes are kept for the write loop; malformed
+        // Data is left null so it stays a per-record failure there.
+        record Entry(JsonNode node, byte[] data) {}
+        List<Entry> entries = new ArrayList<>();
         for (JsonNode node : recordsNode) {
+            byte[] data;
             try {
-                service.validateRecordSize(Base64.getDecoder().decode(node.path("Data").asText()),
-                        node.path("PartitionKey").asText());
-            } catch (IllegalArgumentException ignored) {
-                // malformed Data stays a per-record failure in the write loop below
+                data = Base64.getDecoder().decode(node.path("Data").asText());
+            } catch (IllegalArgumentException e) {
+                data = null;
             }
+            if (data != null) {
+                service.validateRecordSize(data, node.path("PartitionKey").asText());
+            }
+            entries.add(new Entry(node, data));
         }
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode results = response.putArray("Records");
         int failed = 0;
 
-        for (JsonNode node : recordsNode) {
+        for (Entry entry : entries) {
             try {
-                byte[] data = Base64.getDecoder().decode(node.path("Data").asText());
-                String partitionKey = node.path("PartitionKey").asText();
+                byte[] data = entry.data() != null ? entry.data()
+                        : Base64.getDecoder().decode(entry.node().path("Data").asText());
+                String partitionKey = entry.node().path("PartitionKey").asText();
                 KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);
                 results.addObject()
                         .put("SequenceNumber", result.sequenceNumber())
