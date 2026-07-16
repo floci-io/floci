@@ -20,12 +20,30 @@ gateway/memory primitives.
 | `UpdateAgentRuntime` | Update a runtime; appends a new immutable version |
 | `ListAgentRuntimeVersions` | List a runtime's versions (paginated) |
 | `DeleteAgentRuntime` | Delete a runtime |
+| `CreateAgentRuntimeEndpoint` | Create a named endpoint (qualifier) targeting a version |
+| `GetAgentRuntimeEndpoint` | Get an endpoint |
+| `UpdateAgentRuntimeEndpoint` | Retarget an endpoint's version / update its description |
+| `ListAgentRuntimeEndpoints` | List a runtime's endpoints (paginated) |
+| `DeleteAgentRuntimeEndpoint` | Delete an endpoint |
+| `InvokeAgentRuntime` *(data plane)* | Invoke a runtime; returns a fixed canned response |
+
+A `DEFAULT` endpoint is created automatically with each runtime.
+
+## Data plane — `InvokeAgentRuntime`
+
+`POST /runtimes/{agentRuntimeArn}/invocations` returns a fixed, configurable JSON
+body (default `{"output":"yes"}`) and echoes the
+`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. The request payload (opaque
+binary, up to 100 MB) is never parsed. Streaming responses are not emulated — a
+single non-streaming `200` is returned.
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_SERVICES_BEDROCK_AGENT_CORE_CONTROL_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_BEDROCK_AGENT_CORE_CONTROL_ENABLED` | `true` | Enable/disable the control plane |
+| `FLOCI_SERVICES_BEDROCK_AGENT_CORE_ENABLED` | `true` | Enable/disable the data plane (invoke) |
+| `FLOCI_SERVICES_BEDROCK_AGENT_CORE_INVOKE_RESPONSE` | `{"output":"yes"}` | Canned `InvokeAgentRuntime` response body |
 
 ## Behavior notes
 

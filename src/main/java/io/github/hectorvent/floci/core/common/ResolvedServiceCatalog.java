@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
+import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
@@ -261,6 +262,12 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("bedrock-agentcore"), Set.of(),
                         Set.of(BedrockAgentCoreControlController.class)),
+                descriptor("bedrock-agentcore", "bedrock-agentcore",
+                        config.services().bedrockAgentCore().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of(), Set.of(),
+                        Set.of(BedrockAgentCoreController.class)),
                 descriptor("elasticloadbalancing", "elbv2", config.services().elbv2().enabled(), true,
                         "elbv2", config.storage().mode(), 5000L, AwsNamespaces.ELB_V2, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
