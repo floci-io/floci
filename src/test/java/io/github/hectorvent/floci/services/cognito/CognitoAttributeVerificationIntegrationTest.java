@@ -144,4 +144,69 @@ class CognitoAttributeVerificationIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("InvalidParameterException"));
     }
+
+    @Test
+    @Order(6)
+    void emailAndPhoneCodesAreIndependent() throws Exception {
+        String username = "verify-both+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "phone_number", "Value": "+15551234567" }
+                  ]
+                }
+                """.formatted(poolId, username, username))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminSetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "Password": "%s",
+                  "Permanent": true
+                }
+                """.formatted(poolId, username, PASSWORD))
+                .then()
+                .statusCode(200);
+
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "%s"
+                  }
+                }
+                """.formatted(clientId, username, PASSWORD));
+        String token = auth.path("AuthenticationResult").path("AccessToken").asText();
+
+        // Back-to-back requests for different attributes must not trip the shared
+        // rate limit or overwrite each other: each attribute has its own code slot.
+        cognitoAction("GetUserAttributeVerificationCode", """
+                {
+                  "AccessToken": "%s",
+                  "AttributeName": "email"
+                }
+                """.formatted(token))
+                .then()
+                .statusCode(200)
+                .body("CodeDeliveryDetails.DeliveryMedium", equalTo("EMAIL"));
+
+        cognitoAction("GetUserAttributeVerificationCode", """
+                {
+                  "AccessToken": "%s",
+                  "AttributeName": "phone_number"
+                }
+                """.formatted(token))
+                .then()
+                .statusCode(200)
+                .body("CodeDeliveryDetails.AttributeName", equalTo("phone_number"))
+                .body("CodeDeliveryDetails.DeliveryMedium", equalTo("SMS"))
+                .body("CodeDeliveryDetails.Destination", containsString("*"));
+    }
 }

@@ -612,9 +612,9 @@ public class CognitoJsonHandler {
         );
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode delivery = response.putObject("CodeDeliveryDetails");
-        delivery.put("AttributeName", String.valueOf(deliveryDetails.get("AttributeName")));
-        delivery.put("DeliveryMedium", String.valueOf(deliveryDetails.get("DeliveryMedium")));
-        delivery.put("Destination", String.valueOf(deliveryDetails.get("Destination")));
+        delivery.put("AttributeName", (String) deliveryDetails.get("AttributeName"));
+        delivery.put("DeliveryMedium", (String) deliveryDetails.get("DeliveryMedium"));
+        delivery.put("Destination", (String) deliveryDetails.get("Destination"));
         return Response.ok(response).build();
     }
 

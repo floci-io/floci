@@ -1420,12 +1420,14 @@ public class CognitoService {
         }
 
         String deliveryMedium = "email".equals(attributeName) ? "EMAIL" : "SMS";
+        VerificationCode.Purpose purpose = "email".equals(attributeName)
+                ? VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION
+                : VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION;
         ensureVerificationWiring();
         try {
             String code = verificationCodeService.issue(poolId, user.getUsername(),
-                    VerificationCode.Purpose.ATTRIBUTE_VERIFICATION, Duration.ofHours(24));
-            messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.ATTRIBUTE_VERIFICATION,
-                    code, List.of(deliveryMedium));
+                    purpose, Duration.ofHours(24));
+            messageDispatcher.dispatch(pool, user, purpose, code, List.of(deliveryMedium));
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         }
