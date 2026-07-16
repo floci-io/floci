@@ -240,6 +240,27 @@ public class Ec2ContainerManager {
     }
 
     /**
+     * Synchronous stop for emulator shutdown: tears down the port-forward sidecars and
+     * stops the container with a short timeout so N instances cannot exhaust the SIGTERM
+     * grace window. Unlike {@link #stop}, runs on the caller's thread (the async executor
+     * would be abandoned mid-flight during shutdown) and leaves state handling to the caller.
+     */
+    public void stopForShutdown(Instance instance) {
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null) {
+            return;
+        }
+        portForwardManager.unpublishAll(instance);
+        try {
+            dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+        } catch (NotFoundException e) {
+            // already gone
+        } catch (Exception e) {
+            LOG.warnv("Error stopping EC2 container {0} on shutdown: {1}", containerId, e.getMessage());
+        }
+    }
+
+    /**
      * Gracefully stops a running container (30 second timeout then SIGKILL).
      * Updates instance state through stopping → stopped.
      */

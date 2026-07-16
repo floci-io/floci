@@ -770,6 +770,21 @@ class RdsQueryHandlerTest {
         verify(service).listDbSubnetGroups(null, "us-west-2");
     }
 
+    @Test
+    void describeDbSubnetGroups_missingNameReturnsNotFoundFault() {
+        when(service.listDbSubnetGroups("does-not-exist", null))
+                .thenThrow(new AwsException("DBSubnetGroupNotFoundFault",
+                        "DB subnet group does-not-exist not found.", 404));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "does-not-exist");
+
+        Response response = handler.handle("DescribeDBSubnetGroups", p);
+
+        assertEquals(404, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("DBSubnetGroupNotFoundFault"));
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private static MultivaluedMap<String, String> params() {
