@@ -16,6 +16,9 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
@@ -31,6 +34,7 @@ public class BedrockAgentCoreMemoryService {
 
     private final StorageBackend<String, Memory> storage;
     private final RegionResolver regionResolver;
+    private final Set<String> deletedTokens = ConcurrentHashMap.newKeySet();
 
     @Inject
     public BedrockAgentCoreMemoryService(StorageFactory storageFactory, RegionResolver regionResolver) {
@@ -43,7 +47,16 @@ public class BedrockAgentCoreMemoryService {
         this.regionResolver = regionResolver;
     }
 
-    public Memory create(String name, Integer eventExpiryDuration, String description, String region) {
+    public Memory create(String name, Integer eventExpiryDuration, String description,
+                         String clientToken, String region) {
+        if (clientToken != null) {
+            Optional<Memory> replay = storage.scan(k -> k.startsWith(keyPrefix(region))).stream()
+                    .filter(m -> clientToken.equals(m.getClientToken()))
+                    .findFirst();
+            if (replay.isPresent()) {
+                return replay.get();
+            }
+        }
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "name is required", 400);
         }
@@ -64,6 +77,7 @@ public class BedrockAgentCoreMemoryService {
         memory.setCreatedAt(now);
         memory.setUpdatedAt(now);
         memory.setAccountId(regionResolver.getAccountId());
+        memory.setClientToken(clientToken);
         storage.put(key(region, id), memory);
         return memory;
     }
@@ -84,9 +98,22 @@ public class BedrockAgentCoreMemoryService {
         return memory;
     }
 
-    public Memory delete(String id, String region) {
-        Memory memory = get(id, region);
+    public Memory delete(String id, String clientToken, String region) {
+        Optional<Memory> found = storage.get(key(region, id));
+        if (found.isEmpty()) {
+            if (clientToken != null && deletedTokens.contains(region + " " + clientToken)) {
+                Memory marker = new Memory();
+                marker.setMemoryId(id);
+                marker.setStatus(STATUS_DELETING);
+                return marker;
+            }
+            throw new AwsException("ResourceNotFoundException", "Memory not found: " + id, 404);
+        }
+        Memory memory = found.get();
         storage.delete(key(region, id));
+        if (clientToken != null) {
+            deletedTokens.add(region + " " + clientToken);
+        }
         memory.setStatus(STATUS_DELETING);
         return memory;
     }

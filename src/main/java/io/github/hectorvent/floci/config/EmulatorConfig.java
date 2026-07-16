@@ -1431,6 +1431,9 @@ public interface EmulatorConfig {
 
         @WithDefault("{\"output\":\"yes\"}")
         String invokeResponse();
+
+        @WithDefault("false")
+        boolean validateRuntimeExists();
     }
 
     interface ElbV2ServiceConfig {

@@ -21,6 +21,7 @@ public class AgentRuntimeEndpoint {
     private String liveVersion;
     private String status;
     private String description;
+    private String clientToken;
     private Instant createdAt;
     private Instant lastUpdatedAt;
 
@@ -70,6 +71,14 @@ public class AgentRuntimeEndpoint {
 
     public void setDescription(String description) {
         this.description = description;
+    }
+
+    public String getClientToken() {
+        return clientToken;
+    }
+
+    public void setClientToken(String clientToken) {
+        this.clientToken = clientToken;
     }
 
     public Instant getCreatedAt() {

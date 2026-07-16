@@ -57,7 +57,8 @@ public class BedrockAgentCoreMemoryController {
         try {
             JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
             Integer expiry = req.hasNonNull("eventExpiryDuration") ? req.get("eventExpiryDuration").asInt() : null;
-            Memory memory = service.create(text(req, "name"), expiry, text(req, "description"), region);
+            Memory memory = service.create(text(req, "name"), expiry, text(req, "description"),
+                    text(req, "clientToken"), region);
             return Response.status(202).entity(wrapped(memory, region)).build();
         } catch (Exception e) {
             return error(e, "creating memory");
@@ -95,7 +96,7 @@ public class BedrockAgentCoreMemoryController {
                                  @QueryParam("clientToken") String clientToken) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            Memory memory = service.delete(id, region);
+            Memory memory = service.delete(id, clientToken, region);
             ObjectNode out = objectMapper.createObjectNode();
             out.put("memoryId", memory.getMemoryId());
             out.put("status", memory.getStatus());

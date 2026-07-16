@@ -73,6 +73,7 @@ public class BedrockAgentCoreControlController {
                     stringMap(req.get("environmentVariables")),
                     obj(req, "authorizerConfiguration"),
                     obj(req, "protocolConfiguration"),
+                    text(req, "clientToken"),
                     region);
             Map<String, String> tags = stringMap(req.get("tags"));
             if (tags != null) {
@@ -229,7 +230,7 @@ public class BedrockAgentCoreControlController {
                                        @QueryParam("clientToken") String clientToken) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            AgentRuntime runtime = service.deleteAgentRuntime(id, region);
+            AgentRuntime runtime = service.deleteAgentRuntime(id, clientToken, region);
             ObjectNode out = objectMapper.createObjectNode();
             out.put("agentRuntimeId", runtime.getAgentRuntimeId());
             out.put("status", runtime.getStatus());
@@ -250,7 +251,7 @@ public class BedrockAgentCoreControlController {
         try {
             JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
             AgentRuntimeEndpoint endpoint = service.createEndpoint(id, text(req, "name"),
-                    text(req, "agentRuntimeVersion"), text(req, "description"), region);
+                    text(req, "agentRuntimeVersion"), text(req, "description"), text(req, "clientToken"), region);
             AgentRuntime runtime = service.getAgentRuntime(id, region);
             return Response.status(202).entity(endpointResponse(runtime, endpoint, region, false)).build();
         } catch (Exception e) {
@@ -299,7 +300,7 @@ public class BedrockAgentCoreControlController {
                                    @QueryParam("clientToken") String clientToken) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            AgentRuntimeEndpoint endpoint = service.deleteEndpoint(id, name, region);
+            AgentRuntimeEndpoint endpoint = service.deleteEndpoint(id, name, clientToken, region);
             ObjectNode out = objectMapper.createObjectNode();
             out.put("agentRuntimeId", id);
             out.put("endpointName", endpoint.getName());

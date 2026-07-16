@@ -32,6 +32,7 @@ public class AgentRuntime {
     private Instant createdAt;
     private Instant lastUpdatedAt;
     private String accountId;
+    private String clientToken;
 
     private JsonNode agentRuntimeArtifact;
     private JsonNode networkConfiguration;
@@ -128,6 +129,14 @@ public class AgentRuntime {
 
     public void setAccountId(String accountId) {
         this.accountId = accountId;
+    }
+
+    public String getClientToken() {
+        return clientToken;
+    }
+
+    public void setClientToken(String clientToken) {
+        this.clientToken = clientToken;
     }
 
     public JsonNode getAgentRuntimeArtifact() {

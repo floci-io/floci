@@ -50,6 +50,14 @@ single non-streaming `200` is returned.
 | `FLOCI_SERVICES_BEDROCK_AGENT_CORE_CONTROL_ENABLED` | `true` | Enable/disable the control plane |
 | `FLOCI_SERVICES_BEDROCK_AGENT_CORE_ENABLED` | `true` | Enable/disable the data plane (invoke) |
 | `FLOCI_SERVICES_BEDROCK_AGENT_CORE_INVOKE_RESPONSE` | `{"output":"yes"}` | Canned `InvokeAgentRuntime` response body |
+| `FLOCI_SERVICES_BEDROCK_AGENT_CORE_VALIDATE_RUNTIME_EXISTS` | `false` | When `true`, `InvokeAgentRuntime` returns `ResourceNotFoundException` for an unknown runtime ARN instead of the canned response |
+
+> **Note on YAML config keys.** The status endpoint reports these services as
+> `bedrock-agentcore-control` and `bedrock-agentcore`, but the YAML property paths
+> use hyphenated words: `floci.services.bedrock-agent-core-control.enabled` and
+> `floci.services.bedrock-agent-core.enabled` (and `…bedrock-agent-core.invoke-response`,
+> `…bedrock-agent-core.validate-runtime-exists`). The `FLOCI_*` environment variables
+> above map to these paths directly and are the recommended way to configure the service.
 
 ## Behavior notes
 

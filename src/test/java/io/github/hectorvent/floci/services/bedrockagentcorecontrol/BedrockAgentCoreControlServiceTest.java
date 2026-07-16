@@ -45,7 +45,7 @@ class BedrockAgentCoreControlServiceTest {
 
     private AgentRuntime create(String name) {
         return service.createAgentRuntime(name, artifact(), network(),
-                "arn:aws:iam::000000000000:role/agent", "desc", null, null, null, REGION);
+                "arn:aws:iam::000000000000:role/agent", "desc", null, null, null, null, REGION);
     }
 
     @Test
@@ -69,7 +69,7 @@ class BedrockAgentCoreControlServiceTest {
     @Test
     void createRejectsMissingRequiredFields() {
         assertThrows(AwsException.class, () -> service.createAgentRuntime("ok", null, network(),
-                "arn:aws:iam::000000000000:role/agent", null, null, null, null, REGION));
+                "arn:aws:iam::000000000000:role/agent", null, null, null, null, null, REGION));
     }
 
     @Test
@@ -154,7 +154,7 @@ class BedrockAgentCoreControlServiceTest {
         authB.putObject("customJWTAuthorizer").put("discoveryUrl", "B");
 
         AgentRuntime rt = service.createAgentRuntime("myAgent", artifact(), network(),
-                "arn:aws:iam::000000000000:role/agent", "d", null, authA, null, REGION);
+                "arn:aws:iam::000000000000:role/agent", "d", null, authA, null, null, REGION);
         String id = rt.getAgentRuntimeId();
         service.updateAgentRuntime(id, artifact(), network(),
                 "arn:aws:iam::000000000000:role/agent", "d", null, authB, null, REGION);
@@ -182,10 +182,33 @@ class BedrockAgentCoreControlServiceTest {
     }
 
     @Test
+    void createIsIdempotentByClientToken() {
+        // Regression for issue #10.
+        AgentRuntime a = service.createAgentRuntime("myAgent", artifact(), network(),
+                "arn:aws:iam::000000000000:role/agent", "d", null, null, null, "tok-1", REGION);
+        AgentRuntime b = service.createAgentRuntime("myAgent", artifact(), network(),
+                "arn:aws:iam::000000000000:role/agent", "d", null, null, null, "tok-1", REGION);
+        assertEquals(a.getAgentRuntimeId(), b.getAgentRuntimeId());
+        assertEquals(1, service.listAgentRuntimes(0, null, REGION).items().size());
+    }
+
+    @Test
+    void deleteIsIdempotentByClientToken() {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(id, "del-1", REGION).getStatus());
+        // Replayed delete with the same token succeeds instead of 404.
+        assertEquals("DELETING", service.deleteAgentRuntime(id, "del-1", REGION).getStatus());
+        // A different token against the now-missing id still 404s.
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteAgentRuntime(id, "other", REGION)).getHttpStatus());
+    }
+
+    @Test
     void deleteRemovesAndReportsDeleting() {
         AgentRuntime rt = create("myAgent");
         String id = rt.getAgentRuntimeId();
-        AgentRuntime deleted = service.deleteAgentRuntime(id, REGION);
+        AgentRuntime deleted = service.deleteAgentRuntime(id, null, REGION);
         assertEquals("DELETING", deleted.getStatus());
         assertThrows(AwsException.class, () -> service.getAgentRuntime(id, REGION));
     }

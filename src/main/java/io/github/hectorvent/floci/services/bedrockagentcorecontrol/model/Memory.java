@@ -20,6 +20,7 @@ public class Memory {
     private Instant createdAt;
     private Instant updatedAt;
     private String accountId;
+    private String clientToken;
 
     public String getMemoryId() {
         return memoryId;
@@ -83,5 +84,13 @@ public class Memory {
 
     public void setAccountId(String accountId) {
         this.accountId = accountId;
+    }
+
+    public String getClientToken() {
+        return clientToken;
+    }
+
+    public void setClientToken(String clientToken) {
+        this.clientToken = clientToken;
     }
 }
