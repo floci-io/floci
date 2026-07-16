@@ -896,6 +896,21 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(41)
+    void importKeyPairRejectsDuplicateKeyName() {
+        given()
+            .formParam("Action", "ImportKeyPair")
+            .formParam("KeyName", "imported-key")
+            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.Duplicate"));
+    }
+
+    @Test
     @Order(42)
     void createLaunchTemplateRejectsMalformedUserData() {
         given()

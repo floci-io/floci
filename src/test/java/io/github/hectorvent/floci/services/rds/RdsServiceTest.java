@@ -293,7 +293,25 @@ class RdsServiceTest {
         assertEquals(1, rdsService.listDbSubnetGroups("sample-db-subnets").size());
 
         rdsService.deleteDbSubnetGroup("sample-db-subnets");
-        assertTrue(rdsService.listDbSubnetGroups("sample-db-subnets").isEmpty());
+        AwsException missing = assertThrows(AwsException.class,
+                () -> rdsService.listDbSubnetGroups("sample-db-subnets"));
+        assertEquals("DBSubnetGroupNotFoundFault", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+    }
+
+    @Test
+    void listDbSubnetGroupsFaultsForMissingName() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> rdsService.listDbSubnetGroups("does-not-exist"));
+        assertEquals("DBSubnetGroupNotFoundFault", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+    }
+
+    @Test
+    void listDbSubnetGroupsStillResolvesSyntheticDefault() {
+        Collection<DbSubnetGroup> groups = rdsService.listDbSubnetGroups("default");
+        assertEquals(1, groups.size());
+        assertEquals("default", groups.iterator().next().getDbSubnetGroupName());
     }
 
     @Test

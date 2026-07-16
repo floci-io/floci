@@ -16,6 +16,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
+import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -53,6 +54,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final IamActionRegistry actionRegistry;
     private final ResourceArnBuilder arnBuilder;
     private final RequestContext requestContext;
+    private final IamConditionContextResolver conditionContextResolver;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -61,7 +63,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 IamPolicyEvaluator evaluator,
                                 IamActionRegistry actionRegistry,
                                 ResourceArnBuilder arnBuilder,
-                                RequestContext requestContext) {
+                                RequestContext requestContext,
+                                IamConditionContextResolver conditionContextResolver) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -69,6 +72,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.actionRegistry = actionRegistry;
         this.arnBuilder = arnBuilder;
         this.requestContext = requestContext;
+        this.conditionContextResolver = conditionContextResolver;
     }
 
     @Override
@@ -108,7 +112,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 : requestContext.getAccountId();
         String resource = arnBuilder.build(credentialScope, ctx, region, accountId);
 
-        Decision decision = evaluator.evaluate(caller, null, action, resource, null);
+        Map<String, String> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
+        Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
         if (decision == Decision.DENY) {
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
             ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
