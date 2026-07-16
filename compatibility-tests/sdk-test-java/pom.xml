@@ -279,6 +279,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
         </dependency>
+        <!-- Bedrock AgentCore control-plane client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockagentcorecontrol</artifactId>
+        </dependency>
         <!-- AWS IoT client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

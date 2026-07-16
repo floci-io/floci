@@ -114,6 +114,7 @@ nav:
     - Lightsail: services/lightsail.md
     - AppConfig: services/appconfig.md
     - Bedrock Runtime: services/bedrock-runtime.md
+    - Bedrock AgentCore: services/bedrock-agentcore.md
     - ELB v2: services/elb.md
     - Auto Scaling: services/autoscaling.md
     - Elastic Beanstalk: services/elastic-beanstalk.md

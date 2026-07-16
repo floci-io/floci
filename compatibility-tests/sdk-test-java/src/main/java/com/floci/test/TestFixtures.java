@@ -49,6 +49,7 @@ import software.amazon.awssdk.services.elasticbeanstalk.ElasticBeanstalkClient;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.BedrockAgentCoreControlClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.codebuild.CodeBuildClient;
 import software.amazon.awssdk.services.codedeploy.CodeDeployClient;
@@ -758,6 +759,14 @@ public final class TestFixtures {
 
     public static PipesClient pipesClient() {
         return PipesClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static BedrockAgentCoreControlClient bedrockAgentCoreControlClient() {
+        return BedrockAgentCoreControlClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
