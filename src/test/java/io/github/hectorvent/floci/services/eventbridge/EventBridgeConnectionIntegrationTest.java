@@ -94,6 +94,21 @@ class EventBridgeConnectionIntegrationTest {
     }
 
     @Test
+    @Order(4)
+    void describeConnectionStripsSecrets() {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DescribeConnection")
+                .body("{\"Name\":\"test-http-ingress-connection\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("AuthParameters.ApiKeyAuthParameters.ApiKeyName", equalTo("x-api-key"))
+                .body("AuthParameters.ApiKeyAuthParameters.ApiKeyValue", nullValue())
+                .body("AuthParameters.InvocationHttpParameters.HeaderParameters[0].Value", equalTo("acme"))
+                .body("AuthParameters.InvocationHttpParameters.HeaderParameters[1].Value", equalTo("*"));
+    }
+
+    @Test
     @Order(5)
     void updateConnection() {
         given()
@@ -122,7 +137,8 @@ class EventBridgeConnectionIntegrationTest {
                 .then().statusCode(200)
                 .body("Description", equalTo("Updated description"))
                 .body("AuthorizationType", equalTo("BASIC"))
-                .body("AuthParameters.BasicAuthParameters.Username", equalTo("user"));
+                .body("AuthParameters.BasicAuthParameters.Username", equalTo("user"))
+                .body("AuthParameters.BasicAuthParameters.Password", nullValue());
     }
 
     @Test
@@ -139,6 +155,38 @@ class EventBridgeConnectionIntegrationTest {
                 .body("Connections[0].ConnectionArn", equalTo(connectionArn))
                 .body("Connections[0].ConnectionState", equalTo("AUTHORIZED"))
                 .body("Connections[0].AuthParameters", nullValue());
+    }
+
+    @Test
+    @Order(7)
+    void describeMissingConnectionFails() {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DescribeConnection")
+                .body("{\"Name\":\"no-such-connection\"}")
+                .when().post("/")
+                .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(8)
+    void invalidAuthorizationTypeFails() {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.CreateConnection")
+                .body("""
+                        {
+                          "Name": "bad-auth-connection",
+                          "AuthorizationType": "MAGIC",
+                          "AuthParameters": {
+                            "ApiKeyAuthParameters": {"ApiKeyName": "k", "ApiKeyValue": "v"}
+                          }
+                        }
+                        """)
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 
     @Test
