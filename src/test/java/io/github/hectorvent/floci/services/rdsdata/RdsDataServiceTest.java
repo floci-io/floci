@@ -73,6 +73,55 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void bindsSqlParametersThroughPreparedStatements() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode insert = harness.request("""
+                insert into data_api_items(id, title, score, payload, active, created_at)
+                values (:id, :title, :score, :payload, :active, :created_at)
+                """);
+        ArrayNode insertParams = objectMapper.createArrayNode();
+        insertParams.add(stringParam("id", "p1"));
+        insertParams.add(stringParam("title", "Param"));
+        insertParams.add(longParam("score", 7));
+        insertParams.add(blobParam("payload", new byte[] {9, 8, 7}));
+        insertParams.add(booleanParam("active", true));
+        insertParams.add(hintedStringParam("created_at", "2026-06-09 12:34:56", "TIMESTAMP"));
+        insert.set("parameters", insertParams);
+        ObjectNode insertResponse = harness.service.executeStatement(insert, REGION);
+        assertEquals(1L, insertResponse.get("numberOfRecordsUpdated").asLong());
+
+        ObjectNode select = harness.request(
+                "select title, score, payload, active from data_api_items where id = :id");
+        ArrayNode selectParams = objectMapper.createArrayNode();
+        selectParams.add(stringParam("id", "p1"));
+        select.set("parameters", selectParams);
+        ObjectNode selectResponse = harness.service.executeStatement(select, REGION);
+
+        ArrayNode row = (ArrayNode) selectResponse.get("records").get(0);
+        assertEquals("Param", row.get(0).get("stringValue").asText());
+        assertEquals(7L, row.get(1).get("longValue").asLong());
+        assertArrayEquals(new byte[] {9, 8, 7}, row.get(2).get("blobValue").binaryValue());
+        assertTrue(row.get(3).get("booleanValue").asBoolean());
+    }
+
+    @Test
+    void rejectsSqlParameterWithoutMatchingValue() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode select = harness.request("select 1 from data_api_items where id = :id");
+        ArrayNode params = objectMapper.createArrayNode();
+        params.add(stringParam("other", "value"));
+        select.set("parameters", params);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(select, REGION));
+        assertEquals("BadRequestException", error.getErrorCode());
+    }
+
+    @Test
     void commitsRollsBackAndRejectsInvalidTransactionRequests() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();
@@ -291,6 +340,40 @@ class RdsDataServiceTest {
         request.put("secretArn", SECRET_ARN);
         request.put("database", "app");
         return request;
+    }
+
+    private ObjectNode stringParam(String name, String value) {
+        ObjectNode param = objectMapper.createObjectNode();
+        param.put("name", name);
+        param.set("value", objectMapper.createObjectNode().put("stringValue", value));
+        return param;
+    }
+
+    private ObjectNode hintedStringParam(String name, String value, String typeHint) {
+        ObjectNode param = stringParam(name, value);
+        param.put("typeHint", typeHint);
+        return param;
+    }
+
+    private ObjectNode longParam(String name, long value) {
+        ObjectNode param = objectMapper.createObjectNode();
+        param.put("name", name);
+        param.set("value", objectMapper.createObjectNode().put("longValue", value));
+        return param;
+    }
+
+    private ObjectNode booleanParam(String name, boolean value) {
+        ObjectNode param = objectMapper.createObjectNode();
+        param.put("name", name);
+        param.set("value", objectMapper.createObjectNode().put("booleanValue", value));
+        return param;
+    }
+
+    private ObjectNode blobParam(String name, byte[] value) {
+        ObjectNode param = objectMapper.createObjectNode();
+        param.put("name", name);
+        param.set("value", objectMapper.createObjectNode().put("blobValue", value));
+        return param;
     }
 
     private static SecretsManagerService fallbackSecrets() {
