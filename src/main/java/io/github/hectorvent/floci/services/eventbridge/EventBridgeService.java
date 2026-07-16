@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
+import io.github.hectorvent.floci.services.eventbridge.model.Connection;
+import io.github.hectorvent.floci.services.eventbridge.model.ConnectionState;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
@@ -45,6 +47,7 @@ public class EventBridgeService {
     private final StorageBackend<String, Archive> archiveStore;
     private final StorageBackend<String, List<ArchivedEvent>> archivedEventStore;
     private final StorageBackend<String, Replay> replayStore;
+    private final StorageBackend<String, Connection> connectionStore;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final RuleScheduler ruleScheduler;
@@ -74,6 +77,8 @@ public class EventBridgeService {
                         new TypeReference<Map<String, List<ArchivedEvent>>>() {}),
                 storageFactory.create("eventbridge", "eventbridge-replays.json",
                         new TypeReference<Map<String, Replay>>() {}),
+                storageFactory.create("eventbridge", "eventbridge-connections.json",
+                        new TypeReference<Map<String, Connection>>() {}),
                 regionResolver, objectMapper, ruleScheduler, invoker, replayDispatcher,
                 resourceGroupsTaggingService
         );
@@ -85,6 +90,7 @@ public class EventBridgeService {
                        StorageBackend<String, Archive> archiveStore,
                        StorageBackend<String, List<ArchivedEvent>> archivedEventStore,
                        StorageBackend<String, Replay> replayStore,
+                       StorageBackend<String, Connection> connectionStore,
                        RegionResolver regionResolver,
                        ObjectMapper objectMapper,
                        RuleScheduler ruleScheduler,
@@ -97,6 +103,7 @@ public class EventBridgeService {
         this.archiveStore = archiveStore;
         this.archivedEventStore = archivedEventStore;
         this.replayStore = replayStore;
+        this.connectionStore = connectionStore;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.ruleScheduler = ruleScheduler;
@@ -1303,6 +1310,10 @@ public class EventBridgeService {
 
     private static String replayKey(String region, String replayName) {
         return "replay:" + region + ":" + replayName;
+    }
+
+    private static String connectionKey(String region, String connectionName) {
+        return "connection:" + region + ":" + connectionName;
     }
 
     private static String archiveNameFromArn(String arn) {

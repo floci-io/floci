@@ -48,6 +48,7 @@ class EventBridgeSchedulerIntegrationTest {
         eventBridgeService = new EventBridgeService(
                 busStore, ruleStore, targetStore,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
                 new ObjectMapper(), scheduler, invoker, replayDispatcher,
                 new ResourceGroupsTaggingService(null));
