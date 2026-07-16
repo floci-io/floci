@@ -836,6 +836,54 @@ class RdsServiceTest {
                 eq("admin"), eq("secret"), eq("app"), any());
     }
 
+    @Test
+    void createDbSnapshotThrowsForNonPostgres() {
+        rdsService.createDbInstance("mydb", "mysql", "8.0",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSnapshot("mysnap", "mydb"));
+
+        assertEquals("UnsupportedOperation", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("CreateDBSnapshot is not supported for engine MYSQL"));
+    }
+
+    @Test
+    void createDbSnapshotSucceedsForPostgres() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = rdsService.createDbSnapshot("mysnap", "mydb");
+
+        assertEquals("mysnap", snapshot.getDbSnapshotIdentifier());
+        assertEquals("mydb", snapshot.getDbInstanceIdentifier());
+        assertEquals(DatabaseEngine.POSTGRES, snapshot.getEngine());
+        assertEquals("available", snapshot.getStatus());
+        verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
+    }
+
+    @Test
+    void restoreDbInstanceFromDbSnapshotRestoresData() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        DbInstance restored = rdsService.restoreDbInstanceFromDbSnapshot("restored-db", "mysnap", "db.t3.large", "us-east-1a", false, null, null, Map.of());
+
+        assertEquals("restored-db", restored.getDbInstanceIdentifier());
+        assertEquals("db.t3.large", restored.getDbInstanceClass());
+        assertEquals(DatabaseEngine.POSTGRES, restored.getEngine());
+        assertEquals("admin", restored.getMasterUsername());
+        assertEquals("us-east-1a", restored.getAvailabilityZone());
+        verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
+    }
+
     private RdsService newService(RdsContainerManager containerManager,
                                   RdsProxyManager proxyManager,
                                   StorageBackend<String, DbInstance> instances,

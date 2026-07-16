@@ -254,6 +254,77 @@ public class RdsContainerManager {
         throw new IllegalStateException("Timed out initializing PostgreSQL IAM role in " + containerName + ": " + lastOutput);
     }
 
+    public String createPostgresSnapshot(String containerId, String masterUsername) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        String[] cmd = {
+                "pg_dump",
+                "-U", effectiveUser,
+                "-d", "postgres",
+                "--clean",
+                "--if-exists"
+        };
+        try {
+            ContainerExecResult result = execInContainer(containerId, cmd, 120);
+            if (result.exitCode() != 0) {
+                throw new RuntimeException("pg_dump failed with exit code " + result.exitCode() + ": " + result.output());
+            }
+            return result.output();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create postgres snapshot", e);
+        }
+    }
+
+    public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        
+        try {
+            // Write the sql dump to a tar in memory to copy to the container
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
+                tar.setLongFileMode(org.apache.commons.compress.archivers.tar.TarArchiveOutputStream.LONGFILE_GNU);
+                byte[] bytes = sqlDump.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                org.apache.commons.compress.archivers.tar.TarArchiveEntry entry = new org.apache.commons.compress.archivers.tar.TarArchiveEntry("dump.sql");
+                entry.setSize(bytes.length);
+                tar.putArchiveEntry(entry);
+                tar.write(bytes);
+                tar.closeArchiveEntry();
+            }
+
+            try (java.io.InputStream tarStream = new java.io.ByteArrayInputStream(bos.toByteArray())) {
+                lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                        .withRemotePath("/tmp")
+                        .withTarInputStream(tarStream)
+                        .exec();
+            }
+
+            String[] cmd = {
+                    "psql",
+                    "-v", "ON_ERROR_STOP=1",
+                    "-U", effectiveUser,
+                    "-d", "postgres",
+                    "-f", "/tmp/dump.sql"
+            };
+
+            ContainerExecResult result = null;
+            for (int i = 0; i < 60; i++) {
+                result = execInContainer(containerId, cmd, 120);
+                if (result.exitCode() == 0) {
+                    break;
+                }
+                if (result.exitCode() != 2) { // 2 = connection error, 3 = script error
+                    break;
+                }
+                Thread.sleep(1000);
+            }
+            
+            if (result == null || result.exitCode() != 0) {
+                throw new RuntimeException("psql restore failed with exit code " + (result != null ? result.exitCode() : -1) + ": " + (result != null ? result.output() : ""));
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to restore postgres snapshot", e);
+        }
+    }
+
     private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
         String execId = lifecycleManager.getDockerClient().execCreateCmd(containerId)
                 .withCmd(cmd)
