@@ -28,6 +28,9 @@ gateway/memory primitives.
 | `InvokeAgentRuntime` *(data plane)* | Invoke a runtime; returns a fixed canned response |
 | `TagResource` / `UntagResource` / `ListTagsForResource` | Tag runtimes via the shared `/tags/{arn}` route |
 | `CreateWorkloadIdentity` / `GetWorkloadIdentity` / `UpdateWorkloadIdentity` / `DeleteWorkloadIdentity` / `ListWorkloadIdentities` | Manage workload identities (`POST /identities/<Op>`) |
+| `CreateGateway` / `GetGateway` / `UpdateGateway` / `DeleteGateway` / `ListGateways` | Manage gateways (metadata only) |
+| `CreateGatewayTarget` / `GetGatewayTarget` / `UpdateGatewayTarget` / `DeleteGatewayTarget` / `ListGatewayTargets` | Manage gateway targets |
+| `CreateMemory` / `GetMemory` / `UpdateMemory` / `DeleteMemory` / `ListMemories` | Manage memory resources (metadata only) |
 
 A `DEFAULT` endpoint is created automatically with each runtime, and each runtime
 is associated with an auto-created, resolvable workload identity.
