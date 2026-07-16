@@ -41,6 +41,26 @@ if [ "${LOCALSTACK_PARITY:-true}" != "false" ]; then
     . /usr/local/bin/localstack-parity.sh
 fi
 
+# Probe the state dir as the unprivileged user and warn loudly when it is not
+# writable (read-only or root-owned bind mounts the chown above could not fix).
+# The container still starts: with the default in-memory storage the dir is
+# unused, and non-memory modes fail fast at boot with an actionable error.
+data_dir="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
+if [ -d "$data_dir" ]; then
+    probe="$data_dir/.floci-write-probe.$$"
+    if ! ( touch "$probe" && rm -f "$probe" ) 2>/dev/null; then
+        cat >&2 <<EOF
+**************************************************************************
+WARNING: $data_dir is not writable by $(id -un) (uid $(id -u)).
+Persisted state cannot be saved there. If FLOCI_STORAGE_MODE (or any
+per-service storage mode) is not 'memory', Floci will refuse to start.
+Fix the volume mount permissions (it may be read-only or root-owned) or
+set FLOCI_STORAGE_PERSISTENT_PATH to a writable directory.
+**************************************************************************
+EOF
+    fi
+fi
+
 # Fall back to the image's default command when invoked with no arguments.
 # Some tooling re-executes this entrypoint directly with an empty argv —
 # Testcontainers' LocalStackContainer does exactly that via its starter

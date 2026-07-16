@@ -7,11 +7,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
-import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
@@ -41,7 +39,7 @@ class EksNodegroupIntegrationTest {
 
     @Test
     @Order(2)
-    void createNodegroupRoutesToEksNotS3() {
+    void createNodeGroupRoutesToEksNotS3() {
         given().contentType(JSON)
                 .body("{\"nodegroupName\":\"ng1\",\"subnets\":[\"subnet-abc\"],\"nodeRole\":\"" + NODE_ROLE + "\","
                         + "\"scalingConfig\":{\"minSize\":1,\"maxSize\":3,\"desiredSize\":2}}")
@@ -52,14 +50,14 @@ class EksNodegroupIntegrationTest {
                 .body("nodegroup.nodegroupName", equalTo("ng1"))
                 .body("nodegroup.clusterName", equalTo(CLUSTER))
                 .body("nodegroup.nodegroupArn", containsString("nodegroup/" + CLUSTER + "/ng1/"))
-                .body("nodegroup.status", anyOf(is("ACTIVE"), is("CREATING")))
+                .body("nodegroup.status", equalTo("ACTIVE"))
                 .body("nodegroup.scalingConfig.desiredSize", equalTo(2))
                 .body("nodegroup.amiType", notNullValue());
     }
 
     @Test
     @Order(3)
-    void listNodegroups() {
+    void listNodeGroups() {
         given().contentType(JSON)
                 .when().get("/clusters/" + CLUSTER + "/node-groups")
                 .then().statusCode(200)
@@ -68,7 +66,7 @@ class EksNodegroupIntegrationTest {
 
     @Test
     @Order(4)
-    void describeNodegroup() {
+    void describeNodeGroup() {
         given().contentType(JSON)
                 .when().get("/clusters/" + CLUSTER + "/node-groups/ng1")
                 .then().statusCode(200)
@@ -79,7 +77,7 @@ class EksNodegroupIntegrationTest {
 
     @Test
     @Order(5)
-    void deleteNodegroup() {
+    void deleteNodeGroup() {
         given().contentType(JSON)
                 .when().delete("/clusters/" + CLUSTER + "/node-groups/ng1")
                 .then().statusCode(200)
