@@ -7,7 +7,9 @@ import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -26,9 +28,14 @@ import java.util.regex.Pattern;
  *   <li>The origin path is prepended to the request URI when forwarding to the origin.</li>
  * </ul>
  *
- * This class holds no state and does no I/O so the routing rules can be unit-tested in isolation.
+ * This class holds no distribution state and does no I/O. It keeps only a bounded compiled-pattern
+ * cache so the routing rules remain cheap and can be unit-tested in isolation.
  */
 public final class CloudFrontRequestRouter {
+
+    private static final int PATTERN_CACHE_CAPACITY = 256;
+    private static final Map<String, Pattern> PATTERN_CACHE =
+            new LinkedHashMap<>(PATTERN_CACHE_CAPACITY, 0.75f, true);
 
     private CloudFrontRequestRouter() {
     }
@@ -101,7 +108,23 @@ public final class CloudFrontRequestRouter {
         }
         String p = pattern.startsWith("/") ? pattern.substring(1) : pattern;
         String candidate = path.startsWith("/") ? path.substring(1) : path;
-        return Pattern.compile(wildcardToRegex(p)).matcher(candidate).matches();
+        return compiledPattern(p).matcher(candidate).matches();
+    }
+
+    private static Pattern compiledPattern(String pattern) {
+        synchronized (PATTERN_CACHE) {
+            Pattern compiled = PATTERN_CACHE.get(pattern);
+            if (compiled != null) {
+                return compiled;
+            }
+            if (PATTERN_CACHE.size() >= PATTERN_CACHE_CAPACITY) {
+                String eldest = PATTERN_CACHE.keySet().iterator().next();
+                PATTERN_CACHE.remove(eldest);
+            }
+            compiled = Pattern.compile(wildcardToRegex(pattern));
+            PATTERN_CACHE.put(pattern, compiled);
+            return compiled;
+        }
     }
 
     private static String wildcardToRegex(String pattern) {

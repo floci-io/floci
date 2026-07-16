@@ -753,8 +753,8 @@ public class ElbV2Service {
     public List<TargetHealth> describeTargetHealth(String region, String tgArn,
                                                      List<TargetDescription> filterTargets) {
         TargetGroup tg = requireTargetGroup(region, tgArn);
-        List<TargetDescription> candidates = filterTargets != null && !filterTargets.isEmpty()
-                ? filterTargets : tg.getTargets();
+        boolean hasFilterTargets = filterTargets != null && !filterTargets.isEmpty();
+        List<TargetDescription> candidates = hasFilterTargets ? filterTargets : tg.getTargets();
 
         boolean isLambdaTg = "lambda".equals(tg.getTargetType());
         return candidates.stream().map(t -> {
@@ -767,17 +767,24 @@ public class ElbV2Service {
             }
             int port = ElbV2HealthChecker.effectivePort(t, tg);
             th.setHealthCheckPort(String.valueOf(port));
-            String state = healthChecker.getState(tgArn, t.getId(), port);
-            th.setState(state);
-            if ("initial".equals(state)) {
-                th.setReason("Elb.RegistrationInProgress");
-                th.setDescription("Target registration is in progress");
-            } else if ("unhealthy".equals(state)) {
-                th.setReason("Target.FailedHealthChecks");
-                th.setDescription("Health checks failed");
+            if (hasFilterTargets && !isRegisteredTarget(tg, t, port)) {
+                th.setState("unused");
+                th.setReason("Target.NotRegistered");
+                th.setDescription("Target is not registered to the target group");
+                return th;
             }
+            ElbV2HealthChecker.TargetHealthStatus health = healthChecker.getHealth(tgArn, t.getId(), port);
+            th.setState(health.state());
+            th.setReason(health.reason());
+            th.setDescription(health.description());
             return th;
         }).collect(Collectors.toList());
+    }
+
+    private static boolean isRegisteredTarget(TargetGroup targetGroup, TargetDescription candidate, int candidatePort) {
+        return targetGroup.getTargets().stream()
+                .anyMatch(registered -> Objects.equals(registered.getId(), candidate.getId())
+                        && ElbV2HealthChecker.effectivePort(registered, targetGroup) == candidatePort);
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────

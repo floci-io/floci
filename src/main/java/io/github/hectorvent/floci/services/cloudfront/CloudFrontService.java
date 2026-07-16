@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryption
 import io.github.hectorvent.floci.services.cloudfront.model.Invalidation;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.MonitoringSubscription;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
@@ -29,17 +30,33 @@ import jakarta.inject.Inject;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CloudFrontService {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
+    private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
+    private static final int MAX_CUSTOM_HEADER_VALUE_LENGTH = 1_783;
+    private static final int MAX_CUSTOM_HEADERS_LENGTH = 10_240;
+    private static final Pattern HTTP_HEADER_NAME =
+            Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
+    private static final Set<String> PROHIBITED_ORIGIN_CUSTOM_HEADERS = Set.of(
+            "cache-control", "connection", "content-length", "cookie", "host", "if-match",
+            "if-modified-since", "if-none-match", "if-range", "if-unmodified-since",
+            "max-forwards", "pragma", "proxy-authenticate", "proxy-authorization",
+            "proxy-connection", "range", "request-range", "te", "trailer", "transfer-encoding",
+            "upgrade", "via", "x-real-ip");
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -104,6 +121,7 @@ public class CloudFrontService {
     // ── Distributions ─────────────────────────────────────────────────────────
 
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
+        validateOriginCustomHeaders(dist.getConfig());
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
@@ -130,6 +148,7 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        validateOriginCustomHeaders(updated.getConfig());
         updated.setId(id);
         updated.setArn(existing.getArn());
         updated.setDomainName(existing.getDomainName());
@@ -139,6 +158,50 @@ public class CloudFrontService {
         updated.setTags(existing.getTags());
         distStore.put(id, updated);
         return updated;
+    }
+
+    private static void validateOriginCustomHeaders(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        for (Origin origin : config.getOrigins()) {
+            List<Map<String, String>> headers = origin.getCustomHeaders();
+            if (headers == null) {
+                continue;
+            }
+            if (headers.size() > MAX_ORIGIN_CUSTOM_HEADERS) {
+                throw invalidOriginCustomHeader("Too many origin custom headers");
+            }
+            int combinedLength = 0;
+            Set<String> names = new HashSet<>();
+            for (Map<String, String> header : headers) {
+                String name = header == null ? null : header.get("HeaderName");
+                String value = header == null ? null : header.get("HeaderValue");
+                if (name == null || name.isBlank() || value == null
+                        || name.length() > MAX_CUSTOM_HEADER_NAME_LENGTH
+                        || value.length() > MAX_CUSTOM_HEADER_VALUE_LENGTH
+                        || !HTTP_HEADER_NAME.matcher(name).matches()
+                        || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0) {
+                    throw invalidOriginCustomHeader("Invalid origin custom header name or value");
+                }
+                String normalized = name.toLowerCase(Locale.ROOT);
+                if (PROHIBITED_ORIGIN_CUSTOM_HEADERS.contains(normalized)
+                        || normalized.startsWith("x-amz-") || normalized.startsWith("x-edge-")) {
+                    throw invalidOriginCustomHeader("Prohibited origin custom header: " + name);
+                }
+                if (!names.add(normalized)) {
+                    throw invalidOriginCustomHeader("Duplicate origin custom header: " + name);
+                }
+                combinedLength += name.length() + value.length();
+                if (combinedLength > MAX_CUSTOM_HEADERS_LENGTH) {
+                    throw invalidOriginCustomHeader("Origin custom headers exceed the size quota");
+                }
+            }
+        }
+    }
+
+    private static AwsException invalidOriginCustomHeader(String message) {
+        return new AwsException("InvalidArgument", message, 400);
     }
 
     public synchronized void deleteDistribution(String id, String ifMatch) {

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
@@ -10,15 +11,12 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
-import com.sun.net.httpserver.HttpServer;
-
-import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -149,28 +147,41 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
-    void returnsBadGatewayWhenCustomOriginIsUnreachable() {
+    void blocksPrivateCustomOriginBeforeConnecting() throws Exception {
         String suffix = suffix();
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer privateOrigin = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        privateOrigin.createContext("/", exchange -> {
+            hits.incrementAndGet();
+            exchange.sendResponseHeaders(200, 0);
+            exchange.close();
+        });
+        privateOrigin.start();
 
-        Map<String, Object> customOriginConfig = new LinkedHashMap<>();
-        customOriginConfig.put("HTTPPort", "1");
-        customOriginConfig.put("HTTPSPort", "443");
-        customOriginConfig.put("OriginProtocolPolicy", "http-only");
-        Origin custom = new Origin();
-        custom.setId("custom-origin");
-        custom.setDomainName("127.0.0.1");
-        custom.setCustomOriginConfig(customOriginConfig);
+        try {
+            Map<String, Object> customOriginConfig = new LinkedHashMap<>();
+            customOriginConfig.put("HTTPPort", String.valueOf(privateOrigin.getAddress().getPort()));
+            customOriginConfig.put("HTTPSPort", "443");
+            customOriginConfig.put("OriginProtocolPolicy", "http-only");
+            Origin custom = new Origin();
+            custom.setId("custom-origin");
+            custom.setDomainName("127.0.0.1");
+            custom.setCustomOriginConfig(customOriginConfig);
 
-        DistributionConfig cfg = new DistributionConfig();
-        cfg.setEnabled(true);
-        cfg.setDefaultRootObject("index.html");
-        cfg.setOrigins(List.of(custom));
-        cfg.setDefaultCacheBehavior(defaultBehavior("custom-origin"));
+            DistributionConfig cfg = new DistributionConfig();
+            cfg.setEnabled(true);
+            cfg.setDefaultRootObject("index.html");
+            cfg.setOrigins(List.of(custom));
+            cfg.setDefaultCacheBehavior(defaultBehavior("custom-origin"));
 
-        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+            Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
 
-        given().header("Host", dist.getDomainName()).when().get("/")
-                .then().statusCode(502);
+            given().header("Host", dist.getDomainName()).when().get("/")
+                    .then().statusCode(502);
+            assertEquals(0, hits.get(), "blocked private origins must not receive a connection");
+        } finally {
+            privateOrigin.stop(0);
+        }
     }
 
     @Test
@@ -227,43 +238,6 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
-    void injectsOriginCustomHeadersIntoCustomOriginRequests() throws Exception {
-        // CloudFront forwards a distribution's configured origin custom headers on every origin
-        // request — the mechanism a distribution uses to prove a request arrived via CloudFront.
-        AtomicReference<String> received = new AtomicReference<>();
-        HttpServer stub = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        stub.createContext("/", exchange -> {
-            received.set(exchange.getRequestHeaders().getFirst("X-Origin-Verify"));
-            byte[] payload = "ORIGIN-OK".getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, payload.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(payload);
-            }
-        });
-        stub.start();
-        try {
-            Origin origin = customOrigin("secured-origin", "127.0.0.1", stub.getAddress().getPort());
-            origin.setCustomHeaders(List.of(new LinkedHashMap<>(Map.of(
-                    "HeaderName", "X-Origin-Verify", "HeaderValue", "shared-secret-42"))));
-
-            DistributionConfig cfg = new DistributionConfig();
-            cfg.setEnabled(true);
-            cfg.setOrigins(List.of(origin));
-            cfg.setDefaultCacheBehavior(defaultBehavior("secured-origin"));
-
-            Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
-
-            given().header("Host", dist.getDomainName()).when().get("/anything")
-                    .then().statusCode(200).body(containsString("ORIGIN-OK"));
-
-            assertEquals("shared-secret-42", received.get(),
-                    "the origin should have received the configured custom header");
-        } finally {
-            stub.stop(0);
-        }
-    }
-
-    @Test
     void roundTripsOriginCustomHeadersThroughTheApi() {
         // The distribution parser must capture and re-serialize origin CustomHeaders so a read-back
         // (get-distribution) matches what was configured, rather than dropping them.
@@ -316,6 +290,35 @@ class CloudFrontDistributionServingTest {
             .body(containsString("<HeaderValue>shared-secret-42</HeaderValue>"));
     }
 
+    @Test
+    void rejectsProhibitedOriginCustomHeaders() {
+        String body = """
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>cf-prohibited-custom-header</CallerReference>
+                  <Origins><Quantity>1</Quantity><Items><Origin>
+                    <Id>secured</Id><DomainName>example.com</DomainName>
+                    <CustomHeaders><Quantity>1</Quantity><Items><OriginCustomHeader>
+                      <HeaderName>Host</HeaderName><HeaderValue>internal.example</HeaderValue>
+                    </OriginCustomHeader></Items></CustomHeaders>
+                    <CustomOriginConfig><HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+                      <OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>
+                  </Origin></Items></Origins>
+                  <DefaultCacheBehavior><TargetOriginId>secured</TargetOriginId>
+                    <ViewerProtocolPolicy>https-only</ViewerProtocolPolicy></DefaultCacheBehavior>
+                  <Enabled>true</Enabled>
+                </DistributionConfig>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
     private void createBucket(String bucket) {
@@ -337,18 +340,6 @@ class CloudFrontDistributionServingTest {
         origin.setId(id);
         origin.setDomainName(bucket + ".s3." + REGION + ".amazonaws.com");
         origin.setS3OriginConfig(new LinkedHashMap<>(Map.of("OriginAccessIdentity", "")));
-        return origin;
-    }
-
-    private static Origin customOrigin(String id, String domain, int port) {
-        Map<String, Object> coc = new LinkedHashMap<>();
-        coc.put("HTTPPort", String.valueOf(port));
-        coc.put("HTTPSPort", "443");
-        coc.put("OriginProtocolPolicy", "http-only");
-        Origin origin = new Origin();
-        origin.setId(id);
-        origin.setDomainName(domain);
-        origin.setCustomOriginConfig(coc);
         return origin;
     }
 

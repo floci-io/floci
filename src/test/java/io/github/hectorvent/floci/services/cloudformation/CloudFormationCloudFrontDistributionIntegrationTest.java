@@ -1,16 +1,20 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end check that CloudFormation provisions an {@code AWS::CloudFront::Distribution} for real
@@ -27,6 +31,9 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
 
     @Inject
     S3Service s3Service;
+
+    @Inject
+    CloudFrontService cloudFrontService;
 
     @Test
     void createStackProvisionsBrowsableDistributionWithResolvedDomainName() {
@@ -53,6 +60,9 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
                             {
                               "Id": "s3-origin",
                               "DomainName": "%s.s3.us-east-1.amazonaws.com",
+                              "OriginCustomHeaders": [
+                                {"HeaderName": "X-Origin-Verify", "HeaderValue": "cfn-secret"}
+                              ],
                               "S3OriginConfig": { "OriginAccessIdentity": "" }
                             }
                           ],
@@ -96,6 +106,14 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
             .body(containsString(".cloudfront.net"))
             .body(not(containsString("Dist.DomainName")));
+
+        Distribution distribution = cloudFrontService.listDistributions(null, 0).stream()
+                .filter(item -> item.getConfig().getAliases() != null
+                        && item.getConfig().getAliases().contains(alias))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(List.of(Map.of("HeaderName", "X-Origin-Verify", "HeaderValue", "cfn-secret")),
+                distribution.getConfig().getOrigins().getFirst().getCustomHeaders());
 
         // The provisioned distribution is browsable: a request to its alias serves the S3 origin's
         // default root object.
