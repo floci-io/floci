@@ -403,8 +403,11 @@ public class ContainerLauncher {
     // populated and a per-volume lock so a concurrent cold-start storm populates only once. The
     // lock entry is dropped after a successful populate so this map only ever holds in-flight
     // populates (see ensureCodeVolume) rather than growing across redeploys.
+    private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
+    private static final String CODE_VOLUME_MARKER_PREFIX = "floci-code-";
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Object codeVolumeMarkerIoLock = new Object();
 
     /**
      * Returns the name of a read-only Docker volume holding this function's {@code /var/task} code,
@@ -427,7 +430,7 @@ public class ContainerLauncher {
             // succeeds, so a still-present volume with a marker holds exactly this code version — mount
             // it and skip the (e.g. ~34k-file) re-copy. A crashed or partial populate leaves no marker,
             // so it is safely redone.
-            if (codeVolumeMarkerExists(volName) && lifecycleManager.volumeExists(volName)) {
+            if (reusePersistedCodeVolumeOrRemoveStaleMarker(volName)) {
                 LOG.infov("Reusing code volume {0} populated by a previous run (marker present)", volName);
                 populatedCodeVolumes.add(volName);
                 codeVolumeLocks.remove(volName);
@@ -437,7 +440,7 @@ public class ContainerLauncher {
             LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
                     volName, fn.getFunctionName());
             populateCodeVolume(volName, fn, image);
-            writeCodeVolumeMarker(volName);
+            writeCodeVolumeMarkerAndPruneOrphans(volName);
             populatedCodeVolumes.add(volName);
             // Bound codeVolumeLocks: drop the lock now that the volume is populated, so the map only
             // ever holds in-flight populates rather than growing across redeploys. Safe under the
@@ -478,7 +481,11 @@ public class ContainerLauncher {
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
         } finally {
             if (helperId != null) {
-                try { lifecycleManager.stopAndRemove(helperId, null); } catch (Exception ignore) { /* best effort */ }
+                try {
+                    lifecycleManager.stopAndRemove(helperId, null);
+                } catch (Exception e) {
+                    LOG.warnv("Could not remove code-volume helper {0}: {1}", helperId, e.getMessage());
+                }
             }
             POPULATE_SEMAPHORE.release();
         }
@@ -490,21 +497,71 @@ public class ContainerLauncher {
     // shares the volume's lifetime expectations (hybrid/persistent storage); in memory-only mode the
     // marker dir is transient too, which is correct because nothing persists across restarts there.
     private Path codeVolumeMarkerPath(String volName) {
-        return Path.of(config.storage().persistentPath(), "lambda-codevol-markers", volName);
+        return Path.of(config.storage().persistentPath(), CODE_VOLUME_MARKER_DIR, volName);
     }
 
-    private boolean codeVolumeMarkerExists(String volName) {
-        return Files.isRegularFile(codeVolumeMarkerPath(volName));
+    /**
+     * Reuses a completed volume when both marker and volume exist. If the marker is stale, removes it
+     * before repopulation so a failed copy cannot leave the old completion signal beside partial data.
+     */
+    private boolean reusePersistedCodeVolumeOrRemoveStaleMarker(String volName) {
+        synchronized (codeVolumeMarkerIoLock) {
+            Path marker = codeVolumeMarkerPath(volName);
+            if (!Files.isRegularFile(marker, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                return false;
+            }
+            java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+            if (volumeNames.isEmpty()) {
+                throw new IllegalStateException(
+                        "Could not verify the backing container volume for code-volume marker " + volName);
+            }
+            if (volumeNames.get().contains(volName)) {
+                return true;
+            }
+            try {
+                Files.deleteIfExists(marker);
+                LOG.debugv("Removed stale code-volume marker {0}; backing volume is absent", marker);
+            } catch (IOException e) {
+                throw new IllegalStateException("Could not remove stale code-volume marker " + marker, e);
+            }
+            return false;
+        }
     }
 
-    private void writeCodeVolumeMarker(String volName) {
-        Path marker = codeVolumeMarkerPath(volName);
-        try {
-            Files.createDirectories(marker.getParent());
-            Files.writeString(marker, "");
+    private void writeCodeVolumeMarkerAndPruneOrphans(String volName) {
+        synchronized (codeVolumeMarkerIoLock) {
+            Path marker = codeVolumeMarkerPath(volName);
+            try {
+                Files.createDirectories(marker.getParent());
+                Files.writeString(marker, "");
+            } catch (IOException e) {
+                // A missing marker only costs one re-populate on the next boot; never fail a launch over it.
+                LOG.warnv("Could not write code-volume marker {0}: {1}", marker, e.getMessage());
+            }
+            pruneOrphanCodeVolumeMarkers(marker.getParent());
+        }
+    }
+
+    private void pruneOrphanCodeVolumeMarkers(Path markerDir) {
+        java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+        if (volumeNames.isEmpty() || !Files.isDirectory(markerDir)) {
+            return;
+        }
+        try (java.util.stream.Stream<Path> markers = Files.list(markerDir)) {
+            markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                    .filter(path -> path.getFileName().toString().startsWith(CODE_VOLUME_MARKER_PREFIX))
+                    .filter(path -> !volumeNames.get().contains(path.getFileName().toString()))
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                            LOG.debugv("Pruned orphan code-volume marker {0}", path);
+                        } catch (IOException e) {
+                            LOG.warnv("Could not prune orphan code-volume marker {0}: {1}",
+                                    path, e.getMessage());
+                        }
+                    });
         } catch (IOException e) {
-            // A missing marker only costs one re-populate on the next boot; never fail a launch over it.
-            LOG.warnv("Could not write code-volume marker {0}: {1}", marker, e.getMessage());
+            LOG.warnv("Could not scan code-volume marker directory {0}: {1}", markerDir, e.getMessage());
         }
     }
 

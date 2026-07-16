@@ -18,8 +18,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -44,6 +48,8 @@ class ContainerLauncherCodeVolumeReuseTest {
     /** Records populate calls instead of running the real Docker helper-container copy. */
     private static final class RecordingLauncher extends ContainerLauncher {
         final List<String> populated = new ArrayList<>();
+        Runnable beforePopulate = () -> {};
+        RuntimeException populateFailure;
 
         RecordingLauncher(ContainerLifecycleManager lifecycleManager, EmulatorConfig config) {
             super(mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
@@ -54,6 +60,10 @@ class ContainerLauncherCodeVolumeReuseTest {
 
         @Override
         void populateCodeVolume(String volName, LambdaFunction fn, String image) {
+            beforePopulate.run();
+            if (populateFailure != null) {
+                throw populateFailure;
+            }
             populated.add(volName);
         }
     }
@@ -86,7 +96,7 @@ class ContainerLauncherCodeVolumeReuseTest {
         LambdaFunction fn = fn("sha-v1-abcdef0123456789");
         String vol = ContainerLauncher.codeVolumeName(fn);
         writeMarker(vol);
-        when(lifecycleManager.volumeExists(vol)).thenReturn(true);
+        when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(Set.of(vol)));
 
         String result = launcher.ensureCodeVolume(fn, "public.ecr.aws/lambda/nodejs:20");
 
@@ -100,7 +110,6 @@ class ContainerLauncherCodeVolumeReuseTest {
         LambdaFunction fn = fn("sha-v1-abcdef0123456789");
         String vol = ContainerLauncher.codeVolumeName(fn);
         // Volume exists but no completion marker (e.g. a prior populate crashed mid-copy): re-populate.
-        when(lifecycleManager.volumeExists(vol)).thenReturn(true);
 
         String result = launcher.ensureCodeVolume(fn, "img");
 
@@ -111,16 +120,71 @@ class ContainerLauncherCodeVolumeReuseTest {
     }
 
     @Test
-    void populatesWhenMarkerPresentButVolumeMissing() throws Exception {
+    void deletesStaleMarkerBeforeRepopulatingMissingVolume() throws Exception {
         LambdaFunction fn = fn("sha-v1-abcdef0123456789");
         String vol = ContainerLauncher.codeVolumeName(fn);
+        Path marker = tempDir.resolve("lambda-codevol-markers").resolve(vol);
         writeMarker(vol);
         // The marker lingers but the volume was pruned; reusing it would mount an empty /var/task.
-        when(lifecycleManager.volumeExists(vol)).thenReturn(false);
+        when(lifecycleManager.tryListVolumeNames())
+                .thenReturn(Optional.of(Set.of()), Optional.of(Set.of(vol)));
+        launcher.beforePopulate = () -> assertFalse(Files.exists(marker),
+                "the stale completion marker must be deleted before repopulation starts");
 
         launcher.ensureCodeVolume(fn, "img");
 
         assertEquals(List.of(vol), launcher.populated,
                 "a lingering marker without the backing volume must not trigger reuse");
+        assertTrue(Files.isRegularFile(marker), "successful repopulation must write a fresh marker");
+    }
+
+    @Test
+    void failedRepopulateCannotLeaveOldCompletionMarker() throws Exception {
+        LambdaFunction fn = fn("sha-v1-abcdef0123456789");
+        String vol = ContainerLauncher.codeVolumeName(fn);
+        Path marker = tempDir.resolve("lambda-codevol-markers").resolve(vol);
+        writeMarker(vol);
+        when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(Set.of()));
+        launcher.populateFailure = new IllegalStateException("copy failed");
+
+        assertThrows(IllegalStateException.class, () -> launcher.ensureCodeVolume(fn, "img"));
+
+        assertFalse(Files.exists(marker),
+                "a failed repopulation must not retain the previous run's completion marker");
+    }
+
+    @Test
+    void volumeInventoryFailurePreservesMarkerAndDoesNotPopulate() throws Exception {
+        LambdaFunction fn = fn("sha-v1-abcdef0123456789");
+        String vol = ContainerLauncher.codeVolumeName(fn);
+        Path marker = tempDir.resolve("lambda-codevol-markers").resolve(vol);
+        writeMarker(vol);
+        when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.empty());
+
+        assertThrows(IllegalStateException.class, () -> launcher.ensureCodeVolume(fn, "img"));
+
+        assertTrue(Files.isRegularFile(marker), "an unavailable inventory must not be treated as no volumes");
+        assertTrue(launcher.populated.isEmpty(), "population must fail closed when marker safety is unknown");
+    }
+
+    @Test
+    void successfulPopulationPrunesOnlyOrphanInternalMarkers() throws Exception {
+        LambdaFunction fn = fn("sha-v1-abcdef0123456789");
+        String vol = ContainerLauncher.codeVolumeName(fn);
+        String live = "floci-code-live";
+        String orphan = "floci-code-orphan";
+        writeMarker(live);
+        writeMarker(orphan);
+        writeMarker("unrelated-marker");
+        when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(Set.of(vol, live)));
+
+        launcher.ensureCodeVolume(fn, "img");
+
+        Path markerDir = tempDir.resolve("lambda-codevol-markers");
+        assertTrue(Files.isRegularFile(markerDir.resolve(vol)));
+        assertTrue(Files.isRegularFile(markerDir.resolve(live)));
+        assertFalse(Files.exists(markerDir.resolve(orphan)));
+        assertTrue(Files.isRegularFile(markerDir.resolve("unrelated-marker")),
+                "marker cleanup must not delete files outside Floci's code-volume namespace");
     }
 }

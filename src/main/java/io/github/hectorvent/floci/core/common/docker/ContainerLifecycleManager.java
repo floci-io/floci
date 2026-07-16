@@ -5,6 +5,8 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.InspectVolumeResponse;
+import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Bind;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -504,6 +507,28 @@ public class ContainerLifecycleManager {
         } catch (DockerException e) {
             LOG.warnv("Failed to inspect volume ''{0}'': {1}", name, e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Attempts to take an authoritative snapshot of all named volumes in the container runtime.
+     * An empty optional means the runtime could not be queried; it is intentionally distinct from
+     * a successful query that returned an empty set so cleanup callers fail closed.
+     */
+    public Optional<Set<String>> tryListVolumeNames() {
+        try {
+            ListVolumesResponse response = dockerClient.listVolumesCmd().exec();
+            if (response == null || response.getVolumes() == null) {
+                return Optional.of(Set.of());
+            }
+            Set<String> names = response.getVolumes().stream()
+                    .map(InspectVolumeResponse::getName)
+                    .filter(name -> name != null && !name.isBlank())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            return Optional.of(names);
+        } catch (RuntimeException e) {
+            LOG.warnv("Failed to list container-runtime volumes: {0}", e.getMessage());
+            return Optional.empty();
         }
     }
 
