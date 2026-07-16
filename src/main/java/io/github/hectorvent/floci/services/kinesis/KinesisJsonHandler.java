@@ -422,6 +422,19 @@ public class KinesisJsonHandler {
     private Response handlePutRecords(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
         JsonNode recordsNode = request.path("Records");
+
+        // An oversized record fails the whole request before anything is
+        // written — per-record ErrorCode is reserved for throughput/internal
+        // failures.
+        for (JsonNode node : recordsNode) {
+            try {
+                service.validateRecordSize(Base64.getDecoder().decode(node.path("Data").asText()),
+                        node.path("PartitionKey").asText());
+            } catch (IllegalArgumentException ignored) {
+                // malformed Data stays a per-record failure in the write loop below
+            }
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode results = response.putArray("Records");
         int failed = 0;
