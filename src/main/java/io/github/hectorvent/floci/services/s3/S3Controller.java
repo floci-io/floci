@@ -524,10 +524,10 @@ public class S3Controller {
 
             int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
             boolean v1 = !"2".equals(listType);
-            String effectiveStartAfter = v1 && decodedMarker != null ? decodedMarker : decodedStartAfter;
-            String effectiveContinuationToken = v1 ? null : decodedContinuationToken;
+            String effectiveStartAfter = v1 && marker != null ? marker : startAfter;
+            String effectiveContinuationToken = v1 ? null : continuationToken;
             S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
-                    bucket, decodedPrefix, decodedDelimiter, max, effectiveContinuationToken, effectiveStartAfter);
+                    bucket, prefix, delimiter, max, effectiveContinuationToken, effectiveStartAfter);
             List<S3Object> objects = result.objects();
             List<String> commonPrefixes = result.commonPrefixes();
             boolean v2 = "2".equals(listType);
@@ -536,8 +536,8 @@ public class S3Controller {
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListBucketResult", AwsNamespaces.S3)
                     .elem("Name", bucket)
-                    .elem("Prefix", maybeEncode(decodedPrefix != null ? decodedPrefix : "", encodingType))
-                    .elem("Delimiter", maybeEncode(decodedDelimiter, encodingType))
+                    .elem("Prefix", maybeEncode(prefix != null ? prefix : "", encodingType))
+                    .elem("Delimiter", maybeEncode(delimiter, encodingType))
                     .elem("MaxKeys", max);
             if (v2) {
                 xml.elem("KeyCount", objects.size() + commonPrefixes.size());
@@ -562,16 +562,16 @@ public class S3Controller {
             }
             if (v2) {
                 if (continuationToken != null) {
-                    xml.elem("ContinuationToken", maybeEncode(decodedContinuationToken, encodingType));
+                    xml.elem("ContinuationToken", continuationToken);
                 }
                 if (result.isTruncated()) {
-                    xml.elem("NextContinuationToken", maybeEncode(result.nextContinuationToken(), encodingType));
+                    xml.elem("NextContinuationToken", result.nextContinuationToken());
                 }
                 if (startAfter != null) {
-                    xml.elem("StartAfter", maybeEncode(decodedStartAfter, encodingType));
+                    xml.elem("StartAfter", maybeEncode(startAfter, encodingType));
                 }
             } else {
-                xml.elem("Marker", maybeEncode(decodedMarker != null ? decodedMarker : "", encodingType));
+                xml.elem("Marker", maybeEncode(marker != null ? marker : "", encodingType));
                 if (result.isTruncated() && result.nextContinuationToken() != null) {
                     xml.elem("NextMarker", maybeEncode(result.nextContinuationToken(), encodingType));
                 }
@@ -2955,16 +2955,5 @@ public class S3Controller {
                     .replace("%7E", "~");
         }
         return val;
-    }
-
-    private String decodeQueryParam(String val) {
-        if (val == null) {
-            return null;
-        }
-        try {
-            return URLDecoder.decode(val.replace("+", "%2B"), StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            return val;
-        }
     }
 }
