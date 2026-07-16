@@ -79,6 +79,11 @@ public class EventBridgeHandler {
                 case "UpdateArchive" -> handleUpdateArchive(request, region);
                 case "DeleteArchive" -> handleDeleteArchive(request, region);
                 case "ListArchives" -> handleListArchives(request, region);
+                case "CreateConnection" -> handleCreateConnection(request, region);
+                case "DescribeConnection" -> handleDescribeConnection(request, region);
+                case "UpdateConnection" -> handleUpdateConnection(request, region);
+                case "DeleteConnection" -> handleDeleteConnection(request, region);
+                case "ListConnections" -> handleListConnections(request, region);
                 case "StartReplay" -> handleStartReplay(request, region);
                 case "DescribeReplay" -> handleDescribeReplay(request, region);
                 case "CancelReplay" -> handleCancelReplay(request, region);
@@ -467,6 +472,73 @@ public class EventBridgeHandler {
         return Response.ok(response).build();
     }
 
+    // ──────────────────────────── Connections ────────────────────────────
+
+    private Response handleCreateConnection(JsonNode request, String region) {
+        Connection connection = eventBridgeService.createConnection(
+                request.path("Name").asText(null),
+                request.path("Description").asText(null),
+                request.path("AuthorizationType").asText(null),
+                objectAsJson(request.path("AuthParameters")),
+                objectAsJson(request.path("InvocationConnectivityParameters")),
+                request.path("KmsKeyIdentifier").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ConnectionArn", connection.getConnectionArn());
+        response.put("ConnectionState", connection.getConnectionState().name());
+        response.put("CreationTime", connection.getCreationTime().getEpochSecond());
+        response.put("LastModifiedTime", connection.getLastModifiedTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeConnection(JsonNode request, String region) {
+        String name = request.path("Name").asText(null);
+        Connection connection = eventBridgeService.describeConnection(name, region);
+        return Response.ok(buildConnectionNode(connection, true)).build();
+    }
+
+    private Response handleUpdateConnection(JsonNode request, String region) {
+        Connection connection = eventBridgeService.updateConnection(
+                request.path("Name").asText(null),
+                request.path("Description").asText(null),
+                request.path("AuthorizationType").asText(null),
+                objectAsJson(request.path("AuthParameters")),
+                objectAsJson(request.path("InvocationConnectivityParameters")),
+                request.path("KmsKeyIdentifier").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ConnectionArn", connection.getConnectionArn());
+        response.put("ConnectionState", connection.getConnectionState().name());
+        response.put("CreationTime", connection.getCreationTime().getEpochSecond());
+        response.put("LastModifiedTime", connection.getLastModifiedTime().getEpochSecond());
+        response.put("LastAuthorizedTime", connection.getLastAuthorizedTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteConnection(JsonNode request, String region) {
+        String name = request.path("Name").asText(null);
+        Connection connection = eventBridgeService.deleteConnection(name, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ConnectionArn", connection.getConnectionArn());
+        response.put("ConnectionState", ConnectionState.DELETING.name());
+        response.put("CreationTime", connection.getCreationTime().getEpochSecond());
+        response.put("LastModifiedTime", connection.getLastModifiedTime().getEpochSecond());
+        response.put("LastAuthorizedTime", connection.getLastAuthorizedTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListConnections(JsonNode request, String region) {
+        String namePrefix = request.path("NamePrefix").asText(null);
+        ConnectionState state = parseConnectionState(request.path("ConnectionState").asText(null));
+        List<Connection> connections = eventBridgeService.listConnections(namePrefix, state, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode connectionsArray = response.putArray("Connections");
+        for (Connection connection : connections) {
+            connectionsArray.add(buildConnectionNode(connection, false));
+        }
+        return Response.ok(response).build();
+    }
+
     // ──────────────────────────── Replays ────────────────────────────
 
     private Response handleStartReplay(JsonNode request, String region) {
@@ -761,6 +833,19 @@ public class EventBridgeHandler {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    private ConnectionState parseConnectionState(String state) {
+        if (state == null || state.isBlank()) return null;
+        try {
+            return ConnectionState.valueOf(state);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static String objectAsJson(JsonNode node) {
+        return (node.isObject() && !node.isEmpty()) ? node.toString() : null;
     }
 
     private ReplayState parseReplayState(String state) {
