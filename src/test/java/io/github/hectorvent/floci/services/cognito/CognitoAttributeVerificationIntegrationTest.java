@@ -102,4 +102,46 @@ class CognitoAttributeVerificationIntegrationTest {
                 .body("CodeDeliveryDetails.Destination", containsString("*"))
                 .body("CodeDeliveryDetails.Destination", containsString("@"));
     }
+
+    @Test
+    @Order(3)
+    void rejectsInvalidAccessToken() {
+        cognitoAction("GetUserAttributeVerificationCode", """
+                {
+                  "AccessToken": "not-a-valid-token",
+                  "AttributeName": "email"
+                }
+                """)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"));
+    }
+
+    @Test
+    @Order(4)
+    void rejectsUnverifiableAttribute() {
+        cognitoAction("GetUserAttributeVerificationCode", """
+                {
+                  "AccessToken": "%s",
+                  "AttributeName": "given_name"
+                }
+                """.formatted(accessToken))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    @Test
+    @Order(5)
+    void rejectsAttributeWithoutValue() {
+        cognitoAction("GetUserAttributeVerificationCode", """
+                {
+                  "AccessToken": "%s",
+                  "AttributeName": "phone_number"
+                }
+                """.formatted(accessToken))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+    }
 }
