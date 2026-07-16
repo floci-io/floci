@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecs;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -49,7 +50,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class EcsService {
+public class EcsService implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
     private static final String DEFAULT_CLUSTER = "default";
@@ -159,7 +160,40 @@ public class EcsService {
 
     @PreDestroy
     void shutdown() {
+        stopManagedContainers();
+    }
+
+    /**
+     * Stops the Docker containers of all still-running tasks on emulator shutdown.
+     * Task state is transient (memory-only), so without this the containers outlive
+     * the process as orphans. The reconciler is shut down first — and any in-flight
+     * tick awaited — so it cannot restart drained tasks between this teardown and
+     * the final storage flush. Handles are claimed atomically to avoid racing an
+     * explicit StopTask.
+     */
+    @Override
+    public void stopManagedContainers() {
         reconciler.shutdownNow();
+        try {
+            reconciler.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
+            EcsTaskHandle claimed = taskHandles.remove(taskArn);
+            if (claimed == null) {
+                continue;
+            }
+            try {
+                containerManager.stopTask(claimed);
+            } catch (Exception e) {
+                LOG.warnv("Failed to stop ECS task {0} on shutdown: {1}", taskArn, e.getMessage());
+            }
+        }
+    }
+
+    boolean isReconcilerShutdown() {
+        return reconciler.isShutdown();
     }
 
     // ── Clusters ─────────────────────────────────────────────────────────────
@@ -411,11 +445,12 @@ public class EcsService {
 
     public List<EcsTask> runTask(String clusterRef, String taskDefinitionRef, int count,
                                   LaunchType launchType, String group, String startedBy,
-                                  List<ContainerOverride> containerOverrides, String region) {
+                                  List<ContainerOverride> containerOverrides,
+                                  NetworkConfiguration networkConfiguration, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         TaskDefinition taskDef = resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
         return launchTasks(cluster, taskDef, count, launchType, group, startedBy, null,
-                containerOverrides, region);
+                containerOverrides, networkConfiguration, region);
     }
 
     public List<EcsTask> startTask(String clusterRef, List<String> containerInstanceRefs,
@@ -426,7 +461,7 @@ public class EcsService {
         for (String instanceRef : containerInstanceRefs) {
             ContainerInstance instance = resolveContainerInstanceOrThrow(cluster.getClusterArn(), instanceRef);
             List<EcsTask> launched = launchTasks(cluster, taskDef, 1, LaunchType.EC2,
-                    group, startedBy, instance.getContainerInstanceArn(), null, region);
+                    group, startedBy, instance.getContainerInstanceArn(), null, null, region);
             result.addAll(launched);
         }
         return result;
@@ -435,7 +470,8 @@ public class EcsService {
     private List<EcsTask> launchTasks(EcsCluster cluster, TaskDefinition taskDef, int count,
                                        LaunchType launchType, String group, String startedBy,
                                        String containerInstanceArn,
-                                       List<ContainerOverride> containerOverrides, String region) {
+                                       List<ContainerOverride> containerOverrides,
+                                       NetworkConfiguration networkConfiguration, String region) {
         // Fail loudly instead of silently launching zero containers and leaving
         // a task that looks RUNNING with nothing behind it.
         if (taskDef.getContainerDefinitions() == null || taskDef.getContainerDefinitions().isEmpty()) {
@@ -464,6 +500,7 @@ public class EcsService {
             task.setCreatedAt(Instant.now());
             task.setContainers(List.of());
             task.setContainerInstanceArn(containerInstanceArn);
+            task.setNetworkConfiguration(networkConfiguration);
 
             tasks.put(taskArn, task);
 
@@ -478,7 +515,14 @@ public class EcsService {
                     LOG.errorv("Failed to start ECS task {0}: {1}", taskArn, e.getMessage());
                     task.setLastStatus(TaskStatus.STOPPED.name());
                     task.setDesiredStatus(TaskStatus.STOPPED.name());
-                    task.setStoppedReason("Failed to start: " + e.getMessage());
+                    // A ResourceInitializationError is already AWS's exact stopped-reason wording
+                    // (e.g. a secret that could not be resolved), so pass it through verbatim.
+                    // Other start failures keep the generic prefix.
+                    boolean resourceInitError = e instanceof AwsException ae
+                            && "ResourceInitializationError".equals(ae.getErrorCode());
+                    task.setStoppedReason(resourceInitError
+                            ? e.getMessage()
+                            : "Failed to start: " + e.getMessage());
                     task.setStoppedAt(Instant.now());
                 }
             } else {
@@ -1362,7 +1406,8 @@ public class EcsService {
             for (int i = 0; i < toStart; i++) {
                 try {
                     List<EcsTask> launched = runTask(clusterName, svc.getTaskDefinition(), 1,
-                            svc.getLaunchType(), svc.getServiceName(), "ecs-svc", null, region);
+                            svc.getLaunchType(), svc.getServiceName(), "ecs-svc", null,
+                            svc.getNetworkConfiguration(), region);
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getFirst().getTaskArn(), svc.getServiceName());
                 } catch (Exception e) {

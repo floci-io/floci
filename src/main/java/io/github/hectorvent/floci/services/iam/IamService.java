@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -16,6 +18,7 @@ import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -32,12 +35,20 @@ import java.util.Map;
 /**
  * Core IAM business logic — users, groups, roles, policies, access keys, instance profiles.
  * IAM is a global service: resources are not region-scoped and storage keys have no region prefix.
+ *
+ * <p>Eagerly initialized at startup so AWS-managed policies (and the optional deployer principal)
+ * are seeded under the default account before any request runs. Seeding is account-namespaced via
+ * the request context, so deferring it to the first request would otherwise bind the seed data to
+ * whichever account happened to make that call — a real hazard now that {@code AccountContextFilter}
+ * resolves the request account through this service.
  */
+@Startup
 @ApplicationScoped
-public class IamService {
+public class IamService implements SessionAccountLookup {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -182,9 +193,21 @@ public class IamService {
     }
 
     public IamUser getUser(String userName) {
+        if (userName == null) {
+            throw new AwsException("NoSuchEntity",
+                    "The user with name null cannot be found.", 404);
+        }
         return users.get(userName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "The user with name " + userName + " cannot be found.", 404));
+    }
+
+    /** The IAM user that owns the given access key id, when it is a real stored key. */
+    public Optional<String> findUserNameByAccessKeyId(String accessKeyId) {
+        if (accessKeyId == null) {
+            return Optional.empty();
+        }
+        return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
     public void deleteUser(String userName) {
@@ -347,6 +370,19 @@ public class IamService {
                         "The role with name " + roleName + " cannot be found.", 404));
     }
 
+    /**
+     * Looks up a role by name in a specific account's namespace, without throwing when absent.
+     *
+     * <p>Roles are account-namespaced, so a cross-account caller (e.g. STS AssumeRole) must resolve
+     * the role in its owning account — taken from the role ARN — rather than the request's account.
+     */
+    public Optional<IamRole> findRole(String accountId, String roleName) {
+        if (roles instanceof AccountAwareStorageBackend<IamRole> aware) {
+            return aware.getForAccount(accountId, roleName);
+        }
+        return roles.get(roleName);
+    }
+
     public void deleteRole(String roleName) {
         IamRole role = getRole(roleName);
         if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
@@ -427,6 +463,20 @@ public class IamService {
         return policies.get(policyArn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "Policy " + policyArn + " does not exist.", 404));
+    }
+
+    /**
+     * Resolves a policy by ARN without throwing, mirroring {@link #getPolicy} so that
+     * AWS-managed policies (arn:aws:iam::aws:policy/...) are served from the global catalog
+     * rather than the account-partitioned store. Attached-policy read paths must use this:
+     * a managed policy attached to a principal owned by a non-default account is absent from
+     * that account's {@link #policies} partition and would otherwise be silently dropped.
+     */
+    private Optional<IamPolicy> resolvePolicy(String arn) {
+        if (arn != null && arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            return Optional.ofNullable(awsManagedPolicies.get(arn));
+        }
+        return policies.get(arn);
     }
 
     private void rejectIfAwsManaged(String policyArn) {
@@ -605,7 +655,7 @@ public class IamService {
 
     public List<IamPolicy> listAttachedUserPolicies(String userName, String pathPrefix) {
         return getUser(userName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -640,7 +690,7 @@ public class IamService {
 
     public List<IamPolicy> listAttachedGroupPolicies(String groupName, String pathPrefix) {
         return getGroup(groupName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -675,7 +725,7 @@ public class IamService {
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
         return getRole(roleName).getAttachedPolicyArns().stream()
-                .flatMap(arn -> policies.get(arn).stream())
+                .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
     }
@@ -912,7 +962,7 @@ public class IamService {
         if (fromAccessKey.isPresent()) {
             return fromAccessKey;
         }
-        return sessions.get(accessKeyId).map(SessionCredential::getSecretAccessKey);
+        return findSessionAnyAccount(accessKeyId).map(SessionCredential::getSecretAccessKey);
     }
 
     // =========================================================================
@@ -946,6 +996,60 @@ public class IamService {
     }
 
     /**
+     * Stores an assumed-role session and records {@code originAccountId} — the account of the
+     * caller that minted it. The origin lets {@link #resolveAccountId(String)} route temporary
+     * credentials that carry no role ARN (e.g. GetSessionToken) back to the caller's account.
+     */
+    public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
+                                java.time.Instant expiration, String sessionPolicyDocument,
+                                String originAccountId) {
+        sessions.put(sessionAccessKeyId,
+                new SessionCredential(sessionAccessKeyId, secretAccessKey, roleArn, expiration,
+                        sessionPolicyDocument, originAccountId));
+    }
+
+    /**
+     * Resolves the account a temporary access key belongs to: the account encoded in the
+     * session's role (or federated-user) ARN when present, otherwise the caller account captured
+     * at mint time. Returns empty for unknown or expired sessions so callers fall back to the
+     * default account.
+     */
+    @Override
+    public Optional<String> resolveAccountId(String accessKeyId) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
+        if (sessionOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        SessionCredential session = sessionOpt.get();
+        if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            return Optional.empty();
+        }
+        String account = AwsArnUtils.accountOrDefault(session.getRoleArn(), session.getOriginAccountId());
+        return account == null || account.isBlank() ? Optional.empty() : Optional.of(account);
+    }
+
+    /**
+     * Looks up a session by its temporary access key ID independent of the request's account.
+     *
+     * <p>Sessions are keyed by a globally-unique access key (e.g. {@code ASIA...}) but stored in
+     * the minting account's namespace. Account routing must resolve the session <em>before</em> the
+     * request's account is known, so a normal account-scoped {@code get} would miss it. This scans
+     * across all accounts; the access key's global uniqueness keeps the result unambiguous.
+     */
+    private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            return Optional.ofNullable(aware.scanAllAccountsAsMap().get(accessKeyId));
+        }
+        return sessions.get(accessKeyId);
+    }
+
+    /**
      * Resolves the full caller context for the given access key, including identity policies,
      * optional session policy, and optional permission boundary.
      *
@@ -961,12 +1065,13 @@ public class IamService {
             return new CallerContext(identityPolicies, null, boundaryDoc);
         }
 
-        // Check assumed-role sessions
-        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        // Check assumed-role sessions. These can be stored under the account that minted the
+        // session, while request routing for temporary credentials uses the role's account.
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
-                sessions.delete(accessKeyId);
+                deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
 
@@ -980,6 +1085,20 @@ public class IamService {
 
         // Unknown key — bypass
         return null;
+    }
+
+    private Optional<SessionCredential> findSessionForCallerContext(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> session = sessions.get(accessKeyId);
+        if (session.isPresent()) {
+            return session;
+        }
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        return findSessionAnyAccount(accessKeyId);
     }
 
     /**
@@ -1007,11 +1126,11 @@ public class IamService {
             return users.get(userName).map(IamUser::getArn);
         }
 
-        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
-                sessions.delete(accessKeyId);
+                deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
             String roleArn = session.getRoleArn();
@@ -1021,6 +1140,20 @@ public class IamService {
         }
 
         return Optional.empty();
+    }
+
+    private static boolean isTemporaryAccessKey(String accessKeyId) {
+        return accessKeyId != null && accessKeyId.startsWith(TEMPORARY_ACCESS_KEY_PREFIX);
+    }
+
+    private void deleteSession(String accessKeyId, SessionCredential session) {
+        String originAccountId = session.getOriginAccountId();
+        if (originAccountId != null && !originAccountId.isBlank()
+                && sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.deleteForAccount(originAccountId, accessKeyId);
+            return;
+        }
+        sessions.delete(accessKeyId);
     }
 
     public CallerContext resolvePrincipalContext(String principalArn) {
@@ -1049,7 +1182,7 @@ public class IamService {
     private String resolveUserBoundaryDocument(String userName) {
         return users.get(userName)
                 .map(IamUser::getPermissionsBoundaryArn)
-                .flatMap(arn -> policies.get(arn))
+                .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
@@ -1061,7 +1194,7 @@ public class IamService {
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
         return roles.get(roleName)
                 .map(IamRole::getPermissionsBoundaryArn)
-                .flatMap(arn -> policies.get(arn))
+                .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
@@ -1120,7 +1253,7 @@ public class IamService {
 
         // User attached managed policies
         for (String arn : user.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = policies.get(arn);
+            Optional<IamPolicy> p = resolvePolicy(arn);
             if (p.isPresent() && p.get().getDefaultDocument() != null) {
                 docs.add(p.get().getDefaultDocument());
             }
@@ -1133,7 +1266,7 @@ public class IamService {
             IamGroup group = groupOpt.get();
             docs.addAll(group.getInlinePolicies().values());
             for (String arn : group.getAttachedPolicyArns()) {
-                Optional<IamPolicy> p = policies.get(arn);
+                Optional<IamPolicy> p = resolvePolicy(arn);
                 if (p.isPresent() && p.get().getDefaultDocument() != null) {
                     docs.add(p.get().getDefaultDocument());
                 }
@@ -1160,7 +1293,7 @@ public class IamService {
 
         // Role attached managed policies
         for (String arn : role.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = policies.get(arn);
+            Optional<IamPolicy> p = resolvePolicy(arn);
             if (p.isPresent() && p.get().getDefaultDocument() != null) {
                 docs.add(p.get().getDefaultDocument());
             }

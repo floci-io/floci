@@ -15,7 +15,6 @@ import software.amazon.awssdk.services.sesv2.model.DashboardOptions;
 import software.amazon.awssdk.services.sesv2.model.GuardianOptions;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateDedicatedIpPoolRequest;
-import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteDedicatedIpPoolRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
@@ -67,11 +66,7 @@ class SesConfigurationSetOptionsTest {
         deleteConfigSetQuietly(CREATE_CS_BAD);
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(CS_NAME).build());
-        // CustomRedirectDomain must be a verified domain identity.
-        try {
-            sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
-                    .emailIdentity(TRACK_DOMAIN).build());
-        } catch (Exception ignored) {}
+        TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, TRACK_DOMAIN);
     }
 
     @AfterAll

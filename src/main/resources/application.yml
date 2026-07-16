@@ -72,6 +72,18 @@ floci:
     persistent-path: ./data
     host-persistent-path: ./data
     prune-volumes-on-delete: false
+    # EFS access-point emulation for the shared local Docker volumes that stand in for EFS file
+    # systems. All opt-in; with the defaults below (and no owner/permission overrides) volumes are
+    # plain named volumes, so existing behaviour is unchanged. Emulates an access point's
+    # RootDirectory.CreationInfo (owner-uid/owner-gid/root-permissions) and PosixUser
+    # (mount-user/mount-group-add).
+    efs:
+      # owner-uid:            # RootDirectory.CreationInfo.OwnerUid applied to the volume root (set with owner-gid)
+      # owner-gid:            # RootDirectory.CreationInfo.OwnerGid applied to the volume root (set with owner-uid)
+      # root-permissions:     # CreationInfo.Permissions, 3-4 octal digits; e.g. "0777", or "2775" for setgid
+      init-image: busybox:stable
+      # mount-user:           # run mounting containers as "uid[:gid]" (access point PosixUser)
+      # mount-group-add:      # supplementary gid added to mounting containers
     wal:
       compaction-interval-ms: 30000
     services:
@@ -95,6 +107,8 @@ floci:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
+      lightsail:
+        flush-interval-ms: 5000
       codepipeline:
         flush-interval-ms: 5000
       s3vectors:
@@ -105,7 +119,13 @@ floci:
         flush-interval-ms: 5000
       config:
         flush-interval-ms: 5000
+      transcribe:
+        flush-interval-ms: 5000
       codedeploy:
+        flush-interval-ms: 5000
+      tagging:
+        flush-interval-ms: 5000
+      elasticbeanstalk:
         flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
@@ -114,6 +134,8 @@ floci:
         # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
         # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
+      appsync:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -153,11 +175,16 @@ floci:
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""                     # FLOCI_TLS_KEY_PATH (PEM private key file)
     self-signed: true                  # FLOCI_TLS_SELF_SIGNED — auto-generate a self-signed cert if no cert-path provided
+    aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
+
+  protocols:
+    strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
 
   docker:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
 
   services:
@@ -171,6 +198,7 @@ floci:
       clear-fifo-deduplication-cache-on-purge: false
     s3:
       enabled: true
+      enforce-auth: false
       default-presign-expiry-seconds: 3600
     dynamodb:
       enabled: true
@@ -205,6 +233,10 @@ floci:
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
+    amazonmq:
+      enabled: true
+      mock: false
+      default-image: "rabbitmq:3-management"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -219,6 +251,7 @@ floci:
       default-image: "valkey/valkey:8"
     rds:
       enabled: true
+      mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
@@ -297,6 +330,11 @@ floci:
       imds-port: 9169
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
+      publish-security-group-ports: true
+      app-port-range-start: 30000
+      app-port-range-end: 30999
+      max-published-ports-per-instance: 20
+      socat-image: alpine/socat
       mock: false
     ecs:
       enabled: true
@@ -334,6 +372,7 @@ floci:
       keep-running-on-shutdown: false
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
+      ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
     elbv2:
       enabled: true
       mock: false
@@ -377,10 +416,15 @@ floci:
       emit-mode: synchronous
     cloudtrail:
       enabled: true
+    lightsail:
+    cloudcontrol:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:
       enabled: true
+      schema-worker-threads: 4
+      schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
     iot:

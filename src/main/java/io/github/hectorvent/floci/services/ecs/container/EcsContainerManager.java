@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -8,6 +9,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -15,9 +18,13 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
+import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
+import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ExposedPort;
@@ -31,6 +38,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -47,6 +55,9 @@ public class EcsContainerManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final LaunchedContainerAwsEnv awsEnv;
+    private final SsmService ssmService;
+    private final SecretsManagerService secretsManagerService;
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -54,13 +65,19 @@ public class EcsContainerManager {
                                ContainerLogStreamer logStreamer,
                                ContainerDetector containerDetector,
                                EmulatorConfig config,
-                               RegionResolver regionResolver) {
+                               RegionResolver regionResolver,
+                               LaunchedContainerAwsEnv awsEnv,
+                               SsmService ssmService,
+                               SecretsManagerService secretsManagerService) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.containerDetector = containerDetector;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.awsEnv = awsEnv;
+        this.ssmService = ssmService;
+        this.secretsManagerService = secretsManagerService;
     }
 
     /**
@@ -93,26 +110,30 @@ public class EcsContainerManager {
             }
         }
 
+        Map<String, ContainerOverride> overridesByName = overridesByName(containerOverrides);
+        Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
-            String containerName = "floci-ecs-" + taskId + "-" + def.getName();
+            envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region));
+        }
+
+        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+            String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
 
             // RunTask containerOverrides matched by container name: command replaces
             // the task-def command; environment is merged over the task-def environment.
-            ContainerOverride override = null;
-            if (containerOverrides != null) {
-                for (ContainerOverride co : containerOverrides) {
-                    if (def.getName() != null && def.getName().equals(co.getName())) {
-                        override = co;
-                        break;
-                    }
-                }
-            }
+            ContainerOverride override = overridesByName.get(def.getName());
 
             // Build container spec
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(def.getImage())
                     .withName(containerName)
-                    .withEnv(buildEnvVars(def, override))
+                    .withEnv(envVarsByContainer.get(def))
                     .withDockerNetwork(config.services().ecs().dockerNetwork())
+                    // Resolve Floci's endpoint from inside the task container the same way Lambda
+                    // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
+                    // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
+                    // own loopback.
+                    .withHostDockerInternalOnLinux()
+                    .withEmbeddedDns()
                     .withLogRotation();
 
             // Add memory limit if specified
@@ -120,12 +141,21 @@ public class EcsContainerManager {
                 specBuilder.withMemoryMb(def.getMemory());
             }
 
-            // Add port mappings. Publish to host only in native mode; in Docker
-            // mode ECS consumers reach containers via the docker network IP.
+            // Add port mappings. In bridge/host mode an explicit hostPort is
+            // published to the Docker host literally, matching AWS bridge mode
+            // (mirrors the ECR registry's fixed-port publishing). In awsvpc mode
+            // every AWS task gets its own ENI, so a literal hostPort carries no
+            // host-binding semantics and would collide across tasks on the single
+            // local Docker host (#1778) — awsvpc mappings always get a dynamic
+            // host port in native mode, or expose-only in Docker mode where ECS
+            // consumers reach containers via the docker network IP.
             if (def.getPortMappings() != null) {
+                boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
                 boolean publishToHost = !containerDetector.isRunningInContainer();
                 for (PortMapping pm : def.getPortMappings()) {
-                    if (publishToHost) {
+                    if (!awsvpc && pm.hostPort() > 0) {
+                        specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
+                    } else if (publishToHost) {
                         specBuilder.withDynamicPort(pm.containerPort());
                     } else {
                         specBuilder.withExposedPort(pm.containerPort());
@@ -167,9 +197,27 @@ public class EcsContainerManager {
                         // EFS volume: a shared local Docker named volume, so every task
                         // container that mounts the same EFS file system shares persistent
                         // storage — the local stand-in for an EFS mount (Docker cannot mount
-                        // a real EFS file system).
+                        // a real EFS file system). Initialise the volume root's POSIX ownership
+                        // to emulate the EFS access point's RootDirectory.CreationInfo, so a
+                        // non-root task image USER can write to it (no-op unless configured).
+                        var efsCfg = config.storage().efs();
+                        lifecycleManager.ensureSharedVolume(efsVolumeName(efs.fileSystemId()),
+                                efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
+                                efsCfg.initImage());
                         specBuilder.withNamedVolume(efsVolumeName(efs.fileSystemId()),
                                 mp.containerPath(), mp.readOnly());
+                        // Emulate the access point's PosixUser: run the container under the
+                        // configured uid[:gid] and/or add the supplementary group, so a non-root
+                        // image can read/write the shared volume owned by ownerUid/ownerGid.
+                        efsCfg.mountUser().ifPresent(u -> {
+                            // Validate the access point PosixUser format before applying it.
+                            if (!u.matches("^\\d+(:\\d+)?$")) {
+                                throw new IllegalArgumentException(
+                                        "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + u);
+                            }
+                            specBuilder.withUser(u);
+                        });
+                        efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
                     } else {
                         LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
                                 mp.sourceVolume(), def.getName());
@@ -303,12 +351,26 @@ public class EcsContainerManager {
         }
     }
 
-    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override) {
-        // Task-def environment first, then override environment (override wins on key conflict).
+    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override, String region) {
+        // AWS SDK baseline (endpoint + region + credentials) first so the task can reach the
+        // emulator, then the task-def environment, then task-def secrets, then the override
+        // environment. Later entries win on key conflict, so an explicit task-def value or
+        // secret is never clobbered by the baseline.
         Map<String, String> envMap = new LinkedHashMap<>();
+        for (String kv : awsEnv.sdkBaselineEnv(region, Optional.empty())) {
+            int eq = kv.indexOf('=');
+            if (eq > 0) {
+                envMap.put(kv.substring(0, eq), kv.substring(eq + 1));
+            }
+        }
         if (def.getEnvironment() != null) {
             for (var kv : def.getEnvironment()) {
                 envMap.put(kv.name(), kv.value());
+            }
+        }
+        if (def.getSecrets() != null) {
+            for (Secret secret : def.getSecrets()) {
+                envMap.put(secret.name(), resolveSecretValue(secret.valueFrom(), region));
             }
         }
         if (override != null && override.getEnvironment() != null) {
@@ -321,6 +383,84 @@ public class EcsContainerManager {
             envVars.add(entry.getKey() + "=" + entry.getValue());
         }
         return envVars;
+    }
+
+    private Map<String, ContainerOverride> overridesByName(List<ContainerOverride> containerOverrides) {
+        Map<String, ContainerOverride> overrides = new LinkedHashMap<>();
+        if (containerOverrides == null) {
+            return overrides;
+        }
+        for (ContainerOverride override : containerOverrides) {
+            if (override.getName() != null) {
+                overrides.put(override.getName(), override);
+            }
+        }
+        return overrides;
+    }
+
+    private String resolveSecretValue(String valueFrom, String region) {
+        // A full ARN carries its own region; use it so cross-region references resolve
+        // against the right store instead of the task's region. Bare SSM names fall back
+        // to the task region.
+        String secretRegion = arnRegion(valueFrom, region);
+        String value;
+        try {
+            if (valueFrom != null && valueFrom.startsWith("arn:aws:secretsmanager:")) {
+                // A plain secret ARN (or partial ARN) resolves to its full SecretString.
+                // The ECS `:json-key:version-stage:version-id` selector suffix is not yet
+                // supported: it is passed through unparsed, so a valueFrom carrying one fails
+                // to resolve and stops the task with ResourceInitializationError rather than
+                // silently returning the whole secret. See floci-io/floci#1624.
+                var secret = secretsManagerService.getSecretValue(valueFrom, null, null, secretRegion);
+                value = secret == null ? null : secret.getSecretString();
+            } else {
+                String parameterName = ssmParameterName(valueFrom);
+                var parameter = ssmService.getParameter(parameterName, secretRegion);
+                value = parameter == null ? null : parameter.getValue();
+            }
+        } catch (AwsException e) {
+            throw resourceInitializationError(valueFrom, e.getMessage(), e.getHttpStatus());
+        }
+        if (value == null) {
+            // A Secrets Manager secret stored as SecretBinary (no SecretString) has no string
+            // value to inject as an env var. Real AWS fails the task launch rather than starting
+            // the container with a missing value, so surface the same ResourceInitializationError
+            // instead of emitting a literal "NAME=null".
+            throw resourceInitializationError(valueFrom, "secret value is not a string", 400);
+        }
+        return value;
+    }
+
+    // The error code is ResourceInitializationError, not the underlying store's code: this
+    // exception never reaches a client (it is caught in EcsService and rendered as the task's
+    // stoppedReason), and EcsService keys off this code to pass the reason through as AWS's
+    // exact wording rather than wrapping it in the generic "Failed to start:" prefix.
+    private AwsException resourceInitializationError(String valueFrom, String detail, int httpStatus) {
+        return new AwsException("ResourceInitializationError",
+                "ResourceInitializationError: unable to pull secrets or registry auth: "
+                        + valueFrom + ": " + detail,
+                httpStatus);
+    }
+
+    /** The region embedded in an ARN {@code valueFrom} (4th segment), or {@code taskRegion} for a bare name. */
+    private String arnRegion(String valueFrom, String taskRegion) {
+        if (valueFrom != null && valueFrom.startsWith("arn:")) {
+            String[] parts = valueFrom.split(":", 5);
+            if (parts.length >= 4 && !parts[3].isBlank()) {
+                return parts[3];
+            }
+        }
+        return taskRegion;
+    }
+
+    private String ssmParameterName(String valueFrom) {
+        if (valueFrom != null && valueFrom.startsWith("arn:aws:ssm:")) {
+            int parameterMarker = valueFrom.indexOf(":parameter");
+            if (parameterMarker >= 0) {
+                return valueFrom.substring(parameterMarker + ":parameter".length());
+            }
+        }
+        return valueFrom;
     }
 
     /**

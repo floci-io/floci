@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -58,7 +59,7 @@ public class DocDbContainerManager {
     public DocDbContainerHandle start(String clusterId, String image, String masterUsername, String masterPassword) {
         LOG.infov("Starting DocumentDB container for cluster: {0}", clusterId);
 
-        String containerName = "floci-docdb-" + clusterId;
+        String containerName = ContainerStorageHelper.resourceName(config, "docdb", null, clusterId);
         lifecycleManager.removeIfExists(containerName);
 
         List<String> envVars = List.of(

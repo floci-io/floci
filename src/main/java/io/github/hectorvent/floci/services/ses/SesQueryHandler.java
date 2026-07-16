@@ -313,7 +313,13 @@ public class SesQueryHandler {
             xml.start("value");
             xml.elem("DkimEnabled", identity != null ? String.valueOf(identity.isDkimEnabled()) : "false");
             xml.elem("DkimVerificationStatus", identity != null ? identity.getDkimVerificationStatus() : "NotStarted");
-            xml.start("DkimTokens").end("DkimTokens");
+            xml.start("DkimTokens");
+            if (identity != null && identity.getDkimTokens() != null) {
+                for (String token : identity.getDkimTokens()) {
+                    xml.elem("member", token);
+                }
+            }
+            xml.end("DkimTokens");
             xml.end("value");
             xml.end("entry");
         }

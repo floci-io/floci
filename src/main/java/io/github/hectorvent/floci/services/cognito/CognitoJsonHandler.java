@@ -1,12 +1,12 @@
 package io.github.hectorvent.floci.services.cognito;
 
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
@@ -21,6 +21,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @ApplicationScoped
 public class CognitoJsonHandler {
@@ -80,6 +81,7 @@ public class CognitoJsonHandler {
             case "GetUser" -> handleGetUser(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
+            case "GlobalSignOut" -> handleGlobalSignOut(request);
             case "CreateGroup" -> handleCreateGroup(request);
             case "GetGroup" -> handleGetGroup(request);
             case "ListGroups" -> handleListGroups(request);
@@ -90,6 +92,7 @@ public class CognitoJsonHandler {
             case "AdminRemoveUserFromGroup" -> handleAdminRemoveUserFromGroup(request);
             case "AdminListGroupsForUser" -> handleAdminListGroupsForUser(request);
             case "GetTokensFromRefreshToken" -> handleGetTokensFromRefreshToken(request);
+            case "RevokeToken" -> handleRevokeToken(request);
             case "ListUserPoolClientSecrets" -> handleListUserPoolClientSecrets(request);
             case "AddUserPoolClientSecret" -> handleAddUserPoolClientSecret(request);
             case "DeleteUserPoolClientSecret" -> handleDeleteUserPoolClientSecret(request);
@@ -449,6 +452,15 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
+    private Response handleRevokeToken(JsonNode request) {
+        service.revokeToken(
+                request.path("ClientId").asText(null),
+                request.path("Token").asText(null),
+                request.path("ClientSecret").asText(null)
+        );
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Response handleInitiateAuth(JsonNode request) {
         Map<String, String> params = new HashMap<>();
         request.path("AuthParameters").fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().asText()));
@@ -608,6 +620,11 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleGlobalSignOut(JsonNode request) {
+        service.globalSignOut(request.path("AccessToken").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private ObjectNode userPoolToDescriptionNode(UserPool p) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", p.getId());
@@ -681,8 +698,8 @@ public class CognitoJsonHandler {
         c.getAllowedOAuthFlows().forEach(flows::add);
         ArrayNode scopes = node.putArray("AllowedOAuthScopes");
         c.getAllowedOAuthScopes().forEach(scopes::add);
-        node.set("AnalyticsConfiguration", objectMapper.valueToTree(
-                c.getAnalyticsConfiguration() != null ? c.getAnalyticsConfiguration() : new HashMap<>()));
+        Optional.ofNullable(c.getAnalyticsConfiguration())
+                .ifPresent(it -> node.set("AnalyticsConfiguration", objectMapper.valueToTree(it)));
         ArrayNode callbackUrls = node.putArray("CallbackURLs");
         c.getCallbackURLs().forEach(callbackUrls::add);
         if (c.getDefaultRedirectURI() != null) {
@@ -708,12 +725,12 @@ public class CognitoJsonHandler {
         }
         ArrayNode supportedIdentityProviders = node.putArray("SupportedIdentityProviders");
         c.getSupportedIdentityProviders().forEach(supportedIdentityProviders::add);
-        node.set("TokenValidityUnits", objectMapper.valueToTree(
-                c.getTokenValidityUnits() != null ? c.getTokenValidityUnits() : new HashMap<>()));
+        Optional.ofNullable(c.getTokenValidityUnits())
+                .ifPresent(it -> node.set("TokenValidityUnits", objectMapper.valueToTree(it)));
         ArrayNode writeAttributes = node.putArray("WriteAttributes");
         c.getWriteAttributes().forEach(writeAttributes::add);
-        node.set("RefreshTokenRotation", objectMapper.valueToTree(
-                c.getRefreshTokenRotation() != null ? c.getRefreshTokenRotation() : new HashMap<>()));
+        Optional.ofNullable(c.getRefreshTokenRotation())
+                .ifPresent(it -> node.set("RefreshTokenRotation", objectMapper.valueToTree(it)));
         if (c.getEnableTokenRevocation() != null) {
             node.put("EnableTokenRevocation", c.getEnableTokenRevocation());
         }

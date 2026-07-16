@@ -236,6 +236,25 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(17)
+    void getRdsEnhancedMonitoringPolicy() {
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn",
+                    "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName",
+                    equalTo("AmazonRDSEnhancedMonitoringRole"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn",
+                    equalTo("arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"));
+    }
+
+    @Test
     @Order(9)
     void stsGetCallerIdentityFallsBackForUnseededFlociAccessKey() {
         given()
@@ -386,6 +405,85 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(51)
+    void getAccessKeyLastUsedReturnsNeverUsedShape() {
+        given()
+            .formParam("Action", "GetAccessKeyLastUsed")
+            .formParam("AccessKeyId", "AKIAEXAMPLE")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult"
+                    + ".AccessKeyLastUsed.ServiceName", equalTo("N/A"));
+    }
+
+    @Test
+    @Order(52)
+    void getLoginProfileReturnsNoSuchEntity() {
+        given()
+            .formParam("Action", "GetLoginProfile")
+            .formParam("UserName", "any-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .contentType("application/xml")
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+    }
+
+    @Test
+    @Order(53)
+    void listSamlProvidersReturnsEmptyList() {
+        given()
+            .formParam("Action", "ListSAMLProviders")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("ListSAMLProvidersResponse.ListSAMLProvidersResult.SAMLProviderList", isEmptyOrNullString());
+    }
+
+    @Test
+    @Order(54)
+    void listOpenIdConnectProvidersReturnsEmptyList() {
+        given()
+            .formParam("Action", "ListOpenIDConnectProviders")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("ListOpenIDConnectProvidersResponse.ListOpenIDConnectProvidersResult"
+                    + ".OpenIDConnectProviderList", isEmptyOrNullString());
+    }
+
+    @Test
+    @Order(55)
+    void listServerCertificatesReturnsEmptyPaginatedList() {
+        given()
+            .formParam("Action", "ListServerCertificates")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("ListServerCertificatesResponse.ListServerCertificatesResult.IsTruncated", equalTo("false"));
+    }
+
+    @Test
     @Order(10)
     void createUser() {
         given()
@@ -446,7 +544,7 @@ class IamIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ListUsersResponse.ListUsersResult.Users.member.UserName",
+            .body("ListUsersResponse.ListUsersResult.Users.member.find { it.UserName == 'test-user' }.UserName",
                     equalTo("test-user"));
     }
 
@@ -529,7 +627,7 @@ class IamIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ListRolesResponse.ListRolesResult.Roles.member.RoleName",
+            .body("ListRolesResponse.ListRolesResult.Roles.member.find { it.RoleName == 'TestRole' }.RoleName",
                     equalTo("TestRole"));
     }
 
@@ -668,6 +766,106 @@ class IamIntegrationTest {
     // =========================================================================
     // Access Keys
     // =========================================================================
+
+    private static void createUser(String userName) {
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", userName)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static String createAccessKeyFor(String userName) {
+        return given()
+            .formParam("Action", "CreateAccessKey")
+            .formParam("UserName", userName)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+        .extract()
+            .path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+    }
+
+    @Test
+    @Order(56)
+    void listAccessKeysWithoutUserNameResolvesCaller() {
+        // UserName is optional per the IAM model: it defaults to the owner of the access
+        // key that signed the request (issue #1753: this path used to leak a JSON 500).
+        createUser("caller-list-user");
+        String keyId = createAccessKeyFor("caller-list-user");
+
+        given()
+            .formParam("Action", "ListAccessKeys")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=" + keyId + "/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType(containsString("xml"))
+            .body("ListAccessKeysResponse.ListAccessKeysResult.AccessKeyMetadata.member.UserName",
+                    equalTo("caller-list-user"));
+    }
+
+    @Test
+    @Order(57)
+    void listAccessKeysWithoutUserNameUnknownKeyReturnsNoSuchEntityXml() {
+        // The conventional 'test' key owns no IAM user: moto parity is the documented
+        // NoSuchEntity XML error, never a JSON body on the Query wire.
+        given()
+            .formParam("Action", "ListAccessKeys")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .contentType(containsString("xml"))
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
+            .body("ErrorResponse.Error.Message", containsString("test"));
+    }
+
+    @Test
+    @Order(58)
+    void getUserWithoutUserNameResolvesCaller() {
+        createUser("caller-get-user");
+        String keyId = createAccessKeyFor("caller-get-user");
+
+        given()
+            .formParam("Action", "GetUser")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=" + keyId + "/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetUserResponse.GetUserResult.User.UserName", equalTo("caller-get-user"));
+    }
+
+    @Test
+    @Order(59)
+    void deleteAccessKeyWithoutUserNameResolvesOwner() {
+        createUser("caller-del-user");
+        String keyId = createAccessKeyFor("caller-del-user");
+
+        given()
+            .formParam("Action", "DeleteAccessKey")
+            .formParam("AccessKeyId", keyId)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=" + keyId + "/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("DeleteAccessKeyResponse"));
+    }
 
     @Test
     @Order(40)
@@ -838,5 +1036,22 @@ class IamIntegrationTest {
         .then()
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("UnsupportedOperation"));
+    }
+
+    @Test
+    @Order(73)
+    void getUserWithoutUserNameOnAnUnsignedRequestDoesNotLeakNull() {
+        // No Authorization header means no access key to resolve the caller from. The action
+        // still routes to IAM by name, so the error must read as a sentence rather than
+        // interpolating a null key id onto the wire.
+        given()
+            .formParam("Action", "GetUser")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .contentType(containsString("xml"))
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
+            .body("ErrorResponse.Error.Message", not(containsString("null")));
     }
 }

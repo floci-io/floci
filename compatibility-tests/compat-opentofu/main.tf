@@ -257,3 +257,74 @@ output "zone_id" {
 output "health_check_id" {
   value = aws_route53_health_check.app.id
 }
+
+# ── Cognito User Pool ─────────────────────────────────────────────────────
+resource "aws_cognito_user_pool" "pool" {
+  name = "floci-compat-pool"
+
+  password_policy {
+    minimum_length    = 12
+    require_lowercase = true
+    require_numbers   = true
+    require_symbols   = true
+    require_uppercase = true
+  }
+
+  auto_verified_attributes = ["email"]
+  username_attributes      = ["email"]
+
+  admin_create_user_config {
+    allow_admin_create_user_only = false
+  }
+
+  verification_message_template {
+    default_email_option = "CONFIRM_WITH_CODE"
+    email_message        = "Your code is {####}"
+    email_subject        = "Verify your account"
+  }
+
+  account_recovery_setting {
+    recovery_mechanism {
+      name     = "verified_email"
+      priority = 1
+    }
+  }
+}
+
+output "user_pool_id" {
+  value = aws_cognito_user_pool.pool.id
+}
+
+output "user_pool_arn" {
+  value = aws_cognito_user_pool.pool.arn
+}
+
+# ── Cognito User Pool Client ──────────────────────────────────────────────
+resource "aws_cognito_user_pool_client" "client" {
+  name         = "floci-compat-pool-client"
+  user_pool_id = aws_cognito_user_pool.pool.id
+}
+
+# ── Kinesis Firehose Delivery Stream (extended_s3, issue #1043) ───────────
+resource "aws_kinesis_firehose_delivery_stream" "events" {
+  name        = "floci-compat-firehose"
+  destination = "extended_s3"
+
+  extended_s3_configuration {
+    role_arn            = aws_iam_role.lambda_exec.arn
+    bucket_arn          = aws_s3_bucket.app.arn
+    prefix              = "events/data/"
+    error_output_prefix = "events/errors/"
+    compression_format  = "GZIP"
+    buffering_size      = 64
+    buffering_interval  = 120
+  }
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+output "firehose_stream_arn" {
+  value = aws_kinesis_firehose_delivery_stream.events.arn
+}

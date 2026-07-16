@@ -48,7 +48,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of());
     }
 
     @Test
@@ -120,7 +120,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of()));
+                java.util.Map.of(), java.util.Map.of()));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
@@ -229,7 +229,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of()));
+                java.util.Map.of(), java.util.Map.of()));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.INVALID_LAUNCH_TEMPLATE_MESSAGE, error.getMessage());
@@ -268,6 +268,68 @@ class AutoScalingServiceTest {
         assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
         var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertEquals("lt-original", group.getLaunchTemplateId());
+        assertEquals(3, group.getMaxSize());
+    }
+
+    @Test
+    void updateAutoScalingGroupRejectsVersionWithoutLaunchTemplateIdentifier() {
+        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(
+                REGION,
+                "test-asg",
+                null,
+                null,
+                null,
+                "2",
+                null,
+                null,
+                5,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", error.getMessage());
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals("1", group.getLaunchTemplateVersion());
+        assertEquals(3, group.getMaxSize());
+    }
+
+    @Test
+    void updateAutoScalingGroupRejectsDesiredConfigurationChangeDuringActiveInstanceRefresh() {
+        AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
+        InstanceRefresh request = new InstanceRefresh();
+        request.setDesiredLaunchTemplateId("lt-refresh");
+        request.setDesiredLaunchTemplateVersion("2");
+        service.startInstanceRefresh(REGION, "test-asg", request);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(
+                REGION,
+                "test-asg",
+                null,
+                "lt-next",
+                null,
+                "3",
+                null,
+                null,
+                5,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(AutoScalingService.ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals("lt-refresh", group.getLaunchTemplateId());
+        assertEquals("2", group.getLaunchTemplateVersion());
         assertEquals(3, group.getMaxSize());
     }
 
@@ -571,7 +633,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of());
     }
 
     private static final class AutoScalingGroupFixture {

@@ -62,7 +62,40 @@ public class ContainerBuilder {
      * @return a new Builder instance
      */
     public Builder newContainer(String image) {
-        return new Builder(image, config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver);
+        return new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver);
+    }
+
+    private String resolveImage(String image) {
+        return resolveImage(image, configuredImageRegistryBase(config));
+    }
+
+    static String resolveImage(String image, Optional<String> imageRegistryBase) {
+        if (image == null || image.isBlank()) {
+            return image;
+        }
+        return normalizeImageRegistryBase(imageRegistryBase)
+                .filter(base -> !image.startsWith(base + "/"))
+                .map(base -> base + "/" + image)
+                .orElse(image);
+    }
+
+    private static Optional<String> configuredImageRegistryBase(EmulatorConfig config) {
+        if (config == null || config.docker() == null) {
+            return Optional.empty();
+        }
+        return config.docker().imageRegistryBase();
+    }
+
+    private static Optional<String> normalizeImageRegistryBase(Optional<String> imageRegistryBase) {
+        return imageRegistryBase
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .map(value -> {
+                    while (value.endsWith("/")) {
+                        value = value.substring(0, value.length() - 1);
+                    }
+                    return value;
+                });
     }
 
     /**
@@ -90,6 +123,8 @@ public class ContainerBuilder {
         private LogConfig logConfig;
         private boolean privileged;
         private String cgroupnsMode;
+        private String user;
+        private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -330,6 +365,28 @@ public class ContainerBuilder {
         }
 
         /**
+         * Sets the user the container process runs as, formatted {@code "uid[:gid]"}
+         * (Docker's top-level container user). Null or blank leaves the image {@code USER}
+         * in effect.
+         */
+        public Builder withUser(String user) {
+            this.user = user;
+            return this;
+        }
+
+        /**
+         * Adds a supplementary group id to the container process (Docker {@code --group-add}),
+         * so it can access group-owned resources without changing its primary uid/gid. Blank
+         * ids are ignored.
+         */
+        public Builder withGroupAdd(String groupId) {
+            if (groupId != null && !groupId.isBlank()) {
+                this.groupAdd.add(groupId);
+            }
+            return this;
+        }
+
+        /**
          * Injects Floci's embedded DNS server into the container so virtual-hosted
          * S3 hostnames (my-bucket.localhost.floci.io) resolve to Floci's Docker
          * network IP. No-op when the embedded DNS server is not running.
@@ -373,7 +430,9 @@ public class ContainerBuilder {
                     privileged,
                     cgroupnsMode,
                     List.copyOf(dnsServers),
-                    workingDir
+                    workingDir,
+                    user,
+                    List.copyOf(groupAdd)
             );
         }
     }

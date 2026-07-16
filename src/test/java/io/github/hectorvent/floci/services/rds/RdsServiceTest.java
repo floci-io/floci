@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
@@ -98,6 +99,22 @@ class RdsServiceTest {
         assertNotNull(instance.getDbiResourceId());
         assertTrue(instance.getDbiResourceId().startsWith("db-"));
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:mydb", instance.getDbInstanceArn());
+    }
+
+    @Test
+    void createAndModifyDbInstancePersistVpcSecurityGroups() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of("sg-created"));
+
+        assertEquals(List.of("sg-created"), instance.getVpcSecurityGroupIds());
+
+        DbInstance modified = rdsService.modifyDbInstance("mydb", null, null, null,
+                List.of("sg-updated-a", "sg-updated-b"));
+
+        assertEquals(List.of("sg-updated-a", "sg-updated-b"), modified.getVpcSecurityGroupIds());
+        assertEquals(List.of("sg-updated-a", "sg-updated-b"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
     }
 
     @Test
@@ -276,7 +293,112 @@ class RdsServiceTest {
         assertEquals(1, rdsService.listDbSubnetGroups("sample-db-subnets").size());
 
         rdsService.deleteDbSubnetGroup("sample-db-subnets");
-        assertTrue(rdsService.listDbSubnetGroups("sample-db-subnets").isEmpty());
+        AwsException missing = assertThrows(AwsException.class,
+                () -> rdsService.listDbSubnetGroups("sample-db-subnets"));
+        assertEquals("DBSubnetGroupNotFoundFault", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+    }
+
+    @Test
+    void listDbSubnetGroupsFaultsForMissingName() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> rdsService.listDbSubnetGroups("does-not-exist"));
+        assertEquals("DBSubnetGroupNotFoundFault", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+    }
+
+    @Test
+    void listDbSubnetGroupsStillResolvesSyntheticDefault() {
+        Collection<DbSubnetGroup> groups = rdsService.listDbSubnetGroups("default");
+        assertEquals(1, groups.size());
+        assertEquals("default", groups.iterator().next().getDbSubnetGroupName());
+    }
+
+    @Test
+    void dbSubnetGroupTagsRoundTripAndMutateByArn() {
+        rdsService.createDbSubnetGroup(
+                "sample-db-subnets", "test", java.util.List.of("subnet-default-a", "subnet-default-b"));
+        String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:sample-db-subnets";
+
+        // A subnet group with no tags must list cleanly — previously this threw DBInstanceNotFound (404)
+        // because every ResourceName was resolved as a DB instance.
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(arn));
+
+        rdsService.addTagsToResource(arn, java.util.Map.of("Name", "sample-db-subnets"));
+        assertEquals(java.util.Map.of("Name", "sample-db-subnets"),
+                rdsService.listTagsForResource(arn));
+
+        rdsService.removeTagsFromResource(arn, java.util.List.of("Name"));
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(arn));
+    }
+
+    @Test
+    void dbSubnetGroupTagsSurviveModify() {
+        rdsService.createDbSubnetGroup(
+                "sample-db-subnets", "test", java.util.List.of("subnet-default-a", "subnet-default-b"));
+        String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:sample-db-subnets";
+        rdsService.addTagsToResource(arn, java.util.Map.of("Name", "sample-db-subnets"));
+
+        rdsService.modifyDbSubnetGroup("sample-db-subnets", java.util.List.of("subnet-default-a"));
+
+        assertEquals(java.util.Map.of("Name", "sample-db-subnets"),
+                rdsService.listTagsForResource(arn));
+    }
+
+    @Test
+    void listTagsForMissingSubnetGroupReturnsSubnetGroupNotFound() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:subgrp:missing"));
+
+        assertEquals("DBSubnetGroupNotFoundFault", exception.getErrorCode());
+    }
+
+    @Test
+    void dbClusterTagsRoundTripByArn() {
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "postgres", "13",
+                "admin", "password", "dbname", false, null);
+
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(cluster.getDbClusterArn()));
+
+        rdsService.addTagsToResource(cluster.getDbClusterArn(), java.util.Map.of("env", "test"));
+        assertEquals(java.util.Map.of("env", "test"),
+                rdsService.listTagsForResource(cluster.getDbClusterArn()));
+    }
+
+    @Test
+    void tagOperationsRejectUnsupportedResourceArn() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:og:some-option-group"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+        // The type is valid on real AWS; the message must present this as a Floci limitation.
+        assertTrue(exception.getMessage().contains("not yet implemented by Floci"));
+    }
+
+    @Test
+    void tagOperationsRejectTypelessRdsArn() {
+        // Real AWS rejects an RDS ARN whose resource part is not <type>:<id> with InvalidParameterValue;
+        // previously this fell back to a DB-instance lookup and returned DBInstanceNotFound.
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:mydb"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+    }
+
+    @Test
+    void tagOperationsRejectNonRdsArn() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:s3:::some-bucket"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+    }
+
+    @Test
+    void tagOperationsRejectMalformedArn() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:incomplete"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
     }
 
     @Test
@@ -339,6 +461,108 @@ class RdsServiceTest {
 
         assertEquals("InvalidDBClusterStateFault", exception.getErrorCode());
         assertTrue(exception.getMessage().contains("still has DB instances"));
+    }
+
+    @Test
+    void mockModeCreatesClusterAvailableWithoutContainerOrProxy() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, cluster.getStatus());
+        assertEquals("localhost", cluster.getEndpoint().address());
+        assertTrue(cluster.getEndpoint().port() > 0);
+        assertNull(cluster.getContainerId());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+        verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void mockModeCreatesClusterInstanceAvailableWithoutContainer() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        DbInstance instance = rdsService.createDbInstance("inst1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.serverless",
+                0, false, null, null, "cluster1");
+
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertEquals("localhost", instance.getEndpoint().address());
+        // No Docker volume name may be persisted: the mock cluster has a null volume id, so the
+        // fallback would fabricate a name that a later non-mock restore could try to reference.
+        assertNull(instance.getDockerVolumeName());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+        verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void mockModeCreatesStandaloneInstanceAvailableWithoutContainer() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbInstance instance = rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertNull(instance.getContainerId());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void mockModeDeleteClusterSkipsDockerCleanup() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        rdsService.deleteDbCluster("cluster1");
+
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).removeVolume(any(), any());
+    }
+
+    @Test
+    void mockModeDeleteStandaloneInstanceSkipsDockerCleanup() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        rdsService.deleteDbInstance("standalone");
+
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).removeVolume(any(), any());
+    }
+
+    @Test
+    void mockModeAssignsDistinctEndpointPorts() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster a = rdsService.createDbCluster("cluster-a", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        DbCluster b = rdsService.createDbCluster("cluster-b", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertNotEquals(a.getEndpoint().port(), b.getEndpoint().port());
+    }
+
+    @Test
+    void mockModeRebootSkipsContainerAndProxy() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        DbInstance rebooted = rdsService.rebootDbInstance("standalone");
+
+        assertEquals(DbInstanceStatus.AVAILABLE, rebooted.getStatus());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+        verify(containerManager, never()).stop(any());
+        verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any());
     }
 
     @Test
@@ -406,6 +630,21 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbSubnetGroupUsesSuppliedRegionForSubnetLookup() {
+        List<String> subnetIds = List.of("subnet-west-a", "subnet-west-b");
+        when(ec2Service.describeSubnets(eq("us-west-2"), eq(subnetIds), eq(Map.of())))
+                .thenReturn(List.of(
+                        subnet("subnet-west-a", "vpc-west", "us-west-2a"),
+                        subnet("subnet-west-b", "vpc-west", "us-west-2b")));
+
+        DbSubnetGroup group = rdsService.createDbSubnetGroup("west-subnets", "desc", subnetIds, "us-west-2");
+
+        assertEquals("vpc-west", group.getVpcId());
+        assertEquals("arn:aws:rds:us-west-2:123456789012:subgrp:west-subnets", group.getDbSubnetGroupArn());
+        verify(ec2Service).describeSubnets(eq("us-west-2"), eq(subnetIds), eq(Map.of()));
+    }
+
+    @Test
     void createDbSubnetGroupRequiresSubnetIdsWithMissingParameter() {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of()));
@@ -462,6 +701,36 @@ class RdsServiceTest {
 
         assertEquals("default", group.getDbSubnetGroupName());
         assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:default", group.getDbSubnetGroupArn());
+    }
+
+    @Test
+    void resolveDbSubnetGroupViewUsesSuppliedRegionForDefaultGroup() {
+        when(ec2Service.describeSubnets(eq("us-west-2"), anyList(), any()))
+                .thenReturn(List.of(
+                        subnet("subnet-west-a", "vpc-west", "us-west-2a"),
+                        subnet("subnet-west-b", "vpc-west", "us-west-2b")));
+
+        DbSubnetGroup group = rdsService.resolveDbSubnetGroupView(null, "us-west-2");
+
+        assertEquals("default", group.getDbSubnetGroupName());
+        assertEquals("vpc-west", group.getVpcId());
+        assertEquals("arn:aws:rds:us-west-2:123456789012:subgrp:default", group.getDbSubnetGroupArn());
+        assertEquals(Map.of("subnet-west-a", "us-west-2a", "subnet-west-b", "us-west-2b"),
+                group.getSubnetAvailabilityZones());
+    }
+
+    @Test
+    void getDbSubnetGroupUsesSuppliedRegionForDefaultGroup() {
+        when(ec2Service.describeSubnets(eq("us-west-2"), anyList(), any()))
+                .thenReturn(List.of(
+                        subnet("subnet-west-a", "vpc-west", "us-west-2a"),
+                        subnet("subnet-west-b", "vpc-west", "us-west-2b")));
+
+        DbSubnetGroup group = rdsService.getDbSubnetGroup("default", "us-west-2");
+
+        assertEquals("default", group.getDbSubnetGroupName());
+        assertEquals("vpc-west", group.getVpcId());
+        assertEquals("arn:aws:rds:us-west-2:123456789012:subgrp:default", group.getDbSubnetGroupArn());
     }
 
     @Test
@@ -609,16 +878,16 @@ class RdsServiceTest {
     }
 
     private static List<Subnet> defaultSubnets() {
-        Subnet subnetA = new Subnet();
-        subnetA.setSubnetId("subnet-default-a");
-        subnetA.setVpcId("vpc-default");
-        subnetA.setAvailabilityZone("us-east-1a");
+        return List.of(
+                subnet("subnet-default-a", "vpc-default", "us-east-1a"),
+                subnet("subnet-default-b", "vpc-default", "us-east-1b"));
+    }
 
-        Subnet subnetB = new Subnet();
-        subnetB.setSubnetId("subnet-default-b");
-        subnetB.setVpcId("vpc-default");
-        subnetB.setAvailabilityZone("us-east-1b");
-
-        return List.of(subnetA, subnetB);
+    private static Subnet subnet(String subnetId, String vpcId, String availabilityZone) {
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId(subnetId);
+        subnet.setVpcId(vpcId);
+        subnet.setAvailabilityZone(availabilityZone);
+        return subnet;
     }
 }

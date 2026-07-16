@@ -44,7 +44,7 @@ class EventBridgeServiceTest {
                 null,
                 invokerMock,
                 null,
-                new ResourceGroupsTaggingService()
+                new ResourceGroupsTaggingService(null)
         );
     }
 

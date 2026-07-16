@@ -1,7 +1,14 @@
 package io.github.hectorvent.floci.services.resourcegroupstagging;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
+import io.github.hectorvent.floci.core.common.Resettable;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -9,10 +16,26 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class ResourceGroupsTaggingService {
+public class ResourceGroupsTaggingService implements Resettable {
+
+    private final StorageFactory storageFactory;
 
     // region::arn → ResourceTagMapping
-    private final Map<String, ResourceTagMapping> store = new ConcurrentHashMap<>();
+    private Map<String, ResourceTagMapping> store = new ConcurrentHashMap<>();
+
+    @Inject
+    public ResourceGroupsTaggingService(StorageFactory storageFactory) {
+        this.storageFactory = storageFactory;
+    }
+
+    @PostConstruct
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.store = new StorageBackedMap<>(storageFactory.create("tagging",
+                "tagging-resource-mappings.json", new TypeReference<Map<String, ResourceTagMapping>>() {}));
+    }
 
     private String key(String region, String arn) {
         return region + "::" + arn;
@@ -20,28 +43,42 @@ public class ResourceGroupsTaggingService {
 
     // ─── TagResources ──────────────────────────────────────────────────────────
 
-    public void tagResources(List<String> resourceArns, Map<String, String> tags, String region) {
+    // Mutators are synchronized: StorageBackedMap has no atomic computeIfAbsent, so
+    // the get-mutate-put sequence would otherwise lose updates under concurrent calls.
+    public synchronized void tagResources(List<String> resourceArns, Map<String, String> tags, String region) {
         for (String arn : resourceArns) {
-            store.computeIfAbsent(key(region, arn), k -> new ResourceTagMapping(arn))
-                    .getTags().putAll(tags);
+            String storeKey = key(region, arn);
+            ResourceTagMapping mapping = store.get(storeKey);
+            if (mapping == null) {
+                mapping = new ResourceTagMapping(arn);
+            }
+            mapping.getTags().putAll(tags);
+            // Re-put so StorageBackedMap routes the mutation through the backend
+            store.put(storeKey, mapping);
         }
     }
 
     // ─── UntagResources ────────────────────────────────────────────────────────
 
-    public void untagResources(List<String> resourceArns, List<String> tagKeys, String region) {
+    public synchronized void untagResources(List<String> resourceArns, List<String> tagKeys, String region) {
         for (String arn : resourceArns) {
-            ResourceTagMapping mapping = store.get(key(region, arn));
+            String storeKey = key(region, arn);
+            ResourceTagMapping mapping = store.get(storeKey);
             if (mapping != null) {
                 tagKeys.forEach(mapping.getTags()::remove);
+                store.put(storeKey, mapping);
             }
         }
     }
 
-    public void deleteResources(List<String> resourceArns, String region) {
+    public synchronized void deleteResources(List<String> resourceArns, String region) {
         for (String arn : resourceArns) {
             store.remove(key(region, arn));
         }
+    }
+
+    public void clear() {
+        store.clear();
     }
 
     // ─── GetResources ──────────────────────────────────────────────────────────
@@ -95,12 +132,14 @@ public class ResourceGroupsTaggingService {
     private boolean matchesResourceTypeFilters(ResourceTagMapping m, List<String> resourceTypeFilters) {
         if (resourceTypeFilters == null || resourceTypeFilters.isEmpty()) return true;
         // ARN: arn:aws:<service>:<region>:<account>:<type>/<id>  or  arn:aws:<service>:::...
-        String arn = m.getResourceArn();
-        String[] parts = arn.split(":", 6);
-        if (parts.length < 3) return false;
-        String service = parts[2];
-        // resource part is parts[5]: "type/id" or just "type"
-        String resourcePart = parts.length >= 6 ? parts[5] : "";
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(m.getResourceArn());
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        String service = arn.service();
+        String resourcePart = arn.resource(); // "type/id" or just "type"
         String resourceType = resourcePart.contains("/")
                 ? resourcePart.substring(0, resourcePart.indexOf('/'))
                 : resourcePart;

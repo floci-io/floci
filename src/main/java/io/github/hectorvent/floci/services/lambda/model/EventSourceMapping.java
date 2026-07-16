@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -26,6 +27,8 @@ public class EventSourceMapping {
     private List<String> functionResponseTypes = new ArrayList<>();
     private Map<String, String> shardSequenceNumbers = new HashMap<>();
     private ScalingConfig scalingConfig;
+    private Boolean bisectBatchOnFunctionError;
+    private DestinationConfig destinationConfig;
 
     public EventSourceMapping() {
     }
@@ -83,5 +86,55 @@ public class EventSourceMapping {
     /** Convenience accessor: returns {@code null} when no cap is configured. */
     public Integer getMaximumConcurrency() {
         return scalingConfig != null ? scalingConfig.getMaximumConcurrency() : null;
+    }
+
+    public Boolean getBisectBatchOnFunctionError() {
+        return bisectBatchOnFunctionError;
+    }
+
+    public void setBisectBatchOnFunctionError(Boolean bisectBatchOnFunctionError) {
+        this.bisectBatchOnFunctionError = bisectBatchOnFunctionError;
+    }
+
+    public DestinationConfig getDestinationConfig() {
+        return destinationConfig;
+    }
+
+    public void setDestinationConfig(DestinationConfig destinationConfig) {
+        this.destinationConfig = destinationConfig;
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class DestinationConfig {
+        private OnFailure onFailure;
+
+        public DestinationConfig() {
+        }
+
+        public OnFailure getOnFailure() {
+            return onFailure;
+        }
+
+        public void setOnFailure(OnFailure onFailure) {
+            this.onFailure = onFailure;
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class OnFailure {
+        private String destination;
+
+        public OnFailure() {
+        }
+
+        public String getDestination() {
+            return destination;
+        }
+
+        public void setDestination(String destination) {
+            this.destination = destination;
+        }
     }
 }

@@ -37,6 +37,7 @@ import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.kafka.KafkaClient;
+import software.amazon.awssdk.services.mq.MqClient;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
@@ -64,6 +65,17 @@ import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.backup.BackupClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
+import software.amazon.awssdk.services.lightsail.LightsailClient;
+import software.amazon.awssdk.services.route53.Route53Client;
+import software.amazon.awssdk.services.route53.model.Change;
+import software.amazon.awssdk.services.route53.model.ChangeAction;
+import software.amazon.awssdk.services.route53.model.ChangeBatch;
+import software.amazon.awssdk.services.route53.model.ChangeResourceRecordSetsRequest;
+import software.amazon.awssdk.services.route53.model.CreateHostedZoneRequest;
+import software.amazon.awssdk.services.route53.model.CreateHostedZoneResponse;
+import software.amazon.awssdk.services.route53.model.RRType;
+import software.amazon.awssdk.services.route53.model.ResourceRecord;
+import software.amazon.awssdk.services.route53.model.ResourceRecordSet;
 import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 
 import software.amazon.awssdk.core.SdkBytes;
@@ -74,11 +86,15 @@ import software.amazon.awssdk.services.lambda.model.InvokeRequest;
 import software.amazon.awssdk.services.lambda.model.InvokeResponse;
 import software.amazon.awssdk.services.lambda.model.InvocationType;
 import software.amazon.awssdk.services.lambda.model.Runtime;
+import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityResponse;
+import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -369,6 +385,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static MqClient mqClient() {
+        return MqClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AthenaClient athenaClient() {
         return AthenaClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -533,6 +557,75 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
+    }
+
+    public static Route53Client route53Client() {
+        return Route53Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static void verifySesDomainIdentityViaRoute53(SesV2Client sesV2, String domain) {
+        CreateEmailIdentityResponse identity = sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
+                .emailIdentity(domain)
+                .build());
+        List<String> tokens = identity.dkimAttributes() != null ? identity.dkimAttributes().tokens() : null;
+        if (tokens == null || tokens.isEmpty()) {
+            throw new IllegalStateException("CreateEmailIdentity did not return DKIM tokens for " + domain);
+        }
+
+        try (Route53Client route53 = route53Client()) {
+            CreateHostedZoneResponse zone = route53.createHostedZone(CreateHostedZoneRequest.builder()
+                    .name(domain)
+                    .callerReference(uniqueName("ses-dkim-zone"))
+                    .build());
+
+            List<Change> changes = tokens.stream()
+                    .map(token -> Change.builder()
+                            .action(ChangeAction.CREATE)
+                            .resourceRecordSet(ResourceRecordSet.builder()
+                                    .name(token + "._domainkey." + domain)
+                                    .type(RRType.CNAME)
+                                    .ttl(300L)
+                                    .resourceRecords(ResourceRecord.builder()
+                                            .value(token + ".dkim.amazonses.com")
+                                            .build())
+                                    .build())
+                            .build())
+                    .toList();
+
+            route53.changeResourceRecordSets(ChangeResourceRecordSetsRequest.builder()
+                    .hostedZoneId(stripHostedZonePrefix(zone.hostedZone().id()))
+                    .changeBatch(ChangeBatch.builder().changes(changes).build())
+                    .build());
+        }
+
+        for (int i = 0; i < 10; i++) {
+            boolean verified = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                    .emailIdentity(domain)
+                    .build())
+                    .verifiedForSendingStatus();
+            if (verified) {
+                return;
+            }
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for SES identity verification", e);
+            }
+        }
+
+        throw new IllegalStateException("SES identity was not verified after publishing DKIM records for " + domain);
+    }
+
+    private static String stripHostedZonePrefix(String hostedZoneId) {
+        String prefix = "/hostedzone/";
+        return hostedZoneId != null && hostedZoneId.startsWith(prefix)
+                ? hostedZoneId.substring(prefix.length())
+                : hostedZoneId;
     }
 
     public static RdsClient rdsClient() {
@@ -737,6 +830,14 @@ public final class TestFixtures {
 
     public static AppSyncClient appSyncClient() {
         return AppSyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static LightsailClient lightsailClient() {
+        return LightsailClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -915,8 +916,8 @@ public class CloudFrontController {
                         .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0")
                         .end("FunctionConfig")
                         .start("FunctionMetadata")
-                        .elem("FunctionARN", "arn:aws:cloudfront::" + service.getAccountId()
-                                + ":function/" + fn.getName())
+                        .elem("FunctionARN", AwsArnUtils.Arn.of("cloudfront", "", service.getAccountId(),
+                                "function/" + fn.getName()).toString())
                         .elem("Stage", fn.getStage())
                         .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                         .elem("LastModifiedTime",
@@ -2048,7 +2049,7 @@ public class CloudFrontController {
                 .end("FunctionConfig")
                 .start("FunctionMetadata")
                 .elem("FunctionARN",
-                        "arn:aws:cloudfront::" + service.getAccountId() + ":function/" + fn.getName())
+                        AwsArnUtils.Arn.of("cloudfront", "", service.getAccountId(), "function/" + fn.getName()).toString())
                 .elem("Stage", fn.getStage())
                 .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                 .elem("LastModifiedTime",

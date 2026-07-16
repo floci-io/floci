@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.cloudfront.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 import java.util.Map;
 
+@RegisterForReflection
 public class DistributionConfig {
 
     private String callerReference;
