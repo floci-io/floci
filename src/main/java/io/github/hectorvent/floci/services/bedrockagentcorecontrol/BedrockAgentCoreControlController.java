@@ -398,8 +398,9 @@ public class BedrockAgentCoreControlController {
 
     private static void putInstant(ObjectNode node, String field, Instant instant) {
         if (instant != null) {
-            // AgentCore models these timestamps as ISO-8601 strings, not epoch numbers.
-            node.put(field, instant.toString());
+            // AgentCore models these as ISO-8601 strings; second precision stays within
+            // AWS's 20-char timestamp limit.
+            node.put(field, instant.truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString());
         }
     }
 

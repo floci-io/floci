@@ -48,16 +48,24 @@ public class BedrockAgentCoreControlService {
 
     private final StorageBackend<String, AgentRuntime> storage;
     private final RegionResolver regionResolver;
+    private final BedrockAgentCoreIdentityService identityService;
 
     @Inject
-    public BedrockAgentCoreControlService(StorageFactory storageFactory, RegionResolver regionResolver) {
+    public BedrockAgentCoreControlService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                          BedrockAgentCoreIdentityService identityService) {
         this(storageFactory.create("bedrockagentcore", "bedrock-agentcore-runtimes.json",
-                new TypeReference<Map<String, AgentRuntime>>() {}), regionResolver);
+                new TypeReference<Map<String, AgentRuntime>>() {}), regionResolver, identityService);
     }
 
     BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver) {
+        this(storage, regionResolver, null);
+    }
+
+    BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver,
+                                   BedrockAgentCoreIdentityService identityService) {
         this.storage = storage;
         this.regionResolver = regionResolver;
+        this.identityService = identityService;
     }
 
     public AgentRuntime createAgentRuntime(String name, JsonNode artifact, JsonNode networkConfiguration,
@@ -98,8 +106,14 @@ public class BedrockAgentCoreControlService {
         runtime.setAuthorizerConfiguration(authorizerConfiguration);
         runtime.setProtocolConfiguration(protocolConfiguration);
         runtime.setEnvironmentVariables(environmentVariables != null ? new HashMap<>(environmentVariables) : new HashMap<>());
-        runtime.setWorkloadIdentityArn(regionResolver.buildArn(ARN_SERVICE, region,
-                "workload-identity-directory/default/workload-identity/" + name + "-" + randomId()));
+        String workloadName = name + "-" + randomId();
+        if (identityService != null) {
+            runtime.setWorkloadIdentityArn(
+                    identityService.createForRuntime(workloadName, region).getWorkloadIdentityArn());
+        } else {
+            runtime.setWorkloadIdentityArn(regionResolver.buildArn(ARN_SERVICE, region,
+                    "workload-identity-directory/default/workload-identity/" + workloadName));
+        }
         runtime.getVersions().add(snapshot(runtime, "1", now));
         runtime.getEndpoints().add(newEndpoint("DEFAULT", "1", null, now));
 
@@ -194,6 +208,43 @@ public class BedrockAgentCoreControlService {
 
     public String endpointArn(AgentRuntimeEndpoint endpoint, String region) {
         return regionResolver.buildArn(ARN_SERVICE, region, "agentEndpoint/" + endpoint.getUuid());
+    }
+
+    // ──────────────────────────── Tagging (Phase 4) ────────────────────────────
+
+    public Map<String, String> getTagsByArn(String region, String arn) {
+        return new HashMap<>(findByArn(region, arn).getTags());
+    }
+
+    public void tagByArn(String region, String arn, Map<String, String> tags) {
+        AgentRuntime runtime = findByArn(region, arn);
+        runtime.getTags().putAll(tags);
+        storage.put(key(region, runtime.getAgentRuntimeId()), runtime);
+    }
+
+    public void untagByArn(String region, String arn, List<String> keys) {
+        AgentRuntime runtime = findByArn(region, arn);
+        keys.forEach(runtime.getTags()::remove);
+        storage.put(key(region, runtime.getAgentRuntimeId()), runtime);
+    }
+
+    private AgentRuntime findByArn(String region, String arn) {
+        String uuid = uuidFromArn(arn);
+        String prefix = keyPrefix(region);
+        return storage.scan(k -> k.startsWith(prefix)).stream()
+                .filter(r -> uuid.equals(r.getUuid()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "AgentCore resource not found: " + arn, 404));
+    }
+
+    private static String uuidFromArn(String arn) {
+        // arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>
+        String[] parts = arn == null ? new String[0] : arn.split(":");
+        if (parts.length < 6 || !parts[5].startsWith("agent/")) {
+            throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
+        }
+        return parts[5].substring("agent/".length());
     }
 
     // ──────────────────────────── Endpoints (Phase 2) ────────────────────────────

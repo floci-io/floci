@@ -26,8 +26,11 @@ gateway/memory primitives.
 | `ListAgentRuntimeEndpoints` | List a runtime's endpoints (paginated) |
 | `DeleteAgentRuntimeEndpoint` | Delete an endpoint |
 | `InvokeAgentRuntime` *(data plane)* | Invoke a runtime; returns a fixed canned response |
+| `TagResource` / `UntagResource` / `ListTagsForResource` | Tag runtimes via the shared `/tags/{arn}` route |
+| `CreateWorkloadIdentity` / `GetWorkloadIdentity` / `UpdateWorkloadIdentity` / `DeleteWorkloadIdentity` / `ListWorkloadIdentities` | Manage workload identities (`POST /identities/<Op>`) |
 
-A `DEFAULT` endpoint is created automatically with each runtime.
+A `DEFAULT` endpoint is created automatically with each runtime, and each runtime
+is associated with an auto-created, resolvable workload identity.
 
 ## Data plane — `InvokeAgentRuntime`
 
