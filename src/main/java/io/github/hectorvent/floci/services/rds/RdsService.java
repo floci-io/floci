@@ -852,7 +852,10 @@ public class RdsService implements Resettable {
             groups.add(buildDefaultSubnetGroup(effectiveRegion(region)));
         }
         if (filterName != null && !filterName.isBlank()) {
-            subnetGroups.get(filterName).ifPresent(groups::add);
+            if (!"default".equalsIgnoreCase(filterName)) {
+                // Specific name: AWS DescribeDBSubnetGroups faults when absent (not empty 200).
+                groups.add(resolveDbSubnetGroupView(filterName, region));
+            }
             return groups;
         }
         groups.addAll(subnetGroups.scan(k -> true));
