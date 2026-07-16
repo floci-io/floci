@@ -40,6 +40,7 @@ public class AgentRuntime {
     private Map<String, String> environmentVariables = new HashMap<>();
     private Map<String, String> tags = new HashMap<>();
     private List<AgentRuntimeVersion> versions = new ArrayList<>();
+    private List<AgentRuntimeEndpoint> endpoints = new ArrayList<>();
 
     public String getAgentRuntimeId() {
         return agentRuntimeId;
@@ -183,5 +184,13 @@ public class AgentRuntime {
 
     public void setVersions(List<AgentRuntimeVersion> versions) {
         this.versions = versions;
+    }
+
+    public List<AgentRuntimeEndpoint> getEndpoints() {
+        return endpoints;
+    }
+
+    public void setEndpoints(List<AgentRuntimeEndpoint> endpoints) {
+        this.endpoints = endpoints;
     }
 }

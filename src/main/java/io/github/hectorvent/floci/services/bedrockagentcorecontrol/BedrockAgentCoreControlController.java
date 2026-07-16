@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeEndpoint;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeVersion;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.ListResult;
 import jakarta.inject.Inject;
@@ -236,6 +237,126 @@ public class BedrockAgentCoreControlController {
         } catch (Exception e) {
             return error(e, "deleting runtime");
         }
+    }
+
+    // ──────────────────────────── Endpoints (Phase 2) ────────────────────────────
+
+    @PUT
+    @Path("/runtimes/{agentRuntimeId}/runtime-endpoints/")
+    public Response createEndpoint(@Context HttpHeaders headers,
+                                   @PathParam("agentRuntimeId") String id,
+                                   String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
+            AgentRuntimeEndpoint endpoint = service.createEndpoint(id, text(req, "name"),
+                    text(req, "agentRuntimeVersion"), text(req, "description"), region);
+            AgentRuntime runtime = service.getAgentRuntime(id, region);
+            return Response.status(202).entity(endpointResponse(runtime, endpoint, region, false)).build();
+        } catch (Exception e) {
+            return error(e, "creating endpoint");
+        }
+    }
+
+    @GET
+    @Path("/runtimes/{agentRuntimeId}/runtime-endpoints/{endpointName}/")
+    public Response getEndpoint(@Context HttpHeaders headers,
+                                @PathParam("agentRuntimeId") String id,
+                                @PathParam("endpointName") String name) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            AgentRuntime runtime = service.getAgentRuntime(id, region);
+            AgentRuntimeEndpoint endpoint = service.getEndpoint(id, name, region);
+            return Response.ok(endpointResponse(runtime, endpoint, region, true)).build();
+        } catch (Exception e) {
+            return error(e, "getting endpoint");
+        }
+    }
+
+    @PUT
+    @Path("/runtimes/{agentRuntimeId}/runtime-endpoints/{endpointName}/")
+    public Response updateEndpoint(@Context HttpHeaders headers,
+                                   @PathParam("agentRuntimeId") String id,
+                                   @PathParam("endpointName") String name,
+                                   String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
+            AgentRuntimeEndpoint endpoint = service.updateEndpoint(id, name,
+                    text(req, "agentRuntimeVersion"), text(req, "description"), region);
+            AgentRuntime runtime = service.getAgentRuntime(id, region);
+            return Response.status(202).entity(endpointResponse(runtime, endpoint, region, true)).build();
+        } catch (Exception e) {
+            return error(e, "updating endpoint");
+        }
+    }
+
+    @DELETE
+    @Path("/runtimes/{agentRuntimeId}/runtime-endpoints/{endpointName}/")
+    public Response deleteEndpoint(@Context HttpHeaders headers,
+                                   @PathParam("agentRuntimeId") String id,
+                                   @PathParam("endpointName") String name,
+                                   @QueryParam("clientToken") String clientToken) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            AgentRuntimeEndpoint endpoint = service.deleteEndpoint(id, name, region);
+            ObjectNode out = objectMapper.createObjectNode();
+            out.put("agentRuntimeId", id);
+            out.put("endpointName", endpoint.getName());
+            out.put("status", endpoint.getStatus());
+            return Response.status(202).entity(out).build();
+        } catch (Exception e) {
+            return error(e, "deleting endpoint");
+        }
+    }
+
+    @POST
+    @Path("/runtimes/{agentRuntimeId}/runtime-endpoints/")
+    public Response listEndpoints(@Context HttpHeaders headers,
+                                  @PathParam("agentRuntimeId") String id,
+                                  @QueryParam("maxResults") Integer maxResults,
+                                  @QueryParam("nextToken") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            AgentRuntime runtime = service.getAgentRuntime(id, region);
+            ListResult<AgentRuntimeEndpoint> result =
+                    service.listEndpoints(id, maxResults != null ? maxResults : 0, nextToken, region);
+            ObjectNode out = objectMapper.createObjectNode();
+            ArrayNode arr = out.putArray("runtimeEndpoints");
+            for (AgentRuntimeEndpoint endpoint : result.items()) {
+                arr.add(endpointResponse(runtime, endpoint, region, true));
+            }
+            if (result.nextToken() != null) {
+                out.put("nextToken", result.nextToken());
+            }
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            return error(e, "listing endpoints");
+        }
+    }
+
+    private ObjectNode endpointResponse(AgentRuntime runtime, AgentRuntimeEndpoint endpoint,
+                                        String region, boolean full) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("agentRuntimeArn", service.arn(runtime, endpoint.getTargetVersion(), region));
+        node.put("agentRuntimeEndpointArn", service.endpointArn(endpoint, region));
+        node.put("agentRuntimeId", runtime.getAgentRuntimeId());
+        node.put("endpointName", endpoint.getName());
+        node.put("status", endpoint.getStatus());
+        node.put("targetVersion", endpoint.getTargetVersion());
+        putInstant(node, "createdAt", endpoint.getCreatedAt());
+        if (full) {
+            node.put("id", endpoint.getUuid());
+            node.put("name", endpoint.getName());
+            if (endpoint.getLiveVersion() != null) {
+                node.put("liveVersion", endpoint.getLiveVersion());
+            }
+            if (endpoint.getDescription() != null) {
+                node.put("description", endpoint.getDescription());
+            }
+            putInstant(node, "lastUpdatedAt", endpoint.getLastUpdatedAt());
+        }
+        return node;
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

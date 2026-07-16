@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeEndpoint;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeVersion;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.ListResult;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -100,6 +101,7 @@ public class BedrockAgentCoreControlService {
         runtime.setWorkloadIdentityArn(regionResolver.buildArn(ARN_SERVICE, region,
                 "workload-identity-directory/default/workload-identity/" + name + "-" + randomId()));
         runtime.getVersions().add(snapshot(runtime, "1", now));
+        runtime.getEndpoints().add(newEndpoint("DEFAULT", "1", null, now));
 
         storage.put(key(region, id), runtime);
         LOG.infov("Created AgentCore runtime {0} (id={1})", name, id);
@@ -188,6 +190,93 @@ public class BedrockAgentCoreControlService {
 
     public String arn(AgentRuntime runtime, String version, String region) {
         return regionResolver.buildArn(ARN_SERVICE, region, "agent/" + runtime.getUuid() + ":" + version);
+    }
+
+    public String endpointArn(AgentRuntimeEndpoint endpoint, String region) {
+        return regionResolver.buildArn(ARN_SERVICE, region, "agentEndpoint/" + endpoint.getUuid());
+    }
+
+    // ──────────────────────────── Endpoints (Phase 2) ────────────────────────────
+
+    public AgentRuntimeEndpoint createEndpoint(String runtimeId, String name, String agentRuntimeVersion,
+                                               String description, String region) {
+        if (name == null || !NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("ValidationException",
+                    "endpoint name must match [a-zA-Z][a-zA-Z0-9_]{0,47}", 400);
+        }
+        AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+        boolean exists = runtime.getEndpoints().stream().anyMatch(e -> name.equals(e.getName()));
+        if (exists) {
+            throw new AwsException("ConflictException",
+                    "AgentCore runtime endpoint already exists: " + name, 409);
+        }
+        String version = agentRuntimeVersion != null ? agentRuntimeVersion
+                : String.valueOf(runtime.getLatestVersion());
+        AgentRuntimeEndpoint endpoint = newEndpoint(name, version, description, Instant.now());
+        runtime.getEndpoints().add(endpoint);
+        storage.put(key(region, runtimeId), runtime);
+        LOG.infov("Created AgentCore endpoint {0} on runtime {1}", name, runtimeId);
+        return endpoint;
+    }
+
+    public AgentRuntimeEndpoint getEndpoint(String runtimeId, String name, String region) {
+        AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+        return findEndpoint(runtime, name);
+    }
+
+    public AgentRuntimeEndpoint updateEndpoint(String runtimeId, String name, String agentRuntimeVersion,
+                                               String description, String region) {
+        AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+        AgentRuntimeEndpoint endpoint = findEndpoint(runtime, name);
+        if (agentRuntimeVersion != null) {
+            endpoint.setTargetVersion(agentRuntimeVersion);
+            endpoint.setLiveVersion(agentRuntimeVersion);
+        }
+        if (description != null) {
+            endpoint.setDescription(description);
+        }
+        endpoint.setLastUpdatedAt(Instant.now());
+        storage.put(key(region, runtimeId), runtime);
+        return endpoint;
+    }
+
+    public AgentRuntimeEndpoint deleteEndpoint(String runtimeId, String name, String region) {
+        AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+        AgentRuntimeEndpoint endpoint = findEndpoint(runtime, name);
+        runtime.getEndpoints().removeIf(e -> name.equals(e.getName()));
+        endpoint.setStatus(STATUS_DELETING);
+        storage.put(key(region, runtimeId), runtime);
+        return endpoint;
+    }
+
+    public ListResult<AgentRuntimeEndpoint> listEndpoints(String runtimeId, int maxResults, String nextToken,
+                                                          String region) {
+        AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+        List<AgentRuntimeEndpoint> all = runtime.getEndpoints().stream()
+                .sorted(Comparator.comparing(AgentRuntimeEndpoint::getName))
+                .collect(Collectors.toList());
+        return paginate(all, AgentRuntimeEndpoint::getName, maxResults, nextToken);
+    }
+
+    private AgentRuntimeEndpoint findEndpoint(AgentRuntime runtime, String name) {
+        return runtime.getEndpoints().stream()
+                .filter(e -> e.getName().equals(name))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "AgentCore runtime endpoint not found: " + name, 404));
+    }
+
+    private AgentRuntimeEndpoint newEndpoint(String name, String version, String description, Instant now) {
+        AgentRuntimeEndpoint endpoint = new AgentRuntimeEndpoint();
+        endpoint.setName(name);
+        endpoint.setUuid(UUID.randomUUID().toString());
+        endpoint.setTargetVersion(version);
+        endpoint.setLiveVersion(version);
+        endpoint.setStatus(STATUS_READY);
+        endpoint.setDescription(description);
+        endpoint.setCreatedAt(now);
+        endpoint.setLastUpdatedAt(now);
+        return endpoint;
     }
 
     private AgentRuntimeVersion snapshot(AgentRuntime runtime, String version, Instant now) {
