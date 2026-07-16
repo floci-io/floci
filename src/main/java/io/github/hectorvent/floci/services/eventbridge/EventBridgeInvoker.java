@@ -146,7 +146,7 @@ public class EventBridgeInvoker {
             char c = template.charAt(i);
             if (c == '<') {
                 int close = template.indexOf('>', i + 1);
-                if (close > i) {
+                if (close >= 0) {
                     String name = template.substring(i + 1, close);
                     if (resolved.containsKey(name)) {
                         JsonNode node = resolved.get(name);
@@ -185,6 +185,7 @@ public class EventBridgeInvoker {
             String quoted = objectMapper.writeValueAsString(raw); // "escaped"
             return quoted.substring(1, quoted.length() - 1);       // strip surrounding quotes
         } catch (Exception e) {
+            LOG.warnv("Failed to JSON-escape raw template value ''{0}'': {1}", raw, e.getMessage());
             return raw;
         }
     }
