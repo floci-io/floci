@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeEndpoint;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeVersion;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.ListResult;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +14,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -211,5 +216,66 @@ class BedrockAgentCoreControlServiceTest {
         AgentRuntime deleted = service.deleteAgentRuntime(id, null, REGION);
         assertEquals("DELETING", deleted.getStatus());
         assertThrows(AwsException.class, () -> service.getAgentRuntime(id, REGION));
+    }
+
+    @Test
+    void runtimesAreIsolatedByRegion() {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        // Not visible or gettable from a different region.
+        assertTrue(service.listAgentRuntimes(0, null, "us-west-2").items().isEmpty());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.getAgentRuntime(id, "us-west-2")).getHttpStatus());
+        // Same id resolves in its own region.
+        assertEquals(id, service.getAgentRuntime(id, REGION).getAgentRuntimeId());
+    }
+
+    @Test
+    void concurrentCreatesAllPersist() throws InterruptedException {
+        int n = 32;
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        AtomicInteger failures = new AtomicInteger();
+        for (int i = 0; i < n; i++) {
+            final int idx = i;
+            pool.submit(() -> {
+                try {
+                    create("agent" + idx);
+                } catch (RuntimeException e) {
+                    failures.incrementAndGet();
+                }
+            });
+        }
+        pool.shutdown();
+        assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS), "tasks did not finish");
+        assertEquals(0, failures.get());
+        assertEquals(n, service.listAgentRuntimes(100, null, REGION).items().size());
+    }
+
+    @Test
+    void endpointRetargetsToRequestedVersion() {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        service.updateAgentRuntime(id, artifact(), network(),
+                "arn:aws:iam::000000000000:role/agent", "v2", null, null, null, REGION);
+
+        AgentRuntimeEndpoint ep = service.createEndpoint(id, "prod", "2", "prod ep", null, REGION);
+        assertEquals("2", ep.getTargetVersion());
+        assertEquals("2", ep.getLiveVersion());
+
+        AgentRuntimeEndpoint retargeted = service.updateEndpoint(id, "prod", "1", null, REGION);
+        assertEquals("1", retargeted.getTargetVersion());
+        assertEquals("1", service.getEndpoint(id, "prod", REGION).getTargetVersion());
+    }
+
+    @Test
+    void duplicateEndpointNameConflicts() {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        service.createEndpoint(id, "prod", null, null, null, REGION);
+        assertEquals(409, assertThrows(AwsException.class,
+                () -> service.createEndpoint(id, "prod", null, null, null, REGION)).getHttpStatus());
+        // The auto-created DEFAULT endpoint also conflicts.
+        assertEquals(409, assertThrows(AwsException.class,
+                () -> service.createEndpoint(id, "DEFAULT", null, null, null, REGION)).getHttpStatus());
     }
 }

@@ -71,6 +71,29 @@ class BedrockAgentCoreGatewayIntegrationTest {
 
     @Test
     @Order(4)
+    void updateGatewayAndTarget() {
+        given().contentType("application/json")
+                .body("{\"name\":\"myGateway\",\"authorizerType\":\"AWS_IAM\","
+                        + "\"roleArn\":\"arn:aws:iam::000000000000:role/gw2\",\"description\":\"updated gw\"}")
+                .when().put("/gateways/" + gatewayId + "/")
+                .then().statusCode(202);
+        given().when().get("/gateways/" + gatewayId + "/")
+                .then().statusCode(200)
+                .body("roleArn", equalTo("arn:aws:iam::000000000000:role/gw2"))
+                .body("description", equalTo("updated gw"));
+
+        given().contentType("application/json")
+                .body("{\"targetConfiguration\":{\"mcp\":{\"lambda\":{\"arn\":\"x\"}}},\"description\":\"t2\"}")
+                .when().put("/gateways/" + gatewayId + "/targets/" + targetId + "/")
+                .then().statusCode(202);
+        given().when().get("/gateways/" + gatewayId + "/targets/" + targetId + "/")
+                .then().statusCode(200)
+                .body("description", equalTo("t2"))
+                .body("targetConfiguration.mcp.lambda.arn", equalTo("x"));
+    }
+
+    @Test
+    @Order(5)
     void deleteTargetAndGateway() {
         given().when().delete("/gateways/" + gatewayId + "/targets/" + targetId + "/")
                 .then().statusCode(202)

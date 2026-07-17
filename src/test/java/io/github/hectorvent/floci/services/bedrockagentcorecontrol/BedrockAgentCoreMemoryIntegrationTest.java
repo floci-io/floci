@@ -73,4 +73,21 @@ class BedrockAgentCoreMemoryIntegrationTest {
                 .when().post("/memories/create")
                 .then().statusCode(400);
     }
+
+    @Test
+    @Order(6)
+    void eventExpiryDurationBoundaries() {
+        // In range (3..365) → accepted.
+        for (int v : new int[]{3, 365}) {
+            given().contentType("application/json")
+                    .body("{\"name\":\"memOk" + v + "\",\"eventExpiryDuration\":" + v + "}")
+                    .when().post("/memories/create").then().statusCode(202);
+        }
+        // Out of range → 400.
+        for (int v : new int[]{2, 366}) {
+            given().contentType("application/json")
+                    .body("{\"name\":\"memBad" + v + "\",\"eventExpiryDuration\":" + v + "}")
+                    .when().post("/memories/create").then().statusCode(400);
+        }
+    }
 }
