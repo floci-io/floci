@@ -23,7 +23,6 @@ import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
@@ -1407,7 +1406,10 @@ public class AslExecutor {
                         "The ItemReader, ItemBatcher and ResultWriter fields are not supported for INLINE maps");
             }
         }
-        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, input, jsonata, context, variables);
+        // AWS applies InputPath before ItemsPath, ItemSelector/Parameters, and ResultWriter
+        // Parameters. JSONata states do not support InputPath, so their effective input is unchanged.
+        JsonNode mapInput = jsonata ? input : applyInputPath(stateDef, input);
+        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables);
         JsonNode items = resolvedItems.items();
 
         if (!items.isArray()) {
@@ -1422,9 +1424,6 @@ public class AslExecutor {
         // Determine which transformation field is present (ItemSelector is current; Parameters is legacy)
         JsonNode itemTransform = stateDef.has("ItemSelector") ? stateDef.get("ItemSelector")
                 : stateDef.has("Parameters") ? stateDef.get("Parameters") : null;
-
-        // Resolve InputPath before iterating so $. in ItemSelector sees the Map state's effective input
-        JsonNode mapInput = applyInputPath(stateDef, input);
 
         ArrayNode results = objectMapper.createArrayNode();
         // When a ResultWriter exports results, AWS records each child execution's input and timing
@@ -1470,7 +1469,7 @@ public class AslExecutor {
         // given, exports them and yields a reference to the manifest instead of the inline array.
         JsonNode mapResult = results;
         if (hasResultWriter) {
-            mapResult = applyResultWriter(name, stateDef, input, results, childInputs, childTimings,
+            mapResult = applyResultWriter(name, stateDef, mapInput, results, childInputs, childTimings,
                     sm, context, jsonata);
         }
 
@@ -1532,55 +1531,70 @@ public class AslExecutor {
             return formatted;
         }
 
-        // Resolve the destination bucket/prefix: JSONata states carry them under Arguments, JSONPath
-        // states under Parameters (with optional reference paths into the Map state input).
-        JsonNode loc;
-        if (jsonata && writer.has("Arguments")) {
-            loc = jsonataEvaluator.resolveTemplate(writer.get("Arguments"), buildStatesVar(input, null, context));
-        } else if (writer.has("Parameters")) {
-            loc = resolveParameters(writer.get("Parameters"), input, context);
-        } else {
-            loc = objectMapper.createObjectNode();
+        try {
+            // Resolve the destination bucket/prefix: JSONata states carry them under Arguments,
+            // JSONPath states under Parameters. Reference paths see the Map's effective input after
+            // InputPath, which is supplied by executeMapState.
+            JsonNode loc;
+            if (jsonata && writer.has("Arguments")) {
+                loc = jsonataEvaluator.resolveTemplate(
+                        writer.get("Arguments"), buildStatesVar(input, null, context));
+            } else if (writer.has("Parameters")) {
+                loc = resolveParameters(writer.get("Parameters"), input, context);
+            } else {
+                loc = objectMapper.createObjectNode();
+            }
+            String bucket = loc.path("Bucket").asText(null);
+            String prefix = loc.path("Prefix").asText("");
+            if (bucket == null || bucket.isBlank()) {
+                throw new FailStateException("States.ResultWriterFailed",
+                        "ResultWriter destination bucket is required");
+            }
+
+            // AWS includes the Map label (or an automatically generated label) before the run id.
+            // The run id alone keys the exported result set under the user-supplied S3 prefix.
+            String mapRunId = UUID.randomUUID().toString();
+            String mapRunLabel = stateDef.path("Label").asText(null);
+            if (mapRunLabel == null || mapRunLabel.isEmpty()) {
+                mapRunLabel = UUID.randomUUID().toString();
+            }
+            String mapRunArn = "arn:aws:states:" + region + ":" + account + ":mapRun:"
+                    + smName + "/" + mapRunLabel + ":" + mapRunId;
+            String base = prefix.isEmpty()
+                    ? mapRunId + "/"
+                    : prefix + (prefix.endsWith("/") ? "" : "/") + mapRunId + "/";
+
+            String ext = "JSONL".equalsIgnoreCase(outputType) ? ".jsonl" : ".json";
+            String succeededKey = base + "SUCCEEDED_0" + ext;
+            String manifestKey = base + "manifest.json";
+
+            byte[] succeededBytes = serializeResultFile(formatted, outputType);
+            s3Service.putObject(bucket, succeededKey, succeededBytes, "application/json", new HashMap<>());
+
+            ObjectNode manifest = objectMapper.createObjectNode();
+            manifest.put("DestinationBucket", bucket);
+            manifest.put("MapRunArn", mapRunArn);
+            ObjectNode resultFiles = manifest.putObject("ResultFiles");
+            resultFiles.putArray("FAILED");
+            resultFiles.putArray("PENDING");
+            ObjectNode succeededEntry = resultFiles.putArray("SUCCEEDED").addObject();
+            succeededEntry.put("Key", succeededKey);
+            succeededEntry.put("Size", succeededBytes.length);
+            s3Service.putObject(bucket, manifestKey, objectMapper.writeValueAsBytes(manifest),
+                    "application/json", new HashMap<>());
+
+            ObjectNode mapResult = objectMapper.createObjectNode();
+            mapResult.put("MapRunArn", mapRunArn);
+            ObjectNode details = mapResult.putObject("ResultWriterDetails");
+            details.put("Bucket", bucket);
+            details.put("Key", manifestKey);
+            return mapResult;
+        } catch (FailStateException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new FailStateException("States.ResultWriterFailed",
+                    "Unable to export Map Run results: " + e.getClass().getSimpleName());
         }
-        String bucket = loc.path("Bucket").asText(null);
-        String prefix = loc.path("Prefix").asText("");
-        if (bucket == null || bucket.isBlank()) {
-            // No destination resolved; fall back to returning the formatted results inline.
-            return formatted;
-        }
-
-        // A Map Run id keys this run's exported result set; the same uuid appears in the MapRunArn
-        // and in the S3 key path (<Prefix>/<mapRunId>/...), matching AWS.
-        String mapRunId = java.util.UUID.randomUUID().toString();
-        String mapRunArn = "arn:aws:states:" + region + ":" + account + ":mapRun:"
-                + smName + "/" + mapRunId;
-        String base = prefix.isBlank() ? mapRunId + "/" : trimSlashes(prefix) + "/" + mapRunId + "/";
-
-        String ext = "JSONL".equalsIgnoreCase(outputType) ? ".jsonl" : ".json";
-        String succeededKey = base + "SUCCEEDED_0" + ext;
-        String manifestKey = base + "manifest.json";
-
-        byte[] succeededBytes = serializeResultFile(formatted, outputType);
-        s3Service.putObject(bucket, succeededKey, succeededBytes, "application/json", new HashMap<>());
-
-        ObjectNode manifest = objectMapper.createObjectNode();
-        manifest.put("DestinationBucket", bucket);
-        manifest.put("MapRunArn", mapRunArn);
-        ObjectNode resultFiles = manifest.putObject("ResultFiles");
-        resultFiles.putArray("FAILED");
-        resultFiles.putArray("PENDING");
-        ObjectNode succeededEntry = resultFiles.putArray("SUCCEEDED").addObject();
-        succeededEntry.put("Key", succeededKey);
-        succeededEntry.put("Size", succeededBytes.length);
-        s3Service.putObject(bucket, manifestKey, objectMapper.writeValueAsBytes(manifest),
-                "application/json", new HashMap<>());
-
-        ObjectNode mapResult = objectMapper.createObjectNode();
-        mapResult.put("MapRunArn", mapRunArn);
-        ObjectNode details = mapResult.putObject("ResultWriterDetails");
-        details.put("Bucket", bucket);
-        details.put("Key", manifestKey);
-        return mapResult;
     }
 
     /**
@@ -1660,19 +1674,6 @@ public class AslExecutor {
             return sb.toString().getBytes(StandardCharsets.UTF_8);
         }
         return objectMapper.writeValueAsBytes(formatted);
-    }
-
-    /** Strips leading and trailing '/' so a configured Prefix composes into a clean S3 key. */
-    private static String trimSlashes(String s) {
-        int start = 0;
-        int end = s.length();
-        while (start < end && s.charAt(start) == '/') {
-            start++;
-        }
-        while (end > start && s.charAt(end - 1) == '/') {
-            end--;
-        }
-        return s.substring(start, end);
     }
 
     private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input,

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
@@ -23,6 +24,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -88,8 +90,9 @@ class AslExecutorResultWriterTest {
     void exportWritesManifestAndResultFileAndReturnsResultWriterDetails() throws Exception {
         JsonNode stateDef = mapper.readTree("""
                 {"Type":"Map",
+                 "Label":"orders",
                  "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
-                   "Parameters":{"Bucket":"my-bucket","Prefix":"csvJobs"}}}
+                   "Parameters":{"Bucket":"my-bucket","Prefix":"/csvJobs//"}}}
                 """);
         ArrayNode results = arr("{\"ok\":1}", "{\"ok\":2}");
         ArrayNode inputs = arr("{\"in\":1}", "{\"in\":2}");
@@ -101,14 +104,14 @@ class AslExecutorResultWriterTest {
         // The Map state returns the MapRunArn + the S3 manifest location, not the inline array.
         assertTrue(out.has("MapRunArn"));
         assertTrue(out.path("MapRunArn").asText().startsWith(
-                "arn:aws:states:us-east-1:000000000000:mapRun:orderProcessing/"));
+                "arn:aws:states:us-east-1:000000000000:mapRun:orderProcessing/orders:"));
         assertEquals("my-bucket", out.path("ResultWriterDetails").path("Bucket").asText());
         String manifestKey = out.path("ResultWriterDetails").path("Key").asText();
-        assertTrue(manifestKey.startsWith("csvJobs/"), manifestKey);
+        assertTrue(manifestKey.startsWith("/csvJobs//"), manifestKey);
         assertTrue(manifestKey.endsWith("/manifest.json"), manifestKey);
         // The manifest uuid segment must match the MapRunArn uuid.
         String mapRunUuid = out.path("MapRunArn").asText().substring(
-                out.path("MapRunArn").asText().lastIndexOf('/') + 1);
+                out.path("MapRunArn").asText().lastIndexOf(':') + 1);
         assertTrue(manifestKey.contains("/" + mapRunUuid + "/"), manifestKey);
 
         // Capture the two S3 writes: SUCCEEDED_0.json and manifest.json.
@@ -209,6 +212,128 @@ class AslExecutorResultWriterTest {
     }
 
     @Test
+    void distributedMapAppliesInputPathBeforeItemsAndWriterParameters() throws Exception {
+        StateMachine machine = new StateMachine();
+        machine.setName("orderProcessing");
+        machine.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:orderProcessing");
+        machine.setRoleArn("arn:aws:iam::000000000000:role/test-role");
+        machine.setDefinition("""
+                {
+                  "StartAt":"Process",
+                  "States":{
+                    "Process":{
+                      "Type":"Map",
+                      "Label":"orders",
+                      "InputPath":"$.selected",
+                      "ItemsPath":"$.items",
+                      "ItemProcessor":{
+                        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                        "StartAt":"PassItem",
+                        "States":{"PassItem":{"Type":"Pass","End":true}}
+                      },
+                      "ResultWriter":{
+                        "Resource":"arn:aws:states:::s3:putObject",
+                        "Parameters":{
+                          "Bucket.$":"$.destination.bucket",
+                          "Prefix.$":"$.destination.prefix"
+                        }
+                      },
+                      "End":true
+                    }
+                  }
+                }
+                """);
+        Execution execution = execution(machine, "input-path", """
+                {
+                  "items":["wrong"],
+                  "destination":{"bucket":"raw-bucket","prefix":"raw-prefix"},
+                  "selected":{
+                    "items":[{"id":1},{"id":2}],
+                    "destination":{"bucket":"selected-bucket","prefix":"/csvJobs//"}
+                  }
+                }
+                """);
+
+        executor.executeSync(machine, execution, new ArrayList<>(), (updated, history) -> { });
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        JsonNode output = mapper.readTree(execution.getOutput());
+        assertEquals("selected-bucket", output.path("ResultWriterDetails").path("Bucket").asText());
+        String mapRunArn = output.path("MapRunArn").asText();
+        assertTrue(mapRunArn.startsWith(
+                "arn:aws:states:us-east-1:000000000000:mapRun:orderProcessing/orders:"), mapRunArn);
+        String mapRunId = mapRunArn.substring(mapRunArn.lastIndexOf(':') + 1);
+        String manifestKey = output.path("ResultWriterDetails").path("Key").asText();
+        assertTrue(manifestKey.startsWith("/csvJobs//" + mapRunId + "/"), manifestKey);
+
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        verify(s3Service, org.mockito.Mockito.times(2))
+                .putObject(eq("selected-bucket"), keys.capture(), any(byte[].class), anyString(), any());
+        assertTrue(keys.getAllValues().stream().allMatch(key -> key.startsWith("/csvJobs//" + mapRunId + "/")));
+    }
+
+    @Test
+    void s3WriteFailureRaisesCatchableResultWriterFailed() throws Exception {
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(), any()))
+                .thenThrow(new AwsException("NoSuchBucket", "Destination bucket does not exist", 404));
+        StateMachine machine = new StateMachine();
+        machine.setName("orderProcessing");
+        machine.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:orderProcessing");
+        machine.setRoleArn("arn:aws:iam::000000000000:role/test-role");
+        machine.setDefinition("""
+                {
+                  "StartAt":"Process",
+                  "States":{
+                    "Process":{
+                      "Type":"Map",
+                      "ItemsPath":"$.items",
+                      "ItemProcessor":{
+                        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                        "StartAt":"PassItem",
+                        "States":{"PassItem":{"Type":"Pass","End":true}}
+                      },
+                      "ResultWriter":{
+                        "Resource":"arn:aws:states:::s3:putObject",
+                        "Parameters":{"Bucket":"missing-bucket","Prefix":"results"}
+                      },
+                      "Catch":[{
+                        "ErrorEquals":["States.ResultWriterFailed"],
+                        "ResultPath":"$.writerError",
+                        "Next":"Recovered"
+                      }],
+                      "End":true
+                    },
+                    "Recovered":{"Type":"Pass","Result":{"caught":true},"End":true}
+                  }
+                }
+                """);
+        Execution execution = execution(machine, "writer-failure", "{\"items\":[1]}");
+
+        executor.executeSync(machine, execution, new ArrayList<>(), (updated, history) -> { });
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertTrue(mapper.readTree(execution.getOutput()).path("caught").asBoolean());
+    }
+
+    @Test
+    void exportWithoutResolvedBucketFailsInsteadOfReturningInlineResults() throws Exception {
+        JsonNode stateDef = mapper.readTree("""
+                {"Type":"Map",
+                 "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                   "Parameters":{"Prefix":"results"}}}
+                """);
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.applyResultWriter("Process", stateDef, mapper.createObjectNode(),
+                        arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
+                        sm, context, false));
+
+        assertEquals("States.ResultWriterFailed", failure.error);
+        verify(s3Service, org.mockito.Mockito.never())
+                .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
+    }
+
+    @Test
     void resultWriterOnInlineMapIsRejected() {
         StateMachine machine = new StateMachine();
         machine.setName("orderProcessing");
@@ -268,5 +393,15 @@ class AslExecutorResultWriterTest {
         }
         assertFalse(resultKey == null, "JSONL result file should use a .jsonl extension");
         assertTrue(out.path("ResultWriterDetails").path("Key").asText().endsWith("/manifest.json"));
+    }
+
+    private Execution execution(StateMachine machine, String name, String input) {
+        Execution execution = new Execution();
+        execution.setName(name);
+        execution.setExecutionArn(
+                "arn:aws:states:us-east-1:000000000000:execution:" + machine.getName() + ":" + name);
+        execution.setStateMachineArn(machine.getStateMachineArn());
+        execution.setInput(input);
+        return execution;
     }
 }
