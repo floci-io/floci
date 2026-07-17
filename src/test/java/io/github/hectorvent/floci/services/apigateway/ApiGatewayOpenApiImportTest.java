@@ -1568,6 +1568,65 @@ class ApiGatewayOpenApiImportTest {
         given().delete("/restapis/" + apiId);
     }
 
+    @Test
+    @Order(94)
+    void putRestApi_overwriteReplacesAuthorizersWithoutLeavingStaleEntries() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "OverwriteAuthAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "LambdaAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:overwriteAuthz/invocations"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/secure": {
+                      "get": {
+                        "security": [{"LambdaAuth": []}],
+                        "x-amazon-apigateway-integration": {"type": "MOCK"}
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        given()
+                .contentType(ContentType.JSON).queryParam("mode", "overwrite").body(spec)
+                .when().put("/restapis/" + apiId)
+                .then().statusCode(200);
+
+        String authorizerId = given()
+                .when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200)
+                .body("item", hasSize(1))
+                .extract().body().jsonPath().getString("item[0].id");
+        String resourceId = given()
+                .when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200)
+                .extract().body().jsonPath().getString("item.find { it.path == '/secure' }.id");
+
+        given()
+                .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("authorizationType", equalTo("CUSTOM"))
+                .body("authorizerId", equalTo(authorizerId));
+
+        given().delete("/restapis/" + apiId);
+    }
+
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test
