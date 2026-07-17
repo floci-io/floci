@@ -269,6 +269,35 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // Lightsail instance + disk (Resource Explorer 2 provider coverage)
+        given()
+            .header("X-Amz-Target", "Lightsail_20161128.CreateInstances")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {
+                    "instanceNames": ["re2-test-instance"],
+                    "availabilityZone": "us-east-1a",
+                    "blueprintId": "ubuntu_22_04",
+                    "bundleId": "nano_3_0",
+                    "tags": [{"key": "env", "value": "test"}]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Lightsail_20161128.CreateDisk")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {"diskName": "re2-test-disk", "availabilityZone": "us-east-1a", "sizeInGb": 8}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -439,7 +468,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm", "cognito-idp", "iam", "mq"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm", "cognito-idp", "iam", "mq", "lightsail"));
         }
     }
 
@@ -458,7 +487,9 @@ class ResourceExplorer2IntegrationTest {
             "pipes,       pipes:pipe",
             "acm,         acm:certificate",
             "cognito-idp, cognito-idp:userpool",
-            "mq,          mq:broker"
+            "mq,          mq:broker",
+            "lightsail,   lightsail:Instance",
+            "lightsail,   lightsail:Disk"
         })
         void resourceSurfacesViaListResources(String service, String resourceType) {
             given()

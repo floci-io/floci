@@ -5,8 +5,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -17,12 +21,14 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @ApplicationScoped
-public class LightsailService {
+public class LightsailService implements ResourceProvider {
 
     private static final String SERVICE = "lightsail";
     private static final String RESOURCE_INSTANCE = "Instance";
@@ -495,6 +501,51 @@ public class LightsailService {
 
     public ObjectNode isVpcPeered() {
         return mapper.createObjectNode().put("isPeered", false);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (ObjectNode node : resourceStore.scan(key -> true)) {
+            String arn = node.path("arn").asText(null);
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn,
+                    SERVICE + ":" + node.path("resourceType").asText(),
+                    SERVICE,
+                    parsed.region(),
+                    parsed.accountId(),
+                    reportedAt(node),
+                    tagsOf(node)));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType(SERVICE + ":" + RESOURCE_INSTANCE, SERVICE, true),
+                new SupportedResourceType(SERVICE + ":" + RESOURCE_DISK, SERVICE, true),
+                new SupportedResourceType(SERVICE + ":" + RESOURCE_KEY_PAIR, SERVICE, true),
+                // Lightsail static IPs are not taggable in AWS.
+                new SupportedResourceType(SERVICE + ":" + RESOURCE_STATIC_IP, SERVICE, false));
+    }
+
+    private static Instant reportedAt(ObjectNode node) {
+        double createdAt = node.path("createdAt").asDouble(0);
+        return createdAt > 0 ? Instant.ofEpochMilli(Math.round(createdAt * 1000)) : Instant.now();
+    }
+
+    private static Map<String, String> tagsOf(ObjectNode node) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (JsonNode tag : node.path("tags")) {
+            String key = tag.path("key").asText(null);
+            if (key != null) {
+                tags.put(key, tag.path("value").asText(""));
+            }
+        }
+        return tags;
     }
 
     private ObjectNode baseResource(String region, String availabilityZone, String resourceType, String name) {
