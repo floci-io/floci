@@ -2410,7 +2410,10 @@ public class CloudFrontController {
             if (!trustedKeyGroups.isEmpty()) {
                 dcb.setTrustedKeyGroups(trustedKeyGroups);
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOG.debugv("Invalid DefaultCacheBehavior XML: {0}", e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument", "The DefaultCacheBehavior configuration is invalid.", 400);
         }
         return dcb;
     }
@@ -2508,7 +2511,10 @@ public class CloudFrontController {
                 }
             }
             r.close();
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOG.debugv("Invalid CacheBehaviors XML: {0}", e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument", "The CacheBehaviors configuration is invalid.", 400);
         }
         return result;
     }

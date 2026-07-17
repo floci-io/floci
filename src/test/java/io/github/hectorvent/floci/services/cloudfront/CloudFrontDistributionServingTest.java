@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end tests for CloudFront distribution request-serving: a viewer request addressed to a
@@ -237,7 +238,96 @@ class CloudFrontDistributionServingTest {
             .body(containsString("<ResponsePagePath>/index.html</ResponsePagePath>"));
     }
 
+    @Test
+    void rejectsMalformedTrustedKeyGroupsInDefaultBehavior() {
+        String callerReference = "malformed-default-key-groups-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Quantity>1</Quantity>
+                    <Items><KeyGroup><Id>kg-private</Id></KeyGroup></Items>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
+    void rejectsMalformedTrustedKeyGroupsInOrderedBehavior() {
+        String callerReference = "malformed-ordered-key-groups-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                </DefaultCacheBehavior>
+                <CacheBehaviors>
+                  <Quantity>1</Quantity>
+                  <Items>
+                    <CacheBehavior>
+                      <PathPattern>/private/*</PathPattern>
+                      <TargetOriginId>o1</TargetOriginId>
+                      <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                      <TrustedKeyGroups>
+                        <Quantity>1</Quantity>
+                        <Items><KeyGroup><Id>kg-private</Id></KeyGroup></Items>
+                      </TrustedKeyGroups>
+                    </CacheBehavior>
+                  </Items>
+                </CacheBehaviors>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────────
+
+    private String distributionConfigXml(String callerReference, String cacheBehaviors) {
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>%s</CallerReference>
+                  <Origins>
+                    <Quantity>1</Quantity>
+                    <Items>
+                      <Origin>
+                        <Id>o1</Id>
+                        <DomainName>malformed-key-groups.s3.us-east-1.amazonaws.com</DomainName>
+                        <S3OriginConfig><OriginAccessIdentity></OriginAccessIdentity></S3OriginConfig>
+                      </Origin>
+                    </Items>
+                  </Origins>
+                  %s
+                  <Comment>must not be created</Comment>
+                  <Enabled>true</Enabled>
+                </DistributionConfig>
+                """.formatted(callerReference, cacheBehaviors);
+    }
+
+    private void assertDistributionWasNotCreated(String callerReference) {
+        assertTrue(cloudFrontService.listDistributions(null, Integer.MAX_VALUE).stream()
+                .noneMatch(d -> callerReference.equals(d.getConfig().getCallerReference())));
+    }
 
     private void createBucket(String bucket) {
         s3Service.createBucket(bucket, REGION);
