@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.lifecycle;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
+import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
@@ -83,6 +85,8 @@ public class EmulatorLifecycle {
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
+    private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
+    private final PersistentPathValidator persistentPathValidator;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -108,7 +112,9 @@ public class EmulatorLifecycle {
                              EcrRegistryManager ecrRegistryManager,
                              FlociUiManager flociUiManager,
                              InitLifecycleState initLifecycleState,
-                             SchemaCreationWorker schemaCreationWorker) {
+                             SchemaCreationWorker schemaCreationWorker,
+                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
+                             PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -134,6 +140,8 @@ public class EmulatorLifecycle {
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
         this.schemaCreationWorker = schemaCreationWorker;
+        this.containerTeardowns = containerTeardowns;
+        this.persistentPathValidator = persistentPathValidator;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -153,6 +161,8 @@ public class EmulatorLifecycle {
             throw new IllegalStateException("Boot hook execution failed", e);
         }
         initLifecycleState.markBootCompleted();
+
+        persistentPathValidator.validateAtBoot();
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
@@ -264,6 +274,17 @@ public class EmulatorLifecycle {
         rabbitMqManager.stopAll();
         ecrRegistryManager.shutdown();
         flociUiManager.shutdown();
+        // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
+        // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
+        // state written while stopping is captured by the final flush.
+        for (ContainerTeardown teardown : containerTeardowns) {
+            try {
+                teardown.stopManagedContainers();
+            } catch (Exception e) {
+                LOG.warnv("Container teardown failed for {0}: {1}",
+                        teardown.getClass().getSimpleName(), e.getMessage());
+            }
+        }
         storageFactory.shutdownAll();
 
         LOG.info("=== AWS Local Emulator Stopped ===");
