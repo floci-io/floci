@@ -1,12 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.net.URI;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -66,10 +66,12 @@ class CloudFormationGeneratedNameUniquenessIntegrationTest {
     }
 
     private static String outputValue(String xml, String key) {
-        Matcher m = Pattern.compile(
-                "<OutputKey>" + Pattern.quote(key) + "</OutputKey>\\s*<OutputValue>(.*?)</OutputValue>",
-                Pattern.DOTALL).matcher(xml);
-        return m.find() ? m.group(1) : null;
+        return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);
+    }
+
+    private static String queueName(String queueUrl) {
+        String path = URI.create(queueUrl).getPath();
+        return path.substring(path.lastIndexOf('/') + 1);
     }
 
     @Test
@@ -94,17 +96,25 @@ class CloudFormationGeneratedNameUniquenessIntegrationTest {
                 """;
 
         createStack(stackName, template);
-        String xml = describeStacks(stackName);
-        assertTrue(xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
-                "stack should be CREATE_COMPLETE");
+        try {
+            String xml = describeStacks(stackName);
+            assertTrue(xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
+                    "stack should be CREATE_COMPLETE");
 
-        String qOne = outputValue(xml, "QOne");
-        String qTwo = outputValue(xml, "QTwo");
-        assertTrue(qOne != null && !qOne.isBlank(), "QOne ref should be present");
-        assertTrue(qTwo != null && !qTwo.isBlank(), "QTwo ref should be present");
-        assertNotEquals(qOne, qTwo,
-                "two auto-named queues in a long-named stack must get distinct names (unique suffix preserved)");
-
-        deleteStack(stackName);
+            String qOne = outputValue(xml, "QOne");
+            String qTwo = outputValue(xml, "QTwo");
+            assertTrue(qOne != null && !qOne.isBlank(), "QOne ref should be present");
+            assertTrue(qTwo != null && !qTwo.isBlank(), "QTwo ref should be present");
+            String qOneName = queueName(qOne);
+            String qTwoName = queueName(qTwo);
+            assertTrue(qOneName.length() <= 80, "QOne must respect the SQS queue-name limit");
+            assertTrue(qTwoName.length() <= 80, "QTwo must respect the SQS queue-name limit");
+            assertTrue(qOneName.matches(".*-[0-9a-f]{12}$"), "QOne must retain its 12-hex uniqueness suffix");
+            assertTrue(qTwoName.matches(".*-[0-9a-f]{12}$"), "QTwo must retain its 12-hex uniqueness suffix");
+            assertNotEquals(qOne, qTwo,
+                    "two auto-named queues in a long-named stack must get distinct names (unique suffix preserved)");
+        } finally {
+            deleteStack(stackName);
+        }
     }
 }
