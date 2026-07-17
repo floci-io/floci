@@ -444,8 +444,10 @@ public class CloudFormationResourceProvisioner {
             } // KMS keys can't be immediately deleted; skip
             case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
             case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
-            case "AWS::SecretsManager::SecretTargetAttachment" ->
-                    detachSecretTarget(physicalId, null, region);
+            case "AWS::SecretsManager::SecretTargetAttachment" -> throw new AwsException(
+                    "ValidationError",
+                    "SecretTargetAttachment deletion requires the StackResource metadata that records its managed fields.",
+                    400);
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);

@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -304,6 +305,16 @@ class SecretTargetAttachmentCfnProvisionerTest {
         assertDoesNotThrow(() -> provisioner.delete(attachmentResource(), REGION));
         verify(secretsManagerService, never()).putSecretValue(
                 any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void physicalIdOnlyDeleteRefusesToGuessWhichSecretFieldsWereManaged() {
+        AwsException exception = assertThrows(AwsException.class, () -> provisioner.delete(
+                "AWS::SecretsManager::SecretTargetAttachment", SECRET_ARN, REGION));
+
+        assertEquals("ValidationError", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("StackResource metadata"));
+        verifyNoInteractions(secretsManagerService);
     }
 
     @ParameterizedTest
