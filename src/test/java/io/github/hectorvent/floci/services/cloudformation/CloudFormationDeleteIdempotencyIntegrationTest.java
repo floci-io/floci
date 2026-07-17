@@ -17,8 +17,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * no longer exist. Without the {@code *Safe} wrappers those "not found" errors flipped the stack to
  * DELETE_FAILED, wedging the stack name against a later create.
  *
- * <p>Exercised through the DynamoDB path (metadata-only, so Docker-free);
- * {@code deleteLambdaFunctionSafe} is the identical wrapper on the same delete code path.
+ * <p>Exercised end-to-end through the DynamoDB path (metadata-only, so Docker-free). Hermetic unit
+ * coverage verifies both the DynamoDB and Lambda wrappers, including propagation of other errors.
  */
 @QuarkusTest
 class CloudFormationDeleteIdempotencyIntegrationTest {
@@ -64,6 +64,8 @@ class CloudFormationDeleteIdempotencyIntegrationTest {
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
 
+        // CloudFormationQueryHandler awaits executeChangeSet before CreateStack returns, so this
+        // one-shot assertion verifies the handler's synchronous completion contract.
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
         // Remove the table out-of-band — mimics a rollback having already deleted it.
