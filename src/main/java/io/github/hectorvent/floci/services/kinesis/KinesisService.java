@@ -387,7 +387,7 @@ public class KinesisService {
         String raw = String.format("%s|%s|%s|%s|%d|%s",
                 streamName, shardId, type,
                 sequenceNumber != null ? sequenceNumber : "",
-                latestSnapshotIndex(stream, shardId, type),
+                iteratorStartIndex(stream, shardId, type),
                 timestampMillis != null ? timestampMillis.toString() : "");
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
@@ -409,15 +409,14 @@ public class KinesisService {
         return parts;
     }
 
-    private int latestSnapshotIndex(KinesisStream stream, String shardId, String type) {
-        if (!"LATEST".equals(type)) {
-            return 0;
-        }
+    private int iteratorStartIndex(KinesisStream stream, String shardId, String type) {
+        // AWS validates the shard at GetShardIterator time for every iterator type.
         KinesisShard shard = stream.getShards().stream()
                 .filter(s -> s.getShardId().equals(shardId))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
-        return shard.getRecords().size();
+        // LATEST resumes from the tip snapshot taken now; other types resolve in getRecords.
+        return "LATEST".equals(type) ? shard.getRecords().size() : 0;
     }
 
     private int parseIteratorIndex(String value) {
@@ -548,7 +547,7 @@ public class KinesisService {
         String raw = String.format("%s|%s|%s|%s|%d|",
                 streamName, shardId, type,
                 sequenceNumber != null ? sequenceNumber : "",
-                latestSnapshotIndex(stream, shardId, type));
+                iteratorStartIndex(stream, shardId, type));
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
