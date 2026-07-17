@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -325,6 +326,7 @@ class Ec2ServiceTest {
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
         Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
         String instanceId = inst.getInstanceId();
         String instanceAz = inst.getPlacement().getAvailabilityZone();
         Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
@@ -353,6 +355,7 @@ class Ec2ServiceTest {
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
         Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
         String instanceAz = inst.getPlacement().getAvailabilityZone();
         String volumeAz = List.of("us-east-1a", "us-east-1b", "us-east-1c").stream()
                 .filter(az -> !az.equals(instanceAz))
@@ -367,6 +370,23 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void attachVolumeThrowsWithIncorrectInstanceState() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.pending());
+        String az = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", az, "gp3", 8,
+                false, 0, null, null, List.of());
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.attachVolume("us-east-1", volume.getVolumeId(), inst.getInstanceId(), "/dev/sdf"));
+        assertEquals("IncorrectInstanceState", error.getErrorCode());
+    }
+
+    @Test
     void detachVolumeMarksVolumeAvailableAndClearsAttachment() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
@@ -374,6 +394,7 @@ class Ec2ServiceTest {
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
         Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
         String instanceId = inst.getInstanceId();
         String instanceAz = inst.getPlacement().getAvailabilityZone();
         Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
@@ -393,24 +414,36 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void detachRootVolumeRequiresForce() {
+    void detachRootVolumeRequiresForceAndStopped() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
-        String instanceId = reservation.getInstances().getFirst().getInstanceId();
-        String rootVolumeId = reservation.getInstances().getFirst().getRootVolumeId();
-        String rootDeviceName = reservation.getInstances().getFirst().getRootDeviceName();
+        Instance inst = reservation.getInstances().getFirst();
+        String instanceId = inst.getInstanceId();
+        String rootVolumeId = inst.getRootVolumeId();
+        String rootDeviceName = inst.getRootDeviceName();
 
+        // forced but not stopped
+        inst.setState(InstanceState.running());
         AwsException error = assertThrows(AwsException.class,
-                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, false));
-
-        assertEquals("InvalidParameterCombination", error.getErrorCode());
+                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, true));
+        assertEquals("OperationNotPermitted", error.getErrorCode());
         AwsException errorWithoutInstanceId = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, null, null, true));
+        assertEquals("OperationNotPermitted", errorWithoutInstanceId.getErrorCode());
+
+        // stopped but not forced
+        inst.setState(InstanceState.stopped());
+        error = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, false));
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        errorWithoutInstanceId = assertThrows(AwsException.class,
                 () -> service.detachVolume("us-east-1", rootVolumeId, null, null, false));
         assertEquals("InvalidParameterCombination", errorWithoutInstanceId.getErrorCode());
 
+        // success
         VolumeAttachment response = service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, true);
         assertEquals(rootVolumeId, response.getVolumeId());
         assertEquals(instanceId, response.getInstanceId());
