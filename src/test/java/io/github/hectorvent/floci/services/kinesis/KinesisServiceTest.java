@@ -109,6 +109,40 @@ class KinesisServiceTest {
     }
 
     @Test
+    void latestIteratorReturnsRecordsWrittenAfterItWasObtained() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.putRecord("my-stream", "before".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        String shardId = kinesisService.describeStream("my-stream", REGION).getShards().getFirst().getShardId();
+        String iterator = kinesisService.getShardIterator("my-stream", shardId, "LATEST", null, REGION);
+
+        kinesisService.putRecord("my-stream", "after".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
+        var records = (List<?>) result.get("Records");
+        assertEquals(1, records.size());
+        assertEquals("after", new String(((KinesisRecord) records.getFirst()).getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void latestIteratorContinuationPicksUpSubsequentWrites() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        String shardId = kinesisService.describeStream("my-stream", REGION).getShards().getFirst().getShardId();
+        String iterator = kinesisService.getShardIterator("my-stream", shardId, "LATEST", null, REGION);
+
+        // First poll before any write: empty, but the continuation iterator must not skip ahead.
+        Map<String, Object> first = kinesisService.getRecords(iterator, 10, REGION);
+        assertTrue(((List<?>) first.get("Records")).isEmpty());
+
+        kinesisService.putRecord("my-stream", "tailed".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        Map<String, Object> second = kinesisService.getRecords((String) first.get("NextShardIterator"), 10, REGION);
+        var records = (List<?>) second.get("Records");
+        assertEquals(1, records.size());
+        assertEquals("tailed", new String(((KinesisRecord) records.getFirst()).getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
     void millisBehindLatestIsZeroOnEmptyShard() {
         kinesisService.createStream("empty", 1, REGION);
         String shardId = kinesisService.describeStream("empty", REGION).getShards().getFirst().getShardId();
