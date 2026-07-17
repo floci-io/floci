@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import org.junit.jupiter.api.Test;
 
@@ -9,6 +10,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -63,9 +65,9 @@ class ResponseHeadersPolicyConfigCodecTest {
         assertEquals("1; mode=block", headers.get("X-XSS-Protection"));
         assertEquals("floci", headers.get("X-App"));
         assertEquals("*", headers.get("Access-Control-Allow-Origin"));
-        assertEquals("GET, HEAD", headers.get("Access-Control-Allow-Methods"));
         assertEquals("X-App", headers.get("Access-Control-Expose-Headers"));
-        assertEquals("600", headers.get("Access-Control-Max-Age"));
+        assertFalse(headers.containsKey("Access-Control-Allow-Methods"));
+        assertFalse(headers.containsKey("Access-Control-Max-Age"));
         // AllowCredentials=false is omitted, matching CloudFront (the header is only sent when true).
         assertFalse(headers.containsKey("Access-Control-Allow-Credentials"));
     }
@@ -74,7 +76,8 @@ class ResponseHeadersPolicyConfigCodecTest {
     void collidingMaxAgeFieldsStayInTheirOwnBlocks() {
         // AccessControlMaxAgeSec appears under both StrictTransportSecurity and CorsConfig; a flat
         // parse would conflate them. Structure-aware parsing keeps HSTS at 31536000 and CORS at 600.
-        Map<String, String> headers = headers(ResponseHeadersPolicyConfigCodec.parse(XML));
+        Map<String, String> headers = headers(
+                ResponseHeadersPolicyConfigCodec.parse(XML), "https://a.example", true);
         assertTrue(headers.get("Strict-Transport-Security").contains("31536000"));
         assertEquals("600", headers.get("Access-Control-Max-Age"));
     }
@@ -104,6 +107,105 @@ class ResponseHeadersPolicyConfigCodecTest {
     }
 
     @Test
+    void corsHeadersEchoTheMatchingViewerOriginAndOmitUnmatchedRequests() {
+        Map<String, Object> config = ResponseHeadersPolicyConfigCodec.parse("""
+                <ResponseHeadersPolicyConfig><CorsConfig>
+                  <AccessControlAllowOrigins><Quantity>2</Quantity><Items>
+                    <Origin>https://*.example.org</Origin><Origin>https://exact.test:8443</Origin>
+                  </Items></AccessControlAllowOrigins>
+                  <AccessControlAllowMethods><Quantity>1</Quantity><Items><Method>GET</Method></Items></AccessControlAllowMethods>
+                  <OriginOverride>true</OriginOverride>
+                </CorsConfig></ResponseHeadersPolicyConfig>
+                """);
+
+        Map<String, String> matching = headers(config, "https://api.example.org", true);
+        assertEquals("https://api.example.org", matching.get("Access-Control-Allow-Origin"));
+        assertEquals("GET", matching.get("Access-Control-Allow-Methods"));
+
+        Map<String, String> unmatched = headers(config, "https://attacker.example.com");
+        assertFalse(unmatched.containsKey("Access-Control-Allow-Origin"));
+        assertFalse(unmatched.containsKey("Access-Control-Allow-Methods"));
+        assertTrue(headers(config, null).isEmpty());
+    }
+
+    @Test
+    void preflightResponsesIncludeAllowListsAndMaxAge() {
+        Map<String, String> headers = headers(
+                ResponseHeadersPolicyConfigCodec.parse(XML), "https://a.example", true);
+
+        assertEquals("GET, HEAD", headers.get("Access-Control-Allow-Methods"));
+        assertEquals("600", headers.get("Access-Control-Max-Age"));
+    }
+
+    @Test
+    void preflightExpandsAllMethodsAndPreservesAuthorizationAlongsideWildcard() {
+        Map<String, Object> cors = new LinkedHashMap<>();
+        cors.put("AccessControlAllowOrigins", List.of("*"));
+        cors.put("AccessControlAllowMethods", List.of("ALL"));
+        cors.put("AccessControlAllowHeaders", List.of("*", "Authorization"));
+        cors.put("AccessControlAllowCredentials", "false");
+        cors.put("OriginOverride", "true");
+
+        Map<String, String> result = headers(
+                Map.of("CorsConfig", cors), "https://viewer.example", true);
+
+        assertEquals("DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT",
+                result.get("Access-Control-Allow-Methods"));
+        assertEquals("*, Authorization", result.get("Access-Control-Allow-Headers"));
+    }
+
+    @Test
+    void malformedOrMissingPolicyConfigIsRejected() {
+        AwsException malformed = assertThrows(AwsException.class,
+                () -> ResponseHeadersPolicyConfigCodec.parse(
+                        "<ResponseHeadersPolicyConfig><Name>broken</ResponseHeadersPolicyConfig>"));
+        assertEquals("InvalidArgument", malformed.getErrorCode());
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> ResponseHeadersPolicyConfigCodec.parse("<OtherConfig/>"));
+        assertEquals("InvalidArgument", missing.getErrorCode());
+    }
+
+    @Test
+    void rejectsMissingAndInconsistentListQuantities() {
+        AwsException inconsistent = assertThrows(AwsException.class,
+                () -> ResponseHeadersPolicyConfigCodec.parse("""
+                        <ResponseHeadersPolicyConfig><CorsConfig>
+                          <AccessControlAllowOrigins><Quantity>2</Quantity><Items>
+                            <Origin>*</Origin>
+                          </Items></AccessControlAllowOrigins>
+                        </CorsConfig></ResponseHeadersPolicyConfig>
+                        """));
+        assertEquals("InconsistentQuantities", inconsistent.getErrorCode());
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> ResponseHeadersPolicyConfigCodec.parse("""
+                        <ResponseHeadersPolicyConfig><RemoveHeadersConfig>
+                          <Items><ResponseHeadersPolicyRemoveHeader>
+                            <Header>Server</Header>
+                          </ResponseHeadersPolicyRemoveHeader></Items>
+                        </RemoveHeadersConfig></ResponseHeadersPolicyConfig>
+                        """));
+        assertEquals("InvalidArgument", missing.getErrorCode());
+    }
+
+    @Test
+    void originWildcardMatchingFollowsCloudFrontSchemeHostAndPortRules() {
+        assertTrue(ResponseHeadersPolicyConfigCodec.originMatches(
+                "http://*.example.org", "http://www.example.org"));
+        assertFalse(ResponseHeadersPolicyConfigCodec.originMatches(
+                "http://*.example.org", "https://www.example.org"));
+        assertFalse(ResponseHeadersPolicyConfigCodec.originMatches(
+                "http://*.example.org", "http://www.example.org:123"));
+        assertTrue(ResponseHeadersPolicyConfigCodec.originMatches(
+                "example.org", "https://example.org"));
+        assertTrue(ResponseHeadersPolicyConfigCodec.originMatches(
+                "http://example.org:*", "http://example.org"));
+        assertTrue(ResponseHeadersPolicyConfigCodec.originMatches(
+                "http://example.org:1*3", "http://example.org:1893"));
+    }
+
+    @Test
     void serializedConfigRoundTripsToTheSameHeaders() {
         Map<String, Object> config = ResponseHeadersPolicyConfigCodec.parse(XML);
         XmlBuilder xml = new XmlBuilder().start("ResponseHeadersPolicyConfig");
@@ -118,9 +220,19 @@ class ResponseHeadersPolicyConfigCodecTest {
     }
 
     private static Map<String, String> headers(Map<String, Object> config) {
+        return headers(config, "https://a.example");
+    }
+
+    private static Map<String, String> headers(Map<String, Object> config, String viewerOrigin) {
+        return headers(config, viewerOrigin, false);
+    }
+
+    private static Map<String, String> headers(Map<String, Object> config, String viewerOrigin,
+                                               boolean preflightRequest) {
         Map<String, String> map = new LinkedHashMap<>();
         for (ResponseHeadersPolicyConfigCodec.PolicyHeader h
-                : ResponseHeadersPolicyConfigCodec.directives(config).add()) {
+                : ResponseHeadersPolicyConfigCodec.directives(
+                        config, viewerOrigin, preflightRequest).add()) {
             map.put(h.name(), h.value());
         }
         return map;

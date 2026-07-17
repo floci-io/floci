@@ -1,20 +1,17 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import org.jboss.logging.Logger;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.xml.sax.InputSource;
+import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.core.common.XmlParser.XmlElement;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.StringReader;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Parses, re-serializes and applies a CloudFront {@code ResponseHeadersPolicyConfig}.
@@ -33,8 +30,6 @@ import java.util.Map;
  */
 final class ResponseHeadersPolicyConfigCodec {
 
-    private static final Logger LOG = Logger.getLogger(ResponseHeadersPolicyConfigCodec.class);
-
     private ResponseHeadersPolicyConfigCodec() {
     }
 
@@ -51,48 +46,55 @@ final class ResponseHeadersPolicyConfigCodec {
     /** Parses a {@code ResponseHeadersPolicyConfig} body into the nested {@code config} shape. */
     static Map<String, Object> parse(String body) {
         Map<String, Object> config = new LinkedHashMap<>();
-        Element root = configRoot(body);
+        XmlElement root = configRoot(body);
         if (root == null) {
-            return config;
+            throw new AwsException("InvalidArgument",
+                    "The request body must contain a valid ResponseHeadersPolicyConfig element.", 400);
         }
-        Element security = child(root, "SecurityHeadersConfig");
+        XmlElement security = child(root, "SecurityHeadersConfig");
         if (security != null) {
             Map<String, Object> sec = new LinkedHashMap<>();
             for (String block : List.of("XSSProtection", "FrameOptions", "ReferrerPolicy",
                     "ContentSecurityPolicy", "ContentTypeOptions", "StrictTransportSecurity")) {
-                Element el = child(security, block);
+                XmlElement el = child(security, block);
                 if (el != null) {
                     sec.put(block, scalarChildren(el));
                 }
             }
             config.put("SecurityHeadersConfig", sec);
         }
-        Element cors = child(root, "CorsConfig");
+        XmlElement cors = child(root, "CorsConfig");
         if (cors != null) {
             config.put("CorsConfig", parseCors(cors));
         }
-        Element custom = child(root, "CustomHeadersConfig");
+        XmlElement custom = child(root, "CustomHeadersConfig");
         if (custom != null) {
-            config.put("CustomHeadersConfig", itemsAsMaps(custom));
+            List<Map<String, String>> items = itemsAsMaps(custom);
+            validateDeclaredQuantity(custom, items.size(), "CustomHeadersConfig");
+            config.put("CustomHeadersConfig", items);
         }
-        Element remove = child(root, "RemoveHeadersConfig");
+        XmlElement remove = child(root, "RemoveHeadersConfig");
         if (remove != null) {
-            config.put("RemoveHeadersConfig", itemLeafValues(remove, "Header"));
+            List<String> items = itemLeafValues(remove, "Header");
+            validateDeclaredQuantity(remove, items.size(), "RemoveHeadersConfig");
+            config.put("RemoveHeadersConfig", items);
         }
-        Element serverTiming = child(root, "ServerTimingHeadersConfig");
+        XmlElement serverTiming = child(root, "ServerTimingHeadersConfig");
         if (serverTiming != null) {
             config.put("ServerTimingHeadersConfig", scalarChildren(serverTiming));
         }
         return config;
     }
 
-    private static Map<String, Object> parseCors(Element cors) {
+    private static Map<String, Object> parseCors(XmlElement cors) {
         Map<String, Object> map = new LinkedHashMap<>();
         for (String list : List.of("AccessControlAllowOrigins", "AccessControlAllowHeaders",
                 "AccessControlAllowMethods", "AccessControlExposeHeaders")) {
-            Element el = child(cors, list);
+            XmlElement el = child(cors, list);
             if (el != null) {
-                map.put(list, itemLeafValues(el, null));
+                List<String> items = itemLeafValues(el, null);
+                validateDeclaredQuantity(el, items.size(), list);
+                map.put(list, items);
             }
         }
         for (String scalar : List.of("AccessControlAllowCredentials", "AccessControlMaxAgeSec",
@@ -187,8 +189,19 @@ final class ResponseHeadersPolicyConfigCodec {
     // ── Apply ──────────────────────────────────────────────────────────────────
 
     /** Computes the headers this policy contributes to a response and the headers it removes. */
-    @SuppressWarnings("unchecked")
     static Directives directives(Map<String, Object> config) {
+        return directives(config, null);
+    }
+
+    /** Computes policy directives for a viewer request, including request-origin-aware CORS. */
+    static Directives directives(Map<String, Object> config, String viewerOrigin) {
+        return directives(config, viewerOrigin, false);
+    }
+
+    /** Computes policy directives, including the preflight-only CORS response fields when requested. */
+    @SuppressWarnings("unchecked")
+    static Directives directives(Map<String, Object> config, String viewerOrigin,
+                                 boolean preflightRequest) {
         List<PolicyHeader> add = new ArrayList<>();
         List<String> remove = new ArrayList<>();
         if (config == null) {
@@ -213,7 +226,7 @@ final class ResponseHeadersPolicyConfigCodec {
 
         Map<String, Object> cors = (Map<String, Object>) config.get("CorsConfig");
         if (cors != null) {
-            corsHeaders(cors, add);
+            corsHeaders(cors, viewerOrigin, preflightRequest, add);
         }
 
         List<String> removeCfg = (List<String>) config.get("RemoveHeadersConfig");
@@ -272,25 +285,109 @@ final class ResponseHeadersPolicyConfigCodec {
     }
 
     @SuppressWarnings("unchecked")
-    private static void corsHeaders(Map<String, Object> cors, List<PolicyHeader> add) {
+    private static void corsHeaders(Map<String, Object> cors, String viewerOrigin,
+                                    boolean preflightRequest,
+                                    List<PolicyHeader> add) {
         boolean override = Boolean.parseBoolean(String.valueOf(cors.get("OriginOverride")));
-        // Access-Control-Allow-Origin must be a single origin (or "*"); a comma-joined list is not a
-        // valid value. CloudFront echoes the matching request origin when several are configured; with
-        // no request context here, emit "*" when allowed, otherwise the first configured origin.
         List<String> origins = (List<String>) cors.get("AccessControlAllowOrigins");
-        if (origins != null && !origins.isEmpty()) {
-            add.add(new PolicyHeader("Access-Control-Allow-Origin",
-                    origins.contains("*") ? "*" : origins.get(0), override));
+        String allowOrigin = selectAllowOrigin(origins, viewerOrigin);
+        if (allowOrigin == null) {
+            // CloudFront emits CORS policy headers only for a request whose Origin matches the policy.
+            return;
         }
-        corsListHeader(cors, "AccessControlAllowHeaders", "Access-Control-Allow-Headers", override, add);
-        corsListHeader(cors, "AccessControlAllowMethods", "Access-Control-Allow-Methods", override, add);
+        add.add(new PolicyHeader("Access-Control-Allow-Origin", allowOrigin, override));
         corsListHeader(cors, "AccessControlExposeHeaders", "Access-Control-Expose-Headers", override, add);
         if (Boolean.parseBoolean(String.valueOf(cors.get("AccessControlAllowCredentials")))) {
             add.add(new PolicyHeader("Access-Control-Allow-Credentials", "true", override));
         }
-        Object maxAge = cors.get("AccessControlMaxAgeSec");
-        if (maxAge != null) {
-            add.add(new PolicyHeader("Access-Control-Max-Age", maxAge.toString(), override));
+        if (preflightRequest) {
+            corsListHeader(cors, "AccessControlAllowHeaders", "Access-Control-Allow-Headers", override, add);
+            corsMethodsHeader(cors, override, add);
+            Object maxAge = cors.get("AccessControlMaxAgeSec");
+            if (maxAge != null) {
+                add.add(new PolicyHeader("Access-Control-Max-Age", maxAge.toString(), override));
+            }
+        }
+    }
+
+    private static String selectAllowOrigin(List<String> allowedOrigins, String viewerOrigin) {
+        if (allowedOrigins == null || allowedOrigins.isEmpty()
+                || viewerOrigin == null || viewerOrigin.isBlank()) {
+            return null;
+        }
+        String origin = viewerOrigin.trim();
+        for (String allowed : allowedOrigins) {
+            if ("*".equals(allowed)) {
+                return "*";
+            }
+            if (originMatches(allowed, origin)) {
+                return origin;
+            }
+        }
+        return null;
+    }
+
+    /** Implements CloudFront's documented scheme, subdomain, and port wildcard origin matching. */
+    static boolean originMatches(String allowedOrigin, String viewerOrigin) {
+        if (allowedOrigin == null || allowedOrigin.isBlank()
+                || viewerOrigin == null || viewerOrigin.isBlank()) {
+            return false;
+        }
+        try {
+            URI viewer = URI.create(viewerOrigin.trim());
+            if (viewer.getScheme() == null || viewer.getHost() == null
+                    || viewer.getRawUserInfo() != null
+                    || (viewer.getRawPath() != null && !viewer.getRawPath().isEmpty())
+                    || viewer.getRawQuery() != null || viewer.getRawFragment() != null) {
+                return false;
+            }
+
+            String pattern = allowedOrigin.trim();
+            String allowedScheme = null;
+            int schemeEnd = pattern.indexOf("://");
+            if (schemeEnd >= 0) {
+                allowedScheme = pattern.substring(0, schemeEnd);
+                pattern = pattern.substring(schemeEnd + 3);
+            }
+            if (allowedScheme != null && !allowedScheme.equalsIgnoreCase(viewer.getScheme())) {
+                return false;
+            }
+            if (pattern.indexOf('/') >= 0 || pattern.indexOf('?') >= 0 || pattern.indexOf('#') >= 0) {
+                return false;
+            }
+
+            String hostPattern = pattern;
+            String portPattern = null;
+            int colon = pattern.lastIndexOf(':');
+            if (colon >= 0 && pattern.indexOf(':') == colon) {
+                hostPattern = pattern.substring(0, colon);
+                portPattern = pattern.substring(colon + 1);
+            }
+            String viewerHost = viewer.getHost().toLowerCase(Locale.ROOT);
+            String allowedHost = hostPattern.toLowerCase(Locale.ROOT);
+            boolean hostMatches;
+            if (allowedHost.startsWith("*.") && allowedHost.indexOf('*', 1) < 0) {
+                hostMatches = viewerHost.endsWith(allowedHost.substring(1));
+            } else {
+                hostMatches = allowedHost.indexOf('*') < 0 && viewerHost.equals(allowedHost);
+            }
+            if (!hostMatches) {
+                return false;
+            }
+
+            if (portPattern == null) {
+                return viewer.getPort() < 0;
+            }
+            if ("*".equals(portPattern)) {
+                return true;
+            }
+            if (viewer.getPort() < 0 || !portPattern.matches("[0-9*]+")) {
+                return false;
+            }
+            String portRegex = "\\Q" + portPattern.replace("*", "\\E.*\\Q") + "\\E";
+            return Pattern.matches(portRegex, Integer.toString(viewer.getPort()));
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
@@ -301,134 +398,103 @@ final class ResponseHeadersPolicyConfigCodec {
         if (values == null || values.isEmpty()) {
             return;
         }
-        String value = values.contains("*") ? "*" : String.join(", ", values);
-        add.add(new PolicyHeader(header, value, override));
+        add.add(new PolicyHeader(header, String.join(", ", values), override));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void corsMethodsHeader(Map<String, Object> cors, boolean override,
+                                          List<PolicyHeader> add) {
+        List<String> configured = (List<String>) cors.get("AccessControlAllowMethods");
+        if (configured == null || configured.isEmpty()) {
+            return;
+        }
+        List<String> methods = configured.stream().anyMatch("ALL"::equalsIgnoreCase)
+                ? List.of("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT")
+                : configured;
+        add.add(new PolicyHeader("Access-Control-Allow-Methods",
+                String.join(", ", methods), override));
     }
 
     private static boolean override(Map<String, String> block) {
         return Boolean.parseBoolean(block.getOrDefault("Override", "false"));
     }
 
-    // ── DOM helpers ──────────────────────────────────────────────────────────────
+    // ── Structured XML helpers ───────────────────────────────────────────────────
 
-    private static Element configRoot(String body) {
-        if (body == null || body.isBlank()) {
-            return null;
-        }
-        try {
-            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-            factory.setNamespaceAware(false);
-            DocumentBuilder builder = factory.newDocumentBuilder();
-            Document doc = builder.parse(new InputSource(new StringReader(body)));
-            Element root = doc.getDocumentElement();
-            if (root == null) {
-                return null;
-            }
-            if ("ResponseHeadersPolicyConfig".equals(root.getLocalName())
-                    || "ResponseHeadersPolicyConfig".equals(stripPrefix(root.getNodeName()))) {
-                return root;
-            }
-            return firstDescendant(root, "ResponseHeadersPolicyConfig");
-        } catch (Exception e) {
-            // A malformed policy body yields an empty config (no headers applied) rather than failing
-            // the create call; log it so the cause is diagnosable.
-            LOG.debugv("Ignoring unparseable ResponseHeadersPolicyConfig: {0}", e.getMessage());
-            return null;
-        }
+    private static XmlElement configRoot(String body) {
+        return XmlParser.extractElementTree(body, "ResponseHeadersPolicyConfig");
     }
 
-    private static Element firstDescendant(Element parent, String name) {
-        NodeList nodes = parent.getElementsByTagName("*");
-        for (int i = 0; i < nodes.getLength(); i++) {
-            Node n = nodes.item(i);
-            if (n instanceof Element el && name.equals(stripPrefix(el.getNodeName()))) {
-                return el;
-            }
-        }
-        return null;
+    private static XmlElement child(XmlElement parent, String name) {
+        return parent.child(name);
     }
 
-    private static Element child(Element parent, String name) {
-        NodeList children = parent.getChildNodes();
-        for (int i = 0; i < children.getLength(); i++) {
-            Node n = children.item(i);
-            if (n instanceof Element el && name.equals(stripPrefix(el.getNodeName()))) {
-                return el;
-            }
-        }
-        return null;
-    }
-
-    private static String childText(Element parent, String name) {
-        Element el = child(parent, name);
-        return el == null ? null : el.getTextContent().trim();
+    private static String childText(XmlElement parent, String name) {
+        XmlElement element = child(parent, name);
+        return element == null ? null : element.text();
     }
 
     /** Every direct leaf child of {@code parent}, as an ordered {name -> text} map. */
-    private static Map<String, String> scalarChildren(Element parent) {
+    private static Map<String, String> scalarChildren(XmlElement parent) {
         Map<String, String> map = new LinkedHashMap<>();
-        NodeList children = parent.getChildNodes();
-        for (int i = 0; i < children.getLength(); i++) {
-            if (children.item(i) instanceof Element el && !hasElementChild(el)) {
-                map.put(stripPrefix(el.getNodeName()), el.getTextContent().trim());
+        for (XmlElement element : parent.children()) {
+            if (element.children().isEmpty()) {
+                map.put(element.name(), element.text());
             }
         }
         return map;
     }
 
     /** Text of every leaf under a container's {@code Items}; {@code leafName} filters when non-null. */
-    private static List<String> itemLeafValues(Element container, String leafName) {
+    private static List<String> itemLeafValues(XmlElement container, String leafName) {
         List<String> values = new ArrayList<>();
-        Element items = child(container, "Items");
+        XmlElement items = child(container, "Items");
         if (items == null) {
             return values;
         }
-        NodeList children = items.getChildNodes();
-        for (int i = 0; i < children.getLength(); i++) {
-            if (!(children.item(i) instanceof Element item)) {
-                continue;
-            }
+        for (XmlElement item : items.children()) {
             if (leafName == null) {
-                values.add(item.getTextContent().trim());
+                values.add(item.text());
             } else {
                 String text = childText(item, leafName);
-                if (text != null) {
-                    values.add(text);
-                }
+                values.add(text == null ? "" : text);
             }
         }
         return values;
     }
 
     /** Each {@code Items} child element mapped to its own leaf children. */
-    private static List<Map<String, String>> itemsAsMaps(Element container) {
+    private static List<Map<String, String>> itemsAsMaps(XmlElement container) {
         List<Map<String, String>> list = new ArrayList<>();
-        Element items = child(container, "Items");
+        XmlElement items = child(container, "Items");
         if (items == null) {
             return list;
         }
-        NodeList children = items.getChildNodes();
-        for (int i = 0; i < children.getLength(); i++) {
-            if (children.item(i) instanceof Element item) {
-                list.add(scalarChildren(item));
-            }
+        for (XmlElement item : items.children()) {
+            list.add(scalarChildren(item));
         }
         return list;
     }
 
-    private static boolean hasElementChild(Element el) {
-        NodeList children = el.getChildNodes();
-        for (int i = 0; i < children.getLength(); i++) {
-            if (children.item(i) instanceof Element) {
-                return true;
-            }
+    private static void validateDeclaredQuantity(XmlElement container, int actual, String field) {
+        String rawQuantity = childText(container, "Quantity");
+        if (rawQuantity == null) {
+            throw new AwsException("InvalidArgument", field + " Quantity is required.", 400);
         }
-        return false;
-    }
-
-    private static String stripPrefix(String qName) {
-        int colon = qName.indexOf(':');
-        return colon < 0 ? qName : qName.substring(colon + 1);
+        final int declared;
+        try {
+            declared = Integer.parseInt(rawQuantity);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidArgument",
+                    field + " Quantity must be a non-negative integer.", 400);
+        }
+        if (declared < 0) {
+            throw new AwsException("InvalidArgument",
+                    field + " Quantity must be a non-negative integer.", 400);
+        }
+        if (declared != actual) {
+            throw new AwsException("InconsistentQuantities",
+                    field + " Quantity does not match the number of Items.", 400);
+        }
     }
 }

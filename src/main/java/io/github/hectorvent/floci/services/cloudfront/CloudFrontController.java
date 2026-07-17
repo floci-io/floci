@@ -565,20 +565,33 @@ public class CloudFrontController {
                                                 @QueryParam("MaxItems") @DefaultValue("100") int maxItems,
                                                 @QueryParam("Type") String type) {
         try {
-            List<ResponseHeadersPolicy> policies = service.listResponseHeadersPolicies(marker, maxItems);
-            boolean truncated = policies.size() == maxItems;
+            if (maxItems < 1 || maxItems > 100) {
+                throw new AwsException("InvalidArgument",
+                        "MaxItems must be between 1 and 100.", 400);
+            }
+            List<ResponseHeadersPolicy> policies =
+                    service.listResponseHeadersPolicies(marker, maxItems + 1, type);
+            boolean truncated = policies.size() > maxItems;
+            if (truncated) {
+                policies = new ArrayList<>(policies.subList(0, maxItems));
+            }
+            String nextMarker = truncated ? policies.get(policies.size() - 1).getId() : null;
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListResponseHeadersPoliciesResult", NS)
                     .start("ResponseHeadersPolicyList")
-                    .elem("Marker", marker != null ? marker : "")
-                    .elem("MaxItems", maxItems)
+                    .elem("Marker", marker != null ? marker : "");
+            if (nextMarker != null) {
+                xml.elem("NextMarker", nextMarker);
+            }
+            xml.elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
                     .elem("Quantity", policies.size())
                     .start("Items");
             for (ResponseHeadersPolicy p : policies) {
                 xml.start("ResponseHeadersPolicySummary")
-                        .elem("Type", "custom")
+                        .elem("Type", CloudFrontService.isManagedResponseHeadersPolicy(p.getId())
+                                ? "managed" : "custom")
                         .raw(xmlResponseHeadersPolicyResponse(p))
                         .end("ResponseHeadersPolicySummary");
             }
