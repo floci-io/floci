@@ -143,11 +143,13 @@ class KinesisServiceTest {
     }
 
     @Test
-    void latestIteratorUnknownShardThrows() {
+    void getShardIteratorUnknownShardThrowsForAllIteratorTypes() {
         kinesisService.createStream("my-stream", 1, REGION);
-        AwsException ex = assertThrows(AwsException.class, () ->
-                kinesisService.getShardIterator("my-stream", "shardId-999999999999", "LATEST", null, REGION));
-        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        for (String type : List.of("LATEST", "TRIM_HORIZON", "AT_SEQUENCE_NUMBER", "AFTER_SEQUENCE_NUMBER", "AT_TIMESTAMP")) {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kinesisService.getShardIterator("my-stream", "shardId-999999999999", type, "1", 0L, REGION));
+            assertEquals("ResourceNotFoundException", ex.getErrorCode(), type);
+        }
     }
 
     @Test
