@@ -178,7 +178,7 @@ public class CloudTrailService {
             for (MatchedTrail mt : matched) {
                 ObjectNode copy = record.deepCopy();
                 copy.put("recipientAccountId", regionResolver.getAccountId());
-                queueFor(new TrailKey(mt.region(), mt.trail().name())).add(copy);
+                queueFor(new TrailKey(mt.region(), mt.trail().name(), region)).add(copy);
                 LOG.tracev("Emitted CloudTrail event {0} for trail {1}", in.eventName(), mt.trail().name());
             }
         } catch (Exception e) {
@@ -188,14 +188,14 @@ public class CloudTrailService {
         }
     }
 
-    public void requeueRecords(String region, String trailName, List<ObjectNode> records) {
+    public void requeueRecords(TrailKey key, List<ObjectNode> records) {
         if (!records.isEmpty()) {
-            queueFor(new TrailKey(region, trailName)).addAll(records);
+            queueFor(key).addAll(records);
         }
     }
 
-    public List<ObjectNode> drainPendingRecords(String region, String trailName) {
-        ConcurrentLinkedQueue<ObjectNode> q = pendingRecordsByTrail.get(new TrailKey(region, trailName));
+    public List<ObjectNode> drainPendingRecords(TrailKey key) {
+        ConcurrentLinkedQueue<ObjectNode> q = pendingRecordsByTrail.get(key);
         if (q == null) return List.of();
         List<ObjectNode> drained = new ArrayList<>();
         ObjectNode r;
@@ -203,11 +203,6 @@ public class CloudTrailService {
             drained.add(r);
         }
         return drained;
-    }
-
-    public int pendingRecordCount(String region, String trailName) {
-        ConcurrentLinkedQueue<ObjectNode> q = pendingRecordsByTrail.get(new TrailKey(region, trailName));
-        return q == null ? 0 : q.size();
     }
 
     public List<TrailKey> trailsWithPendingRecords() {
@@ -230,7 +225,13 @@ public class CloudTrailService {
         return pendingRecordsByTrail.computeIfAbsent(key, k -> new ConcurrentLinkedQueue<>());
     }
 
-    public record TrailKey(String region, String trailName) {}
+    /**
+     * Identifies a pending-records queue.
+     * {@code region} is the trail's home region (used for trail store lookups).
+     * {@code eventRegion} is the region where the event occurred (used for the S3 delivery path).
+     * For single-region trails these are the same; for multi-region trails they differ.
+     */
+    public record TrailKey(String region, String trailName, String eventRegion) {}
 
     // --- Helpers ---
 
@@ -440,15 +441,21 @@ public class CloudTrailService {
     }
 
     private Trail findTrail(String region, String nameOrArn) {
-        for (String k : store.keys()) {
-            CloudTrailEntry entry = store.get(k).orElse(null);
-            if (entry == null) continue;
-            Trail t = entry.trail();
-            if (nameOrArn.equals(t.name()) || nameOrArn.equals(t.trailArn())) {
-                return t;
+        // ARN → cross-region scan is valid (callers use ARN to target another Region)
+        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+            for (String k : store.keys()) {
+                CloudTrailEntry entry = store.get(k).orElse(null);
+                if (entry == null) continue;
+                if (nameOrArn.equals(entry.trail().trailArn())) {
+                    return entry.trail();
+                }
             }
+            return null;
         }
-        return null;
+        // Name → region-scoped only (AWS resolves a name only in the current Region)
+        return store.get(regionKey(region, nameOrArn))
+                .map(CloudTrailEntry::trail)
+                .orElse(null);
     }
 
     private Trail findTrailOrThrow(String region, String nameOrArn) {

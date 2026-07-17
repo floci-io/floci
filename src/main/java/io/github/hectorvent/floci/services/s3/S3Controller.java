@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
@@ -97,6 +98,7 @@ public class S3Controller {
     private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
     private final CloudTrailService cloudTrailService;
     private final AccountResolver accountResolver;
+    private final RequestContext requestContext;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
@@ -105,7 +107,8 @@ public class S3Controller {
                         io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
                         io.github.hectorvent.floci.services.floci.ui.UiPages uiPages,
                         CloudTrailService cloudTrailService,
-                        AccountResolver accountResolver) {
+                        AccountResolver accountResolver,
+                        RequestContext requestContext) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
@@ -114,6 +117,7 @@ public class S3Controller {
         this.uiPages = uiPages;
         this.cloudTrailService = cloudTrailService;
         this.accountResolver = accountResolver;
+        this.requestContext = requestContext;
     }
 
     private void emitCloudTrailEvent(String eventName, String bucket, String key,
@@ -143,8 +147,10 @@ public class S3Controller {
                 LOG.tracev(e, "CloudTrail: could not extract request context for S3 event {0}/{1}", bucket, key);
             }
             String akid = accountResolver.extractAccessKeyId(authHeader);
+            String region = requestContext.getRegion() != null
+                    ? requestContext.getRegion() : regionResolver.getDefaultRegion();
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
-                    .region(regionResolver.getDefaultRegion())
+                    .region(region)
                     .eventName(eventName)
                     .bucketName(bucket)
                     .key(key)

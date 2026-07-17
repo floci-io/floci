@@ -173,9 +173,12 @@ public class IamActionRegistry {
         }
         // /{bucket}?acl → bucket-level; /{bucket}/{key}?acl → object-level
         String path = ctx.getUriInfo().getPath();
-        // Strip leading slash and check if there's a key segment after the bucket
+        // Strip leading slash, then check whether there is a key segment after the bucket.
+        // A trailing slash is a valid key character, so /bucket/folder/?acl is an object
+        // request — we cannot use endsWith("/") to infer bucket-level.
         String stripped = path.startsWith("/") ? path.substring(1) : path;
-        boolean isBucketLevel = !stripped.contains("/") || stripped.endsWith("/");
+        int firstSlash = stripped.indexOf('/');
+        boolean isBucketLevel = firstSlash < 0 || firstSlash == stripped.length() - 1;
         if (acl) {
             if (isBucketLevel) {
                 return switch (method) {

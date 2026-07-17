@@ -125,12 +125,11 @@ public class CloudTrailLogWriter {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
             // Trail was deleted while records were pending — drop them.
-            cloudTrailService.drainPendingRecords(key.region(), key.trailName());
+            cloudTrailService.drainPendingRecords(key);
             return;
         }
 
-        List<ObjectNode> records = cloudTrailService.drainPendingRecords(
-                key.region(), key.trailName());
+        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key);
         if (records.isEmpty()) {
             return;
         }
@@ -138,14 +137,16 @@ public class CloudTrailLogWriter {
         try {
             byte[] payload = serializeAndGzip(records);
             String accountId = regionResolver.getAccountId();
-            String objectKey = buildObjectKey(trail, accountId, key.region());
+            // Use the event region for the S3 delivery path so multi-region trail
+            // events from us-west-2 land under CloudTrail/us-west-2, not the trail's home region.
+            String objectKey = buildObjectKey(trail, accountId, key.eventRegion());
             s3Service.putObject(trail.s3BucketName(), objectKey, payload,
                     "application/x-gzip", Map.of());
             LOG.debugv("CloudTrail wrote {0} records to s3://{1}/{2}",
                     records.size(), trail.s3BucketName(), objectKey);
         } catch (RuntimeException e) {
             // Re-queue so records survive the failed flush and are retried next cycle.
-            cloudTrailService.requeueRecords(key.region(), key.trailName(), records);
+            cloudTrailService.requeueRecords(key, records);
             LOG.warnv(e, "CloudTrail flush failed for trail {0} ({1} records re-queued)",
                     key.trailName(), records.size());
             throw e;
