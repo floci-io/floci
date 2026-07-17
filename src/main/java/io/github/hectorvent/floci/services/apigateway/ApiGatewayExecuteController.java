@@ -706,7 +706,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    // Package-private for unit testing (see ProxyEventHeaderCollapseTest).
+    // Package-private for unit testing (see ApiGatewayExecuteControllerTest).
     void putSingleValueHeaders(ObjectNode event, HttpHeaders headers) {
         ObjectNode headersNode = event.putObject("headers");
         headers.getRequestHeaders().forEach((name, values) -> {
