@@ -181,4 +181,53 @@ class CloudFormationEventBusIntegrationTest {
         deleteStack(stackA);
         deleteStack(stackB);
     }
+
+    @Test
+    void failedStackCreateRollsBackRuleAndCustomEventBus() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "rollback-bus-" + suffix;
+        String stackName = "eventbus-rollback-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": { "Name": "%s" }
+                    },
+                    "Rule": {
+                      "Type": "AWS::Events::Rule",
+                      "DependsOn": "Bus",
+                      "Properties": {
+                        "EventBusName": { "Ref": "Bus" },
+                        "EventPattern": { "source": ["com.example.rollback"] },
+                        "State": "ENABLED"
+                      }
+                    },
+                    "BadSecret": {
+                      "Type": "AWS::SecretsManager::Secret",
+                      "DependsOn": "Rule",
+                      "Properties": {
+                        "Name": "rollback-secret-%s",
+                        "SecretString": "explicit",
+                        "GenerateSecretString": { "PasswordLength": 32 }
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName, suffix);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "ROLLBACK_COMPLETE");
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("ResourceNotFoundException"));
+    }
 }
