@@ -578,15 +578,7 @@ public class CloudFrontController {
             String nextMarker = truncated ? policies.get(policies.size() - 1).getId() : null;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListResponseHeadersPoliciesResult", NS)
-                    .start("ResponseHeadersPolicyList")
-                    .elem("Marker", marker != null ? marker : "");
-            if (nextMarker != null) {
-                xml.elem("NextMarker", nextMarker);
-            }
-            xml.elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", policies.size())
+                    .start("ResponseHeadersPolicyList", NS)
                     .start("Items");
             for (ResponseHeadersPolicy p : policies) {
                 xml.start("ResponseHeadersPolicySummary")
@@ -595,7 +587,13 @@ public class CloudFrontController {
                         .raw(xmlResponseHeadersPolicyResponse(p))
                         .end("ResponseHeadersPolicySummary");
             }
-            xml.end("Items").end("ResponseHeadersPolicyList").end("ListResponseHeadersPoliciesResult");
+            xml.end("Items")
+                    .elem("MaxItems", maxItems);
+            if (nextMarker != null) {
+                xml.elem("NextMarker", nextMarker);
+            }
+            xml.elem("Quantity", policies.size())
+                    .end("ResponseHeadersPolicyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);

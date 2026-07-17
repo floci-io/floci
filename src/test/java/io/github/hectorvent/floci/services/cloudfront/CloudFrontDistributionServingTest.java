@@ -395,16 +395,20 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
-    void listsManagedResponseHeadersPoliciesWithManagedType() {
+    void listsManagedResponseHeadersPoliciesWithAwsModeledPayloadRoot() {
         String body = given()
                 .queryParam("Type", "managed")
                 .when().get("/2020-05-31/response-headers-policy")
                 .then().statusCode(200)
                 .extract().asString();
 
+        assertTrue(body.startsWith("<ResponseHeadersPolicyList xmlns=\""
+                + "http://cloudfront.amazonaws.com/doc/2020-05-31/\">"), body);
+        assertFalse(body.contains("<ListResponseHeadersPoliciesResult"), body);
         assertTrue(body.contains("<Quantity>5</Quantity>"), body);
-        assertTrue(body.contains("<IsTruncated>false</IsTruncated>"), body);
         assertFalse(body.contains("<NextMarker>"), body);
+        assertFalse(body.contains("<Marker>"), body);
+        assertFalse(body.contains("<IsTruncated>"), body);
         assertTrue(body.contains("<Type>managed</Type>"), body);
         assertTrue(body.contains("Managed-SimpleCORS"), body);
         assertFalse(body.contains("<Type>custom</Type>"), body);
@@ -416,8 +420,8 @@ class CloudFrontDistributionServingTest {
                 .then().statusCode(200)
                 .extract().asString();
         assertTrue(firstPage.contains("<Quantity>1</Quantity>"), firstPage);
-        assertTrue(firstPage.contains("<IsTruncated>true</IsTruncated>"), firstPage);
         assertTrue(firstPage.contains("<NextMarker>"), firstPage);
+        assertFalse(firstPage.contains("<IsTruncated>"), firstPage);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
