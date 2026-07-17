@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
@@ -20,8 +21,6 @@ import org.jboss.logging.Logger;
 import java.net.IDN;
 import java.net.InetAddress;
 import java.net.URI;
-import java.net.UnknownHostException;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
@@ -63,20 +62,10 @@ public class CloudFrontServingController {
             "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "via",
             "content-length", "content-type");
 
-    // Instance (not static) field: a static HttpClient initialized at class-init time lands in the
-    // GraalVM native-image build heap (jdk.internal.net.http.HttpClientFacade is initialized at run
-    // time), which fails the native build. Creating it per-bean-instance keeps it out of the build
-    // heap, matching the apigatewayv2 HttpProxyInvoker pattern.
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
-
     private final CloudFrontService service;
     private final S3Service s3Service;
-    private final EmulatorConfig emulatorConfig;
     private final CurrentVertxRequest currentVertxRequest;
+    private final CloudFrontOriginHttpClient httpClient;
 
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
@@ -84,8 +73,18 @@ public class CloudFrontServingController {
                                        CurrentVertxRequest currentVertxRequest) {
         this.service = service;
         this.s3Service = s3Service;
-        this.emulatorConfig = emulatorConfig;
         this.currentVertxRequest = currentVertxRequest;
+        this.httpClient = new CloudFrontOriginHttpClient(
+                emulatorConfig.services().cloudfront().allowedPrivateOriginHosts().orElse(List.of()));
+    }
+
+    @PreDestroy
+    void closeHttpClient() {
+        try {
+            httpClient.close();
+        } catch (Exception e) {
+            LOG.debugv("Could not close CloudFront origin HTTP client: {0}", e.getMessage());
+        }
     }
 
     @GET
@@ -180,11 +179,6 @@ public class CloudFrontServingController {
         try {
             URI target = buildCustomOriginUri(
                     protocol, origin.getDomainName(), port, forwardUri, rawQuery);
-            String host = normalizeOriginHost(origin.getDomainName());
-            if (!isOriginAddressAllowed(host)) {
-                LOG.warnv("Blocked CloudFront custom origin host {0}: private or non-routable address", host);
-                return OriginResponse.error(502, "Bad Gateway.");
-            }
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(target)
                     .timeout(Duration.ofSeconds(30));
@@ -210,26 +204,6 @@ public class CloudFrontServingController {
                     safeOriginName(origin), e.getClass().getSimpleName());
             return OriginResponse.error(502, "Bad Gateway.");
         }
-    }
-
-    private boolean isOriginAddressAllowed(String host) throws UnknownHostException {
-        boolean explicitlyAllowed = emulatorConfig.services().cloudfront().allowedPrivateOriginHosts()
-                .orElse(List.of()).stream()
-                .map(CloudFrontServingController::normalizeHost)
-                .anyMatch(host::equals);
-        if (explicitlyAllowed) {
-            return true;
-        }
-        InetAddress[] addresses = InetAddress.getAllByName(host);
-        if (addresses.length == 0) {
-            return false;
-        }
-        for (InetAddress address : addresses) {
-            if (isBlockedOriginAddress(address)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     static boolean isBlockedOriginAddress(InetAddress address) {
@@ -293,7 +267,7 @@ public class CloudFrontServingController {
         return normalizeHost(authority.getHost());
     }
 
-    private static String normalizeHost(String host) {
+    static String normalizeHost(String host) {
         String normalized = host.trim();
         if (normalized.startsWith("[") && normalized.endsWith("]")) {
             normalized = normalized.substring(1, normalized.length() - 1);
