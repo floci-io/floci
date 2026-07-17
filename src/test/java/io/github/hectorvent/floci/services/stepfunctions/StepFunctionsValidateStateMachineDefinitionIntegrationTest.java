@@ -112,12 +112,34 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                         "StartAt":"PassItem",
                         "States":{"PassItem":{"Type":"Pass","End":true}}
                       },
-                      "ResultWriter":%s,
+                      "ResultWriter":__RESULT_WRITER__,
                       "End":true
                     }
                   }
                 }
-                """.formatted(resultWriter);
+                """.replace("__RESULT_WRITER__", resultWriter);
+    }
+
+    private static String jsonataDistributedMapWithResultWriter(String resultWriter) {
+        return """
+                {
+                  "QueryLanguage":"JSONata",
+                  "StartAt":"ProcessItems",
+                  "States":{
+                    "ProcessItems":{
+                      "Type":"Map",
+                      "Items":"{% $states.input.items %}",
+                      "ItemProcessor":{
+                        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                        "StartAt":"PassItem",
+                        "States":{"PassItem":{"Type":"Pass","End":true}}
+                      },
+                      "ResultWriter":__RESULT_WRITER__,
+                      "End":true
+                    }
+                  }
+                }
+                """.replace("__RESULT_WRITER__", resultWriter);
     }
 
     @Test
@@ -205,6 +227,100 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     }
 
     @Test
+    void jsonataResultWriterAcceptsExpressionFormArguments() {
+        String definition = jsonataDistributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Arguments":"{% $states.input.destination %}"
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void jsonataResultWriterRejectsJsonpathParameters() {
+        String definition = jsonataDistributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Arguments":{"Bucket":"results-bucket"},
+                  "Parameters":{"Bucket":"ignored-bucket"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/Parameters"));
+    }
+
+    @Test
+    void jsonpathResultWriterRejectsJsonataArguments() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Parameters":{"Bucket":"results-bucket"},
+                  "Arguments":{"Bucket":"ignored-bucket"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/Arguments"));
+    }
+
+    @Test
+    void writerConfigRequiresTransformationAndOutputTypeTogether() {
+        String definition = distributedMapWithResultWriter("""
+                {"WriterConfig":{"Transformation":"COMPACT"}}
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/WriterConfig"));
+    }
+
+    @Test
+    void writerConfigValuesMustBeStrings() {
+        String definition = distributedMapWithResultWriter("""
+                {"WriterConfig":{"Transformation":{},"OutputType":[]}}
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/WriterConfig"));
+    }
+
+    @Test
+    void resultWriterDestinationFieldsMustBeStrings() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Parameters":{"Bucket":42,"Prefix":{}}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2));
+    }
+
+    @Test
     void emptyResultWriter_returnsFailWithSchemaError() {
         validateDefinition(distributedMapWithResultWriter("{}"))
                 .then().statusCode(200)
@@ -224,6 +340,24 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("result", equalTo("FAIL"))
                 .body("diagnostics", hasSize(1))
                 .body("diagnostics[0].location", equalTo("/States/ProcessItems/ResultWriter"));
+    }
+
+    @Test
+    void nullResultWriterResourceIsNotTreatedAsAbsent() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":null,
+                  "Parameters":{"Bucket":"results-bucket"},
+                  "WriterConfig":{"Transformation":"COMPACT","OutputType":"JSON"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/Resource"));
     }
 
     @Test

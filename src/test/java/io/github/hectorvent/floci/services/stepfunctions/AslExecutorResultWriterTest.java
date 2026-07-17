@@ -140,8 +140,8 @@ class AslExecutorResultWriterTest {
         JsonNode rec = records.get(0);
         assertEquals("SUCCEEDED", rec.path("Status").asText());
         assertEquals("NOT_REDRIVABLE", rec.path("RedriveStatus").asText());
-        assertTrue(rec.path("ExecutionArn").asText().contains(":execution:orderProcessing/Process:"));
-        assertEquals("arn:aws:states:us-east-1:000000000000:stateMachine:orderProcessing/Process",
+        assertTrue(rec.path("ExecutionArn").asText().contains(":execution:orderProcessing/orders:"));
+        assertEquals("arn:aws:states:us-east-1:000000000000:stateMachine:orderProcessing/orders",
                 rec.path("StateMachineArn").asText());
         // Output is stored as a JSON string (not a nested object), matching AWS.
         assertTrue(rec.path("Output").isTextual());
@@ -273,6 +273,147 @@ class AslExecutorResultWriterTest {
     }
 
     @Test
+    void jsonataArgumentsExpressionCanUseWorkflowVariables() throws Exception {
+        StateMachine machine = new StateMachine();
+        machine.setName("orderProcessing");
+        machine.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:orderProcessing");
+        machine.setRoleArn("arn:aws:iam::000000000000:role/test-role");
+        machine.setDefinition("""
+                {
+                  "QueryLanguage":"JSONata",
+                  "StartAt":"SetDestination",
+                  "States":{
+                    "SetDestination":{
+                      "Type":"Pass",
+                      "Assign":{"destination":"{% $states.input.destination %}"},
+                      "Next":"Process"
+                    },
+                    "Process":{
+                      "Type":"Map",
+                      "Label":"orders",
+                      "Items":"{% $states.input.items %}",
+                      "ItemProcessor":{
+                        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                        "StartAt":"PassItem",
+                        "States":{"PassItem":{"Type":"Pass","End":true}}
+                      },
+                      "ResultWriter":{
+                        "Resource":"arn:aws:states:::s3:putObject",
+                        "Arguments":"{% $destination %}"
+                      },
+                      "End":true
+                    }
+                  }
+                }
+                """);
+        Execution execution = execution(machine, "jsonata-writer", """
+                {"items":[{"id":1}],"destination":{"Bucket":"jsonata-bucket","Prefix":"exports"}}
+                """);
+
+        executor.executeSync(machine, execution, new ArrayList<>(), (updated, history) -> { });
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        JsonNode output = mapper.readTree(execution.getOutput());
+        assertEquals("jsonata-bucket", output.path("ResultWriterDetails").path("Bucket").asText());
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        verify(s3Service, org.mockito.Mockito.times(2))
+                .putObject(eq("jsonata-bucket"), keys.capture(), any(byte[].class), anyString(), any());
+        assertTrue(keys.getAllValues().stream().allMatch(key -> key.startsWith("exports/")));
+    }
+
+    @Test
+    void jsonataArgumentsExpressionMustResolveToAnObject() throws Exception {
+        JsonNode stateDef = mapper.readTree("""
+                {"Type":"Map",
+                 "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                   "Arguments":"{% 1 %}"}}
+                """);
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.applyResultWriter("Process", stateDef, mapper.createObjectNode(),
+                        arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
+                        sm, context, true));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertTrue(failure.getMessage().contains("must resolve to an object"), failure.getMessage());
+        verify(s3Service, org.mockito.Mockito.never())
+                .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
+    }
+
+    @Test
+    void jsonataDestinationFieldsMustResolveToStrings() throws Exception {
+        JsonNode stateDef = mapper.readTree("""
+                {"Type":"Map",
+                 "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                   "Arguments":{"Bucket":"{% 42 %}","Prefix":"results"}}}
+                """);
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.applyResultWriter("Process", stateDef, mapper.createObjectNode(),
+                        arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
+                        sm, context, true));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertTrue(failure.getMessage().contains("Bucket must resolve to a string"), failure.getMessage());
+        verify(s3Service, org.mockito.Mockito.never())
+                .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
+    }
+
+    @Test
+    void jsonataDestinationNullsAreTypeErrorsRatherThanMissingValues() throws Exception {
+        JsonNode stateDef = mapper.readTree("""
+                {"Type":"Map",
+                 "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                   "Arguments":"{% $states.input.destination %}"}}
+                """);
+
+        AslExecutor.FailStateException bucketFailure = assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.applyResultWriter("Process", stateDef,
+                        mapper.readTree("{\"destination\":{\"Bucket\":null}}"),
+                        arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
+                        sm, context, true));
+        assertEquals("States.QueryEvaluationError", bucketFailure.error);
+        assertTrue(bucketFailure.getMessage().contains("Bucket must resolve to a string"));
+
+        AslExecutor.FailStateException prefixFailure = assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.applyResultWriter("Process", stateDef,
+                        mapper.readTree("{\"destination\":{\"Bucket\":\"b\",\"Prefix\":null}}"),
+                        arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
+                        sm, context, true));
+        assertEquals("States.QueryEvaluationError", prefixFailure.error);
+        assertTrue(prefixFailure.getMessage().contains("Prefix must resolve to a string"));
+
+        JsonNode nestedBucketStateDef = mapper.readTree("""
+                {"Type":"Map",
+                 "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                   "Arguments":{"Bucket":"{% null %}","Prefix":"results"}}}
+                """);
+        AslExecutor.FailStateException nestedBucketFailure = assertThrows(
+                AslExecutor.FailStateException.class,
+                () -> executor.applyResultWriter("Process", nestedBucketStateDef, mapper.createObjectNode(),
+                        arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
+                        sm, context, true));
+        assertEquals("States.QueryEvaluationError", nestedBucketFailure.error);
+        assertTrue(nestedBucketFailure.getMessage().contains("Bucket must resolve to a string"));
+
+        JsonNode nestedPrefixStateDef = mapper.readTree("""
+                {"Type":"Map",
+                 "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
+                   "Arguments":{"Bucket":"b","Prefix":"{% $states.input.missing %}"}}}
+                """);
+        AslExecutor.FailStateException nestedPrefixFailure = assertThrows(
+                AslExecutor.FailStateException.class,
+                () -> executor.applyResultWriter("Process", nestedPrefixStateDef, mapper.createObjectNode(),
+                        arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
+                        sm, context, true));
+        assertEquals("States.QueryEvaluationError", nestedPrefixFailure.error);
+        assertTrue(nestedPrefixFailure.getMessage().contains("Prefix must resolve to a string"));
+
+        verify(s3Service, org.mockito.Mockito.never())
+                .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
+    }
+
+    @Test
     void s3WriteFailureRaisesCatchableResultWriterFailed() throws Exception {
         when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(), any()))
                 .thenThrow(new AwsException("NoSuchBucket", "Destination bucket does not exist", 404));
@@ -303,7 +444,7 @@ class AslExecutorResultWriterTest {
                       }],
                       "End":true
                     },
-                    "Recovered":{"Type":"Pass","Result":{"caught":true},"End":true}
+                    "Recovered":{"Type":"Pass","End":true}
                   }
                 }
                 """);
@@ -312,7 +453,11 @@ class AslExecutorResultWriterTest {
         executor.executeSync(machine, execution, new ArrayList<>(), (updated, history) -> { });
 
         assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
-        assertTrue(mapper.readTree(execution.getOutput()).path("caught").asBoolean());
+        JsonNode output = mapper.readTree(execution.getOutput());
+        assertEquals("States.ResultWriterFailed",
+                output.path("writerError").path("Error").asText());
+        assertTrue(output.path("writerError").path("Cause").asText()
+                .contains("Destination bucket does not exist"), output.toString());
     }
 
     @Test
@@ -365,7 +510,7 @@ class AslExecutorResultWriterTest {
     }
 
     @Test
-    void jsonlOutputTypeWritesOneJsonRecordPerLine() throws Exception {
+    void jsonlOutputTypeWritesOneJsonRecordPerLineInJsonNamedFile() throws Exception {
         JsonNode stateDef = mapper.readTree("""
                 {"Type":"Map",
                  "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
@@ -383,7 +528,7 @@ class AslExecutorResultWriterTest {
         verify(s3Service, org.mockito.Mockito.times(2))
                 .putObject(anyString(), keys.capture(), bodies.capture(), anyString(), any());
         for (int i = 0; i < keys.getAllValues().size(); i++) {
-            if (keys.getAllValues().get(i).endsWith("SUCCEEDED_0.jsonl")) {
+            if (keys.getAllValues().get(i).endsWith("SUCCEEDED_0.json")) {
                 resultKey = keys.getAllValues().get(i);
                 String body = new String(bodies.getAllValues().get(i), java.nio.charset.StandardCharsets.UTF_8);
                 String[] lines = body.strip().split("\n");
@@ -391,7 +536,7 @@ class AslExecutorResultWriterTest {
                 assertEquals(1, mapper.readTree(lines[0]).path("a").asInt());
             }
         }
-        assertFalse(resultKey == null, "JSONL result file should use a .jsonl extension");
+        assertFalse(resultKey == null, "JSONL serialization should retain AWS's .json result-file name");
         assertTrue(out.path("ResultWriterDetails").path("Key").asText().endsWith("/manifest.json"));
     }
 

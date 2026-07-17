@@ -1470,7 +1470,7 @@ public class AslExecutor {
         JsonNode mapResult = results;
         if (hasResultWriter) {
             mapResult = applyResultWriter(name, stateDef, mapInput, results, childInputs, childTimings,
-                    sm, context, jsonata);
+                    sm, context, jsonata, variables);
         }
 
         if (jsonata) {
@@ -1510,6 +1510,14 @@ public class AslExecutor {
     JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
                                        ArrayNode results, ArrayNode childInputs, List<long[]> childTimings,
                                        StateMachine sm, JsonNode context, boolean jsonata) throws Exception {
+        return applyResultWriter(mapStateName, stateDef, input, results, childInputs, childTimings,
+                sm, context, jsonata, objectMapper.createObjectNode());
+    }
+
+    private JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
+                                       ArrayNode results, ArrayNode childInputs, List<long[]> childTimings,
+                                       StateMachine sm, JsonNode context, boolean jsonata,
+                                       ObjectNode variables) throws Exception {
         JsonNode writer = stateDef.get("ResultWriter");
         JsonNode writerConfig = writer.path("WriterConfig");
         boolean export = writer.hasNonNull("Resource");
@@ -1522,9 +1530,13 @@ public class AslExecutor {
         String region = extractRegionFromArn(sm.getStateMachineArn());
         String account = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
         String smName = context.path("StateMachine").path("Name").asText(sm.getName());
+        String mapRunLabel = stateDef.path("Label").asText(null);
+        if (mapRunLabel == null || mapRunLabel.isBlank()) {
+            mapRunLabel = UUID.randomUUID().toString();
+        }
 
         JsonNode formatted = formatMapResults(transformation, results, childInputs, childTimings,
-                region, account, smName, mapStateName);
+                region, account, smName, mapRunLabel);
 
         if (!export) {
             // WriterConfig only: return the formatted results to the next state (no S3 write).
@@ -1537,35 +1549,63 @@ public class AslExecutor {
             // InputPath, which is supplied by executeMapState.
             JsonNode loc;
             if (jsonata && writer.has("Arguments")) {
+                JsonNode arguments = writer.get("Arguments");
                 loc = jsonataEvaluator.resolveTemplate(
-                        writer.get("Arguments"), buildStatesVar(input, null, context));
+                        arguments, buildStatesVar(input, null, context), variables);
+                if (arguments.isObject()) {
+                    if (arguments.has("Bucket") && !loc.has("Bucket")) {
+                        throw new FailStateException("States.QueryEvaluationError",
+                                "ResultWriter Bucket must resolve to a string");
+                    }
+                    if (arguments.has("Prefix") && !loc.has("Prefix")) {
+                        throw new FailStateException("States.QueryEvaluationError",
+                                "ResultWriter Prefix must resolve to a string");
+                    }
+                }
             } else if (writer.has("Parameters")) {
                 loc = resolveParameters(writer.get("Parameters"), input, context);
             } else {
                 loc = objectMapper.createObjectNode();
             }
-            String bucket = loc.path("Bucket").asText(null);
-            String prefix = loc.path("Prefix").asText("");
-            if (bucket == null || bucket.isBlank()) {
+            if (!loc.isObject()) {
+                throw new FailStateException(
+                        jsonata ? "States.QueryEvaluationError" : "States.ResultWriterFailed",
+                        "ResultWriter " + (jsonata ? "Arguments" : "Parameters")
+                                + " must resolve to an object");
+            }
+            JsonNode bucketNode = loc.get("Bucket");
+            if (bucketNode == null) {
                 throw new FailStateException("States.ResultWriterFailed",
                         "ResultWriter destination bucket is required");
             }
+            if (!bucketNode.isTextual()) {
+                throw new FailStateException(
+                        jsonata ? "States.QueryEvaluationError" : "States.ResultWriterFailed",
+                        "ResultWriter Bucket must resolve to a string");
+            }
+            String bucket = bucketNode.asText();
+            if (bucket.isBlank()) {
+                throw new FailStateException("States.ResultWriterFailed",
+                        "ResultWriter destination bucket is required");
+            }
+            JsonNode prefixNode = loc.get("Prefix");
+            if (prefixNode != null && !prefixNode.isTextual()) {
+                throw new FailStateException(
+                        jsonata ? "States.QueryEvaluationError" : "States.ResultWriterFailed",
+                        "ResultWriter Prefix must resolve to a string");
+            }
+            String prefix = prefixNode == null ? "" : prefixNode.asText();
 
             // AWS includes the Map label (or an automatically generated label) before the run id.
             // The run id alone keys the exported result set under the user-supplied S3 prefix.
             String mapRunId = UUID.randomUUID().toString();
-            String mapRunLabel = stateDef.path("Label").asText(null);
-            if (mapRunLabel == null || mapRunLabel.isEmpty()) {
-                mapRunLabel = UUID.randomUUID().toString();
-            }
             String mapRunArn = "arn:aws:states:" + region + ":" + account + ":mapRun:"
                     + smName + "/" + mapRunLabel + ":" + mapRunId;
             String base = prefix.isEmpty()
                     ? mapRunId + "/"
                     : prefix + (prefix.endsWith("/") ? "" : "/") + mapRunId + "/";
 
-            String ext = "JSONL".equalsIgnoreCase(outputType) ? ".jsonl" : ".json";
-            String succeededKey = base + "SUCCEEDED_0" + ext;
+            String succeededKey = base + "SUCCEEDED_0.json";
             String manifestKey = base + "manifest.json";
 
             byte[] succeededBytes = serializeResultFile(formatted, outputType);
@@ -1592,8 +1632,9 @@ public class AslExecutor {
         } catch (FailStateException e) {
             throw e;
         } catch (Exception e) {
+            String detail = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             throw new FailStateException("States.ResultWriterFailed",
-                    "Unable to export Map Run results: " + e.getClass().getSimpleName());
+                    "Unable to export Map Run results: " + detail);
         }
     }
 
@@ -1608,7 +1649,7 @@ public class AslExecutor {
      */
     private ArrayNode formatMapResults(String transformation, ArrayNode results, ArrayNode childInputs,
                                        List<long[]> childTimings, String region, String account,
-                                       String smName, String mapStateName) {
+                                       String smName, String mapRunLabel) {
         ArrayNode out = objectMapper.createArrayNode();
         if ("FLATTEN".equalsIgnoreCase(transformation)) {
             for (JsonNode r : results) {
@@ -1625,16 +1666,16 @@ public class AslExecutor {
             return out;
         }
         // NONE: emit an execution record per child, mirroring the AWS export format. The child
-        // executions run under a derived state machine "<parentName>/<mapStateName>".
+        // executions run under a derived state machine "<parentName>/<mapRunLabel>".
         String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
-                + smName + "/" + mapStateName;
+                + smName + "/" + mapRunLabel;
         for (int i = 0; i < results.size(); i++) {
             String childId = java.util.UUID.randomUUID().toString();
             long start = childTimings != null && i < childTimings.size() ? childTimings.get(i)[0] : 0L;
             long stop = childTimings != null && i < childTimings.size() ? childTimings.get(i)[1] : 0L;
             ObjectNode rec = out.addObject();
             rec.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
-                    + smName + "/" + mapStateName + ":" + childId);
+                    + smName + "/" + mapRunLabel + ":" + childId);
             rec.put("Input", stringifyResult(childInputs != null && i < childInputs.size()
                     ? childInputs.get(i) : NullNode.getInstance()));
             rec.putObject("InputDetails").put("Included", true);

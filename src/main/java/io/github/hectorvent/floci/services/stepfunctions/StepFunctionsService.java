@@ -603,15 +603,26 @@ public class StepFunctionsService implements Resettable {
         }
 
         String destinationField = jsonata ? "Arguments" : "Parameters";
+        String unsupportedDestinationField = jsonata ? "Parameters" : "Arguments";
+        if (writer.has(unsupportedDestinationField)) {
+            errors.add("The field '" + unsupportedDestinationField + "' is not supported for the '"
+                    + (jsonata ? "JSONata" : "JSONPath") + "' QueryLanguage at "
+                    + writerPath + "/" + unsupportedDestinationField);
+        }
         boolean hasConfig = writer.has("WriterConfig") && writer.get("WriterConfig").isObject();
-        boolean hasResource = writer.hasNonNull("Resource");
-        boolean hasDestination = writer.has(destinationField) && writer.get(destinationField).isObject();
+        boolean hasResource = writer.has("Resource");
+        boolean destinationIsExpression = jsonata
+                && writer.path(destinationField).isTextual()
+                && JsonataEvaluator.isExpression(writer.path(destinationField).asText());
+        boolean hasDestination = writer.has(destinationField)
+                && (writer.get(destinationField).isObject() || destinationIsExpression);
 
         if (writer.has("WriterConfig") && !hasConfig) {
             errors.add("The field 'WriterConfig' must be an object at " + writerPath);
         }
         if (writer.has(destinationField) && !hasDestination) {
-            errors.add("The field '" + destinationField + "' must be an object at " + writerPath);
+            errors.add("The field '" + destinationField + "' must be an object"
+                    + (jsonata ? " or a JSONata expression" : "") + " at " + writerPath);
         }
         if ((!hasConfig && !hasResource && !hasDestination) || hasResource != hasDestination) {
             errors.add("The field 'ResultWriter' must specify WriterConfig alone, Resource with "
@@ -624,25 +635,50 @@ public class StepFunctionsService implements Resettable {
                     + RESULT_WRITER_RESOURCE + " at " + writerPath);
         }
 
-        if (hasDestination) {
+        if (hasDestination && !destinationIsExpression) {
             JsonNode destination = writer.get(destinationField);
-            boolean hasBucket = destination.hasNonNull("Bucket") || (!jsonata && destination.hasNonNull("Bucket.$"));
+            boolean hasBucket = destination.hasNonNull("Bucket")
+                    || (!jsonata && destination.hasNonNull("Bucket.$"));
             if (!hasBucket) {
                 errors.add("The field 'Bucket' is required at " + writerPath + "/" + destinationField);
+            } else if (destination.has("Bucket") && !destination.get("Bucket").isTextual()) {
+                errors.add("The field 'Bucket' must be a string at "
+                        + writerPath + "/" + destinationField + "/Bucket");
+            } else if (!jsonata && destination.has("Bucket.$")
+                    && !destination.get("Bucket.$").isTextual()) {
+                errors.add("The field 'Bucket.$' must be a string at "
+                        + writerPath + "/" + destinationField + "/Bucket.$");
+            }
+            if (destination.has("Prefix") && !destination.get("Prefix").isTextual()) {
+                errors.add("The field 'Prefix' must be a string at "
+                        + writerPath + "/" + destinationField + "/Prefix");
+            }
+            if (!jsonata && destination.has("Prefix.$")
+                    && !destination.get("Prefix.$").isTextual()) {
+                errors.add("The field 'Prefix.$' must be a string at "
+                        + writerPath + "/" + destinationField + "/Prefix.$");
             }
         }
 
         if (hasConfig) {
             JsonNode config = writer.get("WriterConfig");
-            String transformation = config.path("Transformation").asText(null);
-            if (transformation != null && !RESULT_WRITER_TRANSFORMATIONS.contains(transformation)) {
-                errors.add("The field 'Transformation' should have one of these values: "
-                        + RESULT_WRITER_TRANSFORMATIONS + " at " + writerPath + "/WriterConfig");
-            }
-            String outputType = config.path("OutputType").asText(null);
-            if (outputType != null && !RESULT_WRITER_OUTPUT_TYPES.contains(outputType)) {
-                errors.add("The field 'OutputType' should have one of these values: "
-                        + RESULT_WRITER_OUTPUT_TYPES + " at " + writerPath + "/WriterConfig");
+            JsonNode transformationNode = config.get("Transformation");
+            JsonNode outputTypeNode = config.get("OutputType");
+            if (transformationNode == null || !transformationNode.isTextual()
+                    || outputTypeNode == null || !outputTypeNode.isTextual()) {
+                errors.add("The field 'WriterConfig' must specify string Transformation and OutputType at "
+                        + writerPath + "/WriterConfig");
+            } else {
+                String transformation = transformationNode.asText();
+                if (!RESULT_WRITER_TRANSFORMATIONS.contains(transformation)) {
+                    errors.add("The field 'Transformation' should have one of these values: "
+                            + RESULT_WRITER_TRANSFORMATIONS + " at " + writerPath + "/WriterConfig");
+                }
+                String outputType = outputTypeNode.asText();
+                if (!RESULT_WRITER_OUTPUT_TYPES.contains(outputType)) {
+                    errors.add("The field 'OutputType' should have one of these values: "
+                            + RESULT_WRITER_OUTPUT_TYPES + " at " + writerPath + "/WriterConfig");
+                }
             }
         }
     }
