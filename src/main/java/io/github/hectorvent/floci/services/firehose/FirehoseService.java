@@ -377,7 +377,7 @@ public class FirehoseService {
             return;
         }
 
-        List<byte[]> toFlush = buffer.drain();
+        List<StreamBuffer.BufferedRecord> toFlush = buffer.drain();
         if (toFlush.isEmpty()) {
             return;
         }
@@ -393,28 +393,29 @@ public class FirehoseService {
             // arbitrary binary blob, so a String round-trip would corrupt non-UTF-8
             // payloads (and copy every byte twice for nothing).
             ByteArrayOutputStream body = new ByteArrayOutputStream();
-            for (byte[] data : toFlush) {
-                body.write(data, 0, data.length);
-                if (data.length > 0 && data[data.length - 1] != '\n') {
+            for (StreamBuffer.BufferedRecord record : toFlush) {
+                body.write(record.data, 0, record.data.length);
+                if (record.data.length > 0 && record.data[record.data.length - 1] != '\n') {
                     body.write('\n');
                 }
             }
 
             s3Service.putObject(bucket, key, body.toByteArray(), "application/x-ndjson", Map.of());
-            buffer.markDelivered();
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3}",
                     toFlush.size(), streamName, bucket, key);
         } catch (Exception e) {
             // Put the drained records back (ahead of anything buffered meanwhile,
             // preserving order) so the next interval tick retries instead of
-            // silently dropping them — up to MAX_DELIVERY_ATTEMPTS, after which the
-            // batch is dropped so a permanently failing destination can't grow the
-            // in-memory buffer without bound.
-            if (buffer.restoreForRetry(toFlush, MAX_DELIVERY_ATTEMPTS)) {
+            // silently dropping them. Each record carries its own attempt count and
+            // is dropped individually after MAX_DELIVERY_ATTEMPTS failed deliveries,
+            // so a permanently failing destination can't grow the buffer without
+            // bound, while records that arrived mid-failure keep their full budget.
+            int dropped = buffer.restoreForRetry(toFlush, MAX_DELIVERY_ATTEMPTS);
+            if (dropped == 0) {
                 LOG.errorv("Failed to flush Firehose stream {0}, will retry: {1}", streamName, e.getMessage());
             } else {
-                LOG.errorv("Failed to flush Firehose stream {0} after {1} attempts, dropping {2} records: {3}",
-                        streamName, MAX_DELIVERY_ATTEMPTS, toFlush.size(), e.getMessage());
+                LOG.errorv("Failed to flush Firehose stream {0}; dropped {1} records that exhausted {2} delivery attempts: {3}",
+                        streamName, dropped, MAX_DELIVERY_ATTEMPTS, e.getMessage());
             }
         }
     }
@@ -443,48 +444,62 @@ public class FirehoseService {
      * oldest pending record (drives the IntervalInSeconds trigger).
      */
     private static final class StreamBuffer {
-        private final List<byte[]> records = new ArrayList<>();
+
+        /** One pending payload plus how many failed deliveries it has been part of. */
+        static final class BufferedRecord {
+            final byte[] data;
+            int attempts;
+
+            BufferedRecord(byte[] data) {
+                this.data = data;
+            }
+        }
+
+        private final List<BufferedRecord> records = new ArrayList<>();
         private long byteCount;
         private Instant oldestRecordAt;
-        private int failedAttempts;
 
         synchronized void add(byte[] data) {
             if (records.isEmpty()) {
                 oldestRecordAt = Instant.now();
             }
-            records.add(data);
+            records.add(new BufferedRecord(data));
             byteCount += data.length;
         }
 
-        synchronized List<byte[]> drain() {
-            List<byte[]> drained = new ArrayList<>(records);
+        synchronized List<BufferedRecord> drain() {
+            List<BufferedRecord> drained = new ArrayList<>(records);
             records.clear();
             byteCount = 0;
             oldestRecordAt = null;
             return drained;
         }
 
-        synchronized void markDelivered() {
-            failedAttempts = 0;
-        }
-
         /**
-         * Puts a failed batch back at the head of the buffer for a later retry.
-         * Returns false — and drops the batch — once maxAttempts deliveries of it
-         * have failed.
+         * Puts a failed batch back at the head of the buffer (ahead of anything
+         * buffered meanwhile, preserving order) for a later retry. Each record
+         * tracks its own attempt count, so records that arrived between failures
+         * aren't charged for deliveries they weren't part of; a record is dropped
+         * only once it has personally been through maxAttempts failed deliveries.
+         * Returns the number of records dropped.
          */
-        synchronized boolean restoreForRetry(List<byte[]> drained, int maxAttempts) {
-            if (++failedAttempts >= maxAttempts) {
-                failedAttempts = 0;
-                return false;
+        synchronized int restoreForRetry(List<BufferedRecord> drained, int maxAttempts) {
+            List<BufferedRecord> retained = new ArrayList<>(drained.size());
+            int dropped = 0;
+            for (BufferedRecord record : drained) {
+                if (++record.attempts >= maxAttempts) {
+                    dropped++;
+                    continue;
+                }
+                retained.add(record);
+                byteCount += record.data.length;
             }
-            records.addAll(0, drained);
-            for (byte[] data : drained) {
-                byteCount += data.length;
+            records.addAll(0, retained);
+            if (!retained.isEmpty()) {
+                // Pace retries by the stream's interval rather than retrying every tick.
+                oldestRecordAt = Instant.now();
             }
-            // Pace retries by the stream's interval rather than retrying every tick.
-            oldestRecordAt = Instant.now();
-            return true;
+            return dropped;
         }
 
         synchronized long byteCount() {

@@ -51,7 +51,9 @@ class FirehoseS3DeliveryTest {
             try {
                 firehose.deleteDeliveryStream(DeleteDeliveryStreamRequest.builder()
                         .deliveryStreamName(STREAM_NAME).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                System.err.println("Teardown: could not delete stream " + STREAM_NAME + ": " + e);
+            }
             firehose.close();
         }
         if (s3 != null) {
@@ -60,7 +62,9 @@ class FirehoseS3DeliveryTest {
                     s3.deleteObject(DeleteObjectRequest.builder().bucket(BUCKET).key(object.key()).build());
                 }
                 s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                System.err.println("Teardown: could not empty/delete bucket " + BUCKET + ": " + e);
+            }
             s3.close();
         }
     }

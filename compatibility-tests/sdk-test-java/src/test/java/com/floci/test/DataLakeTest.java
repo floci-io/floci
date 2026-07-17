@@ -5,10 +5,14 @@ import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.*;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
+import software.amazon.awssdk.services.firehose.model.BufferingHints;
 import software.amazon.awssdk.services.firehose.model.PutRecordRequest;
 import software.amazon.awssdk.services.firehose.model.Record;
+import software.amazon.awssdk.services.firehose.model.S3DestinationConfiguration;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.*;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -25,6 +29,7 @@ class DataLakeTest {
     private static AthenaClient athena;
     private static GlueClient glue;
     private static FirehoseClient firehose;
+    private static S3Client s3;
 
     private static final String DB_NAME = TestFixtures.uniqueName("test_db");
     private static final String TABLE_NAME = "orders";
@@ -35,6 +40,7 @@ class DataLakeTest {
         athena = TestFixtures.athenaClient();
         glue = TestFixtures.glueClient();
         firehose = TestFixtures.firehoseClient();
+        s3 = TestFixtures.s3Client();
     }
 
     @Test
@@ -66,9 +72,27 @@ class DataLakeTest {
                         .build())
                 .build());
 
-        // 3. Firehose Stream
+        // 3. Firehose Stream — explicit destination matching the Glue table
+        // location, with 1s buffering so ingested records land quickly
+        // (delivery follows BufferingHints; there is no per-record-count flush).
+        // The destination bucket must exist before delivery, as on real AWS.
+        try {
+            s3.createBucket(software.amazon.awssdk.services.s3.model.CreateBucketRequest.builder()
+                    .bucket("floci-firehose-results").build());
+        } catch (software.amazon.awssdk.services.s3.model.S3Exception e) {
+            System.err.println("Setup: createBucket floci-firehose-results: " + e.getMessage());
+        }
         firehose.createDeliveryStream(software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest.builder()
                 .deliveryStreamName(STREAM_NAME)
+                .s3DestinationConfiguration(S3DestinationConfiguration.builder()
+                        .roleARN("arn:aws:iam::000000000000:role/datalake-firehose-role")
+                        .bucketARN("arn:aws:s3:::floci-firehose-results")
+                        .prefix(STREAM_NAME + "/")
+                        .bufferingHints(BufferingHints.builder()
+                                .sizeInMBs(1)
+                                .intervalInSeconds(1)
+                                .build())
+                        .build())
                 .build());
     }
 
@@ -82,6 +106,16 @@ class DataLakeTest {
                     .deliveryStreamName(STREAM_NAME)
                     .record(Record.builder().data(SdkBytes.fromString(json, StandardCharsets.UTF_8)).build())
                     .build());
+        }
+
+        // Wait for the buffered records to be delivered (1s BufferingHints interval)
+        // before querying, so the table's S3 location is populated.
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline
+                && s3.listObjectsV2(ListObjectsV2Request.builder()
+                        .bucket("floci-firehose-results").prefix(STREAM_NAME + "/").build())
+                    .contents().isEmpty()) {
+            Thread.sleep(250);
         }
 
         // Athena Query
