@@ -10,9 +10,9 @@ import java.util.Map;
 
 /**
  * An {@code AWS::RDS::DBProxy}. In real AWS a DB Proxy fronts a target DB cluster/instance behind a
- * pooled endpoint. Floci emulates it as a second auth-relay (see {@code RdsProxyManager}) on its own
- * allocated port, forwarding to the registered target's backend container — so the proxy exposes a
- * distinct, reachable endpoint just like the real service.
+ * pooled endpoint. Floci models the control-plane resource and can attach a second auth relay (see
+ * {@code RdsProxyManager}) that forwards to the registered target's backend container. Distinct
+ * externally reachable same-engine proxy endpoints require endpoint routing beyond this model.
  */
 @RegisterForReflection
 public class DbProxy {
@@ -37,9 +37,7 @@ public class DbProxy {
 
     public DbProxy() {}
 
-    /** The reachable proxy endpoint. AWS RDS Proxy exposes a bare hostname and clients connect on
-     *  the engine's default port; Floci mirrors that (the relay listens on the default port), so the
-     *  endpoint is a bare host — consumers that split host/port and default to 5432/3306 work as-is. */
+    /** AWS RDS Proxy exposes a bare hostname and clients connect on the engine's default port. */
     public String getEndpoint() {
         return endpointHost;
     }

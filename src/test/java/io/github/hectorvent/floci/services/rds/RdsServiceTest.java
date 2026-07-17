@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -13,6 +14,7 @@ import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -20,6 +22,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -27,9 +30,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -44,6 +49,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RdsServiceTest {
+
+    private static final String PROXY_ROLE_ARN = "arn:aws:iam::123456789012:role/proxy";
+    private static final List<String> PROXY_SUBNET_IDS = List.of("subnet-a");
 
     private RdsService rdsService;
     private RdsContainerManager containerManager;
@@ -63,6 +71,7 @@ class RdsServiceTest {
         EmulatorConfig.RdsServiceConfig rdsConfig = mock(EmulatorConfig.RdsServiceConfig.class);
 
         when(config.services()).thenReturn(servicesConfig);
+        when(config.defaultAccountId()).thenReturn("123456789012");
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(rdsConfig.proxyBasePort()).thenReturn(7000);
         when(rdsConfig.proxyMaxPort()).thenReturn(7099);
@@ -859,7 +868,7 @@ class RdsServiceTest {
 
     @Test
     void createDbProxyPopulatesEndpointArnAndDefaultPort() {
-        DbProxy proxy = rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
+        DbProxy proxy = rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
                 List.of("subnet-a"), List.of("sg-a"), List.of(), Map.of());
 
         assertEquals("app-proxy", proxy.getDbProxyName());
@@ -870,28 +879,32 @@ class RdsServiceTest {
         assertEquals("arn:aws:rds:us-east-1:123456789012:db-proxy:" + proxy.getDbProxyResourceId(),
                 proxy.getDbProxyArn());
         assertEquals(1, rdsService.listDbProxies("app-proxy").size());
+        DbProxyTargetGroup targetGroup = rdsService.describeDbProxyTargetGroups("app-proxy").iterator().next();
+        assertEquals("default", targetGroup.getTargetGroupName());
+        assertTrue(targetGroup.getTargets().isEmpty());
+        assertTrue(targetGroup.getTargetGroupArn().contains(":target-group:prx-tg-"));
     }
 
     @Test
     void createDbProxyRejectsDuplicate() {
-        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
-                List.of(), List.of(), List.of(), Map.of());
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
 
         AwsException exception = assertThrows(AwsException.class, () ->
-                rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
-                        List.of(), List.of(), List.of(), Map.of()));
+                rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                        PROXY_SUBNET_IDS, List.of(), List.of(), Map.of()));
 
         assertEquals("DBProxyAlreadyExistsFault", exception.getErrorCode());
     }
 
     @Test
-    void createDbProxyFallsBackToPoolPortWhenEngineDefaultIsTaken() {
-        // Two proxies for the same engine family cannot share the engine's default port — the second
-        // must get a distinct port so its relay can still bind (real RDS Proxy gives each a unique host).
-        DbProxy first = rdsService.createDbProxy("proxy-a", "POSTGRESQL", true, false, null,
-                List.of(), List.of(), List.of(), Map.of());
-        DbProxy second = rdsService.createDbProxy("proxy-b", "POSTGRESQL", true, false, null,
-                List.of(), List.of(), List.of(), Map.of());
+    void createDbProxyReservesDistinctInternalListenerPorts() {
+        // Listener ports must never collide even though externally routing multiple same-engine
+        // proxy hostnames remains a separate concern.
+        DbProxy first = rdsService.createDbProxy("proxy-a", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
+        DbProxy second = rdsService.createDbProxy("proxy-b", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
 
         assertEquals(5432, first.getProxyPort());   // first proxy keeps the clean engine default
         assertNotEquals(first.getProxyPort(), second.getProxyPort());
@@ -902,8 +915,8 @@ class RdsServiceTest {
         when(config.services().rds().mock()).thenReturn(true);
         rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
                 "admin", "secret", "app", false, null);
-        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
-                List.of(), List.of(), List.of(), Map.of());
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
 
         DbProxyTargetGroup tg = rdsService.registerDbProxyTargets("app-proxy", null,
                 List.of("cluster1"), List.of(), 90, 40);
@@ -919,6 +932,193 @@ class RdsServiceTest {
         // The registered target group and target are read back through the describe APIs.
         assertEquals(1, rdsService.describeDbProxyTargetGroups("app-proxy").size());
         assertEquals(1, rdsService.describeDbProxyTargets("app-proxy", "default").size());
+    }
+
+    @Test
+    void createDbProxyValidatesRequiredInputsAndTimeout() {
+        AwsException missingName = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy(null, "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                        PROXY_SUBNET_IDS, List.of(), List.of(), Map.of()));
+        assertEquals("InvalidParameterValue", missingName.getErrorCode());
+
+        AwsException invalidEngine = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("app-proxy", "ORACLE", true, false, PROXY_ROLE_ARN,
+                        PROXY_SUBNET_IDS, List.of(), List.of(), Map.of()));
+        assertEquals("InvalidParameterValue", invalidEngine.getErrorCode());
+
+        AwsException missingRole = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
+                        PROXY_SUBNET_IDS, List.of(), List.of(), Map.of()));
+        assertEquals("InvalidParameterValue", missingRole.getErrorCode());
+
+        AwsException missingSubnets = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                        List.of(), List.of(), List.of(), Map.of()));
+        assertEquals("InvalidParameterValue", missingSubnets.getErrorCode());
+
+        AwsException invalidTimeout = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                        PROXY_SUBNET_IDS, List.of(), List.of(), 0, false, Map.of(), "us-east-1"));
+        assertEquals("InvalidParameterValue", invalidTimeout.getErrorCode());
+    }
+
+    @Test
+    void dbProxyTagsRoundTripByArn() {
+        DbProxy proxy = rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false,
+                PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), List.of(), Map.of("owner", "platform"));
+
+        assertEquals(Map.of("owner", "platform"), rdsService.listTagsForResource(proxy.getDbProxyArn()));
+        rdsService.addTagsToResource(proxy.getDbProxyArn(), Map.of("env", "test"));
+        assertEquals(Map.of("owner", "platform", "env", "test"),
+                rdsService.listTagsForResource(proxy.getDbProxyArn()));
+        rdsService.removeTagsFromResource(proxy.getDbProxyArn(), List.of("owner"));
+        assertEquals(Map.of("env", "test"), rdsService.listTagsForResource(proxy.getDbProxyArn()));
+    }
+
+    @Test
+    void targetGroupConfigurationValidatesBeforeMutatingStoredState() {
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false,
+                PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
+
+        AwsException invalid = assertThrows(AwsException.class, () ->
+                rdsService.configureDbProxyTargetGroup("app-proxy", "default", 80, 101));
+
+        assertEquals("InvalidParameterValue", invalid.getErrorCode());
+        DbProxyTargetGroup targetGroup =
+                rdsService.describeDbProxyTargetGroups("app-proxy").iterator().next();
+        assertEquals(100, targetGroup.getMaxConnectionsPercent());
+        assertEquals(50, targetGroup.getMaxIdleConnectionsPercent());
+
+        AwsException missingMaxConnections = assertThrows(AwsException.class, () ->
+                rdsService.configureDbProxyTargetGroup("app-proxy", "default", null, 0));
+        assertEquals("InvalidParameterValue", missingMaxConnections.getErrorCode());
+
+        DbProxyTargetGroup configured =
+                rdsService.configureDbProxyTargetGroup("app-proxy", "default", 80, null);
+        assertEquals(80, configured.getMaxConnectionsPercent());
+        assertEquals(40, configured.getMaxIdleConnectionsPercent());
+    }
+
+    @Test
+    void clearingTargetGroupPreservesIdentityResetsDefaultsAndAllowsReregistration() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false,
+                PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
+        DbProxyTargetGroup registered = rdsService.registerDbProxyTargets("app-proxy", "default",
+                List.of("cluster1"), List.of(), 80, 20);
+
+        rdsService.clearDbProxyTargetGroupByArn(registered.getTargetGroupArn());
+
+        DbProxyTargetGroup cleared = rdsService.describeDbProxyTargetGroups("app-proxy")
+                .iterator().next();
+        assertEquals(registered.getTargetGroupArn(), cleared.getTargetGroupArn());
+        assertTrue(cleared.isDefaultTargetGroup());
+        assertTrue(cleared.getTargets().isEmpty());
+        assertEquals(100, cleared.getMaxConnectionsPercent());
+        assertEquals(50, cleared.getMaxIdleConnectionsPercent());
+
+        DbProxyTargetGroup reregistered = rdsService.registerDbProxyTargets("app-proxy", "default",
+                List.of("cluster1"), List.of(), 0, 0);
+        assertEquals(1, reregistered.getTargets().size());
+    }
+
+    @Test
+    void sqlServerTargetGroupUsesEngineSpecificPoolDefaults() {
+        rdsService.createDbProxy("sqlserver-proxy", "SQLSERVER", true, false,
+                PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
+        DbProxyTargetGroup targetGroup = rdsService.describeDbProxyTargetGroups("sqlserver-proxy")
+                .iterator().next();
+
+        assertEquals(10, targetGroup.getMaxConnectionsPercent());
+        assertEquals(5, targetGroup.getMaxIdleConnectionsPercent());
+
+        rdsService.configureDbProxyTargetGroup("sqlserver-proxy", "default", 80, 20);
+        rdsService.clearDbProxyTargetGroupByArn(targetGroup.getTargetGroupArn());
+
+        DbProxyTargetGroup cleared = rdsService.describeDbProxyTargetGroups("sqlserver-proxy")
+                .iterator().next();
+        assertEquals(10, cleared.getMaxConnectionsPercent());
+        assertEquals(5, cleared.getMaxIdleConnectionsPercent());
+    }
+
+    @Test
+    void registerDbProxyTargetRejectsDuplicateAndSupportsDeregistration() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
+        rdsService.registerDbProxyTargets("app-proxy", "default",
+                List.of("cluster1"), List.of(), 0, 0);
+
+        AwsException duplicate = assertThrows(AwsException.class, () ->
+                rdsService.registerDbProxyTargets("app-proxy", "default",
+                        List.of("cluster1"), List.of(), 0, 0));
+        assertEquals("DBProxyTargetAlreadyRegisteredFault", duplicate.getErrorCode());
+
+        AwsException referenced = assertThrows(AwsException.class, () ->
+                rdsService.deleteDbCluster("cluster1"));
+        assertEquals("InvalidDBClusterStateFault", referenced.getErrorCode());
+
+        rdsService.deregisterDbProxyTargets("app-proxy", "default", List.of("cluster1"), List.of());
+        assertTrue(rdsService.describeDbProxyTargets("app-proxy", "default").isEmpty());
+        rdsService.deleteDbCluster("cluster1");
+
+        AwsException missing = assertThrows(AwsException.class, () ->
+                rdsService.deregisterDbProxyTargets("app-proxy", "default",
+                        List.of("cluster1"), List.of()));
+        assertEquals("DBProxyTargetNotFoundFault", missing.getErrorCode());
+    }
+
+    @Test
+    void deregistrationDoesNotStopRelayWhenTargetGroupPersistenceFails() {
+        StorageBackend<String, DbProxy> proxies = mock(StorageBackend.class);
+        StorageBackend<String, DbProxyTargetGroup> targetGroups = mock(StorageBackend.class);
+        DbProxy proxy = new DbProxy();
+        proxy.setDbProxyName("app-proxy");
+        proxy.setDbProxyArn("arn:aws:rds:us-east-1:123456789012:db-proxy:prx-abc");
+        DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
+        targetGroup.setDbProxyName("app-proxy");
+        targetGroup.setTargets(List.of(new DbProxyTarget("TRACKED_CLUSTER", "cluster1",
+                "arn:aws:rds:us-east-1:123456789012:cluster:cluster1", "localhost", 5432)));
+        when(proxies.get("app-proxy")).thenReturn(Optional.of(proxy));
+        when(targetGroups.get("app-proxy")).thenReturn(Optional.of(targetGroup));
+        org.mockito.Mockito.doThrow(new IllegalStateException("simulated persistence failure"))
+                .when(targetGroups).put(eq("app-proxy"), any());
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service,
+                regionResolver, config, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                null, null, proxies, targetGroups);
+
+        assertThrows(IllegalStateException.class, () -> service.deregisterDbProxyTargets(
+                "app-proxy", "default", List.of("cluster1"), List.of()));
+
+        verify(proxyManager, never()).stopProxy(any());
+    }
+
+    @Test
+    void proxyTargetGroupRejectsUnsupportedNameCardinalityAndEngine() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        rdsService.createDbProxy("mysql-proxy", "MYSQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
+
+        AwsException missingGroup = assertThrows(AwsException.class, () ->
+                rdsService.describeDbProxyTargets("mysql-proxy", "other"));
+        assertEquals("DBProxyTargetGroupNotFoundFault", missingGroup.getErrorCode());
+
+        AwsException multiple = assertThrows(AwsException.class, () ->
+                rdsService.registerDbProxyTargets("mysql-proxy", "default",
+                        List.of("cluster1", "cluster2"), List.of(), 0, 0));
+        assertEquals("InvalidParameterCombination", multiple.getErrorCode());
+
+        AwsException mismatch = assertThrows(AwsException.class, () ->
+                rdsService.registerDbProxyTargets("mysql-proxy", "default",
+                        List.of("cluster1"), List.of(), 0, 0));
+        assertEquals("InvalidParameterValue", mismatch.getErrorCode());
     }
 
     @Test
@@ -940,8 +1140,8 @@ class RdsServiceTest {
                 subnetGroups, null, null, proxies, proxyTargetGroups);
         initialService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
                 "admin", "secret", "app", false, null);
-        initialService.createDbProxy("app-proxy", "POSTGRESQL", true, false, null,
-                List.of(), List.of(), List.of(), Map.of());
+        initialService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(), Map.of());
         initialService.registerDbProxyTargets("app-proxy", null, List.of("cluster1"), List.of(), 0, 0);
 
         RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
@@ -957,9 +1157,77 @@ class RdsServiceTest {
         // The proxy survives the restart and its relay is re-armed against the restored backend.
         DbProxy restored = restoredService.getDbProxy("app-proxy");
         assertEquals("app-proxy", restored.getDbProxyName());
-        verify(restoredProxyManager).startProxy(eq("app-proxy"), eq(DatabaseEngine.POSTGRES),
+        verify(restoredProxyManager).startProxy(eq("db-proxy:" + restored.getDbProxyArn()),
+                eq(DatabaseEngine.POSTGRES),
                 eq(false), anyInt(), eq("127.0.0.1"), eq(15432),
                 eq("admin"), eq("secret"), eq("app"), any());
+    }
+
+    @Test
+    void restoreDbProxyAuthCallbackKeepsTheTargetAccount() {
+        String defaultAccount = "123456789012";
+        String targetAccount = "999999999999";
+        InMemoryStorage<String, DbInstance> rawInstances = new InMemoryStorage<>();
+        InMemoryStorage<String, DbCluster> rawClusters = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxy> rawProxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> rawTargetGroups = new InMemoryStorage<>();
+
+        // A same-named default-account cluster makes an account-blind callback observably wrong.
+        rawClusters.put(defaultAccount + "/cluster1",
+                persistedCluster(defaultAccount, "default-secret", 7000));
+        rawClusters.put(targetAccount + "/cluster1",
+                persistedCluster(targetAccount, "target-secret", 7001));
+
+        DbProxy proxy = new DbProxy();
+        proxy.setDbProxyName("app-proxy");
+        proxy.setDbProxyArn("arn:aws:rds:us-east-1:" + targetAccount + ":db-proxy:prx-abc");
+        proxy.setDbProxyResourceId("prx-abc");
+        proxy.setEngineFamily("POSTGRESQL");
+        proxy.setProxyPort(5432);
+        proxy.setEndpointHost("stale-host");
+        proxy.setStatus("available");
+        proxy.setCreatedAt(Instant.now());
+        rawProxies.put(targetAccount + "/app-proxy", proxy);
+
+        DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
+        targetGroup.setDbProxyName("app-proxy");
+        targetGroup.setTargetGroupName("default");
+        targetGroup.setTargetGroupArn("arn:aws:rds:us-east-1:" + targetAccount
+                + ":target-group:prx-tg-abc");
+        targetGroup.setCreatedAt(Instant.now());
+        targetGroup.setUpdatedAt(Instant.now());
+        targetGroup.setTargets(List.of(new DbProxyTarget("TRACKED_CLUSTER", "cluster1",
+                "arn:aws:rds:us-east-1:" + targetAccount + ":cluster:cluster1",
+                "stale-host", 5432)));
+        rawTargetGroups.put(targetAccount + "/app-proxy", targetGroup);
+
+        RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
+        RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
+        when(restoredContainerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("restored-container", "cluster1",
+                        "127.0.0.1", 15432));
+
+        RdsService restoredService = new RdsService(restoredContainerManager, restoredProxyManager,
+                ec2Service, regionResolver, config,
+                new AccountAwareStorageBackend<>(rawInstances, null, defaultAccount),
+                new AccountAwareStorageBackend<>(rawClusters, null, defaultAccount),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccount),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccount),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccount),
+                null, null,
+                new AccountAwareStorageBackend<>(rawProxies, null, defaultAccount),
+                new AccountAwareStorageBackend<>(rawTargetGroups, null, defaultAccount));
+
+        restoredService.restorePersistedRuntime();
+
+        ArgumentCaptor<RdsAuthProxy.PasswordValidator> validator =
+                ArgumentCaptor.forClass(RdsAuthProxy.PasswordValidator.class);
+        verify(restoredProxyManager).startProxy(eq("db-proxy:" + proxy.getDbProxyArn()),
+                eq(DatabaseEngine.POSTGRES),
+                eq(false), eq(5432), eq("127.0.0.1"), eq(15432), eq("admin"),
+                eq("target-secret"), eq("app"), validator.capture());
+        assertTrue(validator.getValue().validate("admin", "target-secret"));
+        assertFalse(validator.getValue().validate("admin", "default-secret"));
     }
 
     private RdsService newService(RdsContainerManager containerManager,
@@ -989,6 +1257,16 @@ class RdsServiceTest {
         return List.of(
                 subnet("subnet-default-a", "vpc-default", "us-east-1a"),
                 subnet("subnet-default-b", "vpc-default", "us-east-1b"));
+    }
+
+    private static DbCluster persistedCluster(String accountId, String password, int proxyPort) {
+        DbCluster cluster = new DbCluster("cluster1", DatabaseEngine.POSTGRES, "16.3",
+                "admin", password, "app", DbInstanceStatus.AVAILABLE,
+                new DbEndpoint("stale-host", proxyPort), new DbEndpoint("stale-host", proxyPort),
+                false, List.of(), null, Instant.now(), proxyPort);
+        cluster.setDbClusterArn("arn:aws:rds:us-east-1:" + accountId + ":cluster:cluster1");
+        cluster.setVolumeId("volume-" + accountId);
+        return cluster;
     }
 
     private static Subnet subnet(String subnetId, String vpcId, String availabilityZone) {

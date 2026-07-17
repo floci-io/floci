@@ -77,6 +77,8 @@ public class RdsService implements Resettable {
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
+    private static final Pattern DB_PROXY_NAME_PATTERN =
+            Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
 
     @Inject
     public RdsService(RdsContainerManager containerManager,
@@ -387,9 +389,10 @@ public class RdsService implements Resettable {
         }
 
         if (!mock) {
+            final String accountId = accountIdFromArn(instance.getDbInstanceArn());
             proxyManager.startProxy(id, engine, iamEnabled, proxyPort, backendHost, backendPort,
                     masterUsername, masterPassword, dbName,
-                    (user, pw) -> validateDbPassword(id, user, pw));
+                    (user, pw) -> validateDbPasswordForAccount(accountId, id, user, pw));
         }
 
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
@@ -482,6 +485,17 @@ public class RdsService implements Resettable {
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     subnetGroups.put(resourceId, group);
+                });
+            }
+            case "db-proxy" -> {
+                DbProxy proxy = proxies.scan(k -> true).stream()
+                        .filter(candidate -> resourceId.equals(candidate.getDbProxyResourceId()))
+                        .findFirst()
+                        .orElseThrow(() -> new AwsException("DBProxyNotFoundFault",
+                                "DB proxy " + resourceId + " not found.", 404));
+                yield new TagHandle(proxy.getTags(), updated -> {
+                    proxy.setTags(updated);
+                    proxies.put(proxy.getDbProxyName(), proxy);
                 });
             }
             // Valid RDS resource types Floci does not model yet (og, pg, snapshot, ...) — taggable
@@ -627,24 +641,29 @@ public class RdsService implements Resettable {
         if (!mock) {
             String effectiveMasterUser = instance.getMasterUsername() != null
                     ? instance.getMasterUsername() : "root";
+            final String accountId = accountIdFromArn(instance.getDbInstanceArn());
             proxyManager.startProxy(id, instance.getEngine(),
                     instance.isIamDatabaseAuthenticationEnabled(),
                     instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
-                    (user, pw) -> validateDbPassword(id, user, pw));
+                    (user, pw) -> validateDbPasswordForAccount(accountId, id, user, pw));
         }
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
     }
 
-    public void deleteDbInstance(String id) {
+    public synchronized void deleteDbInstance(String id) {
         DbInstance instance = instances.get(id).orElseThrow(() ->
                 new AwsException("DBInstanceNotFound", "DB instance " + id + " not found.", 404));
 
         if (instance.getStatus() == DbInstanceStatus.DELETING) {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is already being deleted.", 400);
+        }
+        if (isRegisteredProxyTarget("RDS_INSTANCE", id)) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + id + " is registered with a DB proxy target group.", 400);
         }
 
         instance.setStatus(DbInstanceStatus.DELETING);
@@ -742,9 +761,10 @@ public class RdsService implements Resettable {
 
         if (!mock) {
             String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
+            final String accountId = accountIdFromArn(cluster.getDbClusterArn());
             proxyManager.startProxy(id, engine, iamEnabled, proxyPort, cluster.getContainerHost(), cluster.getContainerPort(),
                     effectiveMasterUser, masterPassword, databaseName,
-                    (user, pw) -> validateDbClusterPassword(id, user, pw));
+                    (user, pw) -> validateDbClusterPasswordForAccount(accountId, id, user, pw));
         }
 
         clusters.put(id, cluster);
@@ -779,7 +799,7 @@ public class RdsService implements Resettable {
         return cluster;
     }
 
-    public void deleteDbCluster(String id) {
+    public synchronized void deleteDbCluster(String id) {
         DbCluster cluster = clusters.get(id).orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DB cluster " + id + " not found.", 404));
@@ -787,6 +807,10 @@ public class RdsService implements Resettable {
         if (!cluster.getDbClusterMembers().isEmpty()) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " still has DB instances.", 400);
+        }
+        if (isRegisteredProxyTarget("TRACKED_CLUSTER", id)) {
+            throw new AwsException("InvalidDBClusterStateFault",
+                    "DB cluster " + id + " is registered with a DB proxy target group.", 400);
         }
 
         cluster.setStatus(DbInstanceStatus.DELETING);
@@ -816,35 +840,71 @@ public class RdsService implements Resettable {
                                  boolean iamAuth, String roleArn, List<String> vpcSubnetIds,
                                  List<String> vpcSecurityGroupIds, List<DbProxyAuth> auth,
                                  Map<String, String> tags) {
+        return createDbProxy(dbProxyName, engineFamily, requireTls, iamAuth, roleArn,
+                vpcSubnetIds, vpcSecurityGroupIds, auth, 1800, false, tags,
+                regionResolver.getDefaultRegion());
+    }
+
+    public synchronized DbProxy createDbProxy(String dbProxyName, String engineFamily, boolean requireTls,
+                                               boolean iamAuth, String roleArn, List<String> vpcSubnetIds,
+                                               List<String> vpcSecurityGroupIds, List<DbProxyAuth> auth,
+                                               int idleClientTimeout, boolean debugLogging,
+                                               Map<String, String> tags, String region) {
+        validateDbProxyCreate(dbProxyName, engineFamily, roleArn, vpcSubnetIds, idleClientTimeout);
         if (proxies.get(dbProxyName).isPresent()) {
             throw new AwsException("DBProxyAlreadyExistsFault",
                     "DB proxy " + dbProxyName + " already exists.", 400);
         }
+
         boolean mock = config.services().rds().mock();
-        // Real RDS Proxy listens on the engine's default port and exposes a bare hostname; the local
-        // relay prefers that default port so clients that split host/port (defaulting to 5432/3306)
-        // connect cleanly. If the default port is already taken (e.g. a second proxy for the same
-        // engine family) it falls back to an allocated pool port so the relay can still bind.
+        // RDS Proxy exposes a bare hostname on the engine's default port. Floci currently models
+        // that contract directly; a separate endpoint-routing design is required before multiple
+        // same-engine proxies can be made externally reachable through one Docker host.
         int proxyPort = reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
         DbProxy proxy = new DbProxy();
         proxy.setDbProxyName(dbProxyName);
-        proxy.setEngineFamily(engineFamily);
+        proxy.setEngineFamily(engineFamily.toUpperCase());
         proxy.setRequireTls(requireTls);
         proxy.setIamAuth(iamAuth);
         proxy.setRoleArn(roleArn);
         proxy.setVpcSubnetIds(vpcSubnetIds);
         proxy.setVpcSecurityGroupIds(vpcSecurityGroupIds);
         proxy.setAuth(auth);
+        proxy.setIdleClientTimeout(idleClientTimeout);
+        proxy.setDebugLogging(debugLogging);
         proxy.setTags(tags);
         proxy.setProxyPort(proxyPort);
         proxy.setEndpointHost(mock ? "localhost" : proxyEndpointHost());
         proxy.setStatus("available");
-        proxy.setCreatedAt(Instant.now());
-        String resourceId = "prx-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 17);
+        Instant now = Instant.now();
+        proxy.setCreatedAt(now);
+        String resourceId = "prx-" + randomResourceSuffix();
         proxy.setDbProxyResourceId(resourceId);
-        proxy.setDbProxyArn(regionResolver.buildArn("rds", regionResolver.getDefaultRegion(),
-                "db-proxy:" + resourceId));
-        proxies.put(dbProxyName, proxy);
+        String effectiveRegion = effectiveRegion(region);
+        proxy.setDbProxyArn(regionResolver.buildArn("rds", effectiveRegion, "db-proxy:" + resourceId));
+
+        DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
+        targetGroup.setDbProxyName(dbProxyName);
+        targetGroup.setTargetGroupName("default");
+        targetGroup.setTargetGroupArn(regionResolver.buildArn("rds", effectiveRegion,
+                "target-group:prx-tg-" + randomResourceSuffix()));
+        targetGroup.setDefaultTargetGroup(true);
+        if ("SQLSERVER".equalsIgnoreCase(engineFamily)) {
+            targetGroup.setMaxConnectionsPercent(10);
+            targetGroup.setMaxIdleConnectionsPercent(5);
+        }
+        targetGroup.setCreatedAt(now);
+        targetGroup.setUpdatedAt(now);
+
+        try {
+            proxies.put(dbProxyName, proxy);
+            proxyTargetGroups.put(dbProxyName, targetGroup);
+        } catch (RuntimeException e) {
+            proxies.delete(dbProxyName);
+            proxyTargetGroups.delete(dbProxyName);
+            releaseProxyPort(proxyPort);
+            throw e;
+        }
         LOG.infov("DB proxy {0} created (mock={1}), endpoint={2}",
                 dbProxyName, String.valueOf(mock), proxy.getEndpoint());
         return proxy;
@@ -855,13 +915,28 @@ public class RdsService implements Resettable {
      * real mode — starts the auth relay forwarding the proxy endpoint to the target's backend
      * container. This is the point where the backend host/port become known.
      */
-    public DbProxyTargetGroup registerDbProxyTargets(String dbProxyName, String targetGroupName,
-                                                     List<String> dbClusterIdentifiers,
-                                                     List<String> dbInstanceIdentifiers,
-                                                     int maxConnectionsPercent, int maxIdleConnectionsPercent) {
+    public synchronized DbProxyTargetGroup registerDbProxyTargets(String dbProxyName, String targetGroupName,
+                                                                  List<String> dbClusterIdentifiers,
+                                                                  List<String> dbInstanceIdentifiers,
+                                                                  int maxConnectionsPercent,
+                                                                  int maxIdleConnectionsPercent) {
         DbProxy proxy = proxies.get(dbProxyName).orElseThrow(() ->
                 new AwsException("DBProxyNotFoundFault", "DB proxy " + dbProxyName + " not found.", 404));
-        String tgName = (targetGroupName == null || targetGroupName.isBlank()) ? "default" : targetGroupName;
+        DbProxyTargetGroup targetGroup = getDefaultProxyTargetGroup(dbProxyName, targetGroupName);
+
+        int clusterCount = dbClusterIdentifiers == null ? 0 : dbClusterIdentifiers.size();
+        int instanceCount = dbInstanceIdentifiers == null ? 0 : dbInstanceIdentifiers.size();
+        if (clusterCount + instanceCount == 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "RegisterDBProxyTargets requires a DBClusterIdentifier or DBInstanceIdentifier.", 400);
+        }
+        if (clusterCount + instanceCount != 1) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Floci currently supports exactly one DB cluster or DB instance per proxy target group.", 400);
+        }
+        Integer configuredMaxConnections = maxConnectionsPercent > 0 ? maxConnectionsPercent : null;
+        Integer configuredMaxIdle = maxIdleConnectionsPercent > 0 ? maxIdleConnectionsPercent : null;
+        validatePoolConfiguration(configuredMaxConnections, configuredMaxIdle);
 
         String backendHost;
         int backendPort;
@@ -871,10 +946,14 @@ public class RdsService implements Resettable {
         String dbName;
         DbProxyTarget target;
 
-        if (dbClusterIdentifiers != null && !dbClusterIdentifiers.isEmpty()) {
+        if (clusterCount == 1) {
             String clusterId = dbClusterIdentifiers.get(0);
             DbCluster cluster = clusters.get(clusterId).orElseThrow(() ->
                     new AwsException("DBClusterNotFoundFault", "DB cluster " + clusterId + " not found.", 404));
+            if (cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+                throw new AwsException("InvalidDBClusterStateFault",
+                        "DB cluster " + clusterId + " is not available.", 400);
+            }
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             engine = cluster.getEngine();
@@ -883,10 +962,14 @@ public class RdsService implements Resettable {
             dbName = cluster.getDatabaseName();
             target = new DbProxyTarget("TRACKED_CLUSTER", clusterId, cluster.getDbClusterArn(),
                     cluster.getContainerHost(), cluster.getContainerPort());
-        } else if (dbInstanceIdentifiers != null && !dbInstanceIdentifiers.isEmpty()) {
+        } else {
             String instanceId = dbInstanceIdentifiers.get(0);
             DbInstance instance = instances.get(instanceId).orElseThrow(() ->
-                    new AwsException("DBInstanceNotFoundFault", "DB instance " + instanceId + " not found.", 404));
+                    new AwsException("DBInstanceNotFound", "DB instance " + instanceId + " not found.", 404));
+            if (instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+                throw new AwsException("InvalidDBInstanceState",
+                        "DB instance " + instanceId + " is not available.", 400);
+            }
             backendHost = instance.getContainerHost();
             backendPort = instance.getContainerPort();
             engine = instance.getEngine();
@@ -895,9 +978,18 @@ public class RdsService implements Resettable {
             dbName = instance.getDbName();
             target = new DbProxyTarget("RDS_INSTANCE", instanceId, instance.getDbInstanceArn(),
                     instance.getContainerHost(), instance.getContainerPort());
-        } else {
-            throw new AwsException("InvalidParameterValue",
-                    "RegisterDBProxyTargets requires a DBClusterIdentifier or DBInstanceIdentifier.", 400);
+        }
+
+        validateTargetEngineFamily(proxy, engine);
+        if (targetGroup.getTargets().stream().anyMatch(existing ->
+                existing.getType().equals(target.getType())
+                        && existing.getRdsResourceId().equals(target.getRdsResourceId()))) {
+            throw new AwsException("DBProxyTargetAlreadyRegisteredFault",
+                    "The target is already registered with proxy " + dbProxyName + ".", 400);
+        }
+        if (!targetGroup.getTargets().isEmpty()) {
+            throw new AwsException("InvalidDBProxyStateFault",
+                    "The default target group already has a registered target.", 400);
         }
 
         if (!config.services().rds().mock()) {
@@ -908,24 +1000,86 @@ public class RdsService implements Resettable {
             String effectiveMasterUser = masterUser != null ? masterUser : "root";
             final String targetId = target.getRdsResourceId();
             final boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
-            proxyManager.startProxy(dbProxyName, engine, proxy.isIamAuth(), proxy.getProxyPort(),
+            final String accountId = accountIdFromArn(proxy.getDbProxyArn());
+            proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(), proxy.getProxyPort(),
                     backendHost, backendPort, effectiveMasterUser, masterPassword, dbName,
-                    (user, pw) -> isCluster ? validateDbClusterPassword(targetId, user, pw)
-                            : validateDbPassword(targetId, user, pw));
+                    (user, pw) -> isCluster
+                            ? validateDbClusterPasswordForAccount(accountId, targetId, user, pw)
+                            : validateDbPasswordForAccount(accountId, targetId, user, pw));
         }
 
-        DbProxyTargetGroup tg = new DbProxyTargetGroup();
-        tg.setDbProxyName(dbProxyName);
-        tg.setTargetGroupName(tgName);
-        tg.setMaxConnectionsPercent(maxConnectionsPercent > 0 ? maxConnectionsPercent : 100);
-        tg.setMaxIdleConnectionsPercent(maxIdleConnectionsPercent > 0 ? maxIdleConnectionsPercent : 50);
-        tg.setTargetGroupArn(regionResolver.buildArn("rds", regionResolver.getDefaultRegion(),
-                "target-group:" + dbProxyName + "/" + tgName));
-        tg.getTargets().add(target);
-        proxyTargetGroups.put(dbProxyName, tg);
-        LOG.infov("DB proxy {0} target group {1} registered target {2}",
-                dbProxyName, tgName, target.getRdsResourceId());
-        return tg;
+        DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(targetGroup);
+        if (configuredMaxConnections != null) {
+            updatedTargetGroup.setMaxConnectionsPercent(configuredMaxConnections);
+        }
+        if (configuredMaxIdle != null) {
+            updatedTargetGroup.setMaxIdleConnectionsPercent(configuredMaxIdle);
+        } else if (configuredMaxConnections != null) {
+            updatedTargetGroup.setMaxIdleConnectionsPercent(configuredMaxConnections / 2);
+        }
+        updatedTargetGroup.getTargets().add(target);
+        updatedTargetGroup.setUpdatedAt(Instant.now());
+        try {
+            proxyTargetGroups.put(dbProxyName, updatedTargetGroup);
+        } catch (RuntimeException e) {
+            if (!config.services().rds().mock()) {
+                proxyManager.stopProxy(dbProxyRelayKey(proxy));
+            }
+            throw e;
+        }
+        LOG.infov("DB proxy {0} target group default registered target {1}",
+                dbProxyName, target.getRdsResourceId());
+        return updatedTargetGroup;
+    }
+
+    public synchronized DbProxyTargetGroup configureDbProxyTargetGroup(String dbProxyName,
+                                                                        String targetGroupName,
+                                                                        Integer maxConnectionsPercent,
+                                                                        Integer maxIdleConnectionsPercent) {
+        getDbProxy(dbProxyName);
+        DbProxyTargetGroup targetGroup = getDefaultProxyTargetGroup(dbProxyName, targetGroupName);
+        validatePoolConfiguration(maxConnectionsPercent, maxIdleConnectionsPercent);
+        DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(targetGroup);
+        if (maxConnectionsPercent != null) {
+            updatedTargetGroup.setMaxConnectionsPercent(maxConnectionsPercent);
+        }
+        if (maxIdleConnectionsPercent != null) {
+            updatedTargetGroup.setMaxIdleConnectionsPercent(maxIdleConnectionsPercent);
+        } else if (maxConnectionsPercent != null) {
+            updatedTargetGroup.setMaxIdleConnectionsPercent(maxConnectionsPercent / 2);
+        }
+        updatedTargetGroup.setUpdatedAt(Instant.now());
+        proxyTargetGroups.put(dbProxyName, updatedTargetGroup);
+        return updatedTargetGroup;
+    }
+
+    public synchronized void deregisterDbProxyTargets(String dbProxyName, String targetGroupName,
+                                                       List<String> dbClusterIdentifiers,
+                                                       List<String> dbInstanceIdentifiers) {
+        DbProxy proxy = getDbProxy(dbProxyName);
+        DbProxyTargetGroup targetGroup = getDefaultProxyTargetGroup(dbProxyName, targetGroupName);
+        List<String> clusterIds = dbClusterIdentifiers == null ? List.of() : dbClusterIdentifiers;
+        List<String> instanceIds = dbInstanceIdentifiers == null ? List.of() : dbInstanceIdentifiers;
+        if (clusterIds.isEmpty() && instanceIds.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "DeregisterDBProxyTargets requires a DBClusterIdentifier or DBInstanceIdentifier.", 400);
+        }
+
+        DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(targetGroup);
+        int before = updatedTargetGroup.getTargets().size();
+        updatedTargetGroup.getTargets().removeIf(target ->
+                ("TRACKED_CLUSTER".equals(target.getType()) && clusterIds.contains(target.getRdsResourceId()))
+                        || ("RDS_INSTANCE".equals(target.getType())
+                        && instanceIds.contains(target.getRdsResourceId())));
+        if (updatedTargetGroup.getTargets().size() == before) {
+            throw new AwsException("DBProxyTargetNotFoundFault",
+                    "The specified target is not registered with proxy " + dbProxyName + ".", 404);
+        }
+        updatedTargetGroup.setUpdatedAt(Instant.now());
+        proxyTargetGroups.put(dbProxyName, updatedTargetGroup);
+        if (!config.services().rds().mock()) {
+            proxyManager.stopProxy(dbProxyRelayKey(proxy));
+        }
     }
 
     public DbProxy getDbProxy(String name) {
@@ -935,26 +1089,50 @@ public class RdsService implements Resettable {
 
     public Collection<DbProxy> listDbProxies(String filterName) {
         if (filterName != null && !filterName.isBlank()) {
-            return proxies.scan(k -> k.equalsIgnoreCase(filterName));
+            return List.of(getDbProxy(filterName));
         }
         return proxies.scan(k -> true);
     }
 
     public Collection<DbProxyTargetGroup> describeDbProxyTargetGroups(String dbProxyName) {
-        return proxyTargetGroups.scan(k -> k.equalsIgnoreCase(dbProxyName));
+        return describeDbProxyTargetGroups(dbProxyName, null);
+    }
+
+    public Collection<DbProxyTargetGroup> describeDbProxyTargetGroups(String dbProxyName,
+                                                                       String targetGroupName) {
+        getDbProxy(dbProxyName);
+        return List.of(getDefaultProxyTargetGroup(dbProxyName, targetGroupName));
     }
 
     public Collection<DbProxyTarget> describeDbProxyTargets(String dbProxyName, String targetGroupName) {
-        return proxyTargetGroups.get(dbProxyName)
-                .map(DbProxyTargetGroup::getTargets)
-                .orElseGet(ArrayList::new);
+        getDbProxy(dbProxyName);
+        return new ArrayList<>(getDefaultProxyTargetGroup(dbProxyName, targetGroupName).getTargets());
     }
 
-    public void deleteDbProxy(String name) {
+    public synchronized void clearDbProxyTargetGroupByArn(String targetGroupArn) {
+        DbProxyTargetGroup targetGroup = proxyTargetGroups.scan(k -> true).stream()
+                .filter(candidate -> Objects.equals(targetGroupArn, candidate.getTargetGroupArn()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
+                        "DB proxy target group " + targetGroupArn + " not found.", 404));
+        DbProxyTargetGroup clearedTargetGroup = copyProxyTargetGroup(targetGroup);
+        clearedTargetGroup.getTargets().clear();
+        DbProxy proxy = getDbProxy(targetGroup.getDbProxyName());
+        boolean sqlServer = "SQLSERVER".equals(proxy.getEngineFamily());
+        clearedTargetGroup.setMaxConnectionsPercent(sqlServer ? 10 : 100);
+        clearedTargetGroup.setMaxIdleConnectionsPercent(sqlServer ? 5 : 50);
+        clearedTargetGroup.setUpdatedAt(Instant.now());
+        proxyTargetGroups.put(clearedTargetGroup.getDbProxyName(), clearedTargetGroup);
+        if (!targetGroup.getTargets().isEmpty() && !config.services().rds().mock()) {
+            proxyManager.stopProxy(dbProxyRelayKey(proxy));
+        }
+    }
+
+    public synchronized void deleteDbProxy(String name) {
         DbProxy proxy = proxies.get(name).orElseThrow(() ->
                 new AwsException("DBProxyNotFoundFault", "DB proxy " + name + " not found.", 404));
         if (!config.services().rds().mock()) {
-            proxyManager.stopProxy(name);
+            proxyManager.stopProxy(dbProxyRelayKey(proxy));
         }
         releaseProxyPort(proxy.getProxyPort());
         proxyTargetGroups.delete(name);
@@ -1145,7 +1323,12 @@ public class RdsService implements Resettable {
     // ── Password validation callbacks ─────────────────────────────────────────
 
     public boolean validateDbPassword(String instanceId, String clientUser, String password) {
-        DbInstance instance = instances.get(instanceId).orElse(null);
+        return validateDbPasswordForAccount(null, instanceId, clientUser, password);
+    }
+
+    private boolean validateDbPasswordForAccount(String accountId, String instanceId,
+                                                  String clientUser, String password) {
+        DbInstance instance = findInstanceForAccount(accountId, instanceId);
         if (instance == null) {
             return false;
         }
@@ -1156,7 +1339,12 @@ public class RdsService implements Resettable {
     }
 
     public boolean validateDbClusterPassword(String clusterId, String clientUser, String password) {
-        DbCluster cluster = clusters.get(clusterId).orElse(null);
+        return validateDbClusterPasswordForAccount(null, clusterId, clientUser, password);
+    }
+
+    private boolean validateDbClusterPasswordForAccount(String accountId, String clusterId,
+                                                         String clientUser, String password) {
+        DbCluster cluster = findClusterForAccount(accountId, clusterId);
         if (cluster == null) {
             return false;
         }
@@ -1288,6 +1476,105 @@ public class RdsService implements Resettable {
         return dockerHostResolver != null ? dockerHostResolver.resolve() : "localhost";
     }
 
+    private void validateDbProxyCreate(String name, String engineFamily, String roleArn,
+                                       List<String> subnetIds, int idleClientTimeout) {
+        if (name == null || name.isBlank() || name.length() > 63
+                || !DB_PROXY_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "DBProxyName must be 1-63 characters, begin with a letter, and contain only letters, digits, and single hyphens.",
+                    400);
+        }
+        if (engineFamily == null || !("MYSQL".equalsIgnoreCase(engineFamily)
+                || "POSTGRESQL".equalsIgnoreCase(engineFamily)
+                || "SQLSERVER".equalsIgnoreCase(engineFamily))) {
+            throw new AwsException("InvalidParameterValue",
+                    "EngineFamily must be MYSQL, POSTGRESQL, or SQLSERVER.", 400);
+        }
+        if (roleArn == null || roleArn.length() < 20 || roleArn.length() > 2048) {
+            throw new AwsException("InvalidParameterValue", "RoleArn is required.", 400);
+        }
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "VpcSubnetIds is required.", 400);
+        }
+        if (idleClientTimeout < 1 || idleClientTimeout > 28_800) {
+            throw new AwsException("InvalidParameterValue",
+                    "IdleClientTimeout must be between 1 and 28800 seconds.", 400);
+        }
+    }
+
+    private DbProxyTargetGroup getDefaultProxyTargetGroup(String dbProxyName, String targetGroupName) {
+        String effectiveName = targetGroupName == null || targetGroupName.isBlank()
+                ? "default" : targetGroupName;
+        if (!"default".equals(effectiveName)) {
+            throw new AwsException("DBProxyTargetGroupNotFoundFault",
+                    "DB proxy target group " + effectiveName + " not found for proxy " + dbProxyName + ".", 404);
+        }
+        return proxyTargetGroups.get(dbProxyName).orElseThrow(() ->
+                new AwsException("DBProxyTargetGroupNotFoundFault",
+                        "DB proxy target group default not found for proxy " + dbProxyName + ".", 404));
+    }
+
+    private void validateTargetEngineFamily(DbProxy proxy, DatabaseEngine targetEngine) {
+        boolean compatible = switch (proxy.getEngineFamily()) {
+            case "POSTGRESQL" -> targetEngine == DatabaseEngine.POSTGRES;
+            case "MYSQL" -> targetEngine == DatabaseEngine.MYSQL || targetEngine == DatabaseEngine.MARIADB;
+            default -> false;
+        };
+        if (!compatible) {
+            throw new AwsException("InvalidParameterValue",
+                    "Target engine " + targetEngine + " is incompatible with proxy engine family "
+                            + proxy.getEngineFamily() + ".", 400);
+        }
+    }
+
+    private void validatePercent(String name, int value, int minimum, int maximum) {
+        if (value < minimum || value > maximum) {
+            throw new AwsException("InvalidParameterValue",
+                    name + " must be between " + minimum + " and " + maximum + ".", 400);
+        }
+    }
+
+    private void validatePoolConfiguration(Integer maxConnectionsPercent,
+                                           Integer maxIdleConnectionsPercent) {
+        if (maxConnectionsPercent != null) {
+            validatePercent("MaxConnectionsPercent", maxConnectionsPercent, 1, 100);
+        }
+        if (maxIdleConnectionsPercent != null) {
+            if (maxConnectionsPercent == null) {
+                throw new AwsException("InvalidParameterValue",
+                        "MaxConnectionsPercent is required when MaxIdleConnectionsPercent is specified.", 400);
+            }
+            validatePercent("MaxIdleConnectionsPercent", maxIdleConnectionsPercent,
+                    0, maxConnectionsPercent);
+        }
+    }
+
+    private boolean isRegisteredProxyTarget(String type, String resourceId) {
+        return proxyTargetGroups.scan(k -> true).stream()
+                .flatMap(targetGroup -> targetGroup.getTargets().stream())
+                .anyMatch(target -> type.equals(target.getType())
+                        && resourceId.equals(target.getRdsResourceId()));
+    }
+
+    private DbProxyTargetGroup copyProxyTargetGroup(DbProxyTargetGroup source) {
+        DbProxyTargetGroup copy = new DbProxyTargetGroup();
+        copy.setDbProxyName(source.getDbProxyName());
+        copy.setTargetGroupName(source.getTargetGroupName());
+        copy.setTargetGroupArn(source.getTargetGroupArn());
+        copy.setStatus(source.getStatus());
+        copy.setDefaultTargetGroup(source.isDefaultTargetGroup());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setUpdatedAt(source.getUpdatedAt());
+        copy.setMaxConnectionsPercent(source.getMaxConnectionsPercent());
+        copy.setMaxIdleConnectionsPercent(source.getMaxIdleConnectionsPercent());
+        copy.setTargets(source.getTargets());
+        return copy;
+    }
+
+    private String randomResourceSuffix() {
+        return java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 17);
+    }
+
     /** The engine's default listener port — an RDS Proxy endpoint is a bare host reached on this port. */
     private int defaultPortForEngineFamily(String engineFamily) {
         if (engineFamily == null) {
@@ -1331,11 +1618,13 @@ public class RdsService implements Resettable {
 
                 String effectiveMasterUser = cluster.getMasterUsername() != null
                         ? cluster.getMasterUsername() : "root";
+                final String accountId = accountIdFromArn(cluster.getDbClusterArn());
                 proxyManager.startProxy(cluster.getDbClusterIdentifier(), cluster.getEngine(),
                         cluster.isIamDatabaseAuthenticationEnabled(), proxyPort,
                         handle.getHost(), handle.getPort(), effectiveMasterUser,
                         cluster.getMasterPassword(), cluster.getDatabaseName(),
-                        (user, pw) -> validateDbClusterPassword(cluster.getDbClusterIdentifier(), user, pw));
+                        (user, pw) -> validateDbClusterPasswordForAccount(accountId,
+                                cluster.getDbClusterIdentifier(), user, pw));
                 cluster.setStatus(DbInstanceStatus.AVAILABLE);
             } catch (Exception e) {
                 releaseProxyPort(proxyPort);
@@ -1364,9 +1653,12 @@ public class RdsService implements Resettable {
                 int backendPort;
                 String clusterId = instance.getDbClusterIdentifier();
                 if (clusterId != null && !clusterId.isBlank()) {
-                    DbCluster cluster = clusters.get(clusterId).orElseThrow(() ->
-                            new AwsException("DBClusterNotFoundFault",
-                                    "DB cluster " + clusterId + " not found.", 404));
+                    DbCluster cluster = findClusterForAccount(
+                            accountIdFromArn(instance.getDbInstanceArn()), clusterId);
+                    if (cluster == null) {
+                        throw new AwsException("DBClusterNotFoundFault",
+                                "DB cluster " + clusterId + " not found.", 404);
+                    }
                     backendHost = cluster.getContainerHost();
                     backendPort = cluster.getContainerPort();
                     if (backendHost == null || backendPort <= 0) {
@@ -1398,11 +1690,13 @@ public class RdsService implements Resettable {
 
                 String effectiveMasterUser = instance.getMasterUsername() != null
                         ? instance.getMasterUsername() : "root";
+                final String accountId = accountIdFromArn(instance.getDbInstanceArn());
                 proxyManager.startProxy(instance.getDbInstanceIdentifier(), instance.getEngine(),
                         instance.isIamDatabaseAuthenticationEnabled(), proxyPort,
                         backendHost, backendPort, effectiveMasterUser,
                         instance.getMasterPassword(), instance.getDbName(),
-                        (user, pw) -> validateDbPassword(instance.getDbInstanceIdentifier(), user, pw));
+                        (user, pw) -> validateDbPasswordForAccount(accountId,
+                                instance.getDbInstanceIdentifier(), user, pw));
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
             } catch (Exception e) {
                 releaseProxyPort(proxyPort);
@@ -1418,11 +1712,15 @@ public class RdsService implements Resettable {
             proxy.setProxyPort(proxyPort);
             if (config.services().rds().mock()) {
                 proxy.setEndpointHost("localhost");
+                proxy.setStatus("available");
+                persistRestoredProxy(proxy);
+                ensureRestoredDefaultTargetGroup(proxy);
                 continue;
             }
             proxy.setEndpointHost(proxyEndpointHost());
-            DbProxyTargetGroup tg = proxyTargetGroups.get(proxy.getDbProxyName()).orElse(null);
-            if (tg == null || tg.getTargets().isEmpty()) {
+            persistRestoredProxy(proxy);
+            DbProxyTargetGroup tg = ensureRestoredDefaultTargetGroup(proxy);
+            if (tg.getTargets().isEmpty()) {
                 continue;   // no target registered yet; nothing to relay to
             }
             DbProxyTarget target = tg.getTargets().get(0);
@@ -1435,9 +1733,7 @@ public class RdsService implements Resettable {
                 String dbName;
                 boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
                 if (isCluster) {
-                    DbCluster cluster = clusters.get(target.getRdsResourceId()).orElseThrow(() ->
-                            new AwsException("DBClusterNotFoundFault",
-                                    "DB cluster " + target.getRdsResourceId() + " not found.", 404));
+                    DbCluster cluster = getClusterForRestore(proxy, target.getRdsResourceId());
                     backendHost = cluster.getContainerHost();
                     backendPort = cluster.getContainerPort();
                     engine = cluster.getEngine();
@@ -1445,9 +1741,7 @@ public class RdsService implements Resettable {
                     masterPassword = cluster.getMasterPassword();
                     dbName = cluster.getDatabaseName();
                 } else {
-                    DbInstance instance = instances.get(target.getRdsResourceId()).orElseThrow(() ->
-                            new AwsException("DBInstanceNotFoundFault",
-                                    "DB instance " + target.getRdsResourceId() + " not found.", 404));
+                    DbInstance instance = getInstanceForRestore(proxy, target.getRdsResourceId());
                     backendHost = instance.getContainerHost();
                     backendPort = instance.getContainerPort();
                     engine = instance.getEngine();
@@ -1462,15 +1756,127 @@ public class RdsService implements Resettable {
                 String effectiveMasterUser = masterUser != null ? masterUser : "root";
                 final String targetId = target.getRdsResourceId();
                 final boolean cluster = isCluster;
-                proxyManager.startProxy(proxy.getDbProxyName(), engine, proxy.isIamAuth(), proxyPort,
+                final String accountId = accountIdFromArn(proxy.getDbProxyArn());
+                proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(), proxyPort,
                         backendHost, backendPort, effectiveMasterUser, masterPassword, dbName,
-                        (user, pw) -> cluster ? validateDbClusterPassword(targetId, user, pw)
-                                : validateDbPassword(targetId, user, pw));
+                        (user, pw) -> cluster
+                                ? validateDbClusterPasswordForAccount(accountId, targetId, user, pw)
+                                : validateDbPasswordForAccount(accountId, targetId, user, pw));
+                proxy.setStatus("available");
+                persistRestoredProxy(proxy);
             } catch (Exception e) {
                 releaseProxyPort(proxyPort);
+                proxy.setStatus("insufficient-resource-limits");
+                persistRestoredProxy(proxy);
                 LOG.warnv(e, "Failed to restore RDS proxy {0}", proxy.getDbProxyName());
             }
         }
+    }
+
+    private void persistRestoredProxy(DbProxy proxy) {
+        String defaultAccountId = defaultAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(proxy.getDbProxyArn(), defaultAccountId);
+        if (proxies instanceof AccountAwareStorageBackend<DbProxy> aware) {
+            if (Objects.equals(accountId, defaultAccountId)) {
+                // Use the regular path for the default account so legacy un-prefixed entries are
+                // migrated according to AccountAwareStorageBackend's compatibility contract.
+                aware.get(proxy.getDbProxyName());
+                aware.put(proxy.getDbProxyName(), proxy);
+            } else {
+                aware.putForAccount(accountId, proxy.getDbProxyName(), proxy);
+            }
+        } else {
+            proxies.put(proxy.getDbProxyName(), proxy);
+        }
+    }
+
+    private DbProxyTargetGroup ensureRestoredDefaultTargetGroup(DbProxy proxy) {
+        String defaultAccountId = defaultAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(proxy.getDbProxyArn(), defaultAccountId);
+        DbProxyTargetGroup targetGroup;
+        if (proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware) {
+            targetGroup = Objects.equals(accountId, defaultAccountId)
+                    ? aware.get(proxy.getDbProxyName()).orElse(null)
+                    : aware.getForAccount(accountId, proxy.getDbProxyName()).orElse(null);
+        } else {
+            targetGroup = proxyTargetGroups.get(proxy.getDbProxyName()).orElse(null);
+        }
+        if (targetGroup != null) {
+            return targetGroup;
+        }
+
+        Instant now = proxy.getCreatedAt() != null ? proxy.getCreatedAt() : Instant.now();
+        targetGroup = new DbProxyTargetGroup();
+        targetGroup.setDbProxyName(proxy.getDbProxyName());
+        targetGroup.setTargetGroupName("default");
+        targetGroup.setTargetGroupArn(AwsArnUtils.Arn.of("rds",
+                AwsArnUtils.regionOrDefault(proxy.getDbProxyArn(), regionResolver.getDefaultRegion()),
+                accountId, "target-group:prx-tg-" + randomResourceSuffix()).toString());
+        targetGroup.setCreatedAt(now);
+        targetGroup.setUpdatedAt(now);
+        if (proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware) {
+            if (Objects.equals(accountId, defaultAccountId)) {
+                aware.put(proxy.getDbProxyName(), targetGroup);
+            } else {
+                aware.putForAccount(accountId, proxy.getDbProxyName(), targetGroup);
+            }
+        } else {
+            proxyTargetGroups.put(proxy.getDbProxyName(), targetGroup);
+        }
+        return targetGroup;
+    }
+
+    private DbCluster getClusterForRestore(DbProxy proxy, String clusterId) {
+        DbCluster cluster = findClusterForAccount(accountIdFromArn(proxy.getDbProxyArn()), clusterId);
+        if (cluster == null) {
+            throw new AwsException("DBClusterNotFoundFault",
+                    "DB cluster " + clusterId + " not found.", 404);
+        }
+        return cluster;
+    }
+
+    private DbInstance getInstanceForRestore(DbProxy proxy, String instanceId) {
+        DbInstance instance = findInstanceForAccount(accountIdFromArn(proxy.getDbProxyArn()), instanceId);
+        if (instance == null) {
+            throw new AwsException("DBInstanceNotFoundFault",
+                    "DB instance " + instanceId + " not found.", 404);
+        }
+        return instance;
+    }
+
+    private DbCluster findClusterForAccount(String accountId, String clusterId) {
+        if (accountId != null && clusters instanceof AccountAwareStorageBackend<DbCluster> aware) {
+            return Objects.equals(accountId, defaultAccountId())
+                    ? aware.get(clusterId).orElse(null)
+                    : aware.getForAccount(accountId, clusterId).orElse(null);
+        }
+        return clusters.get(clusterId).orElse(null);
+    }
+
+    private DbInstance findInstanceForAccount(String accountId, String instanceId) {
+        if (accountId != null && instances instanceof AccountAwareStorageBackend<DbInstance> aware) {
+            return Objects.equals(accountId, defaultAccountId())
+                    ? aware.get(instanceId).orElse(null)
+                    : aware.getForAccount(accountId, instanceId).orElse(null);
+        }
+        return instances.get(instanceId).orElse(null);
+    }
+
+    private String accountIdFromArn(String arn) {
+        return AwsArnUtils.accountOrDefault(arn, defaultAccountId());
+    }
+
+    private String defaultAccountId() {
+        String configured = config.defaultAccountId();
+        return configured == null || configured.isBlank() ? regionResolver.getAccountId() : configured;
+    }
+
+    private String dbProxyRelayKey(DbProxy proxy) {
+        String identity = proxy.getDbProxyArn();
+        if (identity == null || identity.isBlank()) {
+            identity = proxy.getDbProxyName();
+        }
+        return "db-proxy:" + identity;
     }
 
     private Collection<DbCluster> allClusters() {

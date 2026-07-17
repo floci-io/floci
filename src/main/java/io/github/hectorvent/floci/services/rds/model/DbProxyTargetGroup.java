@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -16,6 +17,9 @@ public class DbProxyTargetGroup {
     private String targetGroupName = "default";
     private String targetGroupArn;
     private String status = "available";
+    private boolean defaultTargetGroup = true;
+    private Instant createdAt;
+    private Instant updatedAt;
     private int maxConnectionsPercent = 100;
     private int maxIdleConnectionsPercent = 50;
     private List<DbProxyTarget> targets = new ArrayList<>();
@@ -33,6 +37,15 @@ public class DbProxyTargetGroup {
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+
+    public boolean isDefaultTargetGroup() { return defaultTargetGroup; }
+    public void setDefaultTargetGroup(boolean defaultTargetGroup) { this.defaultTargetGroup = defaultTargetGroup; }
+
+    public Instant getCreatedAt() { return createdAt; }
+    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+
+    public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
 
     public int getMaxConnectionsPercent() { return maxConnectionsPercent; }
     public void setMaxConnectionsPercent(int maxConnectionsPercent) { this.maxConnectionsPercent = maxConnectionsPercent; }

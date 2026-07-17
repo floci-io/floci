@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -215,12 +217,15 @@ class RdsCfnProvisionerTest {
         when(proxy.getEndpoint()).thenReturn("host.docker.internal");
         when(proxy.getDbProxyArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc");
         when(rdsService.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(),
-                anyList(), anyList(), anyList(), any())).thenReturn(proxy);
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any()))
+                .thenReturn(proxy);
 
         StackResource r = provision("Proxy", "AWS::RDS::DBProxy", """
                 {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL","RequireTLS":true,
+                 "DebugLogging":true,"IdleClientTimeout":120,
                  "RoleArn":"arn:aws:iam::000000000000:role/proxy",
                  "VpcSubnetIds":["subnet-a","subnet-b"],
+                 "Tags":[{"Key":"owner","Value":"platform"}],
                  "Auth":[{"AuthScheme":"SECRETS","SecretArn":"arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf","IAMAuth":"DISABLED"}]}
                 """);
 
@@ -231,15 +236,17 @@ class RdsCfnProvisionerTest {
         assertEquals("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc", r.getAttributes().get("DBProxyArn"));
         verify(rdsService).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(true), eq(false),
                 eq("arn:aws:iam::000000000000:role/proxy"), eq(List.of("subnet-a", "subnet-b")),
-                anyList(), anyList(), any());
+                anyList(), anyList(), eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-east-1"));
     }
 
     @Test
     void provisionsDbProxyTargetGroupRegistersClusterTarget() {
         DbProxyTargetGroup tg = mock(DbProxyTargetGroup.class);
         when(tg.getDbProxyName()).thenReturn("app-proxy");
-        when(tg.getTargetGroupArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:target-group:app-proxy/default");
+        when(tg.getTargetGroupArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:target-group:prx-tg-abc");
         when(rdsService.registerDbProxyTargets(any(), any(), anyList(), anyList(), anyInt(), anyInt()))
+                .thenReturn(tg);
+        when(rdsService.configureDbProxyTargetGroup("app-proxy", "default", 90, 40))
                 .thenReturn(tg);
 
         StackResource r = provision("Tg", "AWS::RDS::DBProxyTargetGroup", """
@@ -249,9 +256,50 @@ class RdsCfnProvisionerTest {
                 """);
 
         assertEquals("CREATE_COMPLETE", r.getStatus());
-        assertEquals("app-proxy", r.getPhysicalId());
+        assertEquals("arn:aws:rds:us-east-1:000000000000:target-group:prx-tg-abc", r.getPhysicalId());
+        verify(rdsService).configureDbProxyTargetGroup("app-proxy", "default", 90, 40);
         verify(rdsService).registerDbProxyTargets("app-proxy", "default",
-                List.of("mycluster"), List.of(), 90, 40);
+                List.of("mycluster"), List.of(), 0, 0);
+    }
+
+    @Test
+    void provisionsEmptyDbProxyTargetGroupWithoutRegisteringATarget() {
+        DbProxyTargetGroup targetGroup = mock(DbProxyTargetGroup.class);
+        when(targetGroup.getDbProxyName()).thenReturn("app-proxy");
+        when(targetGroup.getTargetGroupArn())
+                .thenReturn("arn:aws:rds:us-east-1:000000000000:target-group:prx-tg-empty");
+        when(rdsService.configureDbProxyTargetGroup("app-proxy", "default", 80, 0))
+                .thenReturn(targetGroup);
+
+        StackResource resource = provision("Tg", "AWS::RDS::DBProxyTargetGroup", """
+                {"DBProxyName":"app-proxy","TargetGroupName":"default",
+                 "ConnectionPoolConfigurationInfo":{"MaxConnectionsPercent":80,"MaxIdleConnectionsPercent":0}}
+                """);
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        assertEquals(targetGroup.getTargetGroupArn(), resource.getPhysicalId());
+        verify(rdsService).configureDbProxyTargetGroup("app-proxy", "default", 80, 0);
+        verify(rdsService, org.mockito.Mockito.never()).registerDbProxyTargets(
+                any(), any(), anyList(), anyList(), anyInt(), anyInt());
+    }
+
+    @Test
+    void rollsBackRegisteredTargetWhenTargetGroupConfigurationFails() {
+        DbProxyTargetGroup targetGroup = mock(DbProxyTargetGroup.class);
+        when(rdsService.registerDbProxyTargets("app-proxy", "default",
+                List.of("mycluster"), List.of(), 0, 0)).thenReturn(targetGroup);
+        when(rdsService.configureDbProxyTargetGroup("app-proxy", "default", 90, 40))
+                .thenThrow(new AwsException("InvalidParameterValue", "invalid pool settings", 400));
+
+        StackResource resource = provision("Tg", "AWS::RDS::DBProxyTargetGroup", """
+                {"DBProxyName":"app-proxy","TargetGroupName":"default",
+                 "DBClusterIdentifiers":["mycluster"],
+                 "ConnectionPoolConfigurationInfo":{"MaxConnectionsPercent":90,"MaxIdleConnectionsPercent":40}}
+                """);
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        verify(rdsService).deregisterDbProxyTargets("app-proxy", "default",
+                List.of("mycluster"), List.of());
     }
 
     @Test
@@ -274,5 +322,23 @@ class RdsCfnProvisionerTest {
 
         provisioner.delete("AWS::RDS::DBProxy", "app-proxy", "us-east-1");
         verify(rdsService).deleteDbProxy("app-proxy");
+
+        provisioner.delete("AWS::RDS::DBProxyTargetGroup",
+                "arn:aws:rds:us-east-1:000000000000:target-group:prx-tg-abc", "us-east-1");
+        verify(rdsService).clearDbProxyTargetGroupByArn(
+                "arn:aws:rds:us-east-1:000000000000:target-group:prx-tg-abc");
+    }
+
+    @Test
+    void targetGroupDeleteIsIdempotentWhenProxyDeletionAlreadyRemovedIt() {
+        String targetGroupArn =
+                "arn:aws:rds:us-east-1:000000000000:target-group:prx-tg-already-gone";
+        org.mockito.Mockito.doThrow(new AwsException("DBProxyTargetGroupNotFoundFault",
+                "target group not found", 404))
+                .when(rdsService).clearDbProxyTargetGroupByArn(targetGroupArn);
+
+        assertDoesNotThrow(() -> provisioner.delete(
+                "AWS::RDS::DBProxyTargetGroup", targetGroupArn, "us-east-1"));
+        verify(rdsService).clearDbProxyTargetGroupByArn(targetGroupArn);
     }
 }

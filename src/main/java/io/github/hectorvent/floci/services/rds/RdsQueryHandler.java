@@ -79,9 +79,10 @@ public class RdsQueryHandler {
                 case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
                 case "DescribeDBProxies" -> handleDescribeDbProxies(params);
-                case "CreateDBProxy" -> handleCreateDbProxy(params);
+                case "CreateDBProxy" -> handleCreateDbProxy(params, region);
                 case "DeleteDBProxy" -> handleDeleteDbProxy(params);
                 case "RegisterDBProxyTargets" -> handleRegisterDbProxyTargets(params);
+                case "DeregisterDBProxyTargets" -> handleDeregisterDbProxyTargets(params);
                 case "DescribeDBProxyTargetGroups" -> handleDescribeDbProxyTargetGroups(params);
                 case "DescribeDBProxyTargets" -> handleDescribeDbProxyTargets(params);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
@@ -624,10 +625,20 @@ public class RdsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DescribeDBProxies", AwsNamespaces.RDS, xml.build())).build();
     }
 
-    private Response handleCreateDbProxy(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbProxy(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
         String engineFamily = params.getFirst("EngineFamily");
         boolean requireTls = "true".equalsIgnoreCase(params.getFirst("RequireTLS"));
+        boolean debugLogging = "true".equalsIgnoreCase(params.getFirst("DebugLogging"));
+        int idleClientTimeout = 1800;
+        String idleClientTimeoutValue = params.getFirst("IdleClientTimeout");
+        if (idleClientTimeoutValue != null) {
+            try {
+                idleClientTimeout = Integer.parseInt(idleClientTimeoutValue);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidParameterValue", "IdleClientTimeout must be an integer.", 400);
+            }
+        }
         String roleArn = params.getFirst("RoleArn");
         List<String> subnetIds = memberList(params, "VpcSubnetIds");
         List<String> sgIds = memberList(params, "VpcSecurityGroupIds");
@@ -645,7 +656,7 @@ public class RdsQueryHandler {
         }
         boolean iamEnabled = auth.stream().anyMatch(a -> "REQUIRED".equalsIgnoreCase(a.getIamAuth()));
         DbProxy proxy = service.createDbProxy(name, engineFamily, requireTls, iamEnabled, roleArn,
-                subnetIds, sgIds, auth, new LinkedHashMap<>());
+                subnetIds, sgIds, auth, idleClientTimeout, debugLogging, parseTags(params), region);
         String result = new XmlBuilder().start("DBProxy").raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
         return Response.ok(AwsQueryResponse.envelope("CreateDBProxy", AwsNamespaces.RDS, result)).build();
     }
@@ -672,10 +683,17 @@ public class RdsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("RegisterDBProxyTargets", AwsNamespaces.RDS, xml.build())).build();
     }
 
+    private Response handleDeregisterDbProxyTargets(MultivaluedMap<String, String> params) {
+        service.deregisterDbProxyTargets(params.getFirst("DBProxyName"), params.getFirst("TargetGroupName"),
+                memberList(params, "DBClusterIdentifiers"), memberList(params, "DBInstanceIdentifiers"));
+        return Response.ok(AwsQueryResponse.envelope("DeregisterDBProxyTargets", AwsNamespaces.RDS, "")).build();
+    }
+
     private Response handleDescribeDbProxyTargetGroups(MultivaluedMap<String, String> params) {
         String name = params.getFirst("DBProxyName");
         XmlBuilder xml = new XmlBuilder().start("TargetGroups");
-        for (DbProxyTargetGroup tg : service.describeDbProxyTargetGroups(name)) {
+        for (DbProxyTargetGroup tg : service.describeDbProxyTargetGroups(
+                name, params.getFirst("TargetGroupName"))) {
             xml.start("member").raw(dbProxyTargetGroupInnerXml(tg)).end("member");
         }
         xml.end("TargetGroups");
@@ -711,8 +729,14 @@ public class RdsQueryHandler {
             xml.start("member")
                .elem("AuthScheme", a.getAuthScheme())
                .elem("SecretArn", a.getSecretArn())
-               .elem("IAMAuth", a.getIamAuth())
-               .end("member");
+               .elem("IAMAuth", a.getIamAuth());
+            if (a.getClientPasswordAuthType() != null) {
+                xml.elem("ClientPasswordAuthType", a.getClientPasswordAuthType());
+            }
+            if (a.getDescription() != null) {
+                xml.elem("Description", a.getDescription());
+            }
+            xml.end("member");
         }
         xml.end("Auth");
         xml.start("VpcSubnetIds");
@@ -720,6 +744,11 @@ public class RdsQueryHandler {
             xml.elem("member", s);
         }
         xml.end("VpcSubnetIds");
+        xml.start("VpcSecurityGroupIds");
+        for (String securityGroupId : p.getVpcSecurityGroupIds()) {
+            xml.elem("member", securityGroupId);
+        }
+        xml.end("VpcSecurityGroupIds");
         if (p.getCreatedAt() != null) {
             xml.elem("CreatedDate", p.getCreatedAt().toString());
         }
@@ -727,16 +756,23 @@ public class RdsQueryHandler {
     }
 
     private String dbProxyTargetGroupInnerXml(DbProxyTargetGroup tg) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .elem("DBProxyName", tg.getDbProxyName())
                 .elem("TargetGroupName", tg.getTargetGroupName())
                 .elem("TargetGroupArn", tg.getTargetGroupArn())
                 .elem("Status", tg.getStatus())
+                .elem("IsDefault", String.valueOf(tg.isDefaultTargetGroup()))
                 .start("ConnectionPoolConfig")
                   .elem("MaxConnectionsPercent", tg.getMaxConnectionsPercent())
                   .elem("MaxIdleConnectionsPercent", tg.getMaxIdleConnectionsPercent())
-                .end("ConnectionPoolConfig")
-                .build();
+                .end("ConnectionPoolConfig");
+        if (tg.getCreatedAt() != null) {
+            xml.elem("CreatedDate", tg.getCreatedAt().toString());
+        }
+        if (tg.getUpdatedAt() != null) {
+            xml.elem("UpdatedDate", tg.getUpdatedAt().toString());
+        }
+        return xml.build();
     }
 
     private String dbProxyTargetInnerXml(DbProxyTarget t) {

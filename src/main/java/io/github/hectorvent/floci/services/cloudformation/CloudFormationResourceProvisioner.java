@@ -348,9 +348,9 @@ public class CloudFormationResourceProvisioner {
                         provisionDbClusterParameterGroup(resource, properties, engine, stackName);
                 case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBProxy" -> provisionDbProxy(resource, properties, engine, stackName);
+                case "AWS::RDS::DBProxy" -> provisionDbProxy(resource, properties, engine, region);
                 case "AWS::RDS::DBProxyTargetGroup" ->
-                        provisionDbProxyTargetGroup(resource, properties, engine, stackName);
+                        provisionDbProxyTargetGroup(resource, properties, engine);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
@@ -462,8 +462,7 @@ public class CloudFormationResourceProvisioner {
             case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
             case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
             case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId);
-            // The target group lives and dies with its proxy; deleting it alone is a no-op.
-            case "AWS::RDS::DBProxyTargetGroup" -> { }
+            case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId);
             case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
             case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
             case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
@@ -1058,42 +1057,66 @@ public class CloudFormationResourceProvisioner {
     }
 
     private void provisionDbProxy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                  String stackName) {
+                                  String region) {
         String name = resolveOptional(props, "DBProxyName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
-        }
         String engineFamily = resolveOptional(props, "EngineFamily", engine);
         boolean requireTls = parseBoolProp(props, "RequireTLS", engine);
+        boolean debugLogging = parseBoolProp(props, "DebugLogging", engine);
+        Integer configuredIdleClientTimeout = parseOptionalIntProp(props, "IdleClientTimeout", engine);
+        int idleClientTimeout = configuredIdleClientTimeout != null ? configuredIdleClientTimeout : 1800;
         String roleArn = resolveOptional(props, "RoleArn", engine);
         List<String> subnetIds = resolveStringList(props, "VpcSubnetIds", engine);
+        if (subnetIds.size() < 2) {
+            throw new AwsException("InvalidParameterValue",
+                    "AWS::RDS::DBProxy VpcSubnetIds must contain at least two subnet IDs.", 400);
+        }
         List<String> sgIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         List<DbProxyAuth> auth = parseProxyAuth(props, engine);
         boolean iamAuth = auth.stream().anyMatch(a -> "REQUIRED".equalsIgnoreCase(a.getIamAuth()));
         var proxy = rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth, roleArn,
-                subnetIds, sgIds, auth, Map.of());
+                subnetIds, sgIds, auth, idleClientTimeout, debugLogging,
+                parseCfnTags(props != null ? props.get("Tags") : null, engine), region);
         r.setPhysicalId(proxy.getDbProxyName());              // Ref -> DBProxyName
         r.getAttributes().put("Endpoint", proxy.getEndpoint());   // GetAtt "Endpoint" (bare host)
         r.getAttributes().put("DBProxyArn", proxy.getDbProxyArn());
     }
 
     private void provisionDbProxyTargetGroup(StackResource r, JsonNode props,
-                                             CloudFormationTemplateEngine engine, String stackName) {
+                                             CloudFormationTemplateEngine engine) {
         String dbProxyName = resolveOptional(props, "DBProxyName", engine);
-        String targetGroupName = firstNonBlank(resolveOptional(props, "TargetGroupName", engine), "default");
+        String targetGroupName = resolveOptional(props, "TargetGroupName", engine);
+        if (!"default".equals(targetGroupName)) {
+            throw new AwsException("InvalidParameterValue",
+                    "AWS::RDS::DBProxyTargetGroup TargetGroupName must be default.", 400);
+        }
         List<String> clusterIds = resolveStringList(props, "DBClusterIdentifiers", engine);
         List<String> instanceIds = resolveStringList(props, "DBInstanceIdentifiers", engine);
-        int maxConn = 0;
-        int maxIdle = 0;
+        Integer maxConn = null;
+        Integer maxIdle = null;
         if (props != null && props.has("ConnectionPoolConfigurationInfo")) {
             JsonNode cpc = props.get("ConnectionPoolConfigurationInfo");
-            maxConn = parseIntProp(cpc, "MaxConnectionsPercent", engine, 0);
-            maxIdle = parseIntProp(cpc, "MaxIdleConnectionsPercent", engine, 0);
+            maxConn = parseOptionalIntProp(cpc, "MaxConnectionsPercent", engine);
+            maxIdle = parseOptionalIntProp(cpc, "MaxIdleConnectionsPercent", engine);
         }
-        // Registering the target starts the relay (target backend host/port are now known).
-        var tg = rdsService.registerDbProxyTargets(dbProxyName, targetGroupName,
-                clusterIds, instanceIds, maxConn, maxIdle);
-        r.setPhysicalId(tg.getDbProxyName());                 // Ref -> DBProxyName
+        var hasTargets = !clusterIds.isEmpty() || !instanceIds.isEmpty();
+        var tg = hasTargets
+                ? rdsService.registerDbProxyTargets(dbProxyName, targetGroupName,
+                        clusterIds, instanceIds, 0, 0)
+                : rdsService.configureDbProxyTargetGroup(dbProxyName, targetGroupName, maxConn, maxIdle);
+        if (hasTargets) {
+            try {
+                tg = rdsService.configureDbProxyTargetGroup(dbProxyName, targetGroupName, maxConn, maxIdle);
+            } catch (RuntimeException configurationFailure) {
+                try {
+                    rdsService.deregisterDbProxyTargets(dbProxyName, targetGroupName,
+                            clusterIds, instanceIds);
+                } catch (RuntimeException rollbackFailure) {
+                    configurationFailure.addSuppressed(rollbackFailure);
+                }
+                throw configurationFailure;
+            }
+        }
+        r.setPhysicalId(tg.getTargetGroupArn());              // Ref -> TargetGroupArn
         r.getAttributes().put("TargetGroupArn", tg.getTargetGroupArn());
         r.getAttributes().put("DBProxyName", tg.getDbProxyName());
     }
@@ -1125,6 +1148,17 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
+    private void clearDbProxyTargetGroupSafe(String targetGroupArn) {
+        try {
+            rdsService.clearDbProxyTargetGroupByArn(targetGroupArn);
+        } catch (AwsException e) {
+            if (!"DBProxyTargetGroupNotFoundFault".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("DB proxy target group already gone, treating as deleted: {0}", targetGroupArn);
+        }
+    }
+
     private static String firstNonBlank(String value, String fallback) {
         return (value == null || value.isBlank()) ? fallback : value;
     }
@@ -1138,6 +1172,18 @@ public class CloudFormationResourceProvisioner {
             return Integer.parseInt(value.trim());
         } catch (NumberFormatException e) {
             return fallback;
+        }
+    }
+
+    private Integer parseOptionalIntProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        String value = resolveOptional(props, name, engine);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " must be an integer.", 400);
         }
     }
 

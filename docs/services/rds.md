@@ -42,6 +42,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `CreateDBProxy` | Create a DB proxy |
 | `DeleteDBProxy` | Delete a DB proxy |
 | `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
+| `DeregisterDBProxyTargets` | Remove a cluster or instance from a proxy target group |
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
 | `DescribeDBClusterSnapshots` | - |
@@ -56,7 +57,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 |---|---|---|
 | `FLOCI_SERVICES_RDS_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_RDS_MOCK` | `false` | `true` = metadata only (no Docker container or auth proxy) |
-| `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7000` | First host port in the RDS proxy range |
+| `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
@@ -100,6 +101,14 @@ services:
     best-effort, as with the other mock-capable services: resources created in real mode and
     deleted under mock leave their containers and volumes behind, and resources created in mock
     mode are restored with fresh, empty containers when loaded in real mode.
+
+!!! warning "DB proxy endpoint routing"
+
+    DB proxy control-plane resources and target registration are modeled, but Floci's current
+    single-host TCP relay cannot expose multiple same-engine DB proxies as distinct AWS-style bare
+    hostnames on the same engine-default port. The standard Docker Compose mapping also exposes
+    only the `7001-7099` instance/cluster proxy range, not `1433`, `3306`, or `5432`. Use mock mode
+    for DB proxy provisioning workflows until a dedicated endpoint-routing design is implemented.
 
 ## Examples
 
