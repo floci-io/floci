@@ -378,16 +378,29 @@ public class KinesisService {
 
     public String getShardIterator(String streamName, String shardId, String type, String sequenceNumber,
                                    Long timestampMillis, String region) {
-        resolveStream(streamName, region); // validate exists
+        KinesisStream stream = resolveStream(streamName, region);
         // Format: streamName|shardId|type|sequenceNumber|index|timestampMillis
         // The 6th slot was added for AT_TIMESTAMP; empty for other iterator types.
         // Old 5-part iterators still decode via split(-1) compatibility in getRecords.
+        // For LATEST the index slot carries the shard tip at iterator creation time,
+        // so records written afterwards are visible to getRecords.
         String raw = String.format("%s|%s|%s|%s|%d|%s",
                 streamName, shardId, type,
                 sequenceNumber != null ? sequenceNumber : "",
-                0,
+                latestSnapshotIndex(stream, shardId, type),
                 timestampMillis != null ? timestampMillis.toString() : "");
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private int latestSnapshotIndex(KinesisStream stream, String shardId, String type) {
+        if (!"LATEST".equals(type)) {
+            return 0;
+        }
+        KinesisShard shard = stream.getShards().stream()
+                .filter(s -> s.getShardId().equals(shardId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
+        return shard.getRecords().size();
     }
 
     public Map<String, Object> getRecords(String shardIterator, Integer limit, String region) {
@@ -419,11 +432,11 @@ public class KinesisService {
         List<KinesisRecord> allRecords = shard.getRecords();
         int startIndex = 0;
 
-        // Simple implementation of iterator types
-        if ("TRIM_HORIZON".equals(type)) {
+        // Simple implementation of iterator types.
+        // LATEST resumes from the shard tip snapshot encoded at GetShardIterator time,
+        // so records appended after the iterator was obtained are returned.
+        if ("TRIM_HORIZON".equals(type) || "LATEST".equals(type)) {
             startIndex = lastIndex;
-        } else if ("LATEST".equals(type)) {
-            startIndex = allRecords.size();
         } else if ("AT_SEQUENCE_NUMBER".equals(type)) {
             for (int i = 0; i < allRecords.size(); i++) {
                 if (allRecords.get(i).getSequenceNumber().equals(startSeq)) {
@@ -509,10 +522,11 @@ public class KinesisService {
 
     public String getShardIteratorForAccount(String accountId, String streamName, String shardId,
                                              String type, String sequenceNumber, String region) {
-        resolveStreamForAccount(accountId, streamName, region);
+        KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
         String raw = String.format("%s|%s|%s|%s|%d|",
                 streamName, shardId, type,
-                sequenceNumber != null ? sequenceNumber : "", 0);
+                sequenceNumber != null ? sequenceNumber : "",
+                latestSnapshotIndex(stream, shardId, type));
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -537,10 +551,9 @@ public class KinesisService {
 
         List<KinesisRecord> allRecords = shard.getRecords();
         int startIndex = 0;
-        if ("TRIM_HORIZON".equals(type)) {
+        // LATEST resumes from the shard tip snapshot encoded at GetShardIterator time.
+        if ("TRIM_HORIZON".equals(type) || "LATEST".equals(type)) {
             startIndex = lastIndex;
-        } else if ("LATEST".equals(type)) {
-            startIndex = allRecords.size();
         } else if ("AFTER_SEQUENCE_NUMBER".equals(type)) {
             for (int i = 0; i < allRecords.size(); i++) {
                 if (allRecords.get(i).getSequenceNumber().equals(startSeq)) {
