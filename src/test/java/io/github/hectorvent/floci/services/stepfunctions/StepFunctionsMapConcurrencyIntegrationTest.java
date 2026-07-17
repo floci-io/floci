@@ -7,6 +7,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -14,10 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Verifies a Map state runs its iterations concurrently (honoring MaxConcurrency) while preserving
- * item order in the results. Each iteration Waits one second; with the default (unlimited)
- * concurrency N iterations finish in ~1s rather than ~Ns, and MaxConcurrency=1 runs them strictly
- * sequentially. Order preservation is asserted independently of timing.
+ * Wire-level coverage for Map concurrency configuration and ordered results. The scheduler's
+ * concurrency, bounded-window, cancellation, and fail-fast behavior is covered deterministically
+ * by {@link MapIterationSchedulerTest} rather than with wall-clock assertions.
  */
 @QuarkusTest
 class StepFunctionsMapConcurrencyIntegrationTest {
@@ -33,10 +34,13 @@ class StepFunctionsMapConcurrencyIntegrationTest {
 
     private static String mapDef(Integer maxConcurrency) {
         String mc = maxConcurrency == null ? "" : "\"MaxConcurrency\":" + maxConcurrency + ",";
+        return mapDefWithConcurrencyField(mc);
+    }
+
+    private static String mapDefWithConcurrencyField(String concurrencyField) {
         return "{\"StartAt\":\"M\",\"States\":{"
-             + "\"M\":{\"Type\":\"Map\",\"ItemsPath\":\"$.items\"," + mc
-             + "\"ItemProcessor\":{\"StartAt\":\"W\",\"States\":{"
-             + "\"W\":{\"Type\":\"Wait\",\"Seconds\":1,\"Next\":\"P\"},"
+             + "\"M\":{\"Type\":\"Map\",\"ItemsPath\":\"$.items\"," + concurrencyField
+             + "\"ItemProcessor\":{\"StartAt\":\"P\",\"States\":{"
              + "\"P\":{\"Type\":\"Pass\",\"End\":true}}},"
              + "\"End\":true}}}";
     }
@@ -59,27 +63,85 @@ class StepFunctionsMapConcurrencyIntegrationTest {
     }
 
     @Test
-    void mapRunsIterationsConcurrentlyByDefaultAndPreservesOrder() throws Exception {
-        long start = System.currentTimeMillis();
-        String output = run(mapDef(null), items(4));
-        long elapsedMs = System.currentTimeMillis() - start;
-
-        assertOrderedItems(output, 4);
-        // Four one-second Waits complete in ~1s when run concurrently; strictly sequential would be ~4s.
-        assertTrue(elapsedMs < 3000,
-                "Map iterations should run concurrently (elapsed " + elapsedMs + "ms, expected < 3000)");
+    void mapPreservesInputOrderWithDefaultConcurrency() throws Exception {
+        assertOrderedItems(run(mapDef(null), items(50)), 50);
     }
 
     @Test
-    void mapWithMaxConcurrencyOneRunsSequentially() throws Exception {
-        long start = System.currentTimeMillis();
-        String output = run(mapDef(1), items(3));
-        long elapsedMs = System.currentTimeMillis() - start;
+    void mapAcceptsStaticMaxConcurrency() throws Exception {
+        assertOrderedItems(run(mapDef(1), items(5)), 5);
+    }
 
-        assertOrderedItems(output, 3);
-        // MaxConcurrency=1 serialises the three 1s Waits (~3s), unlike the ~1s of the concurrent path.
-        assertTrue(elapsedMs >= 2500,
-                "MaxConcurrency=1 should run sequentially (elapsed " + elapsedMs + "ms, expected >= 2500)");
+    @Test
+    void mapResolvesMaxConcurrencyPathFromItsInput() throws Exception {
+        String input = "{\"ignored\":true,\"payload\":{"
+                + "\"config\":{\"max-limit\":2},\"items\":["
+                + "{\"i\":0},{\"i\":1},{\"i\":2},{\"i\":3}]}}";
+
+        assertOrderedItems(run(mapDefWithConcurrencyField(
+                "\"InputPath\":\"$.payload\","
+                        + "\"MaxConcurrencyPath\":\"$.config.['max-limit']\","), input), 4);
+    }
+
+    @Test
+    void jsonataMapEvaluatesMaxConcurrencyExpression() throws Exception {
+        String definition = """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "M",
+                  "States": {
+                    "M": {
+                      "Type": "Map",
+                      "Items": "{% $states.input.items %}",
+                      "MaxConcurrency": "{% $states.input.limit %}",
+                      "ItemProcessor": {
+                        "StartAt": "P",
+                        "States": {"P": {"Type": "Pass", "End": true}}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """;
+
+        assertOrderedItems(run(definition,
+                "{\"limit\":3,\"items\":[{\"i\":0},{\"i\":1},{\"i\":2},{\"i\":3}]}"), 4);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"true", "-1", "1.5", "$states.input.missing"})
+    void invalidJsonataMaxConcurrencyIsCatchableAsQueryEvaluationError(String expression) throws Exception {
+        String definition = """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "M",
+                  "States": {
+                    "M": {
+                      "Type": "Map",
+                      "Items": "{% $states.input.items %}",
+                      "MaxConcurrency": "{% __EXPRESSION__ %}",
+                      "ItemProcessor": {
+                        "StartAt": "P",
+                        "States": {"P": {"Type": "Pass", "End": true}}
+                      },
+                      "Catch": [{
+                        "ErrorEquals": ["States.QueryEvaluationError"],
+                        "Next": "Caught"
+                      }],
+                      "Next": "Unexpected"
+                    },
+                    "Caught": {
+                      "Type": "Pass",
+                      "Output": {"caught": true},
+                      "End": true
+                    },
+                    "Unexpected": {"Type": "Fail", "Error": "UnexpectedSuccess"}
+                  }
+                }
+                """.replace("__EXPRESSION__", expression);
+
+        JsonNode output = mapper.readTree(run(definition, "{\"items\":[1,2]}"));
+        assertTrue(output.path("caught").asBoolean());
     }
 
     private String run(String definition, String input) throws InterruptedException {
