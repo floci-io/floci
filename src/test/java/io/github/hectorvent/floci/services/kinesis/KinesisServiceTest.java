@@ -143,6 +143,14 @@ class KinesisServiceTest {
     }
 
     @Test
+    void latestIteratorUnknownShardThrows() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kinesisService.getShardIterator("my-stream", "shardId-999999999999", "LATEST", null, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
     void millisBehindLatestIsZeroOnEmptyShard() {
         kinesisService.createStream("empty", 1, REGION);
         String shardId = kinesisService.describeStream("empty", REGION).getShards().getFirst().getShardId();
