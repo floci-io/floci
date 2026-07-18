@@ -28,9 +28,10 @@ import static org.hamcrest.Matchers.notNullValue;
  * the lookup in the default region fails with "Invalid API id specified"
  * (404) — exactly the error reported in the issue.
  *
- * <p>This test currently asserts the BUGGY behaviour so the failure is visible.
- * Once the region-resolution fallback is fixed, the unsigned request should
- * succeed (or at least not report "Invalid API id specified").
+ * <p>The unsigned data-plane request now resolves the API across all regions,
+ * so it reaches the v2 dispatch and is no longer rejected with
+ * "Invalid API id specified". The assertions below validate this fixed
+ * behaviour.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

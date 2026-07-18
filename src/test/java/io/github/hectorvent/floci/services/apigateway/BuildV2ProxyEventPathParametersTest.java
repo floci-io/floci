@@ -49,7 +49,7 @@ class BuildV2ProxyEventPathParametersTest {
     void greedyProxyRoutePopulatesPathParameters() throws Exception {
         String json = controller.buildV2ProxyEvent(
                 "POST", "/trpc/health", "ANY /{proxy+}",
-                "abc123", "$default", headers, uriInfo, null, "req-1");
+                "abc123", "us-east-1", "$default", headers, uriInfo, null, "req-1");
         JsonNode event = new ObjectMapper().readTree(json);
         assertTrue(event.has("pathParameters"), "pathParameters must be present");
         assertEquals("trpc/health", event.get("pathParameters").get("proxy").asText());
@@ -60,7 +60,7 @@ class BuildV2ProxyEventPathParametersTest {
         when(uriInfo.getRequestUri()).thenReturn(new URI("http://localhost:4566/api/stage/users/42"));
         String json = controller.buildV2ProxyEvent(
                 "GET", "/users/42", "GET /users/{id}",
-                "abc123", "$default", headers, uriInfo, null, "req-2");
+                "abc123", "us-east-1", "$default", headers, uriInfo, null, "req-2");
         JsonNode event = new ObjectMapper().readTree(json);
         assertTrue(event.has("pathParameters"), "pathParameters must be present");
         assertEquals("42", event.get("pathParameters").get("id").asText());
@@ -71,7 +71,7 @@ class BuildV2ProxyEventPathParametersTest {
         when(uriInfo.getRequestUri()).thenReturn(new URI("http://localhost:4566/api/stage/anything"));
         String json = controller.buildV2ProxyEvent(
                 "GET", "/anything", "$default",
-                "abc123", "$default", headers, uriInfo, null, "req-3");
+                "abc123", "us-east-1", "$default", headers, uriInfo, null, "req-3");
         JsonNode event = new ObjectMapper().readTree(json);
         assertFalse(event.has("pathParameters"), "pathParameters must be absent for $default route");
     }
