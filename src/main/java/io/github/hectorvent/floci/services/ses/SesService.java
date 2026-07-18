@@ -258,7 +258,10 @@ public class SesService {
         regenerateDkimTokens(identity);
         identity.setVerificationStatus("Pending");
         identity.setDkimEnabled(true);
-        identity.setDkimVerificationStatus("Pending");
+        // The create response reports DKIM verification as NotStarted (SES hasn't begun tracking the
+        // CNAMEs yet); the first Get/List refresh transitions it to Pending. Matches AWS, where
+        // CreateEmailIdentity returns NOT_STARTED but a subsequent GetEmailIdentity returns PENDING.
+        identity.setDkimVerificationStatus("NotStarted");
         identityStore.put(key, identity);
         LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
         return identity;
@@ -892,8 +895,9 @@ public class SesService {
             identity.setVerificationStatus("Pending");
             changed = true;
         }
-        if (identity.isDkimEnabled()
-                && !"Success".equals(identity.getDkimVerificationStatus())
+        // DKIM verification tracks DNS detection, not the signing-enabled flag, so a domain that has
+        // begun tracking (NotStarted -> Pending) reports Pending on Get even while signing is disabled.
+        if (!"Success".equals(identity.getDkimVerificationStatus())
                 && !"Pending".equals(identity.getDkimVerificationStatus())) {
             identity.setDkimVerificationStatus("Pending");
             changed = true;
