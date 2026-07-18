@@ -776,6 +776,12 @@ public class SesService {
     public DkimSigningResult putDkimSigningAttributes(String identityValue, String origin,
                                                       String signingSelector, String nextKeyLength,
                                                       String region) {
+        // DKIM signing attributes are domain-level; AWS rejects an email-address identity here rather
+        // than mutating state that the email would just inherit back from its parent domain.
+        if (identityValue != null && identityValue.contains("@")) {
+            throw new AwsException("BadRequestException",
+                    "The EmailIdentity value must be a valid domain.", 400);
+        }
         String key = identityKey(region, identityValue);
         Identity identity = identityStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
@@ -847,12 +853,18 @@ public class SesService {
             // Upgrade identity- and DKIM-verification independently so that, e.g., after a key rotation
             // (which resets only DkimVerificationStatus while the identity stays verified), the DKIM
             // status can still return to Success once the new records are detected.
-            if (hasAllExpectedDkimRecords(identity, region)) {
+            // Only look up DNS when a status can still be upgraded — skip the (cached) Route53 check
+            // once both identity- and DKIM-verification are already Success. DKIM verification tracks
+            // DNS detection independently of the signing-enabled flag, so it can reach Success even
+            // when DKIM signing is disabled, and can re-pend/re-upgrade after a key rotation.
+            boolean needsUpgrade = !"Success".equals(identity.getVerificationStatus())
+                    || !"Success".equals(identity.getDkimVerificationStatus());
+            if (needsUpgrade && hasAllExpectedDkimRecords(identity, region)) {
                 if (!"Success".equals(identity.getVerificationStatus())) {
                     identity.setVerificationStatus("Success");
                     changed = true;
                 }
-                if (identity.isDkimEnabled() && !"Success".equals(identity.getDkimVerificationStatus())) {
+                if (!"Success".equals(identity.getDkimVerificationStatus())) {
                     identity.setDkimVerificationStatus("Success");
                     changed = true;
                 }

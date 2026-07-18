@@ -100,6 +100,16 @@ class SesDkimSigningActionsIntegrationTest {
     }
 
     @Test
+    void putDkimSigningAttributes_emailIdentity_returns400() {
+        // DKIM signing attributes are domain-level; an email-shaped identity is rejected.
+        given().contentType("application/json").header("Authorization", V2_AUTH)
+                .body("{\"SigningAttributesOrigin\":\"AWS_SES\"}")
+        .when().put("/v2/email/identities/bob@dkim-emailsigning.floci.test/dkim/signing")
+        .then().statusCode(400).body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("The EmailIdentity value must be a valid domain."));
+    }
+
+    @Test
     void putDkimSigningAttributes_unknownIdentity_returns404() {
         given().contentType("application/json").header("Authorization", V2_AUTH)
                 .body("{\"SigningAttributesOrigin\":\"AWS_SES\"}")
