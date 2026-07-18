@@ -118,6 +118,43 @@ public class ApiGatewayV2Service {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
     }
 
+    /**
+     * Returns {@code true} if a v2 API with the given id exists in {@code region}.
+     * Used by the data-plane dispatch to detect a v2 API that lives in the same
+     * region the request resolved to (where {@link #resolveApiRegion} would
+     * return the preferred region unchanged).
+     */
+    public boolean apiExists(String region, String apiId) {
+        return apiStore.get(apiKey(region, apiId)).isPresent();
+    }
+
+    /**
+     * Resolves the region an API lives in, tolerating unsigned data-plane
+     * requests that carry no SigV4 {@code Authorization} header (and therefore
+     * resolve to the configured default region).
+     *
+     * <p>If the API exists in {@code preferredRegion} that region is returned.
+     * Otherwise every stored API key is scanned for one ending in
+     * {@code "::" + apiId} and its region prefix is returned. This mirrors the
+     * v1 {@code ApiGatewayService#resolveRestApiRegion} behaviour so that
+     * frontend/browser invocations of the execute-api URL keep working
+     * regardless of which region the API was created in.
+     *
+     * @return the resolved region, or {@code preferredRegion} if the API is
+     *         not found in any region (the caller will then surface the
+     *         standard "Invalid API id specified" error)
+     */
+    public String resolveApiRegion(String preferredRegion, String apiId) {
+        if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {
+            return preferredRegion;
+        }
+        return apiStore.keys().stream()
+                .filter(k -> k.endsWith("::" + apiId))
+                .map(k -> k.substring(0, k.indexOf("::")))
+                .findFirst()
+                .orElse(preferredRegion);
+    }
+
     public List<Api> getApis(String region) {
         String prefix = region + "::";
         return apiStore.scan(k -> k.startsWith(prefix));
