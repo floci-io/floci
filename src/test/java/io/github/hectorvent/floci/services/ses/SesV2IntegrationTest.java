@@ -54,8 +54,19 @@ class SesV2IntegrationTest {
             .body("IdentityType", equalTo("DOMAIN"))
             .body("VerifiedForSendingStatus", equalTo(false))
             .body("DkimAttributes.SigningEnabled", equalTo(true))
-            .body("DkimAttributes.Status", equalTo("PENDING"))
+            // CreateEmailIdentity reports NOT_STARTED (SES hasn't begun tracking the CNAMEs yet).
+            .body("DkimAttributes.Status", equalTo("NOT_STARTED"))
             .body("DkimAttributes.Tokens", not(empty()));
+
+        // A subsequent GetEmailIdentity transitions the DKIM status to PENDING, matching AWS.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2example.com")
+        .then()
+            .statusCode(200)
+            .body("DkimAttributes.Status", equalTo("PENDING"));
     }
 
     @Test
