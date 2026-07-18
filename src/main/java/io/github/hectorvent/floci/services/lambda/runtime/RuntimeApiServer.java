@@ -13,11 +13,14 @@ import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Per-container HTTP server implementing the AWS Lambda Runtime API and, for
@@ -43,6 +46,21 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * gates it starting its proxy loop) without taking on exact post-invoke completion timing,
  * which mainly matters for extensions doing work after the response is already returned to
  * the client (e.g. flushing telemetry) — not a fidelity floci's local dev/test use case needs.
+ *
+ * Locking discipline: every read/write of {@code stopped}, {@code pendingQueue},
+ * {@code waitingContexts}, {@code extensions}, and each {@code RegisteredExtension}'s
+ * {@code pendingEvents}/waiting context happens inside a single {@code synchronized(lock)}
+ * block per operation. That block only *decides* what to do (dispatch to a specific
+ * RoutingContext, complete a future, or nothing) and returns/collects that decision — the
+ * actual {@code ctx.response()...end()}/{@code vertx.runOnContext(...)} calls always happen
+ * after releasing the lock, so the lock is never held across a call into Vert.x and hold
+ * times stay to sub-microsecond in-memory queue operations. One lock per server instance
+ * (up to ~100 instances live at once, one per container) means no cross-container contention.
+ * This intentionally stays non-blocking/event-loop-based throughout — NEXT_PATH and
+ * EXTENSION_NEXT_PATH never park a real thread in {@code wait()} — because the container's
+ * language-runtime bootstrap process holds one of these long-polls open for its entire idle
+ * lifetime; blocking a bounded worker-thread pool (Quarkus's default is 20 threads) for that
+ * long would exhaust it with only a handful of warm containers.
  */
 public class RuntimeApiServer {
 
@@ -75,20 +93,25 @@ public class RuntimeApiServer {
     private final Vertx vertx;
     private final int port;
 
-    // Invocations queued before a /next poller arrived.
-    private final ConcurrentLinkedQueue<PendingInvocation> pendingQueue = new ConcurrentLinkedQueue<>();
+    // Guards stopped, pendingQueue, waitingContexts, extensions, closeFuture, and every
+    // RegisteredExtension's pendingEvents/waitingContext. See class doc for the discipline.
+    private final Object lock = new Object();
 
-    // /next callers parked while the pending queue is empty.
-    private final ConcurrentLinkedQueue<RoutingContext> waitingContexts = new ConcurrentLinkedQueue<>();
+    // Invocations queued before a /next poller arrived. Guarded by lock.
+    private final ArrayDeque<PendingInvocation> pendingQueue = new ArrayDeque<>();
+
+    // /next callers parked while the pending queue is empty. Guarded by lock.
+    private final ArrayDeque<RoutingContext> waitingContexts = new ArrayDeque<>();
 
     private final ConcurrentHashMap<String, PendingInvocation> inFlight = new ConcurrentHashMap<>();
 
     // Extensions registered via /extension/register, keyed by their generated identifier.
-    private final ConcurrentHashMap<String, RegisteredExtension> extensions = new ConcurrentHashMap<>();
+    // Guarded by lock.
+    private final Map<String, RegisteredExtension> extensions = new HashMap<>();
 
     private volatile HttpServer httpServer;
-    private volatile boolean stopped;
-    private volatile CompletableFuture<Void> closeFuture;
+    private boolean stopped;
+    private CompletableFuture<Void> closeFuture;
 
     // Set by ContainerLauncher once it knows which function this server instance is for (the
     // factory creates the server generically, before that's known) — used only to populate the
@@ -123,34 +146,24 @@ public class RuntimeApiServer {
         // Uses a reactive pattern (no thread held while waiting) to avoid Vert.x worker pool
         // exhaustion when many warm containers poll concurrently.
         router.get(NEXT_PATH).handler(ctx -> {
-            if (stopped) {
-                ctx.response().setStatusCode(204).end();
-                return;
-            }
-            PendingInvocation invocation = pendingQueue.poll();
-            if (invocation != null) {
+            PendingInvocation toDispatch = null;
+            boolean send204 = false;
+            synchronized (lock) {
                 if (stopped) {
-                    invocation.getResultFuture().complete(
-                            new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
-                    ctx.response().setStatusCode(204).end();
-                    return;
+                    send204 = true;
+                } else {
+                    toDispatch = pendingQueue.poll();
+                    if (toDispatch == null) {
+                        waitingContexts.add(ctx);
+                    }
                 }
-                sendInvocation(ctx, invocation);
-                return;
             }
-            // No invocation queued yet — park this context until enqueue() wakes it.
-            waitingContexts.add(ctx);
-            // Re-check stop race: stop() may have drained waitingContexts before our add().
-            if (stopped && waitingContexts.remove(ctx)) {
+            if (send204) {
                 ctx.response().setStatusCode(204).end();
-                return;
+            } else if (toDispatch != null) {
+                sendInvocation(ctx, toDispatch);
             }
-            // Re-check enqueue race: an invocation may have arrived between our poll() and add().
-            PendingInvocation raced = pendingQueue.poll();
-            if (raced != null && waitingContexts.remove(ctx)) {
-                sendInvocation(ctx, raced);
-            }
-            // else: still parked — enqueue() will dispatch via vertx.runOnContext().
+            // else: parked — enqueue() or stop() will dispatch this ctx later.
         });
 
         // POST /runtime/invocation/{requestId}/response — success
@@ -203,7 +216,17 @@ public class RuntimeApiServer {
                 events = body.getJsonArray("events").stream().map(String::valueOf).toList();
             }
             String identifier = UUID.randomUUID().toString();
-            extensions.put(identifier, new RegisteredExtension(identifier, name, events));
+            RegisteredExtension extension = new RegisteredExtension(identifier, name, events);
+            synchronized (lock) {
+                extensions.put(identifier, extension);
+                if (stopped && extension.isSubscribedTo(ExtensionEvent.Type.SHUTDOWN)) {
+                    // The server is already stopping — this extension will never see stop()'s
+                    // own SHUTDOWN fan-out (that already ran), so queue one now to preserve
+                    // "every registered extension eventually sees SHUTDOWN."
+                    extension.getPendingEvents().offer(
+                            ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN"));
+                }
+            }
             LOG.infov("Extension registered: {0} ({1}), events={2}", name, identifier, events);
 
             JsonObject responseBody = new JsonObject()
@@ -222,45 +245,32 @@ public class RuntimeApiServer {
         // extension has its own independent event queue.
         router.get(EXTENSION_NEXT_PATH).handler(ctx -> {
             String identifier = ctx.request().getHeader(EXTENSION_ID_HEADER);
-            RegisteredExtension extension = identifier != null ? extensions.get(identifier) : null;
-            if (extension == null) {
+            ExtensionEvent toDispatch = null;
+            boolean send204 = false;
+            boolean unknownExtension = false;
+            synchronized (lock) {
+                RegisteredExtension extension = identifier != null ? extensions.get(identifier) : null;
+                if (extension == null) {
+                    unknownExtension = true;
+                } else if (stopped) {
+                    send204 = true;
+                } else {
+                    toDispatch = extension.getPendingEvents().poll();
+                    if (toDispatch == null) {
+                        extension.setWaitingContext(ctx);
+                    }
+                }
+            }
+            if (unknownExtension) {
                 ctx.response().setStatusCode(403)
                         .putHeader("Content-Type", "application/json")
                         .end("{\"errorMessage\":\"Unknown or missing Lambda-Extension-Identifier\"}");
-                return;
-            }
-            // Poll before checking stopped: stop() offers a SHUTDOWN event to pendingEvents for any
-            // extension it doesn't find already parked, so a request arriving just after stopped is
-            // set (but after that offer landed) must still see it — otherwise it gets a bare 204 and
-            // the queued SHUTDOWN is orphaned, never delivered.
-            ExtensionEvent event = extension.getPendingEvents().poll();
-            if (event != null) {
-                sendExtensionEvent(ctx, event);
-                return;
-            }
-            if (stopped) {
+            } else if (send204) {
                 ctx.response().setStatusCode(204).end();
-                return;
+            } else if (toDispatch != null) {
+                sendExtensionEvent(ctx, toDispatch);
             }
-            extension.setWaitingContext(ctx);
-            // Re-check races the same way NEXT_PATH does: an event or stop() may have landed
-            // between our poll() and setWaitingContext().
-            if (stopped && extension.takeWaitingContext() != null) {
-                ctx.response().setStatusCode(204).end();
-                return;
-            }
-            ExtensionEvent raced = extension.getPendingEvents().poll();
-            if (raced != null) {
-                if (extension.takeWaitingContext() != null) {
-                    sendExtensionEvent(ctx, raced);
-                } else {
-                    // A concurrent notifyExtensionsOfInvoke/stop() already consumed the waiting
-                    // context (dispatching directly via runOnContext rather than the queue) between
-                    // our poll() and this check — raced is a real event we already removed from the
-                    // queue, so it must go back or it's silently lost for this extension.
-                    extension.getPendingEvents().offer(raced);
-                }
-            }
+            // else: parked — notifyExtensionsOfInvoke()/stop() will dispatch this ctx later.
         });
 
         // POST /extension/init/error, /extension/exit/error — an extension reports it can't
@@ -295,13 +305,44 @@ public class RuntimeApiServer {
         });
     }
 
-    public synchronized CompletableFuture<Void> stop() {
-        if (closeFuture != null) {
-            return closeFuture;
+    public CompletableFuture<Void> stop() {
+        CompletableFuture<Void> closed;
+        List<RoutingContext> contextsToClose204;
+        List<Runnable> dispatches = new ArrayList<>();
+        List<PendingInvocation> invocationsToFailContainerStopped;
+
+        synchronized (lock) {
+            if (closeFuture != null) {
+                return closeFuture;
+            }
+            stopped = true;
+            closed = new CompletableFuture<>();
+            closeFuture = closed;
+
+            contextsToClose204 = new ArrayList<>(waitingContexts);
+            waitingContexts.clear();
+
+            ExtensionEvent shutdownEvent = ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN");
+            for (RegisteredExtension ext : extensions.values()) {
+                if (!ext.isSubscribedTo(ExtensionEvent.Type.SHUTDOWN)) {
+                    continue;
+                }
+                RoutingContext waitingCtx = ext.takeWaitingContext();
+                if (waitingCtx != null) {
+                    dispatches.add(() -> {
+                        if (!waitingCtx.response().ended()) {
+                            sendExtensionEvent(waitingCtx, shutdownEvent);
+                        }
+                    });
+                } else {
+                    ext.getPendingEvents().offer(shutdownEvent);
+                }
+            }
+
+            invocationsToFailContainerStopped = new ArrayList<>(pendingQueue);
+            pendingQueue.clear();
         }
-        stopped = true;
-        CompletableFuture<Void> closed = new CompletableFuture<>();
-        closeFuture = closed;
+
         if (httpServer != null) {
             httpServer.close(ar -> {
                 if (ar.succeeded()) {
@@ -317,9 +358,7 @@ public class RuntimeApiServer {
         }
 
         // Wake any parked /next pollers with 204 (container shutting down — runtime will exit).
-        RoutingContext waiting;
-        while ((waiting = waitingContexts.poll()) != null) {
-            final RoutingContext ctx = waiting;
+        for (RoutingContext ctx : contextsToClose204) {
             vertx.runOnContext(v -> {
                 if (!ctx.response().ended()) {
                     ctx.response().setStatusCode(204).end();
@@ -327,28 +366,13 @@ public class RuntimeApiServer {
             });
         }
 
-        // Notify every extension subscribed to SHUTDOWN, same park/dispatch pattern as the
-        // runtime poller above.
-        ExtensionEvent shutdownEvent = ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN");
-        extensions.values().forEach(ext -> {
-            if (!ext.isSubscribedTo(ExtensionEvent.Type.SHUTDOWN)) {
-                return;
-            }
-            RoutingContext ctx = ext.takeWaitingContext();
-            if (ctx != null) {
-                vertx.runOnContext(v -> {
-                    if (!ctx.response().ended()) {
-                        sendExtensionEvent(ctx, shutdownEvent);
-                    }
-                });
-            } else {
-                ext.getPendingEvents().offer(shutdownEvent);
-            }
-        });
+        // Dispatch SHUTDOWN to every extension that was already parked on /event/next.
+        for (Runnable dispatch : dispatches) {
+            vertx.runOnContext(v -> dispatch.run());
+        }
 
-        // Drain queued invocations that were never consumed by /next.
-        PendingInvocation pending;
-        while ((pending = pendingQueue.poll()) != null) {
+        // Fail queued invocations that were never consumed by /next.
+        for (PendingInvocation pending : invocationsToFailContainerStopped) {
             pending.getResultFuture().complete(
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, pending.getRequestId()));
         }
@@ -363,34 +387,66 @@ public class RuntimeApiServer {
     }
 
     public CompletableFuture<InvokeResult> enqueue(PendingInvocation invocation) {
-        if (stopped) {
+        boolean alreadyStopped;
+        List<Runnable> dispatches = new ArrayList<>();
+        RoutingContext waitingCtxForInvocation = null;
+
+        synchronized (lock) {
+            alreadyStopped = stopped;
+            if (!alreadyStopped) {
+                if (!extensions.isEmpty()) {
+                    ExtensionEvent event = ExtensionEvent.invoke(
+                            invocation.getRequestId(), invocation.getDeadlineMs(), invocation.getFunctionArn());
+                    for (RegisteredExtension ext : extensions.values()) {
+                        if (!ext.isSubscribedTo(ExtensionEvent.Type.INVOKE)) {
+                            continue;
+                        }
+                        RoutingContext waitingCtx = ext.takeWaitingContext();
+                        if (waitingCtx != null) {
+                            dispatches.add(() -> {
+                                if (!waitingCtx.response().ended()) {
+                                    sendExtensionEvent(waitingCtx, event);
+                                } else {
+                                    synchronized (lock) {
+                                        ext.getPendingEvents().offer(event);
+                                    }
+                                }
+                            });
+                        } else {
+                            ext.getPendingEvents().offer(event);
+                        }
+                    }
+                }
+
+                waitingCtxForInvocation = waitingContexts.poll();
+                if (waitingCtxForInvocation == null) {
+                    pendingQueue.offer(invocation);
+                }
+            }
+        }
+
+        if (alreadyStopped) {
             invocation.getResultFuture().complete(
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
             return invocation.getResultFuture();
         }
 
-        notifyExtensionsOfInvoke(invocation);
+        for (Runnable dispatch : dispatches) {
+            vertx.runOnContext(v -> dispatch.run());
+        }
 
-        // If a /next poller is already parked, dispatch immediately on the event loop.
-        RoutingContext ctx = waitingContexts.poll();
-        if (ctx != null) {
-            final RoutingContext waitingCtx = ctx;
+        if (waitingCtxForInvocation != null) {
+            final RoutingContext waitingCtx = waitingCtxForInvocation;
             vertx.runOnContext(v -> {
                 if (!waitingCtx.response().ended()) {
                     sendInvocation(waitingCtx, invocation);
                 } else {
                     // Connection closed between park and dispatch — re-queue.
-                    pendingQueue.offer(invocation);
+                    synchronized (lock) {
+                        pendingQueue.offer(invocation);
+                    }
                 }
             });
-            return invocation.getResultFuture();
-        }
-        pendingQueue.offer(invocation);
-        // Close the check-then-offer race: if stop() ran between the guard and offer(),
-        // the drain is done and our invocation would sit forever. Remove and complete.
-        if (stopped && pendingQueue.remove(invocation)) {
-            invocation.getResultFuture().complete(
-                    new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
         }
         return invocation.getResultFuture();
     }
@@ -418,33 +474,6 @@ public class RuntimeApiServer {
                 .end(body);
     }
 
-    /** Fans an INVOKE event out to every extension subscribed to it, same park/dispatch pattern
-     *  used for the runtime's own /next queue, scoped per-extension. */
-    private void notifyExtensionsOfInvoke(PendingInvocation invocation) {
-        if (extensions.isEmpty()) {
-            return;
-        }
-        ExtensionEvent event = ExtensionEvent.invoke(
-                invocation.getRequestId(), invocation.getDeadlineMs(), invocation.getFunctionArn());
-        for (RegisteredExtension ext : extensions.values()) {
-            if (!ext.isSubscribedTo(ExtensionEvent.Type.INVOKE)) {
-                continue;
-            }
-            RoutingContext waitingCtx = ext.takeWaitingContext();
-            if (waitingCtx != null) {
-                vertx.runOnContext(v -> {
-                    if (!waitingCtx.response().ended()) {
-                        sendExtensionEvent(waitingCtx, event);
-                    } else {
-                        ext.getPendingEvents().offer(event);
-                    }
-                });
-            } else {
-                ext.getPendingEvents().offer(event);
-            }
-        }
-    }
-
     private void sendExtensionEvent(RoutingContext ctx, ExtensionEvent event) {
         JsonObject body = new JsonObject().put("eventType", event.getType().name());
         if (event.getType() == ExtensionEvent.Type.INVOKE) {
@@ -464,7 +493,10 @@ public class RuntimeApiServer {
 
     private void handleExtensionFatalError(RoutingContext ctx, String phase) {
         String identifier = ctx.request().getHeader(EXTENSION_ID_HEADER);
-        RegisteredExtension removed = identifier != null ? extensions.remove(identifier) : null;
+        RegisteredExtension removed;
+        synchronized (lock) {
+            removed = identifier != null ? extensions.remove(identifier) : null;
+        }
         if (removed != null) {
             LOG.warnv("Extension {0} ({1}) reported {2} error on port {3}",
                     removed.getName(), identifier, phase, String.valueOf(port));
