@@ -67,19 +67,33 @@ class AthenaTest {
     @Order(3)
     @DisplayName("Get query results returns result set")
     void getQueryResults() {
-        // Poll until succeeded (mock mode completes immediately, real duck may take a moment)
+        // Poll until succeeded. Mock mode completes immediately; against real floci-duck the
+        // first query also pays for pulling the sidecar image and waiting for its health check,
+        // so allow enough headroom to cover a cold start. The loop exits as soon as the state
+        // flips, so a warm sidecar costs nothing extra.
         QueryExecutionState state = QueryExecutionState.RUNNING;
         int attempts = 0;
-        while (state == QueryExecutionState.RUNNING && attempts++ < 20) {
+        while (state == QueryExecutionState.RUNNING && attempts++ < 120) {
             GetQueryExecutionResponse exec = athena.getQueryExecution(
                     GetQueryExecutionRequest.builder().queryExecutionId(queryExecutionId).build());
-            state = exec.queryExecution().status().state();
+            QueryExecutionStatus status = exec.queryExecution().status();
+            state = status.state();
+            if (state == QueryExecutionState.FAILED) {
+                Assertions.fail("Query failed: " + status.stateChangeReason());
+            }
             if (state == QueryExecutionState.RUNNING) {
-                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         }
 
-        assertThat(state).isEqualTo(QueryExecutionState.SUCCEEDED);
+        assertThat(state)
+                .as("query %s did not succeed within 60s", queryExecutionId)
+                .isEqualTo(QueryExecutionState.SUCCEEDED);
 
         GetQueryResultsResponse results = athena.getQueryResults(
                 GetQueryResultsRequest.builder()
