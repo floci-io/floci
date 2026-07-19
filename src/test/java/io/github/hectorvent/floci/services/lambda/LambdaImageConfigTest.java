@@ -251,7 +251,8 @@ class LambdaImageConfigTest {
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
-                    mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv);
+                    mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv,
+                    mock(io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials.class));
 
             when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
             when(runtimeApiServer.getPort()).thenReturn(9000);

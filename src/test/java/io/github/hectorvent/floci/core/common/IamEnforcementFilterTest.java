@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -103,6 +104,27 @@ class IamEnforcementFilterTest {
         filter.filter(containerRequest);
 
         verify(arnBuilder).build("lambda", containerRequest, "us-east-1", "222233334444");
+    }
+
+    @Test
+    void getCallerIdentityBypassesPolicyEnforcement() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260720/us-east-1/sts/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("sts", containerRequest)).thenReturn("sts:GetCallerIdentity");
+
+        IamEnforcementFilter filter = new IamEnforcementFilter(
+                config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
+                requestContext, conditionContextResolver);
+
+        filter.filter(containerRequest);
+
+        verify(iamService, never()).resolveCallerContext(any());
+        verify(evaluator, never()).evaluate(any(), any(), any(), any(), any());
+        verify(containerRequest, never()).abortWith(any());
     }
 
     @Test

@@ -519,6 +519,46 @@ class IamServiceTest {
         assertTrue(sessions.getForAccount("111122223333", accessKeyId).isEmpty());
     }
 
+    @Test
+    void lambdaExecutionRoleSessionUsesExplicitAccountAndHasNoExpiration() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIALAMBDAEXPLICIT";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerLambdaExecutionRoleSession(
+                accountId, accessKeyId, "lambda-secret",
+                "arn:aws:iam::222233334444:role/LambdaRole");
+
+        SessionCredential stored = sessions.getForAccount(accountId, accessKeyId).orElseThrow();
+        assertEquals(accountId, stored.getOriginAccountId());
+        assertNull(stored.getExpiration());
+        assertTrue(stored.isLambdaExecutionRole());
+        assertTrue(sessions.getForAccount("000000000000", accessKeyId).isEmpty());
+
+        service.unregisterSession(accountId, accessKeyId);
+        assertTrue(sessions.getForAccount(accountId, accessKeyId).isEmpty());
+    }
+
+    @Test
+    void lambdaExecutionRoleSessionSweepPreservesStsSessions() {
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+        service.registerLambdaExecutionRoleSession(
+                "222233334444", "ASIALAMBDAORPHAN", "lambda-secret",
+                "arn:aws:iam::222233334444:role/LambdaRole");
+        service.registerSession(
+                "ASIASTSSESSION", "sts-secret", "arn:aws:iam::000000000000:role/StsRole",
+                Instant.now().plusSeconds(3600), null, "000000000000");
+
+        assertEquals(1, service.sweepOrphanedLambdaExecutionRoleSessions());
+
+        assertTrue(sessions.getForAccount("222233334444", "ASIALAMBDAORPHAN").isEmpty());
+        assertTrue(sessions.getForAccount("000000000000", "ASIASTSSESSION").isPresent());
+    }
+
     // =========================================================================
     // Instance Profiles
     // =========================================================================

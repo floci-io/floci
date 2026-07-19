@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -70,6 +71,36 @@ class LaunchedContainerAwsEnvTest {
         assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")));
 
         assertTrue(env.contains("AWS_ENDPOINT_URL=http://localhost:4566"));
+    }
+
+    @Test
+    void injectsWorkloadSessionCredentialsInsteadOfFallbackCredentials() {
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithEndpoint("http://localhost:4566");
+        SessionCreds credentials = new SessionCreds("ASIAEXECUTIONROLE", "role-secret", "role-token");
+
+        List<String> env = awsEnv.sdkBaselineEnv(
+                "us-east-1", Optional.empty(), Optional.of(credentials));
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=ASIAEXECUTIONROLE"));
+        assertTrue(env.contains("AWS_SECRET_ACCESS_KEY=role-secret"));
+        assertTrue(env.contains("AWS_SESSION_TOKEN=role-token"));
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_ACCESS_KEY_ID=")).count());
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")).count());
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_SESSION_TOKEN=")).count());
+    }
+
+    @Test
+    void mountedConfigTakesPrecedenceOverWorkloadSessionCredentials() {
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithEndpoint("http://localhost:4566");
+        SessionCreds credentials = new SessionCreds("ASIAEXECUTIONROLE", "role-secret", "role-token");
+
+        List<String> env = awsEnv.sdkBaselineEnv(
+                "us-east-1", Optional.of("/opt/aws-config"), Optional.of(credentials));
+
+        assertTrue(env.contains("AWS_SHARED_CREDENTIALS_FILE=/opt/aws-config/credentials"));
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_ACCESS_KEY_ID=")));
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")));
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")));
     }
 
     @Test
