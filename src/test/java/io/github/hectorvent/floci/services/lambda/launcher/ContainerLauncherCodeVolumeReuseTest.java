@@ -58,7 +58,8 @@ class ContainerLauncherCodeVolumeReuseTest {
             super(mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
                     mock(ImageResolver.class), mock(RuntimeApiServerFactory.class),
                     mock(DockerHostResolver.class), config, mock(EcrRegistryManager.class),
-                    mock(LambdaLayerService.class), mock(LaunchedContainerAwsEnv.class));
+                    mock(LambdaLayerService.class), mock(LaunchedContainerAwsEnv.class),
+                    mock(LambdaExecutionRoleCredentials.class));
         }
 
         @Override
