@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -81,6 +82,7 @@ public class ContainerLauncher {
     private final EcrRegistryManager ecrRegistryManager;
     private final LambdaLayerService layerService;
     private final LaunchedContainerAwsEnv awsEnv;
+    private final LambdaExecutionRoleCredentials executionRoleCredentials;
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -96,7 +98,8 @@ public class ContainerLauncher {
                              EmulatorConfig config,
                              EcrRegistryManager ecrRegistryManager,
                              LambdaLayerService layerService,
-                             LaunchedContainerAwsEnv awsEnv) {
+                             LaunchedContainerAwsEnv awsEnv,
+                             LambdaExecutionRoleCredentials executionRoleCredentials) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -107,6 +110,7 @@ public class ContainerLauncher {
         this.ecrRegistryManager = ecrRegistryManager;
         this.layerService = layerService;
         this.awsEnv = awsEnv;
+        this.executionRoleCredentials = executionRoleCredentials;
     }
 
     /**
@@ -159,6 +163,7 @@ public class ContainerLauncher {
         // runtime-api port per failed attempt and eventually exhausts the pool, so launches keep
         // failing even after the daemon recovers.
         String containerId = null;
+        Optional<SessionCreds> roleCredentials = Optional.empty();
         try {
 
         // Resolve image
@@ -201,16 +206,25 @@ public class ContainerLauncher {
         if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
             env.add("_HANDLER=" + fn.getHandler());
         }
-        // Region, credentials and the Floci endpoint the SDK should target — the same baseline
-        // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath)
-        // the SDK discovers credentials from /opt/aws-config instead of the placeholders.
+        // Region, credentials and the Floci endpoint the SDK should target: the same baseline
+        // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath),
+        // the SDK discovers credentials from /opt/aws-config instead of injected credentials.
         Optional<String> awsConfigPath = config.services().lambda().awsConfigPath()
                 .filter(s -> !s.isBlank());
+        if (awsConfigPath.isEmpty()) {
+            roleCredentials = executionRoleCredentials.forFunction(fn);
+        }
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
-                awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty()));
+                awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
+                roleCredentials));
         env.addAll(flociCaEnv(flociCaCert));
         if (fn.getEnvironment() != null) {
-            fn.getEnvironment().forEach((k, v) -> env.add(k + "=" + v));
+            boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
+            fn.getEnvironment().forEach((k, v) -> {
+                if (!hasExecutionRoleCredentials || !isAwsCredentialVariable(k)) {
+                    env.add(k + "=" + v);
+                }
+            });
         }
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
@@ -355,7 +369,10 @@ public class ContainerLauncher {
         // invocations without a slow extension is strictly better than failing the launch.
         awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
 
-        ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
+        ContainerHandle handle = new ContainerHandle(
+                containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload(),
+                roleCredentials.map(SessionCreds::accessKeyId).orElse(null),
+                LambdaExecutionRoleCredentials.sessionAccountId(fn));
 
         // Attach log streaming
         Closeable logHandle = logStreamer.attach(
@@ -373,9 +390,23 @@ public class ContainerLauncher {
             LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
                     fn.getFunctionName(), e.getMessage());
             if (containerId != null) {
-                try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
+                try {
+                    lifecycleManager.stopAndRemove(containerId, null);
+                } catch (Exception cleanupError) {
+                    LOG.warnv(cleanupError, "Could not remove failed Lambda container {0}", containerId);
+                }
             }
-            try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
+            if (roleCredentials.isPresent()) {
+                executionRoleCredentials.unregister(
+                        LambdaExecutionRoleCredentials.sessionAccountId(fn),
+                        roleCredentials.get().accessKeyId());
+            }
+            try {
+                runtimeApiServerFactory.release(runtimeApiServer);
+            } catch (Exception cleanupError) {
+                LOG.warnv(cleanupError, "Could not release Runtime API server for function {0}",
+                        fn.getFunctionName());
+            }
             throw e;
         }
     }
@@ -392,9 +423,25 @@ public class ContainerLauncher {
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
         } finally {
-            runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            try {
+                runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            } catch (RuntimeException releaseError) {
+                LOG.warnv(releaseError, "Could not release Runtime API server for container {0}",
+                        handle.getContainerId());
+            }
         }
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+        try {
+            lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+        } finally {
+            executionRoleCredentials.unregister(
+                    handle.getExecutionRoleSessionAccountId(), handle.getExecutionRoleAccessKeyId());
+        }
+    }
+
+    private static boolean isAwsCredentialVariable(String name) {
+        return "AWS_ACCESS_KEY_ID".equals(name)
+                || "AWS_SECRET_ACCESS_KEY".equals(name)
+                || "AWS_SESSION_TOKEN".equals(name);
     }
 
     /**
