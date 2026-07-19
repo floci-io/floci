@@ -959,6 +959,10 @@ class DynamoDbServiceTest {
     private ObjectNode mapAttributeValue(String key, String value) {
         ObjectNode inner = mapper.createObjectNode();
         inner.set(key, attributeValue("S", value));
+        return mapAttributeValue(inner);
+    }
+
+    private ObjectNode mapAttributeValue(ObjectNode inner) {
         ObjectNode node = mapper.createObjectNode();
         node.set("M", inner);
         return node;
@@ -1360,6 +1364,176 @@ class DynamoDbServiceTest {
         JsonNode notifs = updated.get("settings").get("M").get("notifications").get("M");
         assertTrue(notifs.has("email"), "email should still exist");
         assertFalse(notifs.has("sms"), "sms should be removed");
+    }
+
+    @Test
+    void updateItemAddResolvesNestedPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode invocationSummary = mapper.createObjectNode();
+        invocationSummary.set("eventsAvailable", attributeValue("N", "0"));
+        ObjectNode functionInvocationSummaries = mapper.createObjectNode();
+        functionInvocationSummaries.set("ISA_10136", mapAttributeValue(invocationSummary));
+
+        ObjectNode initialItem = item("userId", "nested-add-placeholder");
+        initialItem.set("functionInvocationSummaries", mapAttributeValue(functionInvocationSummaries));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#fis", "functionInvocationSummaries");
+        names.put("#isa", "ISA_10136");
+        names.put("#ea", "eventsAvailable");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":one", attributeValue("N", "1"));
+
+        service.updateItem("Users", userIdKey("nested-add-placeholder"), null,
+                "ADD #fis.#isa.#ea :one", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-placeholder"), region);
+        assertEquals(1, stored.path("functionInvocationSummaries").path("M")
+                .path("ISA_10136").path("M").path("eventsAvailable").path("N").asInt());
+        assertFalse(stored.has("#fis.#isa.#ea"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemAddTraversesLiteralDottedPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nested = mapper.createObjectNode();
+        nested.set("c", attributeValue("N", "4"));
+        ObjectNode parent = mapper.createObjectNode();
+        parent.set("b", mapAttributeValue(nested));
+        ObjectNode initialItem = item("userId", "nested-add-literal");
+        initialItem.set("a", mapAttributeValue(parent));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":three", attributeValue("N", "3"));
+
+        service.updateItem("Users", userIdKey("nested-add-literal"), null,
+                "ADD a.b.c :three", null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-literal"), region);
+        assertEquals("7", stored.path("a").path("M").path("b").path("M").path("c").path("N").asText());
+        assertFalse(stored.has("a.b.c"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemAddSeedsMissingNestedLeafUnderExistingParents() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode parent = mapper.createObjectNode();
+        parent.set("b", mapAttributeValue(mapper.createObjectNode()));
+        ObjectNode initialItem = item("userId", "nested-add-missing-leaf");
+        initialItem.set("a", mapAttributeValue(parent));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":five", attributeValue("N", "5"));
+
+        service.updateItem("Users", userIdKey("nested-add-missing-leaf"), null,
+                "ADD a.b.c :five", null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-missing-leaf"), region);
+        assertEquals("5", stored.path("a").path("M").path("b").path("M").path("c").path("N").asText());
+        assertFalse(stored.has("a.b.c"), "ADD must write the missing leaf at its document path");
+    }
+
+    @Test
+    void updateItemAddUnionsNestedSetAtPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode metadata = mapper.createObjectNode();
+        metadata.set("tags", stringSetAttributeValue("alpha", "beta"));
+        ObjectNode initialItem = item("userId", "nested-add-set");
+        initialItem.set("metadata", mapAttributeValue(metadata));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#meta", "metadata");
+        names.put("#tags", "tags");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":tags", stringSetAttributeValue("beta", "gamma"));
+
+        service.updateItem("Users", userIdKey("nested-add-set"), null,
+                "ADD #meta.#tags :tags", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-set"), region);
+        java.util.Set<String> tags = new java.util.HashSet<>();
+        stored.path("metadata").path("M").path("tags").path("SS").forEach(value -> tags.add(value.asText()));
+        assertEquals(java.util.Set.of("alpha", "beta", "gamma"), tags);
+        assertFalse(stored.has("#meta.#tags"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemDeleteMutatesAndRemovesNestedSetAtPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode settings = mapper.createObjectNode();
+        settings.set("labels", stringSetAttributeValue("keep", "drop"));
+        ObjectNode initialItem = item("userId", "nested-delete-set");
+        initialItem.set("settings", mapAttributeValue(settings));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#settings", "settings");
+        names.put("#labels", "labels");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":labels", stringSetAttributeValue("drop"));
+
+        service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        JsonNode remaining = stored.path("settings").path("M").path("labels").path("SS");
+        assertEquals(1, remaining.size());
+        assertEquals("keep", remaining.get(0).asText());
+
+        values.set(":labels", stringSetAttributeValue("keep"));
+        service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region);
+
+        stored = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        assertFalse(stored.path("settings").path("M").has("labels"),
+                "DELETE must remove a nested attribute when its set becomes empty");
+        assertFalse(stored.has("#settings.#labels"), "DELETE must not create a phantom top-level attribute");
+
+        assertDoesNotThrow(() -> service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region));
+        JsonNode afterMissingPathDelete = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        assertFalse(afterMissingPathDelete.path("settings").path("M").has("labels"),
+                "DELETE on a missing nested path must be a no-op");
+    }
+
+    @Test
+    void updateItemTopLevelAddAndDeleteRemainUnchanged() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "top-level-add-delete");
+        initialItem.set("counter", attributeValue("N", "2"));
+        initialItem.set("tags", stringSetAttributeValue("keep", "drop"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#counter", "counter");
+        names.put("#tags", "tags");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":three", attributeValue("N", "3"));
+        values.set(":drop", stringSetAttributeValue("drop"));
+
+        service.updateItem("Users", userIdKey("top-level-add-delete"), null,
+                "ADD #counter :three DELETE #tags :drop", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("top-level-add-delete"), region);
+        assertEquals("5", stored.path("counter").path("N").asText());
+        assertEquals(1, stored.path("tags").path("SS").size());
+        assertEquals("keep", stored.path("tags").path("SS").get(0).asText());
     }
 
     // --- UpdateExpression clause separator tests ---
