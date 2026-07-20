@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM eclipse-temurin:25-jdk AS build
+FROM eclipse-temurin:25-jdk-noble AS build
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y maven && rm -rf /var/lib/apt/lists/*
@@ -11,7 +11,7 @@ COPY src/ src/
 RUN mvn clean package -DskipTests -q
 
 # Stage 2: Runtime
-FROM eclipse-temurin:25-jre-alpine
+FROM eclipse-temurin:25-jre-noble
 
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
@@ -26,16 +26,18 @@ ENV GOSU_VERSION=1.17
 ENV GOSU_AMD64_SHA256=bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3
 ENV GOSU_ARM64_SHA256=c3805a85d17f4454c23d7059bcb97e1ec1af272b90126e79ed002342de08389b
 RUN set -eux; \
-    apk add --no-cache shadow ca-certificates python3 py3-pip; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget; \
+    rm -rf /var/lib/apt/lists/*; \
     pip3 install --no-cache-dir --break-system-packages awscli boto3; \
-    mv /usr/bin/aws /usr/bin/aws.real; \
+    mv /usr/local/bin/aws /usr/bin/aws.real; \
     printf '#!/bin/sh\nexec /usr/bin/aws.real --endpoint-url=http://localhost:4566 "$@"\n' > /usr/bin/aws; \
     chmod +x /usr/bin/aws; \
-    useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci; \
-    arch="$(apk --print-arch)"; \
+    useradd -r -u 1001 -g root -d /app -s /usr/sbin/nologin floci; \
+    arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-        x86_64) gosuArch='amd64'; gosuSha256="$GOSU_AMD64_SHA256" ;; \
-        aarch64) gosuArch='arm64'; gosuSha256="$GOSU_ARM64_SHA256" ;; \
+        amd64) gosuArch='amd64'; gosuSha256="$GOSU_AMD64_SHA256" ;; \
+        arm64) gosuArch='arm64'; gosuSha256="$GOSU_ARM64_SHA256" ;; \
         *) echo >&2 "unsupported arch: $arch"; exit 1 ;; \
     esac; \
     wget -q -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosuArch}"; \
