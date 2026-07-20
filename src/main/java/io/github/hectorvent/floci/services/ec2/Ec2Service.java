@@ -305,7 +305,7 @@ public class Ec2Service implements ContainerTeardown {
         igw.setInternetGatewayId(igwId);
         igw.setOwnerId(accountId);
         igw.setRegion(region);
-        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
+        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "attached"));
         internetGateways.put(key(region, igwId), igw);
 
         String rtId = createMainRouteTable(region, defaultVpc, "rtb-default", "rtbassoc-default");
@@ -1119,6 +1119,67 @@ public class Ec2Service implements ContainerTeardown {
                 .filter(v -> vpcIds.isEmpty() || vpcIds.contains(v.getVpcId()))
                 .filter(v -> matchesFilters(v, filters, region))
                 .collect(Collectors.toList());
+    }
+
+    public List<String> describeVpcPeeringConnectionIds(String region, List<String> connectionIds,
+                                                         Map<String, List<String>> filters) {
+        Set<String> supportedFilters = Set.of(
+                "accepter-vpc-info.cidr-block", "accepter-vpc-info.owner-id",
+                "accepter-vpc-info.vpc-id", "expiration-time",
+                "requester-vpc-info.cidr-block", "requester-vpc-info.owner-id",
+                "requester-vpc-info.vpc-id", "status-code", "status-message",
+                "tag-key", "vpc-peering-connection-id");
+        return emptyNetworkDiscovery(connectionIds, filters, supportedFilters,
+                "InvalidVpcPeeringConnectionID.NotFound",
+                "The vpcPeeringConnection ID '%s' does not exist");
+    }
+
+    public List<String> describeTransitGatewayVpcAttachmentIds(
+            String region, List<String> attachmentIds, Map<String, List<String>> filters) {
+        Set<String> supportedFilters = Set.of(
+                "state", "transit-gateway-attachment-id", "transit-gateway-id", "vpc-id");
+        return emptyNetworkDiscovery(attachmentIds, filters, supportedFilters,
+                "InvalidTransitGatewayAttachmentID.NotFound",
+                "Transit Gateway Attachment %s was not found.");
+    }
+
+    public List<String> describeVpnGatewayIds(
+            String region, List<String> gatewayIds, Map<String, List<String>> filters) {
+        Set<String> supportedFilters = Set.of(
+                "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
+                "state", "tag-key", "type", "vpn-gateway-id");
+        return emptyNetworkDiscovery(gatewayIds, filters, supportedFilters,
+                "InvalidVpnGatewayID.NotFound",
+                "The vpnGateway ID '%s' does not exist");
+    }
+
+    public List<String> describeEgressOnlyInternetGatewayIds(
+            String region, List<String> gatewayIds, Map<String, List<String>> filters) {
+        Set<String> supportedFilters = Set.of(
+                "attachment.state", "attachment.vpc-id",
+                "egress-only-internet-gateway-id", "tag-key");
+        return emptyNetworkDiscovery(gatewayIds, filters, supportedFilters,
+                "InvalidEgressOnlyInternetGatewayId.NotFound",
+                "The egress-only internet gateway ID '%s' does not exist");
+    }
+
+    private List<String> emptyNetworkDiscovery(
+            List<String> resourceIds,
+            Map<String, List<String>> filters,
+            Set<String> supportedFilters,
+            String notFoundCode,
+            String notFoundMessage) {
+        filters.keySet().stream()
+                .filter(name -> !supportedFilters.contains(name)
+                        && !(supportedFilters.contains("tag-key") && name.startsWith("tag:")))
+                .findFirst()
+                .ifPresent(name -> {
+                    throw new AwsException("InvalidParameterValue", "The filter '" + name + "' is invalid", 400);
+                });
+        if (!resourceIds.isEmpty()) {
+            throw new AwsException(notFoundCode, notFoundMessage.formatted(resourceIds.getFirst()), 400);
+        }
+        return List.of();
     }
 
     public void deleteVpc(String region, String vpcId) {
@@ -2283,7 +2344,7 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         InternetGateway igw = getRequiredInternetGateway(region, igwId);
 
-        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
+        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "attached"));
         internetGateways.put(key(region, igwId), igw);
     }
 

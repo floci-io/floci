@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
+import software.amazon.awssdk.services.ec2.model.Tag;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -29,6 +30,140 @@ class Ec2Tests {
     static void setup() {
         ec2 = TestFixtures.ec2Client();
         keyName = "sdk-test-key";
+    }
+
+    @Test
+    @Order(0)
+    @DisplayName("DescribeVpcPeeringConnections - empty when none exist")
+    void describeVpcPeeringConnectionsEmpty() {
+        DescribeVpcPeeringConnectionsResponse response = ec2.describeVpcPeeringConnections();
+
+        assertThat(response.vpcPeeringConnections()).isEmpty();
+        assertThat(ec2.describeVpcPeeringConnections(DescribeVpcPeeringConnectionsRequest.builder()
+                .filters(Filter.builder().name("status-code").values("active").build())
+                .build()).vpcPeeringConnections()).isEmpty();
+        DescribeVpcPeeringConnectionsResponse paged = ec2.describeVpcPeeringConnections(
+                DescribeVpcPeeringConnectionsRequest.builder().maxResults(5).build());
+        assertThat(paged.vpcPeeringConnections()).isEmpty();
+        assertThat(paged.nextToken()).isNull();
+
+        assertThatThrownBy(() -> ec2.describeVpcPeeringConnections(
+                DescribeVpcPeeringConnectionsRequest.builder()
+                        .vpcPeeringConnectionIds("pcx-0123456789abcdef0")
+                        .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidVpcPeeringConnectionID.NotFound");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo("The vpcPeeringConnection ID 'pcx-0123456789abcdef0' does not exist");
+                    assertThat(error.requestId()).isNotBlank();
+                });
+    }
+
+    @Test
+    @Order(0)
+    @DisplayName("DescribeTransitGatewayVpcAttachments - empty when none exist")
+    void describeTransitGatewayVpcAttachmentsEmpty() {
+        DescribeTransitGatewayVpcAttachmentsResponse response =
+                ec2.describeTransitGatewayVpcAttachments();
+
+        assertThat(response.transitGatewayVpcAttachments()).isEmpty();
+        assertThat(ec2.describeTransitGatewayVpcAttachments(
+                DescribeTransitGatewayVpcAttachmentsRequest.builder()
+                        .filters(Filter.builder().name("state").values("available").build())
+                        .build()).transitGatewayVpcAttachments()).isEmpty();
+        DescribeTransitGatewayVpcAttachmentsResponse paged =
+                ec2.describeTransitGatewayVpcAttachments(
+                        DescribeTransitGatewayVpcAttachmentsRequest.builder().maxResults(5).build());
+        assertThat(paged.transitGatewayVpcAttachments()).isEmpty();
+        assertThat(paged.nextToken()).isNull();
+
+        assertThatThrownBy(() -> ec2.describeTransitGatewayVpcAttachments(
+                DescribeTransitGatewayVpcAttachmentsRequest.builder()
+                        .transitGatewayAttachmentIds("tgw-attach-0123456789abcdef0")
+                        .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidTransitGatewayAttachmentID.NotFound");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo("Transit Gateway Attachment "
+                                    + "tgw-attach-0123456789abcdef0 was not found.");
+                    assertThat(error.requestId()).isNotBlank();
+                });
+
+        for (String filterName : List.of("tag:Owner", "tag-key")) {
+            assertThatThrownBy(() -> ec2.describeTransitGatewayVpcAttachments(
+                    DescribeTransitGatewayVpcAttachmentsRequest.builder()
+                            .filters(Filter.builder().name(filterName).values("TeamA").build())
+                            .build()))
+                    .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(400);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
+                        assertThat(error.awsErrorDetails().errorMessage())
+                                .isEqualTo("The filter '" + filterName + "' is invalid");
+                        assertThat(error.requestId()).isNotBlank();
+                    });
+        }
+    }
+
+    @Test
+    @Order(0)
+    @DisplayName("DescribeVpnGateways - empty when none exist")
+    void describeVpnGatewaysEmpty() {
+        assertThat(ec2.describeVpnGateways().vpnGateways()).isEmpty();
+        assertThat(ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .filters(Filter.builder()
+                        .name("attachment.vpc-id")
+                        .values("vpc-0123456789abcdef0")
+                        .build())
+                .build()).vpnGateways()).isEmpty();
+
+        assertThatThrownBy(() -> ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .vpnGatewayIds("vgw-0123456789abcdef0")
+                .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidVpnGatewayID.NotFound");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist");
+                    assertThat(error.requestId()).isNotBlank();
+                });
+    }
+
+    @Test
+    @Order(0)
+    @DisplayName("DescribeEgressOnlyInternetGateways - empty when none exist")
+    void describeEgressOnlyInternetGatewaysEmpty() {
+        assertThat(ec2.describeEgressOnlyInternetGateways().egressOnlyInternetGateways()).isEmpty();
+        assertThat(ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .filters(Filter.builder()
+                                .name("tag:Owner")
+                                .values("TeamA")
+                                .build())
+                        .build()).egressOnlyInternetGateways()).isEmpty();
+        DescribeEgressOnlyInternetGatewaysResponse paged =
+                ec2.describeEgressOnlyInternetGateways(
+                        DescribeEgressOnlyInternetGatewaysRequest.builder().maxResults(5).build());
+        assertThat(paged.egressOnlyInternetGateways()).isEmpty();
+        assertThat(paged.nextToken()).isNull();
+
+        assertThatThrownBy(() -> ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .egressOnlyInternetGatewayIds("eigw-0123456789abcdef0")
+                        .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidEgressOnlyInternetGatewayId.NotFound");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo("The egress-only internet gateway ID "
+                                    + "'eigw-0123456789abcdef0' does not exist");
+                    assertThat(error.requestId()).isNotBlank();
+                });
     }
 
     @AfterAll
@@ -251,12 +386,74 @@ class Ec2Tests {
                 .vpcId(vpcId)
                 .cidrBlock("10.0.1.0/24")
                 .availabilityZone("us-east-1a")
+                .tagSpecifications(
+                        TagSpecification.builder()
+                                .resourceType(ResourceType.SUBNET)
+                                .tags(Tag.builder().key("example.io:managed-by").value("sdk-test").build())
+                                .build(),
+                        TagSpecification.builder()
+                                .resourceType(ResourceType.SUBNET)
+                                .tags(
+                                        Tag.builder().key("Name").value("sdk-test-subnet").build(),
+                                        Tag.builder().key("omitted-value").build(),
+                                        Tag.builder().key("explicit-empty-value").value("").build())
+                                .build())
                 .build());
         subnetId = resp.subnet().subnetId();
 
         assertThat(subnetId).isNotNull().startsWith("subnet-");
         assertThat(resp.subnet().vpcId()).isEqualTo(vpcId);
         assertThat(resp.subnet().cidrBlock()).isEqualTo("10.0.1.0/24");
+        assertThat(resp.subnet().tags()).extracting(Tag::key, Tag::value)
+                .containsExactlyInAnyOrder(
+                        tuple("example.io:managed-by", "sdk-test"),
+                        tuple("Name", "sdk-test-subnet"),
+                        tuple("omitted-value", ""),
+                        tuple("explicit-empty-value", ""));
+    }
+
+    @Test
+    @Order(11)
+    @DisplayName("CreateSubnet - reject unsupported tag resource type")
+    void createSubnetRejectsUnsupportedTagResourceType() {
+        assertCreateSubnetTagSpecificationRejected(
+                "10.0.2.0/24",
+                TagSpecification.builder()
+                        .resourceType(ResourceType.VPC)
+                        .tags(Tag.builder().key("Name").value("invalid").build())
+                        .build(),
+                "Tag specification resource type 'vpc'");
+    }
+
+    @Test
+    @Order(11)
+    @DisplayName("CreateSubnet - reject tag specification without resource type")
+    void createSubnetRejectsMissingTagResourceType() {
+        assertCreateSubnetTagSpecificationRejected(
+                "10.0.3.0/24",
+                TagSpecification.builder()
+                        .tags(Tag.builder().key("Name").value("invalid").build())
+                        .build(),
+                "Tag specification resource type ''");
+    }
+
+    private void assertCreateSubnetTagSpecificationRejected(
+            String cidrBlock, TagSpecification tagSpecification, String expectedMessage) {
+        assertThatThrownBy(() -> ec2.createSubnet(CreateSubnetRequest.builder()
+                .vpcId(vpcId)
+                .cidrBlock(cidrBlock)
+                .tagSpecifications(tagSpecification)
+                .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
+                    assertThat(error.awsErrorDetails().errorMessage()).contains(expectedMessage);
+                    assertThat(error.requestId()).isNotBlank();
+                });
+        assertThat(ec2.describeSubnets(DescribeSubnetsRequest.builder()
+                        .filters(Filter.builder().name("vpc-id").values(vpcId).build())
+                        .build()).subnets())
+                .noneMatch(subnet -> cidrBlock.equals(subnet.cidrBlock()));
     }
 
     @Test
@@ -268,6 +465,21 @@ class Ec2Tests {
 
         assertThat(resp.subnets()).hasSize(1);
         assertThat(resp.subnets().get(0).subnetId()).isEqualTo(subnetId);
+        assertThat(resp.subnets().get(0).tags()).extracting(Tag::key, Tag::value)
+                .containsExactlyInAnyOrder(
+                        tuple("example.io:managed-by", "sdk-test"),
+                        tuple("Name", "sdk-test-subnet"),
+                        tuple("omitted-value", ""),
+                        tuple("explicit-empty-value", ""));
+        assertThat(ec2.describeTags(DescribeTagsRequest.builder()
+                        .filters(Filter.builder().name("resource-id").values(subnetId).build())
+                        .build()).tags())
+                .extracting(TagDescription::key, TagDescription::value)
+                .containsExactlyInAnyOrder(
+                        tuple("example.io:managed-by", "sdk-test"),
+                        tuple("Name", "sdk-test-subnet"),
+                        tuple("omitted-value", ""),
+                        tuple("explicit-empty-value", ""));
     }
 
     @Test
@@ -377,9 +589,11 @@ class Ec2Tests {
                 DescribeInternetGatewaysRequest.builder()
                         .internetGatewayIds(igwId).build());
 
-        boolean attached = resp.internetGateways().get(0).attachments().stream()
-                .anyMatch(a -> vpcId.equals(a.vpcId()));
-        assertThat(attached).isTrue();
+        assertThat(resp.internetGateways().get(0).attachments())
+                .anySatisfy(attachment -> {
+                    assertThat(attachment.vpcId()).isEqualTo(vpcId);
+                    assertThat(attachment.stateAsString()).isEqualTo("attached");
+                });
     }
 
     @Test

@@ -557,6 +557,209 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(321)
+    void describeVpcPeeringConnectionsReturnsEmptySet() {
+        given()
+            .formParam("Action", "DescribeVpcPeeringConnections")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeVpcPeeringConnectionsResponse.vpcPeeringConnectionSet.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeVpcPeeringConnections")
+            .formParam("Filter.1.Name", "status-code")
+            .formParam("Filter.1.Value.1", "active")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcPeeringConnectionsResponse.vpcPeeringConnectionSet.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeVpcPeeringConnections")
+            .formParam("VpcPeeringConnectionId.1", "pcx-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpcPeeringConnectionID.NotFound"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The vpcPeeringConnection ID 'pcx-0123456789abcdef0' does not exist"));
+    }
+
+    @Test
+    @Order(322)
+    void describeTransitGatewayVpcAttachmentsReturnsEmptySet() {
+        given()
+            .formParam("Action", "DescribeTransitGatewayVpcAttachments")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeTransitGatewayVpcAttachmentsResponse.transitGatewayVpcAttachments.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayVpcAttachments")
+            .formParam("Filter.1.Name", "state")
+            .formParam("Filter.1.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTransitGatewayVpcAttachmentsResponse.transitGatewayVpcAttachments.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayVpcAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", "tgw-attach-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.NotFound"))
+            .body("Response.Errors.Error.Message",
+                     equalTo("Transit Gateway Attachment tgw-attach-0123456789abcdef0 was not found."));
+    }
+
+    @Test
+    @Order(323)
+    void describeVpnGatewaysReturnsEmptySetAndNotFoundError() {
+        given()
+            .formParam("Action", "DescribeVpnGateways")
+            .formParam("Filter.1.Name", "attachment.vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpnGatewaysResponse.vpnGatewaySet.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeVpnGateways")
+            .formParam("VpnGatewayId.1", "vgw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpnGatewayID.NotFound"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist"));
+    }
+
+    @Test
+    @Order(324)
+    void describeEgressOnlyInternetGatewaysReturnsEmptySetAndNotFoundError() {
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "tag:Owner")
+            .formParam("Filter.1.Value.1", "TeamA")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "attachment.vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "unsupported")
+            .formParam("Filter.1.Value.1", "value")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The filter 'unsupported' is invalid"));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("EgressOnlyInternetGatewayId.1", "eigw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code",
+                    equalTo("InvalidEgressOnlyInternetGatewayId.NotFound"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The egress-only internet gateway ID "
+                            + "'eigw-0123456789abcdef0' does not exist"));
+    }
+
+    @Test
+    @Order(325)
+    void emptyNetworkDiscoveryValidatesPaginationBeforeReturningResults() {
+        for (var actionAndMaximum : java.util.Map.of(
+                "DescribeVpcPeeringConnections", 1000,
+                "DescribeTransitGatewayVpcAttachments", 1000,
+                "DescribeEgressOnlyInternetGateways", 255).entrySet()) {
+            String action = actionAndMaximum.getKey();
+            int maximum = actionAndMaximum.getValue();
+            for (String maxResults : List.of("5", Integer.toString(maximum))) {
+                given()
+                    .formParam("Action", action)
+                    .formParam("MaxResults", maxResults)
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .body(not(containsString("<nextToken>")));
+            }
+
+            for (String maxResults : List.of("4", Integer.toString(maximum + 1), "not-a-number")) {
+                given()
+                    .formParam("Action", action)
+                    .formParam("MaxResults", maxResults)
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("InvalidMaxResults"));
+            }
+
+            given()
+                .formParam("Action", action)
+                .formParam("NextToken", "arbitrary-token")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        }
+    }
+
+    @Test
     @Order(12)
     void modifyVpcAttribute() {
         given()
@@ -1253,7 +1456,9 @@ class Ec2IntegrationTest {
             .body("DescribeInternetGatewaysResponse.internetGatewaySet.item.internetGatewayId",
                     equalTo(igwId))
             .body("DescribeInternetGatewaysResponse.internetGatewaySet.item.attachmentSet.item.vpcId",
-                    equalTo(vpcId));
+                    equalTo(vpcId))
+            .body("DescribeInternetGatewaysResponse.internetGatewaySet.item.attachmentSet.item.state",
+                    equalTo("attached"));
     }
 
     // =========================================================================
@@ -3081,9 +3286,20 @@ class Ec2IntegrationTest {
             .formParam("TagSpecification.1.ResourceType", "subnet")
             .formParam("TagSpecification.1.Tag.1.Key", "Name")
             .formParam("TagSpecification.1.Tag.1.Value", "tagged-subnet")
+            .formParam("TagSpecification.2.ResourceType", "subnet")
+            .formParam("TagSpecification.2.Tag.1.Key", "omitted-value")
+            .formParam("TagSpecification.2.Tag.2.Key", "explicit-empty-value")
+            .formParam("TagSpecification.2.Tag.2.Value", "")
             .header("Authorization", AUTH_HEADER)
         .when().post("/")
-        .then().statusCode(200)
+        .then()
+            .statusCode(200)
+            .body("CreateSubnetResponse.subnet.tagSet.item.find { it.key == 'Name' }.value",
+                    equalTo("tagged-subnet"))
+            .body("CreateSubnetResponse.subnet.tagSet.item.find { it.key == 'omitted-value' }.value",
+                    equalTo(""))
+            .body("CreateSubnetResponse.subnet.tagSet.item.find { it.key == 'explicit-empty-value' }.value",
+                    equalTo(""))
             .extract().path("CreateSubnetResponse.subnet.subnetId");
 
         given()
@@ -3093,8 +3309,120 @@ class Ec2IntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
-            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.key", equalTo("Name"))
-            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.value", equalTo("tagged-subnet"));
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.find { it.key == 'Name' }.value",
+                    equalTo("tagged-subnet"))
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.find { it.key == 'omitted-value' }.value",
+                    equalTo(""))
+            .body("DescribeSubnetsResponse.subnetSet.item.tagSet.item.find { it.key == 'explicit-empty-value' }.value",
+                    equalTo(""));
+
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-id")
+            .formParam("Filter.1.Value.1", subnet)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'Name' }.value",
+                    equalTo("tagged-subnet"))
+            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'omitted-value' }.value",
+                    equalTo(""))
+            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'explicit-empty-value' }.value",
+                    equalTo(""));
+    }
+
+    @Test
+    @Order(400)
+    void createSubnetRejectsEveryWrongTagSpecificationBeforeMutation() {
+        String vpc = newVpc("10.39.0.0/16");
+
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.39.1.0/24")
+            .formParam("TagSpecification.1.ResourceType", "subnet")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "valid")
+            .formParam("TagSpecification.2.ResourceType", "vpc")
+            .formParam("TagSpecification.2.Tag.1.Key", "Name")
+            .formParam("TagSpecification.2.Tag.1.Value", "invalid")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message", equalTo(
+                    "Tag specification resource type 'vpc' is not valid for this operation. "
+                            + "The valid resource type is 'subnet'."));
+
+        assertVpcHasNoSubnet(vpc);
+    }
+
+    @Test
+    @Order(401)
+    void createSubnetRejectsTagSpecificationWithoutResourceTypeBeforeMutation() {
+        String vpc = newVpc("10.40.0.0/16");
+
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.40.1.0/24")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "invalid")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+
+        assertVpcHasNoSubnet(vpc);
+    }
+
+    @Test
+    @Order(402)
+    void createSubnetRejectsSparseTagSpecificationBeforeMutation() {
+        assertCreateSubnetTagSpecificationIndexRejected("10.41.0.0/16", "10.41.1.0/24", "2");
+    }
+
+    @Test
+    @Order(403)
+    void createSubnetRejectsNonnumericTagSpecificationBeforeMutation() {
+        assertCreateSubnetTagSpecificationIndexRejected("10.42.0.0/16", "10.42.1.0/24", "member");
+    }
+
+    private void assertCreateSubnetTagSpecificationIndexRejected(
+            String vpcCidr, String subnetCidr, String specificationIndex) {
+        String vpc = newVpc(vpcCidr);
+
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", subnetCidr)
+            .formParam("TagSpecification." + specificationIndex + ".ResourceType", "subnet")
+            .formParam("TagSpecification." + specificationIndex + ".Tag.1.Key", "Name")
+            .formParam("TagSpecification." + specificationIndex + ".Tag.1.Value", "invalid")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message", containsString(
+                    "Tag specification member index '" + specificationIndex + "' is invalid"));
+
+        assertVpcHasNoSubnet(vpc);
+    }
+
+    private void assertVpcHasNoSubnet(String vpc) {
+        given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSubnetsResponse.subnetSet.item.size()", equalTo(0));
     }
 
     @Test
