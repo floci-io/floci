@@ -147,7 +147,10 @@ Override any of them at runtime via `docker run -e` or the Compose `environment`
 
 ## Local Development
 
-The project ships a `docker-compose.yml` at the repository root configured for local development. By default it uses `docker/Dockerfile` (a fast JVM build suited for iteration). Switch the `dockerfile` entry to test the native image locally:
+The project ships a `docker-compose.yml` at the repository root configured for local development.
+By default it uses `docker/Dockerfile`, a fast Ubuntu Noble/glibc JVM image suited for iteration
+with Java 25. The release and nightly images use the native Dockerfiles described above. Switch the
+`dockerfile` entry to test the native image locally:
 
 ```yaml title="docker-compose.yml"
 build:
