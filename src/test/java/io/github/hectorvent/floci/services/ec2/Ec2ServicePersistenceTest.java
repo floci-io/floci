@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -54,6 +55,22 @@ import static org.mockito.Mockito.when;
 class Ec2ServicePersistenceTest {
 
     private static final String REGION = "us-east-1";
+
+    @Test
+    void emptyNetworkDiscoverySurvivesRestart(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        assertTrue(first.describeVpcPeeringConnectionIds(REGION, List.of(), Map.of()).isEmpty());
+        assertTrue(first.describeVpnGatewayIds(REGION, List.of(), Map.of()).isEmpty());
+        assertTrue(first.describeEgressOnlyInternetGatewayIds(REGION, List.of(), Map.of()).isEmpty());
+
+        Ec2Service restarted = newService(dir);
+        assertTrue(restarted.describeVpcPeeringConnectionIds(
+                REGION, List.of(), Map.of("status-code", List.of("active"))).isEmpty());
+        assertTrue(restarted.describeVpnGatewayIds(
+                REGION, List.of(), Map.of("attachment.vpc-id", List.of("vpc-0123456789abcdef0"))).isEmpty());
+        assertTrue(restarted.describeEgressOnlyInternetGatewayIds(
+                REGION, List.of(), Map.of("tag:Owner", List.of("TeamA"))).isEmpty());
+    }
 
     @Test
     void vpcAndSubnetSurviveRestart(@TempDir Path dir) {

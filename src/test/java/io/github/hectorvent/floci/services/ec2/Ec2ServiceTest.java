@@ -11,15 +11,14 @@ import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
-import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
-import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
@@ -62,6 +61,89 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2ServiceTest {
+
+    @Test
+    void describeVpcPeeringConnectionsReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        assertTrue(service.describeVpcPeeringConnectionIds("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeVpcPeeringConnectionIds(
+                "us-east-1", List.of(), Map.of("status-code", List.of("active"))).isEmpty());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.describeVpcPeeringConnectionIds(
+                "us-east-1", List.of("pcx-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidVpcPeeringConnectionID.NotFound", error.getErrorCode());
+        assertEquals("The vpcPeeringConnection ID 'pcx-0123456789abcdef0' does not exist", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeVpcPeeringConnectionIds(
+                        "us-east-1", List.of(), Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+    }
+
+    @Test
+    void describeVpnGatewaysReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Map<String, List<String>> vpcFilter =
+                Map.of("attachment.vpc-id", List.of("vpc-0123456789abcdef0"));
+
+        assertTrue(service.describeVpnGatewayIds("us-east-1", List.of(), vpcFilter).isEmpty());
+
+        AwsException vpnError = assertThrows(AwsException.class, () -> service.describeVpnGatewayIds(
+                "us-east-1", List.of("vgw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidVpnGatewayID.NotFound", vpnError.getErrorCode());
+        assertEquals("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist", vpnError.getMessage());
+        assertEquals(400, vpnError.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeVpnGatewayIds(
+                        "us-east-1", List.of(), Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+    }
+
+    @Test
+    void describeEgressOnlyInternetGatewaysReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Map<String, List<String>> supportedFilters = Map.of(
+                "attachment.state", List.of("attached"),
+                "attachment.vpc-id", List.of("vpc-0123456789abcdef0"),
+                "egress-only-internet-gateway-id", List.of("eigw-0123456789abcdef0"),
+                "tag:Owner", List.of("TeamA"),
+                "tag-key", List.of("Owner"));
+
+        for (Map.Entry<String, List<String>> filter : supportedFilters.entrySet()) {
+            assertTrue(service.describeEgressOnlyInternetGatewayIds(
+                    "us-east-1", List.of(), Map.of(filter.getKey(), filter.getValue())).isEmpty());
+        }
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeEgressOnlyInternetGatewayIds(
+                        "us-east-1", List.of("eigw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidEgressOnlyInternetGatewayId.NotFound", error.getErrorCode());
+        assertEquals("The egress-only internet gateway ID 'eigw-0123456789abcdef0' does not exist",
+                error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeEgressOnlyInternetGatewayIds(
+                        "us-east-1", List.of(),
+                        Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+        assertEquals(400, filterError.getHttpStatus());
+    }
 
     @Test
     void mockModeTreatsExistingNonTerminatedInstanceAsRunningContainer() {
@@ -342,6 +424,23 @@ class Ec2ServiceTest {
         field.setAccessible(true);
         var backend = (io.github.hectorvent.floci.core.storage.StorageBackend<String, T>) field.get(service);
         backend.put(key, value);
+    }
+
+    @Test
+    void attachedInternetGatewayRoundTripsAttachedState() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.42.0.0/16", false).getVpcId();
+        InternetGateway gateway = service.createInternetGateway(region);
+
+        service.attachInternetGateway(region, gateway.getInternetGatewayId(), vpcId);
+
+        InternetGateway described = service.describeInternetGateways(
+                region, List.of(gateway.getInternetGatewayId()), Map.of()).getFirst();
+        assertEquals(vpcId, described.getAttachments().getFirst().getVpcId());
+        assertEquals("attached", described.getAttachments().getFirst().getState());
     }
 
     @Test
