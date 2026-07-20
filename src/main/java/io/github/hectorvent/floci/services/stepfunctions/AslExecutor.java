@@ -37,6 +37,7 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import io.vertx.core.http.HttpMethod;
+import io.vertx.core.impl.NoStackTraceTimeoutException;
 import io.vertx.mutiny.core.MultiMap;
 import io.vertx.mutiny.core.buffer.Buffer;
 import io.vertx.mutiny.core.Vertx;
@@ -66,6 +67,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -2054,12 +2056,18 @@ public class AslExecutor {
             return httpResultJson(response);
         } catch (FailStateException e) {
             throw e;
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof NoStackTraceTimeoutException) {
+                throw new FailStateException("States.Http.Socket", e.getCause().getMessage());
+            } else {
+                throw new FailStateException("States.TaskFailed", e.getCause().getMessage());
+            }
         } catch (Exception e) {
             throw new FailStateException("States.TaskFailed", e.getMessage());
         }
     }
 
-    private HttpResponse<Buffer> sendHttpRequest(HttpRequest<Buffer> request, HttpRequestPayload payload) {
+    private HttpResponse<Buffer> sendHttpRequest(HttpRequest<Buffer> request, HttpRequestPayload payload) throws NoStackTraceTimeoutException {
         if (payload.form() != null) {
             return request.sendFormAndAwait(payload.form());
         }

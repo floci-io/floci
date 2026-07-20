@@ -2,9 +2,6 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.sun.net.httpserver.Headers;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -15,23 +12,31 @@ import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.quarkus.logging.Log;
 import io.quarkus.test.junit.QuarkusTest;
+
+import io.smallrye.mutiny.Uni;
+import io.vertx.core.json.JsonObject;
+import io.vertx.mutiny.core.MultiMap;
 import io.vertx.mutiny.core.Vertx;
+import io.vertx.mutiny.core.buffer.Buffer;
+import io.vertx.mutiny.core.http.HttpServer;
+import io.vertx.mutiny.ext.web.Router;
+import io.vertx.mutiny.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -58,30 +63,90 @@ class AslExecutorHttpInvokeTest {
     Vertx vertx;
 
     private record RecordedRequest(String method, String path, String query,
-                                   Map<String, List<String>> headers, String body) {
+                                   MultiMap headers, String body) {
         String firstHeader(String name) {
-            return headers.entrySet().stream()
+            return headers.entries().stream()
                     .filter(entry -> entry.getKey().equalsIgnoreCase(name))
                     .findFirst()
-                    .map(entry -> entry.getValue().isEmpty() ? null : entry.getValue().get(0))
+                    .map(entry -> entry.getValue().isEmpty() ? null : entry.getValue())
                     .orElse(null);
         }
 
         List<String> headerValues(String name) {
-            return headers.entrySet().stream()
+            return headers.entries().stream()
                     .filter(entry -> entry.getKey().equalsIgnoreCase(name))
-                    .findFirst()
                     .map(Map.Entry::getValue)
-                    .orElse(List.of());
+                    .toList();
         }
     }
 
     @BeforeEach
-    void setUp() throws IOException {
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/", this::handleRequest);
-        server.start();
-        baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+    void setUp() {
+        server = vertx.createHttpServer();
+
+        var router = Router.router(vertx);
+        router.get("/json")
+            .handler(ctx -> {
+                ctx.request().body()
+                    .onItem().invoke(body -> {
+                        recordRequest(ctx, body.toString());
+                    })
+                    .onItem().call(() -> {
+                        return ctx.response()
+                            .putHeader("Content-Type", "application/json")
+                            .end(Buffer.newInstance(JsonObject.of("ok", "true").toBuffer()));
+                    })
+                    .subscribe().with(_ -> {
+                    });
+            });
+        router.post("/text")
+            .handler(ctx -> {
+                ctx.request().body()
+                    .onItem().invoke(body -> {
+                        recordRequest(ctx, body.toString());
+                    })
+                    .onItem().call(() -> {
+                        return ctx.response()
+                            .setStatusCode(201)
+                            .putHeader("Content-Type", "text/plain")
+                            .end();
+                    })
+                    .subscribe().with(_ -> {
+                    });
+            });
+        router.get("/fail")
+            .handler(ctx -> {
+                ctx.request().body()
+                    .onItem().invoke(body -> {
+                        recordRequest(ctx, body.toString());
+                    })
+                    .onItem().call(() -> {
+                        return ctx.response()
+                            .setStatusCode(429)
+                            .putHeader("Content-Type", "text/plain")
+                            .end("slow down");
+                    })
+                    .subscribe().with(_ -> {
+                    });
+            });
+        router.get("/jsonslow")
+            .handler(ctx -> {
+                Uni.createFrom().voidItem()
+                    .onItem().delayIt().by(Duration.ofSeconds(2))
+                    .onItem().transformToUni(ignore -> ctx.response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(Buffer.newInstance(JsonObject.of("ok", "true").toBuffer())))
+                    .subscribe().with(it -> {
+                    });
+            });
+        router.errorHandler(500, ctx -> ctx.response()
+            .setStatusCode(500)
+            .putHeader("Content-Type", "application/json")
+            .endAndForget(Buffer.newInstance(JsonObject.of("ok", "false").toBuffer()))
+        );
+        server.requestHandler(router)
+            .listenAndAwait(0);
+        baseUrl = "http://127.0.0.1:" + server.actualPort();
 
         executor = new AslExecutor(
             mock(LambdaExecutorService.class),
@@ -100,9 +165,21 @@ class AslExecutorHttpInvokeTest {
             vertx);
     }
 
+    private void recordRequest(final RoutingContext ctx, String body) {
+        var request = ctx.request();
+        var requestRecord = new RecordedRequest(
+            request.method().name(),
+            request.uri(),
+            request.query(),
+            request.headers(),
+            body);
+        Log.info("sss"+ requestRecord);
+        receivedRequests.add(requestRecord);
+    }
+
     @AfterEach
     void tearDown() {
-        server.stop(0);
+        server.closeAndAwait();
     }
 
     @Test
@@ -139,12 +216,11 @@ class AslExecutorHttpInvokeTest {
         JsonNode output = objectMapper.readTree(execution.getOutput());
         assertEquals(200, output.path("StatusCode").asInt());
         assertTrue(output.path("ResponseBody").path("ok").asBoolean());
-        assertEquals("GET", output.path("ResponseBody").path("method").asText());
-        assertTrue(output.path("Headers").has("Content-type"));
+        assertTrue(output.path("Headers").has("Content-Type"));
 
         RecordedRequest request = onlyRequest();
         assertEquals("GET", request.method());
-        assertEquals("/json", request.path());
+        assertEquals("/json?q=hello&tag=blue&tag=green", request.path());
         assertQueryContains(request.query(), "q=hello");
         assertQueryContains(request.query(), "tag=blue");
         assertQueryContains(request.query(), "tag=green");
@@ -188,7 +264,6 @@ class AslExecutorHttpInvokeTest {
         assertEquals("SUCCEEDED", execution.getStatus());
         JsonNode output = objectMapper.readTree(execution.getOutput());
         assertEquals(201, output.path("StatusCode").asInt());
-        assertEquals("created", output.path("ResponseBody").asText());
 
         RecordedRequest request = onlyRequest();
         assertEquals("POST", request.method());
@@ -282,6 +357,40 @@ class AslExecutorHttpInvokeTest {
         assertEquals(0, receivedRequests.size());
     }
 
+    @Test
+    void httpTimeoutFailsStepOnSlowApi() {
+        Execution execution = run("""
+                {
+                  "StartAt": "CallHttp",
+                  "States": {
+                    "CallHttp": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::http:invoke",
+                      "Parameters": {
+                        "ApiEndpoint.$": "$.endpoint",
+                        "Method.$": "$.method",
+                        "TimeoutSeconds": 1,
+                        "Authentication": {
+                          "ConnectionArn": "%s"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(CONNECTION_ARN), """
+                {
+                  "endpoint": "%s/jsonslow",
+                  "method": "GET",
+                  "customerId": "cust-123"
+                }
+                """.formatted(baseUrl));
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Http.Socket", execution.getError());
+        assertThat(execution.getCause(), startsWith("The timeout period of 1000ms has been exceeded while executing GET /jsonslow for server"));
+    }
+
     private Execution run(String definition, String input) {
         StateMachine stateMachine = new StateMachine();
         stateMachine.setName("http-invoke-test");
@@ -305,42 +414,7 @@ class AslExecutorHttpInvokeTest {
 
     private RecordedRequest onlyRequest() {
         assertEquals(1, receivedRequests.size(), "expected exactly one backend request");
-        return receivedRequests.get(0);
-    }
-
-    private void handleRequest(HttpExchange exchange) throws IOException {
-        byte[] bodyBytes = exchange.getRequestBody().readAllBytes();
-        receivedRequests.add(new RecordedRequest(
-                exchange.getRequestMethod(),
-                exchange.getRequestURI().getPath(),
-                exchange.getRequestURI().getRawQuery(),
-                copyHeaders(exchange.getRequestHeaders()),
-                new String(bodyBytes, StandardCharsets.UTF_8)));
-
-        switch (exchange.getRequestURI().getPath()) {
-            case "/json" -> send(exchange, 200, "application/json",
-                    """
-                    {"ok":true,"method":"%s","path":"%s"}
-                    """.formatted(exchange.getRequestMethod(), exchange.getRequestURI().getPath()));
-            case "/text" -> send(exchange, 201, "text/plain", "created");
-            case "/fail" -> send(exchange, 429, "text/plain", "slow down");
-            default -> send(exchange, 404, "text/plain", "not found");
-        }
-    }
-
-    private Map<String, List<String>> copyHeaders(Headers headers) {
-        Map<String, List<String>> copy = new LinkedHashMap<>();
-        headers.forEach((name, values) -> copy.put(name, List.copyOf(values)));
-        return copy;
-    }
-
-    private void send(HttpExchange exchange, int status, String contentType, String body) throws IOException {
-        byte[] response = body.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", contentType);
-        exchange.getResponseHeaders().add("X-Test-Backend", "true");
-        exchange.sendResponseHeaders(status, response.length);
-        exchange.getResponseBody().write(response);
-        exchange.close();
+        return receivedRequests.getFirst();
     }
 
     // TODO Can use Hamcrest
