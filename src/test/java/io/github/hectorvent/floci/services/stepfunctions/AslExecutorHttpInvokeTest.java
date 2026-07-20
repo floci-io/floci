@@ -7,6 +7,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
@@ -82,15 +84,20 @@ class AslExecutorHttpInvokeTest {
         baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
 
         executor = new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbService.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class),
-                objectMapper,
-                new JsonataEvaluator(objectMapper),
-                mock(Instance.class),
-                vertx);
+            mock(LambdaExecutorService.class),
+            mock(LambdaFunctionStore.class),
+            mock(DynamoDbService.class),
+            mock(DynamoDbJsonHandler.class),
+            mock(SqsJsonHandler.class),
+            mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
+            mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
+            mock(io.github.hectorvent.floci.services.s3.S3Service.class),
+            mock(EcsService.class),
+            mock(EcsJsonHandler.class),
+            objectMapper,
+            new JsonataEvaluator(objectMapper),
+            mock(Instance.class),
+            vertx);
     }
 
     @AfterEach

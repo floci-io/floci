@@ -43,7 +43,8 @@ class AslExecutorPathIntrinsicsTest {
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
                 mapper,
                 new JsonataEvaluator(mapper),
-                mock(Instance.class));
+                mock(Instance.class),
+                null);
     }
 
     @Test

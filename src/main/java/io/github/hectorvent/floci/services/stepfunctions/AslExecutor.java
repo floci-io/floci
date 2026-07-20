@@ -23,7 +23,6 @@ import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
@@ -173,9 +172,13 @@ public class AslExecutor {
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
-        // This can be optimized further
-        // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
-        this.webClient = WebClient.wrap(vertx.createHttpClient());
+        if (vertx != null) {
+            // This can be optimized further
+            // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
+            this.webClient = WebClient.wrap(vertx.createHttpClient());
+        } else {
+            webClient = null;
+        }
     }
 
     /**

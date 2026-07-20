@@ -70,7 +70,8 @@ class AslExecutorEcsRunTaskModeTest {
                 ecsJsonHandler,
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class));
+                mock(Instance.class),
+                null);
     }
 
     @Test
