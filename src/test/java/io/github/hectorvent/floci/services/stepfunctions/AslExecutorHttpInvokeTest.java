@@ -139,6 +139,12 @@ class AslExecutorHttpInvokeTest {
                     .subscribe().with(it -> {
                     });
             });
+        router.get("/form")
+            .handler(ctx -> {
+                ctx.response()
+                    .putHeader("Content-Type", "application/x-www-form-urlencoded")
+                    .endAndForget("no_support");
+            });
         router.errorHandler(500, ctx -> ctx.response()
             .setStatusCode(500)
             .putHeader("Content-Type", "application/json")
@@ -389,6 +395,46 @@ class AslExecutorHttpInvokeTest {
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Http.Socket", execution.getError());
         assertThat(execution.getCause(), startsWith("The timeout period of 1000ms has been exceeded while executing GET /jsonslow for server"));
+    }
+
+    @Test
+    void formTransformationIsUnsupported() {
+        Execution execution = run("""
+                {
+                  "StartAt": "CallHttp",
+                  "States": {
+                    "CallHttp": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::http:invoke",
+                      "Parameters": {
+                        "ApiEndpoint.$": "$.endpoint",
+                        "Method.$": "$.method",
+                        "TimeoutSeconds": 1,
+                        "Authentication": {
+                          "ConnectionArn": "%s"
+                        },
+                        "Transform": {
+                          "RequestBodyEncoding": "URL_ENCODED",
+                          "RequestEncodingOptions": {
+                            "ArrayFormat": "COMMAS"
+                          }
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(CONNECTION_ARN), """
+                {
+                  "endpoint": "%s/form",
+                  "method": "GET",
+                  "customerId": "cust-123"
+                }
+                """.formatted(baseUrl));
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.TaskFailed", execution.getError());
+        assertThat(execution.getCause(), startsWith("URL-encoded request bodies are not supported yet"));
     }
 
     private Execution run(String definition, String input) {

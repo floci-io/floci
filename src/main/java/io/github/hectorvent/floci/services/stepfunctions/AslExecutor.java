@@ -2030,7 +2030,7 @@ public class AslExecutor {
         var headers = input.path("Headers");
         var queryParameters = input.path("QueryParameters");
         var requestBody = input.path("RequestBody");
-        var requestBodyEncoding = input.path("Transform").path("RequestBodyEncoding").asText();
+        var requestBodyEncoding = input.path("Transform").path("RequestBodyEncoding").asText("NONE");
 
         if (uri == null || uri.isBlank()) {
             throw new FailStateException("States.Runtime", "ApiEndpoint is required for HTTP task");
@@ -2039,9 +2039,8 @@ public class AslExecutor {
         validateConnectionArn(input);
         validateHttpHeaders(headers);
 
-        var contentType = headerValue(headers, "Content-Type");
-        var requestPayload = requestPayload(method, requestBody, requestBodyEncoding, contentType);
-        var requestHeaders = requestHeaders(headers, requestPayload.contentType(), region);
+        var requestPayload = requestPayload(requestBody, requestBodyEncoding);
+        var requestHeaders = requestHeaders(headers, requestPayload.contentType());
         var requestQueryParameters = queryParameters(queryParameters);
         var request = webClient.requestAbs(HttpMethod.valueOf(method), uri)
                 .timeout(timeoutMillis)
@@ -2145,7 +2144,7 @@ public class AslExecutor {
         return contentType != null && contentType.toLowerCase(Locale.ROOT).contains("application/json");
     }
 
-    private MultiMap requestHeaders(JsonNode headers, String defaultContentType, String region) {
+    private MultiMap requestHeaders(JsonNode headers, String defaultContentType) {
         MultiMap requestHeaders = MultiMap.caseInsensitiveMultiMap();
         if (headers.isObject()) {
             headers.fields().forEachRemaining(entry -> addHeaderValues(requestHeaders, entry.getKey(), entry.getValue()));
@@ -2164,30 +2163,27 @@ public class AslExecutor {
         }
     }
 
-    private HttpRequestPayload requestPayload(String method, JsonNode requestBody, String requestBodyEncoding, String contentType) {
-        if (requestBody.isMissingNode() || requestBody.isNull() || !allowsRequestBody(method)) {
-            return new HttpRequestPayload(null, null, null);
-        }
-
-        boolean urlEncoded = "URL_ENCODED".equalsIgnoreCase(requestBodyEncoding)
-                || "application/x-www-form-urlencoded".equalsIgnoreCase(contentType);
-        if (urlEncoded) {
+    private HttpRequestPayload requestPayload(JsonNode requestBody, String requestBodyEncoding) {
+        if ("URL_ENCODED".equalsIgnoreCase(requestBodyEncoding)) {
             // TODO: Implement Transform.RequestBodyEncoding URL_ENCODED with AWS-compatible array formats.
             throw new FailStateException("States.TaskFailed", "URL-encoded request bodies are not supported yet");
-        }
+        } else if ("NONE".equalsIgnoreCase(requestBodyEncoding)) {
+            try {
+                if (requestBody.isMissingNode() || requestBody.isNull()) {
+                    return new HttpRequestPayload(null, null, null);
+                }
 
-        if (requestBody.isTextual()) {
-            return new HttpRequestPayload(Buffer.buffer(requestBody.asText()), null, null);
-        }
-
-        try {
-            return new HttpRequestPayload(
+                return new HttpRequestPayload(
                     Buffer.buffer(objectMapper.writeValueAsString(requestBody)),
                     null,
                     "application/json");
-        } catch (Exception e) {
+            } catch (Exception e) {
+                throw new FailStateException("States.TaskFailed",
+                    "Failed to serialize HTTP request body to JSON: " + e.getMessage());
+            }
+        } else {
             throw new FailStateException("States.TaskFailed",
-                    "Failed to serialize HTTP request body: " + e.getMessage());
+                "Unsupported body transformer: " + requestBodyEncoding);
         }
     }
 
@@ -2199,10 +2195,6 @@ public class AslExecutor {
             @JsonProperty("StatusText") String statusText,
             @JsonProperty("Headers") Map<String, List<String>> headers,
             @JsonProperty("ResponseBody") JsonNode responseBody) {
-    }
-
-    private boolean allowsRequestBody(String method) {
-        return !"GET".equals(method) && !"HEAD".equals(method);
     }
 
     private void validateHttpMethod(String method) {
