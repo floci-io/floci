@@ -70,6 +70,12 @@ public class Ec2QueryHandler {
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
                 case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
                 case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
+                case "DescribeVpcPeeringConnections" -> handleDescribeVpcPeeringConnections(params, region);
+                case "DescribeTransitGatewayVpcAttachments" ->
+                        handleDescribeTransitGatewayVpcAttachments(params, region);
+                case "DescribeVpnGateways" -> handleDescribeVpnGateways(params, region);
+                case "DescribeEgressOnlyInternetGateways" ->
+                        handleDescribeEgressOnlyInternetGateways(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -339,6 +345,129 @@ public class Ec2QueryHandler {
         }
         return tags;
     }
+
+    private List<TagSpecificationMember> parseCreateSubnetTagSpecifications(MultivaluedMap<String, String> p) {
+        String prefix = "TagSpecification.";
+        SortedMap<Integer, SortedSet<Integer>> specificationTagIndexes = new TreeMap<>();
+        for (String parameter : p.keySet()) {
+            if (!parameter.startsWith(prefix)) {
+                continue;
+            }
+
+            String suffix = parameter.substring(prefix.length());
+            String[] segments = suffix.split("\\.", -1);
+            if (segments.length < 2) {
+                throw invalidCreateSubnetTagSpecificationParameter(parameter);
+            }
+
+            int specificationIndex = parseCreateSubnetTagMemberIndex(segments[0], false);
+            SortedSet<Integer> tagIndexes = specificationTagIndexes.computeIfAbsent(
+                    specificationIndex, ignored -> new TreeSet<>());
+
+            if (segments.length == 2 && "ResourceType".equals(segments[1])) {
+                continue;
+            }
+            if (segments.length != 4
+                    || !"Tag".equals(segments[1])
+                    || !("Key".equals(segments[3]) || "Value".equals(segments[3]))) {
+                throw invalidCreateSubnetTagSpecificationParameter(parameter);
+            }
+            tagIndexes.add(parseCreateSubnetTagMemberIndex(segments[2], true));
+        }
+
+        int expectedIndex = 1;
+        List<TagSpecificationMember> specifications = new ArrayList<>();
+        for (Map.Entry<Integer, SortedSet<Integer>> indexedSpecification : specificationTagIndexes.entrySet()) {
+            if (indexedSpecification.getKey() != expectedIndex++) {
+                throw invalidCreateSubnetTagSpecificationIndex(Integer.toString(indexedSpecification.getKey()));
+            }
+
+            String index = Integer.toString(indexedSpecification.getKey());
+            List<String> requestedTypes = p.get(prefix + index + ".ResourceType");
+            if (requestedTypes == null || requestedTypes.size() != 1) {
+                throw invalidCreateSubnetTagResourceType(null);
+            }
+            String requestedType = requestedTypes.getFirst();
+            if (!"subnet".equals(requestedType)) {
+                throw invalidCreateSubnetTagResourceType(requestedType);
+            }
+
+            List<Tag> tags = new ArrayList<>();
+            int expectedTagIndex = 1;
+            for (int tagIndex : indexedSpecification.getValue()) {
+                if (tagIndex != expectedTagIndex++) {
+                    throw invalidCreateSubnetTagIndex(index, Integer.toString(tagIndex));
+                }
+
+                String tagPrefix = prefix + index + ".Tag." + tagIndex;
+                List<String> keys = p.get(tagPrefix + ".Key");
+                if (keys == null || keys.size() != 1 || keys.getFirst() == null) {
+                    throw invalidCreateSubnetTagSpecificationParameter(tagPrefix + ".Key");
+                }
+                List<String> values = p.get(tagPrefix + ".Value");
+                if (values != null && values.size() != 1) {
+                    throw invalidCreateSubnetTagSpecificationParameter(tagPrefix + ".Value");
+                }
+                tags.add(new Tag(keys.getFirst(), values == null ? "" : values.getFirst()));
+            }
+            specifications.add(new TagSpecificationMember(tags));
+        }
+        return specifications;
+    }
+
+    private int parseCreateSubnetTagMemberIndex(String rawIndex, boolean tagIndex) {
+        int index;
+        try {
+            index = Integer.parseInt(rawIndex);
+        } catch (NumberFormatException e) {
+            if (tagIndex) {
+                throw invalidCreateSubnetTagIndex("", rawIndex);
+            }
+            throw invalidCreateSubnetTagSpecificationIndex(rawIndex);
+        }
+        if (index < 1 || !rawIndex.equals(Integer.toString(index))) {
+            if (tagIndex) {
+                throw invalidCreateSubnetTagIndex("", rawIndex);
+            }
+            throw invalidCreateSubnetTagSpecificationIndex(rawIndex);
+        }
+        return index;
+    }
+
+    private AwsException invalidCreateSubnetTagSpecificationIndex(String index) {
+        return new AwsException(
+                "InvalidParameterValue",
+                "Tag specification member index '" + index
+                        + "' is invalid. Member indexes must be contiguous positive integers starting at 1.",
+                400);
+    }
+
+    private AwsException invalidCreateSubnetTagResourceType(String requestedType) {
+        String value = requestedType == null ? "" : requestedType;
+        return new AwsException(
+                "InvalidParameterValue",
+                "Tag specification resource type '" + value
+                        + "' is not valid for this operation. The valid resource type is 'subnet'.",
+                400);
+    }
+
+    private AwsException invalidCreateSubnetTagIndex(String specificationIndex, String tagIndex) {
+        String specification = specificationIndex.isEmpty() ? "" : " in tag specification '" + specificationIndex + "'";
+        return new AwsException(
+                "InvalidParameterValue",
+                "Tag member index '" + tagIndex + "'" + specification
+                        + " is invalid. Member indexes must be contiguous positive integers starting at 1.",
+                400);
+    }
+
+    private AwsException invalidCreateSubnetTagSpecificationParameter(String parameter) {
+        return new AwsException(
+                "InvalidParameterValue",
+                "Tag specification parameter '" + parameter + "' has an invalid structure.",
+                400);
+    }
+
+    private record TagSpecificationMember(List<Tag> tags) {}
 
     private List<Tag> parseLaunchTemplateDataTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
         List<Tag> tags = new ArrayList<>();
@@ -965,6 +1094,62 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleDescribeVpcPeeringConnections(MultivaluedMap<String, String> p, String region) {
+        validateEmptyDiscoveryPagination(p, 1000);
+        service.describeVpcPeeringConnectionIds(
+                region, getList(p, "VpcPeeringConnectionId"), getFilters(p));
+        return emptyDescribeResponse(
+                "DescribeVpcPeeringConnections", "vpcPeeringConnectionSet");
+    }
+
+    private Response handleDescribeTransitGatewayVpcAttachments(
+            MultivaluedMap<String, String> p, String region) {
+        validateEmptyDiscoveryPagination(p, 1000);
+        service.describeTransitGatewayVpcAttachmentIds(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p));
+        return emptyDescribeResponse(
+                "DescribeTransitGatewayVpcAttachments", "transitGatewayVpcAttachments");
+    }
+
+    private Response handleDescribeVpnGateways(MultivaluedMap<String, String> p, String region) {
+        service.describeVpnGatewayIds(region, getList(p, "VpnGatewayId"), getFilters(p));
+        return emptyDescribeResponse("DescribeVpnGateways", "vpnGatewaySet");
+    }
+
+    private Response handleDescribeEgressOnlyInternetGateways(
+            MultivaluedMap<String, String> p, String region) {
+        validateEmptyDiscoveryPagination(p, 255);
+        service.describeEgressOnlyInternetGatewayIds(
+                region, getList(p, "EgressOnlyInternetGatewayId"), getFilters(p));
+        return emptyDescribeResponse(
+                "DescribeEgressOnlyInternetGateways", "egressOnlyInternetGatewaySet");
+    }
+
+    private void validateEmptyDiscoveryPagination(MultivaluedMap<String, String> p, int maximum) {
+        String rawMaxResults = p.getFirst("MaxResults");
+        if (rawMaxResults != null) {
+            int maxResults = parseIntParam(p, "MaxResults", 0);
+            if (maxResults < 5 || maxResults > maximum) {
+                throw new AwsException("InvalidMaxResults",
+                        "The specified value for MaxResults is not valid.", 400);
+            }
+        }
+        if (p.getFirst("NextToken") != null) {
+            throw new AwsException("InvalidParameterValue", "Invalid NextToken", 400);
+        }
+    }
+
+    private Response emptyDescribeResponse(String action, String resultSet) {
+        String response = action + "Response";
+        String xml = new XmlBuilder()
+                .start(response, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start(resultSet).end(resultSet)
+                .end(response)
+                .build();
+        return xmlResponse(xml);
+    }
+
     private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
         List<String> endpointIds = getList(p, "VpcEndpointId");
         service.deleteVpcEndpoints(region, endpointIds);
@@ -1015,8 +1200,14 @@ public class Ec2QueryHandler {
         String vpcId = p.getFirst("VpcId");
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
+        List<TagSpecificationMember> tagSpecifications = parseCreateSubnetTagSpecifications(p);
         Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az);
-        applyResourceTags(p, region, "subnet", subnet.getSubnetId());
+        List<Tag> subnetTags = tagSpecifications.stream()
+                .flatMap(specification -> specification.tags().stream())
+                .toList();
+        if (!subnetTags.isEmpty()) {
+            service.createTags(region, List.of(subnet.getSubnetId()), subnetTags);
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
