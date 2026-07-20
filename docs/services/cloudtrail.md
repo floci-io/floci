@@ -17,13 +17,14 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
 | Action | Description |
 | --- | --- |
 | `CreateTrail` | Creates a trail and returns its ARN |
-| `UpdateTrail` | Updates the settings of an existing trail |
 | `DescribeTrails` | Returns the settings for one or more trails |
+| `DeleteTrail` | Deletes a trail |
+| `UpdateTrail` | Updates the settings of an existing trail |
+| `PutEventSelectors` | Configures the event selectors for a trail |
+| `GetEventSelectors` | - |
 | `StartLogging` | Starts logging for a trail |
 | `StopLogging` | Stops logging for a trail |
-| `DeleteTrail` | Deletes a trail |
 | `GetTrailStatus` | Returns the logging status of a trail |
-| `PutEventSelectors` | Configures the event selectors for a trail |
 | `LookupEvents` | - |
 <!-- floci:actions:end -->
 
