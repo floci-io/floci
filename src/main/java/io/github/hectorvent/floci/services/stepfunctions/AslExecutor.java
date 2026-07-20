@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
@@ -54,6 +55,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -147,6 +149,7 @@ public class AslExecutor {
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
     private final WebClient webClient;
+    private final EmulatorConfig config;
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
         t.setDaemon(true);
@@ -160,7 +163,7 @@ public class AslExecutor {
                        Ec2Service ec2Service, S3Service s3Service,
                        EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
-                       Instance<StepFunctionsService> sfnService, Vertx vertx) {
+                       Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx) {
         this.lambdaExecutor = lambdaExecutor;
         this.functionStore = functionStore;
         this.dynamoDbService = dynamoDbService;
@@ -174,6 +177,7 @@ public class AslExecutor {
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
+        this.config = config;
         if (vertx != null) {
             // This can be optimized further
             // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
@@ -2024,7 +2028,7 @@ public class AslExecutor {
      * TODO: Add HTTP Task coverage for unsupported binary/media response content types.
      */
     private JsonNode invokeHttp(JsonNode input, String region) {
-        var uri = input.path("ApiEndpoint").asText(null);
+        var rawUri = input.path("ApiEndpoint").asText(null);
         var method = input.path("Method").asText(null);
         var timeoutMillis = input.path("TimeoutSeconds").asLong(60) * 1_000;
         var headers = input.path("Headers");
@@ -2032,9 +2036,16 @@ public class AslExecutor {
         var requestBody = input.path("RequestBody");
         var requestBodyEncoding = input.path("Transform").path("RequestBodyEncoding").asText("NONE");
 
-        if (uri == null || uri.isBlank()) {
+        if (rawUri == null || rawUri.isBlank()) {
             throw new FailStateException("States.Runtime", "ApiEndpoint is required for HTTP task");
         }
+        var uri = URI.create(rawUri);
+        var isHttps = "https".equalsIgnoreCase(uri.getScheme());
+        var allowPlainHttp = config.services().stepfunctions().allowPlaintextHttp();
+        if (!allowPlainHttp && !isHttps) {
+            throw new FailStateException("States.Runtime", "The value for the 'ApiEndpoint' field must have the scheme 'https'");
+        }
+
         validateHttpMethod(method);
         validateConnectionArn(input);
         validateHttpHeaders(headers);
@@ -2042,12 +2053,13 @@ public class AslExecutor {
         var requestPayload = requestPayload(requestBody, requestBodyEncoding);
         var requestHeaders = requestHeaders(headers, requestPayload.contentType());
         var requestQueryParameters = queryParameters(queryParameters);
-        var request = webClient.requestAbs(HttpMethod.valueOf(method), uri)
-                .timeout(timeoutMillis)
-                .putHeaders(requestHeaders);
-        request.queryParams().addAll(requestQueryParameters);
 
         try {
+            var request = webClient.requestAbs(HttpMethod.valueOf(method), rawUri)
+                .timeout(timeoutMillis)
+                .putHeaders(requestHeaders);
+            request.queryParams().addAll(requestQueryParameters);
+
             LOG.infov("Step Functions HTTP task sending request: method={0}, uri={1}", method, uri);
             var response = sendHttpRequest(request, requestPayload);
             validateHttpStatus(response);

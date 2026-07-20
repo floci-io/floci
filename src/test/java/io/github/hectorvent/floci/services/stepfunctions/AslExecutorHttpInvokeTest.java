@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -61,6 +62,9 @@ class AslExecutorHttpInvokeTest {
 
     @Inject
     Vertx vertx;
+
+    @Inject
+    EmulatorConfig emulatorConfig;
 
     private record RecordedRequest(String method, String path, String query,
                                    MultiMap headers, String body) {
@@ -168,6 +172,7 @@ class AslExecutorHttpInvokeTest {
             objectMapper,
             new JsonataEvaluator(objectMapper),
             mock(Instance.class),
+            emulatorConfig,
             vertx);
     }
 
