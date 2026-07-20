@@ -2043,7 +2043,8 @@ public class AslExecutor {
         var isHttps = "https".equalsIgnoreCase(uri.getScheme());
         var allowPlainHttp = config.services().stepfunctions().allowPlaintextHttp();
         if (!allowPlainHttp && !isHttps) {
-            throw new FailStateException("States.Runtime", "The value for the 'ApiEndpoint' field must have the scheme 'https'");
+            throw new FailStateException("States.Runtime", "The value for the 'ApiEndpoint' field must have the scheme 'https'. " +
+                                                           "You can enable plaintext http via 'floci.services.stepfunctions.allow-plaintext-http=true'.");
         }
 
         validateHttpMethod(method);
