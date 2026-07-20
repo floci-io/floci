@@ -2102,6 +2102,7 @@ public class AslExecutor {
     private JsonNode httpResultJson(HttpResponse<Buffer> response) {
        var stepHttpResponse = new HttpTaskResponse(
             response.statusCode(),
+            response.statusMessage(),
             httpResponseHeaders(response),
             httpResponseBody(response));
         return objectMapper.valueToTree(stepHttpResponse);
@@ -2187,6 +2188,7 @@ public class AslExecutor {
 
     private record HttpTaskResponse(
             @JsonProperty("StatusCode") int statusCode,
+            @JsonProperty("StatusText") String statusText,
             @JsonProperty("Headers") Map<String, List<String>> headers,
             @JsonProperty("ResponseBody") JsonNode responseBody) {
     }
