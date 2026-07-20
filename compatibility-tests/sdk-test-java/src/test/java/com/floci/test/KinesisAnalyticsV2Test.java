@@ -58,12 +58,15 @@ class KinesisAnalyticsV2Test {
         if (kda != null) {
             if (applicationName != null && createTimestamp != null) {
                 try {
+                    ensureStopped();
                     kda.deleteApplication(DeleteApplicationRequest.builder()
                             .applicationName(applicationName)
                             .createTimestamp(createTimestamp)
                             .build());
-                } catch (Exception ignored) {
-                    // best-effort teardown
+                } catch (Exception e) {
+                    // Tolerated (best-effort teardown) but logged with context per AGENTS.md.
+                    System.err.println("[WARN] AfterAll cleanup failed for application "
+                            + applicationName + ": " + e.getMessage());
                 }
             }
             kda.close();
@@ -158,6 +161,9 @@ class KinesisAnalyticsV2Test {
     void deleteApplication() {
         requireApp();
 
+        // AWS rejects DeleteApplication on a non-stopped application (ResourceInUseException), so
+        // ensure it is READY first (it may still be STARTING if it never reached RUNNING in time).
+        ensureStopped();
         kda.deleteApplication(DeleteApplicationRequest.builder()
                 .applicationName(applicationName)
                 .createTimestamp(createTimestamp)
@@ -165,7 +171,25 @@ class KinesisAnalyticsV2Test {
         applicationName = null;
     }
 
-    private ApplicationDetail waitForStatus(ApplicationStatus target, Duration timeout) {
+    /** Best-effort: stop the application if it is RUNNING/STARTING so it can be deleted from READY. */
+    private static void ensureStopped() {
+        try {
+            ApplicationStatus status = kda.describeApplication(DescribeApplicationRequest.builder()
+                    .applicationName(applicationName)
+                    .build()).applicationDetail().applicationStatus();
+            if (status == ApplicationStatus.RUNNING || status == ApplicationStatus.STARTING) {
+                kda.stopApplication(StopApplicationRequest.builder()
+                        .applicationName(applicationName)
+                        .build());
+                waitForStatus(ApplicationStatus.READY, Duration.ofSeconds(60));
+            }
+        } catch (Exception e) {
+            System.err.println("[WARN] ensureStopped failed for application "
+                    + applicationName + ": " + e.getMessage());
+        }
+    }
+
+    private static ApplicationDetail waitForStatus(ApplicationStatus target, Duration timeout) {
         Instant deadline = Instant.now().plus(timeout);
         while (Instant.now().isBefore(deadline)) {
             ApplicationDetail detail = kda.describeApplication(DescribeApplicationRequest.builder()

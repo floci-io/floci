@@ -114,16 +114,39 @@ class KinesisAnalyticsV2ServiceTest {
     @Test
     void updateApplicationBumpsVersion() {
         create("demo");
-        FlinkApplication updated = service.updateApplication("demo", "arn:aws:iam::000000000000:role/y");
+        FlinkApplication updated = service.updateApplication("demo", 1L, "arn:aws:iam::000000000000:role/y");
         assertEquals(2L, updated.getApplicationVersionId());
         assertEquals("arn:aws:iam::000000000000:role/y", updated.getServiceExecutionRole());
     }
 
     @Test
+    void updateApplicationRejectsStaleVersion() {
+        create("demo"); // version 1
+        // Optimistic concurrency: a mismatched CurrentApplicationVersionId is rejected.
+        assertThrows(AwsException.class, () -> service.updateApplication("demo", 5L, null));
+    }
+
+    @Test
     void deleteApplicationRemovesIt() {
-        create("demo");
-        service.deleteApplication("demo");
+        FlinkApplication app = create("demo");
+        service.deleteApplication("demo", app.getCreateTimestamp());
         assertTrue(service.listApplications().isEmpty());
+    }
+
+    @Test
+    void deleteApplicationRejectsWrongTimestamp() {
+        create("demo");
+        assertThrows(AwsException.class,
+                () -> service.deleteApplication("demo", java.time.Instant.ofEpochSecond(1)));
+    }
+
+    @Test
+    void deleteApplicationRejectedWhileRunning() {
+        FlinkApplication app = create("demo");
+        service.startApplication("demo"); // mock mode → RUNNING
+        // AWS rejects delete of a running application; it must be stopped first.
+        assertThrows(AwsException.class,
+                () -> service.deleteApplication("demo", app.getCreateTimestamp()));
     }
 
     @Test

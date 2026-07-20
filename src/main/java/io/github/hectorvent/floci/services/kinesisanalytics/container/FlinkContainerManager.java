@@ -69,6 +69,11 @@ public class FlinkContainerManager {
      * shared {@code floci-<service>-<name>} convention via {@link ContainerStorageHelper#resourceName}
      * so a configured {@code resourceNamespace} scopes the name (letting multiple Floci instances share
      * a Docker host without container-name collisions), matching OpenSearch/MSK/RDS/etc.
+     *
+     * <p>Like OpenSearch's domain names, the name is scoped by application name, not by account — two
+     * accounts using the same application name would map to the same container. This mirrors AWS, where
+     * an application name is account-and-region unique, and matches the accepted OpenSearch trade-off;
+     * local multi-account use of an identical name is rare.
      */
     private String containerName(String applicationName) {
         return ContainerStorageHelper.resourceName(config, "kinesisanalytics", null, applicationName);

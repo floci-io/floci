@@ -101,8 +101,15 @@ class KinesisAnalyticsV2JsonHandlerTest {
     void deleteApplicationRemovesIt() {
         createApplication("demo");
 
+        // DeleteApplication requires the app's CreateTimestamp (epoch seconds).
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("ApplicationName", "demo");
+        double createTs = ((ObjectNode) entity(handler.handle("DescribeApplication", describe, REGION))
+                .get("ApplicationDetail")).get("CreateTimestamp").asDouble();
+
         ObjectNode del = MAPPER.createObjectNode();
         del.put("ApplicationName", "demo");
+        del.put("CreateTimestamp", createTs);
         assertThat(handler.handle("DeleteApplication", del, REGION).getStatus(), is(200));
 
         var summaries = entity(handler.handle("ListApplications", MAPPER.createObjectNode(), REGION))

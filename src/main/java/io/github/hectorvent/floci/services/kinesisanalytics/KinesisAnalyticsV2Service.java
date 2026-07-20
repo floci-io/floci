@@ -65,8 +65,17 @@ public class KinesisAnalyticsV2Service {
     public void shutdown() {
         // Container teardown is wired into EmulatorLifecycle.onStop() via
         // FlinkContainerManager.stopAll() (ordered with the other container managers);
-        // here we only stop the readiness poller.
+        // here we only stop the readiness poller. Wait briefly for an in-flight tick so a
+        // mid-flight putApplication cannot race the storage flush in onStop().
         poller.shutdown();
+        try {
+            if (!poller.awaitTermination(5, TimeUnit.SECONDS)) {
+                poller.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            poller.shutdownNow();
+        }
     }
 
     public FlinkApplication createApplication(String applicationName, String runtimeEnvironment,
@@ -152,7 +161,7 @@ public class KinesisAnalyticsV2Service {
                 && app.getApplicationStatus() != ApplicationStatus.STARTING) {
             throw new AwsException("ResourceInUseException",
                     "Application " + applicationName + " cannot be stopped while in state "
-                            + app.getApplicationStatus() + "; it must be RUNNING", 400);
+                            + app.getApplicationStatus() + "; it must be RUNNING or STARTING", 400);
         }
         if (!config.services().kinesisAnalytics().mock()) {
             containerManager.stopCluster(app);
@@ -165,8 +174,20 @@ public class KinesisAnalyticsV2Service {
         return app;
     }
 
-    public FlinkApplication updateApplication(String applicationName, String serviceExecutionRole) {
+    public FlinkApplication updateApplication(String applicationName, Long currentApplicationVersionId,
+                                              String serviceExecutionRole) {
         FlinkApplication app = describeApplication(applicationName);
+        // AWS requires CurrentApplicationVersionId and rejects a stale value with
+        // ConcurrentModificationException (optimistic concurrency on the application version).
+        if (currentApplicationVersionId == null) {
+            throw new AwsException("InvalidArgumentException",
+                    "CurrentApplicationVersionId is required", 400);
+        }
+        if (currentApplicationVersionId != app.getApplicationVersionId()) {
+            throw new AwsException("ConcurrentModificationException",
+                    "Provided CurrentApplicationVersionId " + currentApplicationVersionId
+                            + " does not match the current version " + app.getApplicationVersionId(), 400);
+        }
         if (serviceExecutionRole != null && !serviceExecutionRole.isBlank()) {
             app.setServiceExecutionRole(serviceExecutionRole);
         }
@@ -178,10 +199,28 @@ public class KinesisAnalyticsV2Service {
         return app;
     }
 
-    public void deleteApplication(String applicationName) {
+    public void deleteApplication(String applicationName, Instant createTimestamp) {
         FlinkApplication app = describeApplication(applicationName);
-        app.setApplicationStatus(ApplicationStatus.DELETING);
+        // AWS requires CreateTimestamp and rejects a value that does not match the stored one. The
+        // wire value is epoch seconds, so compare at second granularity.
+        if (createTimestamp == null) {
+            throw new AwsException("InvalidArgumentException", "CreateTimestamp is required", 400);
+        }
+        if (app.getCreateTimestamp() == null
+                || app.getCreateTimestamp().getEpochSecond() != createTimestamp.getEpochSecond()) {
+            throw new AwsException("InvalidArgumentException",
+                    "Provided CreateTimestamp does not match application " + applicationName, 400);
+        }
+        // AWS rejects deletion of a non-stopped application (RUNNING/STARTING) with
+        // ResourceInUseException; the caller must StopApplication first.
+        if (app.getApplicationStatus() != ApplicationStatus.READY) {
+            throw new AwsException("ResourceInUseException",
+                    "Application " + applicationName + " cannot be deleted while in state "
+                            + app.getApplicationStatus() + "; stop the application first", 400);
+        }
         if (!config.services().kinesisAnalytics().mock()) {
+            // No-op for a READY app with no container; also clears any stale container left from a
+            // previous run (containerId is not persisted across an emulator restart).
             containerManager.stopCluster(app);
         }
         storage.delete(applicationName);

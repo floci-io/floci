@@ -5,8 +5,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * In-memory representation of a Managed Service for Apache Flink application
@@ -51,9 +49,6 @@ public class FlinkApplication {
     @JsonProperty("LastUpdateTimestamp")
     private Instant lastUpdateTimestamp;
 
-    @JsonProperty("Tags")
-    private Map<String, String> tags;
-
     // Internal bookkeeping — NOT part of the AWS response shape, but persisted so the
     // application stays manageable after an emulator restart in persistent mode (container
     // teardown, account-aware storage routing). The handler builds the ApplicationDetail
@@ -80,7 +75,6 @@ public class FlinkApplication {
         this.applicationVersionId = 1L;
         this.createTimestamp = Instant.now();
         this.lastUpdateTimestamp = this.createTimestamp;
-        this.tags = new HashMap<>();
     }
 
     public String getApplicationName() { return applicationName; }
@@ -112,9 +106,6 @@ public class FlinkApplication {
 
     public Instant getLastUpdateTimestamp() { return lastUpdateTimestamp; }
     public void setLastUpdateTimestamp(Instant lastUpdateTimestamp) { this.lastUpdateTimestamp = lastUpdateTimestamp; }
-
-    public Map<String, String> getTags() { return tags; }
-    public void setTags(Map<String, String> tags) { this.tags = tags; }
 
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.kinesisanalytics;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.config.JsonPathConfig;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -110,12 +111,26 @@ class KinesisAnalyticsV2IntegrationTest {
     void deleteApplicationSucceeds() {
         createApplication("it-delete");
 
+        // DeleteApplication validates CreateTimestamp against the stored value — fetch the real one
+        // (epoch seconds). Use BigDecimal number handling: the default float extraction truncates the
+        // ~10-digit epoch to ~7 significant figures, which would shift it by seconds and fail the match.
+        String createTimestamp = given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.DescribeApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-delete"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
+            .getString("ApplicationDetail.CreateTimestamp");
+
         given()
             .header("X-Amz-Target", "KinesisAnalytics_20180523.DeleteApplication")
             .contentType(CONTENT_TYPE)
-            .body("""
-                {"ApplicationName": "it-delete", "CreateTimestamp": 1700000000}
-                """)
+            .body("{\"ApplicationName\": \"it-delete\", \"CreateTimestamp\": " + createTimestamp + "}")
         .when()
             .post("/")
         .then()

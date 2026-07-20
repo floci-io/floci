@@ -10,6 +10,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Instant;
+
 /**
  * Dispatches Kinesis Analytics V2 (Managed Service for Apache Flink) actions for the
  * {@code application/x-amz-json-1.1} protocol, routed here by {@code AwsJson11Controller}
@@ -93,17 +95,26 @@ public class KinesisAnalyticsV2JsonHandler {
 
     private Response handleUpdateApplication(JsonNode request) {
         String applicationName = request.path("ApplicationName").asText(null);
+        // CurrentApplicationVersionId gates the update (optimistic concurrency); the service rejects a
+        // stale or missing value.
+        Long currentVersionId = request.hasNonNull("CurrentApplicationVersionId")
+                ? request.path("CurrentApplicationVersionId").asLong()
+                : null;
         // ServiceExecutionRoleUpdate is the only field this emulator applies; other configuration
         // updates are accepted (version bump) but not otherwise modelled.
         String serviceExecutionRole = request.path("ServiceExecutionRoleUpdate").asText(null);
-        return applicationDetailResponse(service.updateApplication(applicationName, serviceExecutionRole));
+        return applicationDetailResponse(
+                service.updateApplication(applicationName, currentVersionId, serviceExecutionRole));
     }
 
     private Response handleDeleteApplication(JsonNode request) {
         String applicationName = request.path("ApplicationName").asText(null);
-        // CreateTimestamp is required by the AWS API for optimistic concurrency; this emulator
-        // deletes by name and does not enforce the timestamp match.
-        service.deleteApplication(applicationName);
+        // CreateTimestamp is epoch seconds on the wire (possibly fractional); the service validates it
+        // against the stored value.
+        Instant createTimestamp = request.hasNonNull("CreateTimestamp")
+                ? Instant.ofEpochMilli(Math.round(request.path("CreateTimestamp").asDouble() * 1000))
+                : null;
+        service.deleteApplication(applicationName, createTimestamp);
         // AWS DeleteApplication returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
     }
