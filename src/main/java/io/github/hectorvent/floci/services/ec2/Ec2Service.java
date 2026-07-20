@@ -26,10 +26,15 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
@@ -47,6 +52,10 @@ import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
+import io.github.hectorvent.floci.services.ec2.model.PrefixList;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -54,6 +63,7 @@ import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.RouteTableAssociation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
+import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
@@ -68,7 +78,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 @ApplicationScoped
-public class Ec2Service {
+public class Ec2Service implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
@@ -77,8 +87,10 @@ public class Ec2Service {
     private final String accountId;
     private final EmulatorConfig config;
     private final Ec2ContainerManager containerManager;
+    private final Ec2PortForwardManager portForwardManager;
     private final AmiImageResolver amiImageResolver;
     private final Ec2ImageCatalog imageCatalog;
+    private final Ec2InstanceTypeCatalog instanceTypeCatalog;
 
     // region::id → resource (persisted via StorageFactory so state survives a restart in
     // persistent/hybrid/wal modes; see #1297 — CloudFormation persists stacks/exports that
@@ -93,10 +105,13 @@ public class Ec2Service {
     private final StorageBackend<String, Address> addresses;
     private final StorageBackend<String, Instance> instances;
     private final StorageBackend<String, Volume> volumes;
+    private final StorageBackend<String, Image> registeredImages;
+    private final StorageBackend<String, Snapshot> snapshots;
     private final StorageBackend<String, LaunchTemplate> launchTemplates;
     private final StorageBackend<String, VpcEndpoint> vpcEndpoints;
     private final StorageBackend<String, NatGateway> natGateways;
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
+    private final StorageBackend<String, NetworkAcl> networkAcls;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -105,9 +120,10 @@ public class Ec2Service {
 
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
-                      StorageFactory storageFactory) {
-        this(config, containerManager, amiImageResolver, imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
                 storageFactory.create("ec2", "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
@@ -118,16 +134,21 @@ public class Ec2Service {
                 storageFactory.create("ec2", "ec2-addresses.json", new TypeReference<Map<String, Address>>() {}),
                 storageFactory.create("ec2", "ec2-instances.json", new TypeReference<Map<String, Instance>>() {}),
                 storageFactory.create("ec2", "ec2-volumes.json", new TypeReference<Map<String, Volume>>() {}),
+                storageFactory.create("ec2", "ec2-registered-images.json", new TypeReference<Map<String, Image>>() {}),
+                storageFactory.create("ec2", "ec2-snapshots.json", new TypeReference<Map<String, Snapshot>>() {}),
                 storageFactory.create("ec2", "ec2-launch-templates.json", new TypeReference<Map<String, LaunchTemplate>>() {}),
                 storageFactory.create("ec2", "ec2-vpc-endpoints.json", new TypeReference<Map<String, VpcEndpoint>>() {}),
                 storageFactory.create("ec2", "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
                 storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
+                storageFactory.create("ec2", "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
                AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
                StorageBackend<String, Vpc> vpcs,
                StorageBackend<String, Subnet> subnets,
                StorageBackend<String, SecurityGroup> securityGroups,
@@ -138,16 +159,21 @@ public class Ec2Service {
                StorageBackend<String, Address> addresses,
                StorageBackend<String, Instance> instances,
                StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
                StorageBackend<String, LaunchTemplate> launchTemplates,
                StorageBackend<String, VpcEndpoint> vpcEndpoints,
                StorageBackend<String, NatGateway> natGateways,
                StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
         this.containerManager = containerManager;
+        this.portForwardManager = portForwardManager;
         this.amiImageResolver = amiImageResolver;
         this.imageCatalog = imageCatalog;
+        this.instanceTypeCatalog = instanceTypeCatalog;
         this.vpcs = vpcs;
         this.subnets = subnets;
         this.securityGroups = securityGroups;
@@ -158,15 +184,25 @@ public class Ec2Service {
         this.addresses = addresses;
         this.instances = instances;
         this.volumes = volumes;
+        this.registeredImages = registeredImages;
+        this.snapshots = snapshots;
         this.launchTemplates = launchTemplates;
         this.vpcEndpoints = vpcEndpoints;
         this.natGateways = natGateways;
         this.spotInstanceRequests = spotInstanceRequests;
+        this.networkAcls = networkAcls;
         this.tags = tags;
     }
 
     @PostConstruct
     void restoreMetadataRegistrations() {
+        if (portForwardManager != null) {
+            portForwardManager.setPersister(inst -> {
+                if (inst != null && inst.getRegion() != null && inst.getInstanceId() != null) {
+                    instances.put(key(inst.getRegion(), inst.getInstanceId()), inst);
+                }
+            });
+        }
         if (config.services().ec2().mock()) {
             return;
         }
@@ -180,6 +216,10 @@ public class Ec2Service {
             if (containerManager.restoreMetadataRegistration(instance)) {
                 instances.put(key, instance);
                 restored++;
+                // Container is running: re-reserve host ports and recreate any missing socat sidecars.
+                if (portForwardManager != null) {
+                    portForwardManager.restore(instance);
+                }
             }
         }
         if (restored > 0) {
@@ -245,6 +285,20 @@ public class Ec2Service {
 
         createDefaultSecurityGroup(region, vpcId, "sg-default");
 
+        // Default NACL, with the default subnets associated to it.
+        String defaultAclId = createDefaultNetworkAcl(region, vpcId, "acl-default");
+        NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
+        if (defaultAcl != null) {
+            for (String subnetId : subnetIds) {
+                NetworkAclAssociation assoc = new NetworkAclAssociation();
+                assoc.setNetworkAclAssociationId("aclassoc-" + subnetId);
+                assoc.setNetworkAclId(defaultAclId);
+                assoc.setSubnetId(subnetId);
+                defaultAcl.getAssociations().add(assoc);
+            }
+            networkAcls.put(key(region, defaultAclId), defaultAcl);
+        }
+
         // Default internet gateway
         String igwId = "igw-default";
         InternetGateway igw = new InternetGateway();
@@ -277,6 +331,9 @@ public class Ec2Service {
         egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
         defaultSg.getIpPermissionsEgress().add(egressAll);
         securityGroups.put(key(region, securityGroupId), defaultSg);
+        // Persist the default egress rule as a SecurityGroupRule so that
+        // DescribeSecurityGroupRules can find it immediately (#1093).
+        createRules(region, securityGroupId, egressAll, true);
     }
 
     private String createMainRouteTable(String region, Vpc vpc, String routeTableId, String associationId) {
@@ -298,8 +355,239 @@ public class Ec2Service {
         return routeTableId;
     }
 
+    private NetworkAclEntry naclEntry(int ruleNumber, String protocol, String action, boolean egress, String cidr) {
+        NetworkAclEntry entry = new NetworkAclEntry();
+        entry.setRuleNumber(ruleNumber);
+        entry.setProtocol(protocol);
+        entry.setRuleAction(action);
+        entry.setEgress(egress);
+        entry.setCidrBlock(cidr);
+        return entry;
+    }
+
+    // The default NACL allows all traffic (rule 100) and ends with the implicit deny (32767),
+    // for both ingress and egress — matching what AWS provisions with every VPC.
+    private String createDefaultNetworkAcl(String region, String vpcId, String networkAclId) {
+        NetworkAcl acl = new NetworkAcl();
+        acl.setNetworkAclId(networkAclId);
+        acl.setVpcId(vpcId);
+        acl.setOwnerId(accountId);
+        acl.setRegion(region);
+        acl.setDefault(true);
+        acl.getEntries().add(naclEntry(100, "-1", "allow", false, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", false, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(100, "-1", "allow", true, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", true, "0.0.0.0/0"));
+        networkAcls.put(key(region, networkAclId), acl);
+        return networkAclId;
+    }
+
+    private NetworkAcl findDefaultNetworkAcl(String region, String vpcId) {
+        return networkAcls.scan(k -> true).stream()
+                .filter(a -> region.equals(a.getRegion()) && vpcId.equals(a.getVpcId()) && a.isDefault())
+                .findFirst().orElse(null);
+    }
+
+    private NetworkAcl getRequiredNetworkAcl(String region, String networkAclId) {
+        return networkAcls.get(key(region, networkAclId)).orElseThrow(() ->
+                new AwsException("InvalidNetworkAclID.NotFound",
+                        "The network ACL ID '" + networkAclId + "' does not exist", 400));
+    }
+
+    // A brand-new custom NACL starts closed: only the implicit deny rules, no allows.
+    public NetworkAcl createNetworkAcl(String region, String vpcId) {
+        ensureDefaultResources(region);
+        getRequiredVpc(region, vpcId);
+        String networkAclId = "acl-" + randomHex(17);
+        NetworkAcl acl = new NetworkAcl();
+        acl.setNetworkAclId(networkAclId);
+        acl.setVpcId(vpcId);
+        acl.setOwnerId(accountId);
+        acl.setRegion(region);
+        acl.setDefault(false);
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", false, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", true, "0.0.0.0/0"));
+        networkAcls.put(key(region, networkAclId), acl);
+        return acl;
+    }
+
+    public List<NetworkAcl> describeNetworkAcls(String region, List<String> ids, Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        return networkAcls.scan(k -> true).stream()
+                .filter(a -> region.equals(a.getRegion()))
+                .filter(a -> ids.isEmpty() || ids.contains(a.getNetworkAclId()))
+                .filter(a -> matchesNetworkAclFilters(a, filters))
+                .collect(Collectors.toList());
+    }
+
+    private boolean matchesNetworkAclFilters(NetworkAcl acl, Map<String, List<String>> filters) {
+        for (Map.Entry<String, List<String>> f : filters.entrySet()) {
+            List<String> values = f.getValue();
+            boolean matches = switch (f.getKey()) {
+                case "network-acl-id" -> values.contains(acl.getNetworkAclId());
+                case "vpc-id" -> values.contains(acl.getVpcId());
+                case "default" -> values.contains(String.valueOf(acl.isDefault()));
+                case "association.subnet-id" ->
+                        acl.getAssociations().stream().anyMatch(a -> values.contains(a.getSubnetId()));
+                case "association.network-acl-association-id" ->
+                        acl.getAssociations().stream().anyMatch(a -> values.contains(a.getNetworkAclAssociationId()));
+                default -> true;
+            };
+            if (!matches) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public void createNetworkAclEntry(String region, String networkAclId, int ruleNumber, String protocol,
+                                      String ruleAction, boolean egress, String cidrBlock, Integer from, Integer to,
+                                      boolean replace) {
+        synchronized (lockFor(key(region, networkAclId))) {
+            NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+            boolean exists = acl.getEntries().stream()
+                    .anyMatch(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+            if (!replace && exists) {
+                throw new AwsException("NetworkAclEntryAlreadyExists",
+                        "The network acl entry identified by " + ruleNumber + " already exists.", 400);
+            }
+            List<NetworkAclEntry> next = new ArrayList<>(acl.getEntries());
+            next.removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+            NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock);
+            entry.setPortRangeFrom(from);
+            entry.setPortRangeTo(to);
+            next.add(entry);
+            acl.setEntries(next);
+            networkAcls.put(key(region, networkAclId), acl);
+        }
+    }
+
+    public void deleteNetworkAclEntry(String region, String networkAclId, int ruleNumber, boolean egress) {
+        synchronized (lockFor(key(region, networkAclId))) {
+            NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+            List<NetworkAclEntry> next = new ArrayList<>(acl.getEntries());
+            next.removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+            acl.setEntries(next);
+            networkAcls.put(key(region, networkAclId), acl);
+        }
+    }
+
+    public NetworkAclAssociation replaceNetworkAclAssociation(String region, String associationId, String networkAclId) {
+        NetworkAcl target = getRequiredNetworkAcl(region, networkAclId);
+        for (NetworkAcl acl : networkAcls.scan(k -> true)) {
+            if (!region.equals(acl.getRegion())
+                    || acl.getAssociations().stream()
+                            .noneMatch(a -> a.getNetworkAclAssociationId().equals(associationId))) {
+                continue;
+            }
+            String sourceKey = key(region, acl.getNetworkAclId());
+            String targetKey = key(region, networkAclId);
+            // The move must be atomic across both ACLs, or a describe could observe the subnet
+            // associated with neither. Locks are taken in stripe order so two callers moving
+            // associations in opposite directions cannot deadlock; one stripe re-enters.
+            synchronized (lowerLockOf(sourceKey, targetKey)) {
+                synchronized (higherLockOf(sourceKey, targetKey)) {
+                    List<NetworkAclAssociation> remaining = new ArrayList<>(acl.getAssociations());
+                    NetworkAclAssociation claimed = remaining.stream()
+                            .filter(a -> a.getNetworkAclAssociationId().equals(associationId))
+                            .findFirst()
+                            .orElse(null);
+                    // The scan above ran unlocked, so a concurrent replace of the same association
+                    // may already have moved it. That caller minted the new id; this one sees the
+                    // requested id no longer exist.
+                    if (claimed == null) {
+                        break;
+                    }
+                    remaining.remove(claimed);
+                    acl.setAssociations(remaining);
+                    networkAcls.put(sourceKey, acl);
+
+                    NetworkAclAssociation moved = new NetworkAclAssociation();
+                    moved.setNetworkAclAssociationId("aclassoc-" + randomHex(17));
+                    moved.setNetworkAclId(networkAclId);
+                    moved.setSubnetId(claimed.getSubnetId());
+                    List<NetworkAclAssociation> next = new ArrayList<>(target.getAssociations());
+                    next.add(moved);
+                    target.setAssociations(next);
+                    networkAcls.put(targetKey, target);
+                    return moved;
+                }
+            }
+        }
+        throw new AwsException("InvalidAssociationID.NotFound",
+                "The network ACL association ID '" + associationId + "' does not exist", 400);
+    }
+
+    public void deleteNetworkAcl(String region, String networkAclId) {
+        NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+        if (acl.isDefault()) {
+            throw new AwsException("InvalidParameterValue",
+                    "The network ACL '" + networkAclId + "' is the default network ACL and cannot be deleted", 400);
+        }
+        if (!acl.getAssociations().isEmpty()) {
+            throw new AwsException("DependencyViolation",
+                    "The network ACL '" + networkAclId + "' has dependencies and cannot be deleted.", 400);
+        }
+        networkAcls.delete(key(region, networkAclId));
+    }
+
+    // AWS-managed prefix lists for the gateway-endpoint services (S3, DynamoDB). These are
+    // not user-created, so they're returned as static managed data per region. Querying any
+    // other service name (e.g. an interface endpoint) correctly yields no match.
+    public List<PrefixList> describePrefixLists(String region, List<String> ids, Map<String, List<String>> filters) {
+        List<PrefixList> managed = new ArrayList<>();
+        managed.add(new PrefixList("pl-63a5400a", "com.amazonaws." + region + ".s3",
+                new ArrayList<>(List.of("52.216.0.0/15", "54.231.0.0/16"))));
+        managed.add(new PrefixList("pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
+                new ArrayList<>(List.of("3.218.182.0/24", "52.94.0.0/22"))));
+
+        List<String> names = filters.getOrDefault("prefix-list-name", List.of());
+        List<String> filterIds = filters.getOrDefault("prefix-list-id", List.of());
+        return managed.stream()
+                .filter(pl -> ids.isEmpty() || ids.contains(pl.getPrefixListId()))
+                .filter(pl -> filterIds.isEmpty() || filterIds.contains(pl.getPrefixListId()))
+                .filter(pl -> names.isEmpty() || names.contains(pl.getPrefixListName()))
+                .collect(Collectors.toList());
+    }
+
     private String key(String region, String id) {
         return region + "::" + id;
+    }
+
+    // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
+    // unsynchronized list mutations race under parallel clients (Terraform runs 10-wide) and
+    // drop entries. Mutators take the resource's stripe and swap collections copy-on-write so
+    // concurrent describes only ever see a complete list. A fixed stripe array keeps this
+    // bounded — a lock per storage key would never evict — at the cost of unrelated resources
+    // sharing a monitor on hash collision.
+    private static final int LOCK_STRIPES = 512;
+    private final Object[] resourceLocks = newLockStripes();
+
+    private static Object[] newLockStripes() {
+        Object[] stripes = new Object[LOCK_STRIPES];
+        for (int i = 0; i < stripes.length; i++) {
+            stripes[i] = new Object();
+        }
+        return stripes;
+    }
+
+    private int stripeOf(String storeKey) {
+        return Math.floorMod(storeKey.hashCode(), LOCK_STRIPES);
+    }
+
+    private Object lockFor(String storeKey) {
+        return resourceLocks[stripeOf(storeKey)];
+    }
+
+    // Stripe index, not key order, is the total order two-lock callers must agree on: distinct
+    // keys can share a stripe, so ordering by key could have two callers take the same pair of
+    // monitors in opposite orders.
+    private Object lowerLockOf(String keyA, String keyB) {
+        return resourceLocks[Math.min(stripeOf(keyA), stripeOf(keyB))];
+    }
+
+    private Object higherLockOf(String keyA, String keyB) {
+        return resourceLocks[Math.max(stripeOf(keyA), stripeOf(keyB))];
     }
 
     private String randomHex(int len) {
@@ -318,6 +606,9 @@ public class Ec2Service {
                                     List<String> securityGroupIds, String subnetId,
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn) {
+        if (imageId == null || imageId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
+        }
         ensureDefaultResources(region);
 
         // Resolve subnet
@@ -356,16 +647,19 @@ public class Ec2Service {
         reservation.setReservationId(reservationId);
         reservation.setOwnerId(accountId);
 
+        String effectiveInstanceType = instanceType != null ? instanceType : "t2.micro";
+        validateArchitectureCompatibility(imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
+        String architecture = architectureFor(imageId, effectiveInstanceType);
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
             String privateIp = assignPrivateIp(region, finalSubnetId);
 
             Instance inst = new Instance();
             inst.setInstanceId(instanceId);
-            inst.setImageId(imageId != null ? imageId : "ami-default");
+            inst.setImageId(imageId);
             inst.setState(InstanceState.pending());
-            inst.setInstanceType(instanceType != null ? instanceType : "t2.micro");
+            inst.setInstanceType(effectiveInstanceType);
             inst.setPlacement(new Placement(az));
             inst.setSubnetId(finalSubnetId);
             inst.setVpcId(vpcId);
@@ -373,7 +667,7 @@ public class Ec2Service {
             inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
             inst.setKeyName(keyName);
             inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
-            inst.setArchitecture("x86_64");
+            inst.setArchitecture(architecture);
             inst.setLaunchTime(Instant.now());
             inst.setAmiLaunchIndex(i);
             inst.setClientToken(clientToken);
@@ -426,7 +720,7 @@ public class Ec2Service {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                String dockerImage = amiImageResolver.resolve(imageId);
+                ResolvedAmiImage dockerImage = amiImageResolver.resolveImage(imageId);
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -434,11 +728,87 @@ public class Ec2Service {
                         publicKey = kp.getPublicKey();
                     }
                 }
-                containerManager.launch(inst, dockerImage, publicKey, region);
+                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst));
             }
         }
 
         return reservation;
+    }
+
+    /**
+     * Resolves the TCP ingress ports Floci should publish on the host for an instance, aggregated
+     * across its attached security groups. Empty when publishing is disabled or nothing is opened.
+     */
+    private Set<Integer> desiredPublishedPorts(String region, Instance inst) {
+        if (!config.services().ec2().publishSecurityGroupPorts()) {
+            return Set.of();
+        }
+        List<SecurityGroup> sgs = new ArrayList<>();
+        if (inst.getSecurityGroups() != null) {
+            for (GroupIdentifier gi : inst.getSecurityGroups()) {
+                securityGroups.get(key(region, gi.getGroupId())).ifPresent(sgs::add);
+            }
+        }
+        return Ec2PortForwardManager.extractPublishablePorts(
+                sgs, config.services().ec2().maxPublishedPortsPerInstance());
+    }
+
+    /**
+     * Re-publishes host forwards for every running instance attached to the given security group,
+     * so ports opened or closed via authorize/revoke ingress take effect on already-running
+     * instances. No-op in mock mode or when publishing is disabled.
+     */
+    private void reconcilePublishedPortsForGroup(String region, String groupId) {
+        if (!config.services().ec2().publishSecurityGroupPorts() || config.services().ec2().mock()) {
+            return;
+        }
+        String prefix = region + "::";
+        for (Instance inst : instances.scan(k -> k.startsWith(prefix))) {
+            if (inst.getSecurityGroups() == null || inst.getDockerContainerId() == null) {
+                continue;
+            }
+            boolean attached = inst.getSecurityGroups().stream()
+                    .anyMatch(g -> groupId.equals(g.getGroupId()));
+            if (!attached) {
+                continue;
+            }
+            String state = inst.getState() != null ? inst.getState().getName() : null;
+            if (!"running".equals(state)) {
+                continue;
+            }
+            portForwardManager.reconcile(inst, desiredPublishedPorts(region, inst));
+            instances.put(key(region, inst.getInstanceId()), inst);
+        }
+    }
+
+    private void validateArchitectureCompatibility(String imageId, String instanceType) {
+        Optional<String> imageArchitecture = imageCatalog.findByIdOrAlias(imageId)
+                .map(image -> image.architecture)
+                .filter(value -> !value.isBlank());
+        if (imageArchitecture.isEmpty()) {
+            return;
+        }
+        instanceTypeCatalog.find(instanceType)
+                .filter(type -> type.supportedArchitectures.stream()
+                        .noneMatch(imageArchitecture.get()::equals))
+                .ifPresent(type -> {
+                    throw new AwsException("InvalidParameterValue",
+                            "The architecture '" + imageArchitecture.get()
+                                    + "' of the specified image does not match the architecture supported by instance type '"
+                                    + instanceType + "'.",
+                            400);
+                });
+    }
+
+    private String architectureFor(String imageId, String instanceType) {
+        Optional<Ec2ImageCatalog.CatalogImage> image = imageCatalog.findByIdOrAlias(imageId);
+        return image.map(catalogImage -> catalogImage.architecture)
+                .filter(value -> !value.isBlank())
+                .or(() -> instanceTypeCatalog.find(instanceType)
+                        .flatMap(type -> type.supportedArchitectures.stream()
+                                .filter(value -> value != null && !value.isBlank())
+                                .findFirst()))
+                .orElse("x86_64");
     }
 
     public Subnet requireSubnet(String region, String subnetId) {
@@ -531,6 +901,34 @@ public class Ec2Service {
             result.add(entry);
         }
         return result;
+    }
+
+    /**
+     * Stops the Docker containers of running instances on emulator shutdown. Without this
+     * they outlive the process as orphans. Instances flip to {@code stopped} — the container
+     * really is stopped, and the id is kept so StartInstances can revive it after a restart.
+     * Runs during the ShutdownEvent phase, so the state change is captured by the final flush.
+     */
+    @Override
+    public void stopManagedContainers() {
+        if (config.services().ec2().mock()) {
+            return;
+        }
+        for (String storeKey : Set.copyOf(instances.keys())) {
+            Instance inst = instances.get(storeKey).orElse(null);
+            if (inst == null || inst.getDockerContainerId() == null
+                    || inst.getState() == null || !"running".equals(inst.getState().getName())) {
+                continue;
+            }
+            try {
+                containerManager.stopForShutdown(inst);
+                inst.setState(InstanceState.stopped());
+                instances.put(storeKey, inst);
+            } catch (Exception e) {
+                LOG.warnv("Failed to stop EC2 instance container {0} on shutdown: {1}",
+                        inst.getDockerContainerId(), e.getMessage());
+            }
+        }
     }
 
     public List<Map<String, String>> stopInstances(String region, List<String> instanceIds) {
@@ -651,6 +1049,34 @@ public class Ec2Service {
         instances.put(key(region, instanceId), inst);
     }
 
+    /**
+     * Replaces the security groups attached to an instance (ModifyInstanceAttribute with
+     * {@code GroupId.N}). Validates each group, updates the instance and its network interfaces,
+     * and re-publishes host forwards so ports opened by the newly attached groups take effect.
+     */
+    public void modifyInstanceGroups(String region, String instanceId, List<String> groupIds) {
+        ensureDefaultResources(region);
+        Instance inst = getRequiredInstance(region, instanceId);
+
+        List<GroupIdentifier> identifiers = new ArrayList<>();
+        for (String groupId : groupIds) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+        }
+
+        inst.setSecurityGroups(new ArrayList<>(identifiers));
+        if (inst.getNetworkInterfaces() != null) {
+            inst.getNetworkInterfaces().forEach(eni -> eni.setGroups(new ArrayList<>(identifiers)));
+        }
+        instances.put(key(region, instanceId), inst);
+
+        if (config.services().ec2().publishSecurityGroupPorts() && !config.services().ec2().mock()
+                && inst.getDockerContainerId() != null
+                && inst.getState() != null && "running".equals(inst.getState().getName())) {
+            portForwardManager.reconcile(inst, desiredPublishedPorts(region, inst));
+        }
+    }
+
     private Instance getRequiredInstance(String region, String instanceId) {
         Instance inst = instances.get(key(region, instanceId)).orElse(null);
         if (inst == null)
@@ -677,6 +1103,7 @@ public class Ec2Service {
 
         createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
         createMainRouteTable(region, vpc, "rtb-" + randomHex(17), "rtbassoc-" + randomHex(17));
+        createDefaultNetworkAcl(region, vpcId, "acl-" + randomHex(17));
         return vpc;
     }
 
@@ -754,7 +1181,7 @@ public class Ec2Service {
 
     public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
                                          List<String> routeTableIds, List<String> subnetIds,
-                                         List<String> securityGroupIds, List<Tag> endpointTags) {
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled, List<Tag> endpointTags) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -772,6 +1199,8 @@ public class Ec2Service {
         endpoint.setVpcId(vpcId);
         endpoint.setServiceName(serviceName);
         endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        boolean isInterface = "Interface".equalsIgnoreCase(endpoint.getVpcEndpointType());
+        endpoint.setPrivateDnsEnabled(privateDnsEnabled != null ? privateDnsEnabled : isInterface);
         endpoint.setCreationTimestamp(Instant.now());
         endpoint.setRegion(region);
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
@@ -813,6 +1242,54 @@ public class Ec2Service {
         return deleted;
     }
 
+    /**
+     * Network interfaces owned by interface VPC endpoints (PrivateLink ENIs).
+     * Floci does not persist per-endpoint ENIs; they are synthesized
+     * deterministically from the endpoint's subnets so flow-log generation can
+     * attribute AWS-service traffic to a stable endpoint address.
+     */
+    public List<NetworkInterface> endpointNetworkInterfaces(String region) {
+        List<NetworkInterface> result = new ArrayList<>();
+        for (VpcEndpoint endpoint : vpcEndpoints.scan(k -> true)) {
+            if (!region.equals(endpoint.getRegion())
+                    || !"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+                continue;
+            }
+            for (String subnetId : endpoint.getSubnetIds()) {
+                Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
+                if (subnet == null) {
+                    continue;
+                }
+                NetworkInterface ni = new NetworkInterface();
+                ni.setNetworkInterfaceId(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
+                ni.setSubnetId(subnetId);
+                ni.setVpcId(endpoint.getVpcId());
+                ni.setAvailabilityZone(subnet.getAvailabilityZone());
+                ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
+                ni.setInterfaceType("vpc_endpoint");
+                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint.getVpcEndpointId()));
+                result.add(ni);
+            }
+        }
+        return result;
+    }
+
+    private static String endpointEniId(String endpointId, String subnetId) {
+        String hex = java.util.UUID.nameUUIDFromBytes(
+                (endpointId + "|" + subnetId).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "");
+        return "eni-" + hex.substring(0, 17);
+    }
+
+    /** Stable host address near the top of the subnet range, clear of the instance counter (starts at 10). */
+    private static String endpointPrivateIp(Subnet subnet, String endpointId) {
+        String cidr = subnet.getCidrBlock();
+        String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
+        String[] parts = baseIp.split("\\.");
+        int host = 200 + Math.floorMod(endpointId.hashCode(), 50);
+        return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
+    }
+
     private VpcEndpoint getRequiredVpcEndpoint(String region, String endpointId) {
         VpcEndpoint endpoint = vpcEndpoints.get(key(region, endpointId)).orElse(null);
         if (endpoint == null) {
@@ -841,6 +1318,18 @@ public class Ec2Service {
         subnet.setRegion(region);
         subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetId).toString());
         subnets.put(key(region, subnetId), subnet);
+
+        // Every subnet starts associated with its VPC's default NACL. ReplaceNetworkAclAssociation
+        // later moves it onto a custom NACL, so this association must exist for that lookup to work.
+        NetworkAcl defaultAcl = findDefaultNetworkAcl(region, vpcId);
+        if (defaultAcl != null) {
+            NetworkAclAssociation assoc = new NetworkAclAssociation();
+            assoc.setNetworkAclAssociationId("aclassoc-" + randomHex(17));
+            assoc.setNetworkAclId(defaultAcl.getNetworkAclId());
+            assoc.setSubnetId(subnetId);
+            defaultAcl.getAssociations().add(assoc);
+            networkAcls.put(key(region, defaultAcl.getNetworkAclId()), defaultAcl);
+        }
         return subnet;
     }
 
@@ -904,6 +1393,9 @@ public class Ec2Service {
         egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
         sg.getIpPermissionsEgress().add(egressAll);
         securityGroups.put(key(region, sgId), sg);
+        // Persist the default egress rule as a SecurityGroupRule so that
+        // DescribeSecurityGroupRules can find it immediately (#1093).
+        createRules(region, sgId, egressAll, true);
         return sg;
     }
 
@@ -928,27 +1420,34 @@ public class Ec2Service {
 
     public List<SecurityGroupRule> authorizeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
         List<SecurityGroupRule> rules = new ArrayList<>();
-        for (IpPermission perm : permissions) {
-            sg.getIpPermissions().add(perm);
-            rules.addAll(createRules(region, groupId, perm, false));
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
+            for (IpPermission perm : permissions) {
+                next.add(perm);
+                rules.addAll(createRules(region, groupId, perm, false));
+            }
+            sg.setIpPermissions(next);
+            securityGroups.put(key(region, groupId), sg);
         }
-        securityGroups.put(key(region, groupId), sg);
+        reconcilePublishedPortsForGroup(region, groupId);
         return rules;
     }
 
     public List<SecurityGroupRule> authorizeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
         List<SecurityGroupRule> rules = new ArrayList<>();
-        for (IpPermission perm : permissions) {
-            sg.getIpPermissionsEgress().add(perm);
-            rules.addAll(createRules(region, groupId, perm, true));
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
+            for (IpPermission perm : permissions) {
+                next.add(perm);
+                rules.addAll(createRules(region, groupId, perm, true));
+            }
+            sg.setIpPermissionsEgress(next);
+            securityGroups.put(key(region, groupId), sg);
         }
-        securityGroups.put(key(region, groupId), sg);
         return rules;
     }
 
@@ -987,18 +1486,25 @@ public class Ec2Service {
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
-        sg.getIpPermissions().removeIf(p -> matchesAnyPermission(p, permissions));
-        securityGroups.put(key(region, groupId), sg);
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
+            next.removeIf(p -> matchesAnyPermission(p, permissions));
+            sg.setIpPermissions(next);
+            securityGroups.put(key(region, groupId), sg);
+        }
+        reconcilePublishedPortsForGroup(region, groupId);
     }
 
     public void revokeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-
-        sg.getIpPermissionsEgress().removeIf(p -> matchesAnyPermission(p, permissions));
-        securityGroups.put(key(region, groupId), sg);
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
+            next.removeIf(p -> matchesAnyPermission(p, permissions));
+            sg.setIpPermissionsEgress(next);
+            securityGroups.put(key(region, groupId), sg);
+        }
     }
 
     private SecurityGroup getRequiredSecurityGroup(String region, String groupId) {
@@ -1020,10 +1526,11 @@ public class Ec2Service {
         return false;
     }
 
-    public List<SecurityGroupRule> describeSecurityGroupRules(String region, String groupId, List<String> ruleIds) {
+    public List<SecurityGroupRule> describeSecurityGroupRules(String region, List<String> groupIds, List<String> ruleIds) {
         ensureDefaultResources(region);
-        return securityGroupRules.scan(k -> true).stream()
-                .filter(r -> r.getGroupId().equals(groupId))
+        String regionPrefix = region + "::";
+        return securityGroupRules.scan(k -> k.startsWith(regionPrefix)).stream()
+                .filter(r -> groupIds.isEmpty() || groupIds.contains(r.getGroupId()))
                 .filter(r -> ruleIds.isEmpty() || ruleIds.contains(r.getSecurityGroupRuleId()))
                 .collect(Collectors.toList());
     }
@@ -1094,6 +1601,11 @@ public class Ec2Service {
 
     public KeyPair importKeyPair(String region, String keyName, String publicKeyMaterial) {
         ensureDefaultResources(region);
+        boolean exists = keyPairs.scan(k -> true).stream()
+                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
+        if (exists) {
+            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
+        }
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
@@ -1142,12 +1654,79 @@ public class Ec2Service {
     }
 
     public List<Image> describeImages(String region, List<String> imageIds, List<String> owners, Map<String, List<String>> filters) {
-        return imageCatalog.images().stream()
+        List<Image> catalogImages = imageCatalog.images().stream()
                 .filter(Ec2ImageCatalog.CatalogImage::advertised)
                 .filter(img -> img.matchesIdOrAlias(imageIds))
                 .filter(img -> img.matchesOwner(owners))
                 .filter(img -> matchesImageFilters(img, filters))
                 .map(Ec2ImageCatalog.CatalogImage::toImage)
+                .collect(Collectors.toList());
+        List<Image> createdImages = registeredImages.scan(k -> true).stream()
+                .filter(img -> region.equals(img.getRegion()))
+                .filter(img -> matchesImageIds(img, imageIds))
+                .filter(img -> matchesImageOwners(img, owners))
+                .filter(img -> matchesRegisteredImageFilters(img, filters))
+                .collect(Collectors.toList());
+        List<Image> images = new ArrayList<>(catalogImages);
+        images.addAll(createdImages);
+        return images;
+    }
+
+    public Image registerImage(String region, String name, String description, String architecture,
+                               String rootDeviceName, List<BlockDeviceMapping> blockDeviceMappings) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter Name", 400);
+        }
+        boolean duplicateName = registeredImages.scan(k -> true).stream()
+                .filter(img -> region.equals(img.getRegion()))
+                .anyMatch(img -> name.equals(img.getName()));
+        if (duplicateName) {
+            throw new AwsException("InvalidAMIName.Duplicate",
+                    "AMI name '" + name + "' is already in use.", 400);
+        }
+        Image image = new Image();
+        image.setImageId("ami-" + randomHex(17));
+        image.setName(name);
+        image.setDescription(description != null ? description : name);
+        image.setOwnerId(accountId);
+        image.setImageOwnerAlias(null);
+        image.setPublic(false);
+        image.setArchitecture(architecture != null ? architecture : "x86_64");
+        image.setRootDeviceName(rootDeviceName != null ? rootDeviceName : "/dev/sda1");
+        image.setRootDeviceType("ebs");
+        image.setVirtualizationType("hvm");
+        image.setHypervisor("xen");
+        image.setCreationDate(ISO_FMT.format(Instant.now()));
+        image.setRegion(region);
+        image.setBlockDeviceMappings(blockDeviceMappings != null ? new ArrayList<>(blockDeviceMappings) : List.of());
+        registeredImages.put(key(region, image.getImageId()), image);
+        for (BlockDeviceMapping mapping : image.getBlockDeviceMappings()) {
+            EbsBlockDevice ebs = mapping.getEbs();
+            if (ebs != null && ebs.getSnapshotId() != null) {
+                String snapshotKey = key(region, ebs.getSnapshotId());
+                if (snapshots.get(snapshotKey).isEmpty()) {
+                    snapshots.put(snapshotKey, snapshotFrom(region, ebs.getSnapshotId(), image, mapping));
+                }
+            }
+        }
+        return image;
+    }
+
+    public List<Snapshot> describeSnapshots(String region, List<String> snapshotIds,
+                                            List<String> ownerIds, Map<String, List<String>> filters) {
+        if (snapshotIds != null && !snapshotIds.isEmpty()) {
+            for (String id : snapshotIds) {
+                if (snapshots.get(key(region, id)).isEmpty()) {
+                    throw new AwsException("InvalidSnapshot.NotFound",
+                            "The snapshot '" + id + "' does not exist.", 400);
+                }
+            }
+        }
+        return snapshots.scan(k -> true).stream()
+                .filter(snapshot -> region.equals(snapshot.getRegion()))
+                .filter(snapshot -> snapshotIds == null || snapshotIds.isEmpty() || snapshotIds.contains(snapshot.getSnapshotId()))
+                .filter(snapshot -> matchesSnapshotOwners(snapshot, ownerIds))
+                .filter(snapshot -> matchesSnapshotFilters(snapshot, filters))
                 .collect(Collectors.toList());
     }
 
@@ -1156,6 +1735,8 @@ public class Ec2Service {
     public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
                                                String instanceType, String keyName,
                                                List<String> securityGroupIds, String userData,
+                                               String encodedUserData,
+                                               String iamInstanceProfileArn,
                                                List<Tag> launchTemplateTags, List<Tag> instanceTags) {
         ensureDefaultResources(region);
         if (name == null || name.isBlank()) {
@@ -1172,12 +1753,14 @@ public class Ec2Service {
         launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
         launchTemplate.setLaunchTemplateName(name);
         launchTemplate.setCreateTime(Instant.now());
-        launchTemplate.setCreatedBy("arn:aws:iam::" + accountId + ":root");
+        launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         launchTemplate.setRegion(region);
         launchTemplate.setImageId(imageId);
         launchTemplate.setInstanceType(instanceType);
         launchTemplate.setKeyName(keyName);
         launchTemplate.setUserData(userData);
+        launchTemplate.setEncodedUserData(encodedUserData);
+        launchTemplate.setIamInstanceProfileArn(iamInstanceProfileArn);
         if (securityGroupIds != null) {
             launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
         }
@@ -1197,6 +1780,8 @@ public class Ec2Service {
                                                       String sourceVersion,
                                                       String imageId, String instanceType, String keyName,
                                                       List<String> securityGroupIds, String userData,
+                                                      String encodedUserData,
+                                                      String iamInstanceProfileArn,
                                                       List<Tag> instanceTags) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
@@ -1216,6 +1801,10 @@ public class Ec2Service {
         }
         if (userData != null && !userData.isBlank()) {
             data.setUserData(userData);
+            data.setEncodedUserData(encodedUserData);
+        }
+        if (iamInstanceProfileArn != null && !iamInstanceProfileArn.isBlank()) {
+            data.setIamInstanceProfileArn(iamInstanceProfileArn);
         }
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             data.setSecurityGroupIds(securityGroupIds);
@@ -1282,6 +1871,16 @@ public class Ec2Service {
                 .filter(lt -> names.isEmpty() || names.contains(lt.getLaunchTemplateName()))
                 .filter(lt -> matchesFilters(lt, filters, region))
                 .collect(Collectors.toList());
+    }
+
+    public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        String resolvedVersion = resolveLaunchTemplateVersion(
+                launchTemplate,
+                version,
+                launchTemplate.getDefaultVersionNumber());
+        return new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
     }
 
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
@@ -1354,6 +1953,8 @@ public class Ec2Service {
         data.setInstanceType(launchTemplate.getInstanceType());
         data.setKeyName(launchTemplate.getKeyName());
         data.setUserData(launchTemplate.getUserData());
+        data.setEncodedUserData(launchTemplate.getEncodedUserData());
+        data.setIamInstanceProfileArn(launchTemplate.getIamInstanceProfileArn());
         data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
         data.setInstanceTags(launchTemplate.getInstanceTags());
         return data;
@@ -1364,6 +1965,8 @@ public class Ec2Service {
         launchTemplate.setInstanceType(data.getInstanceType());
         launchTemplate.setKeyName(data.getKeyName());
         launchTemplate.setUserData(data.getUserData());
+        launchTemplate.setEncodedUserData(data.getEncodedUserData());
+        launchTemplate.setIamInstanceProfileArn(data.getIamInstanceProfileArn());
         launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
         launchTemplate.setInstanceTags(data.getInstanceTags());
     }
@@ -1413,6 +2016,100 @@ public class Ec2Service {
         };
     }
 
+    private boolean matchesImageIds(Image image, List<String> imageIds) {
+        return imageIds == null || imageIds.isEmpty() || imageIds.contains(image.getImageId());
+    }
+
+    private boolean matchesImageOwners(Image image, List<String> owners) {
+        return owners == null || owners.isEmpty()
+                || owners.contains(image.getOwnerId())
+                || (owners.contains("self") && accountId.equals(image.getOwnerId()));
+    }
+
+    private boolean matchesRegisteredImageFilters(Image image, Map<String, List<String>> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return true;
+        }
+        for (Map.Entry<String, List<String>> filter : filters.entrySet()) {
+            if (!matchesRegisteredImageFilter(image, filter.getKey(), filter.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean matchesRegisteredImageFilter(Image image, String name, List<String> values) {
+        return switch (name) {
+            case "architecture" -> matchesFilterValue(values, image.getArchitecture());
+            case "block-device-mapping.snapshot-id" -> image.getBlockDeviceMappings().stream()
+                    .map(BlockDeviceMapping::getEbs)
+                    .filter(Objects::nonNull)
+                    .map(EbsBlockDevice::getSnapshotId)
+                    .anyMatch(snapshotId -> matchesFilterValue(values, snapshotId));
+            case "description" -> matchesFilterValue(values, image.getDescription());
+            case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
+            case "image-id" -> matchesFilterValue(values, image.getImageId());
+            case "image-type" -> matchesFilterValue(values, "machine");
+            case "is-public" -> matchesFilterValue(values, String.valueOf(image.isPublic()));
+            case "name" -> matchesFilterValue(values, image.getName());
+            case "owner-alias" -> matchesFilterValue(values, image.getImageOwnerAlias());
+            case "owner-id" -> matchesFilterValue(values, image.getOwnerId());
+            case "root-device-name" -> matchesFilterValue(values, image.getRootDeviceName());
+            case "root-device-type" -> matchesFilterValue(values, image.getRootDeviceType());
+            case "state" -> matchesFilterValue(values, image.getState());
+            case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
+            default -> true;
+        };
+    }
+
+    private Snapshot snapshotFrom(String region, String snapshotId, Image image, BlockDeviceMapping mapping) {
+        EbsBlockDevice ebs = mapping.getEbs();
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotId(snapshotId);
+        snapshot.setOwnerId(accountId);
+        snapshot.setState("completed");
+        snapshot.setDescription("Created by RegisterImage for " + image.getName());
+        snapshot.setStartTime(Instant.now());
+        snapshot.setVolumeSize(ebs.getVolumeSize());
+        snapshot.setEncrypted(Boolean.TRUE.equals(ebs.getEncrypted()));
+        snapshot.setRegion(region);
+        return snapshot;
+    }
+
+    private boolean matchesSnapshotFilters(Snapshot snapshot, Map<String, List<String>> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return true;
+        }
+        for (Map.Entry<String, List<String>> filter : filters.entrySet()) {
+            if (!matchesSnapshotFilter(snapshot, filter.getKey(), filter.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean matchesSnapshotOwners(Snapshot snapshot, List<String> ownerIds) {
+        if (ownerIds == null || ownerIds.isEmpty()) {
+            return accountId.equals(snapshot.getOwnerId());
+        }
+        return ownerIds.contains(snapshot.getOwnerId())
+                || ownerIds.contains("self") && accountId.equals(snapshot.getOwnerId());
+    }
+
+    private boolean matchesSnapshotFilter(Snapshot snapshot, String name, List<String> values) {
+        return switch (name) {
+            case "description" -> matchesFilterValue(values, snapshot.getDescription());
+            case "owner-id" -> matchesFilterValue(values, snapshot.getOwnerId());
+            case "progress" -> matchesFilterValue(values, snapshot.getProgress());
+            case "snapshot-id" -> matchesFilterValue(values, snapshot.getSnapshotId());
+            case "status" -> matchesFilterValue(values, snapshot.getState());
+            case "volume-id" -> matchesFilterValue(values, snapshot.getVolumeId());
+            case "volume-size" -> matchesFilterValue(values,
+                    snapshot.getVolumeSize() != null ? String.valueOf(snapshot.getVolumeSize()) : null);
+            default -> true;
+        };
+    }
+
     private boolean matchesFilterValue(List<String> patterns, String value) {
         if (patterns == null || patterns.isEmpty()) {
             return true;
@@ -1441,28 +2138,33 @@ public class Ec2Service {
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
-            List<Tag> existing = tags.get(resourceId).orElse(new ArrayList<>());
-            for (Tag tag : tagList) {
-                existing.removeIf(t -> t.getKey().equals(tag.getKey()));
-                existing.add(tag);
+            synchronized (lockFor(key(region, resourceId))) {
+                List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElse(List.of()));
+                for (Tag tag : tagList) {
+                    existing.removeIf(t -> t.getKey().equals(tag.getKey()));
+                    existing.add(tag);
+                }
+                tags.put(resourceId, existing);
+                // Update resource objects
+                updateResourceTags(region, resourceId, existing);
             }
-            tags.put(resourceId, existing);
-            // Update resource objects
-            updateResourceTags(region, resourceId, existing);
         }
     }
 
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
-            List<Tag> existing = tags.get(resourceId).orElse(null);
-            if (existing != null) {
-                for (Tag tag : tagList) {
-                    existing.removeIf(t -> t.getKey().equals(tag.getKey())
-                            && (tag.getValue() == null || tag.getValue().equals(t.getValue())));
+            synchronized (lockFor(key(region, resourceId))) {
+                List<Tag> stored = tags.get(resourceId).orElse(null);
+                if (stored != null) {
+                    List<Tag> existing = new ArrayList<>(stored);
+                    for (Tag tag : tagList) {
+                        existing.removeIf(t -> t.getKey().equals(tag.getKey())
+                                && (tag.getValue() == null || tag.getValue().equals(t.getValue())));
+                    }
+                    tags.put(resourceId, existing);
+                    updateResourceTags(region, resourceId, existing);
                 }
-                tags.put(resourceId, existing);
-                updateResourceTags(region, resourceId, existing);
             }
         }
     }
@@ -1477,6 +2179,8 @@ public class Ec2Service {
         if (subnet != null) { subnet.setTags(new ArrayList<>(tagList)); subnets.put(storeKey, subnet); return; }
         SecurityGroup sg = securityGroups.get(storeKey).orElse(null);
         if (sg != null) { sg.setTags(new ArrayList<>(tagList)); securityGroups.put(storeKey, sg); return; }
+        SecurityGroupRule sgRule = securityGroupRules.get(storeKey).orElse(null);
+        if (sgRule != null) { sgRule.setTags(new ArrayList<>(tagList)); securityGroupRules.put(storeKey, sgRule); return; }
         InternetGateway igw = internetGateways.get(storeKey).orElse(null);
         if (igw != null) { igw.setTags(new ArrayList<>(tagList)); internetGateways.put(storeKey, igw); return; }
         RouteTable rt = routeTables.get(storeKey).orElse(null);
@@ -1488,7 +2192,11 @@ public class Ec2Service {
         VpcEndpoint endpoint = vpcEndpoints.get(storeKey).orElse(null);
         if (endpoint != null) { endpoint.setTags(new ArrayList<>(tagList)); vpcEndpoints.put(storeKey, endpoint); return; }
         NatGateway natGateway = natGateways.get(storeKey).orElse(null);
-        if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); natGateways.put(storeKey, natGateway); }
+        if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); natGateways.put(storeKey, natGateway); return; }
+        NetworkAcl networkAcl = networkAcls.get(storeKey).orElse(null);
+        if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); return; }
+        Address address = addresses.get(storeKey).orElse(null);
+        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -1648,35 +2356,55 @@ public class Ec2Service {
         assoc.setSubnetId(subnetId);
         assoc.setMain(false);
         assoc.setAssociationState("associated");
-        rt.getAssociations().add(assoc);
-        routeTables.put(key(region, routeTableId), rt);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<RouteTableAssociation> next = new ArrayList<>(current.getAssociations());
+            next.add(assoc);
+            current.setAssociations(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
         return assoc;
     }
 
     public void disassociateRouteTable(String region, String associationId) {
         ensureDefaultResources(region);
         for (RouteTable rt : routeTables.scan(k -> true)) {
-            if (rt.getRegion().equals(region)) {
-                rt.getAssociations().removeIf(a -> a.getRouteTableAssociationId().equals(associationId));
-                routeTables.put(key(region, rt.getRouteTableId()), rt);
+            if (rt.getRegion().equals(region)
+                    && rt.getAssociations().stream()
+                            .anyMatch(a -> a.getRouteTableAssociationId().equals(associationId))) {
+                synchronized (lockFor(key(region, rt.getRouteTableId()))) {
+                    RouteTable current = getRequiredRouteTable(region, rt.getRouteTableId());
+                    List<RouteTableAssociation> next = new ArrayList<>(current.getAssociations());
+                    next.removeIf(a -> a.getRouteTableAssociationId().equals(associationId));
+                    current.setAssociations(next);
+                    routeTables.put(key(region, current.getRouteTableId()), current);
+                }
             }
         }
     }
 
-    public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId) {
+    public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
         ensureDefaultResources(region);
-        RouteTable rt = getRequiredRouteTable(region, routeTableId);
-
-        rt.getRoutes().add(new Route(destinationCidrBlock, gatewayId, "CreateRoute"));
-        routeTables.put(key(region, routeTableId), rt);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<Route> next = new ArrayList<>(current.getRoutes());
+            Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
+            route.setNatGatewayId(natGatewayId);
+            next.add(route);
+            current.setRoutes(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
     }
 
     public void deleteRoute(String region, String routeTableId, String destinationCidrBlock) {
         ensureDefaultResources(region);
-        RouteTable rt = getRequiredRouteTable(region, routeTableId);
-
-        rt.getRoutes().removeIf(r -> r.getDestinationCidrBlock().equals(destinationCidrBlock));
-        routeTables.put(key(region, routeTableId), rt);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<Route> next = new ArrayList<>(current.getRoutes());
+            next.removeIf(r -> r.getDestinationCidrBlock().equals(destinationCidrBlock));
+            current.setRoutes(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
     }
 
     private RouteTable getRequiredRouteTable(String region, String routeTableId) {
@@ -1825,12 +2553,7 @@ public class Ec2Service {
     }
 
     public List<String> describeRegions() {
-        return List.of(
-                "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-                "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1",
-                "ap-northeast-1", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2",
-                "ap-south-1", "sa-east-1", "ca-central-1"
-        );
+        return AwsRegions.ALL;
     }
 
     public Map<String, String> describeAccountAttributes(String region) {
@@ -1844,41 +2567,17 @@ public class Ec2Service {
     // ─── Instance Types ────────────────────────────────────────────────────────
 
     public List<Map<String, Object>> describeInstanceTypes(List<String> instanceTypeNames) {
-        List<Map<String, Object>> allTypes = new ArrayList<>();
-        allTypes.add(buildInstanceType("t2.micro", 1, 1024));
-        allTypes.add(buildInstanceType("t3.micro", 2, 1024));
-        allTypes.add(buildInstanceType("t3.small", 2, 2048));
-        allTypes.add(buildInstanceType("t3.medium", 2, 4096));
-        allTypes.add(buildInstanceType("m5.large", 2, 8192));
-        allTypes.add(buildInstanceType("t4g.micro", 2, 1024, List.of("arm64")));
-        allTypes.add(buildInstanceType("t4g.small", 2, 2048, List.of("arm64")));
-        allTypes.add(buildInstanceType("t4g.medium", 2, 4096, List.of("arm64")));
-        allTypes.add(buildInstanceType("m6gd.2xlarge", 8, 32768, List.of("arm64")));
-        allTypes.add(buildInstanceType("m7gd.2xlarge", 8, 32768, List.of("arm64")));
-        allTypes.add(buildInstanceType("m8gd.medium", 1, 4096, List.of("arm64")));
-        allTypes.add(buildInstanceType("m8gd.2xlarge", 8, 32768, List.of("arm64")));
-
         if (instanceTypeNames.isEmpty()) {
-            return allTypes;
+            return instanceTypeCatalog.instanceTypes().stream()
+                    .map(Ec2InstanceTypeCatalog.CatalogInstanceType::toResponseMap)
+                    .collect(Collectors.toList());
         }
-        return allTypes.stream()
-                .filter(t -> instanceTypeNames.contains(t.get("instanceType")))
+        return instanceTypeNames.stream()
+                .distinct()
+                .map(instanceTypeCatalog::find)
+                .flatMap(Optional::stream)
+                .map(Ec2InstanceTypeCatalog.CatalogInstanceType::toResponseMap)
                 .collect(Collectors.toList());
-    }
-
-    private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib) {
-        return buildInstanceType(name, vcpu, memMib, List.of("x86_64"));
-    }
-
-    private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib,
-                                                  List<String> supportedArchitectures) {
-        Map<String, Object> t = new LinkedHashMap<>();
-        t.put("instanceType", name);
-        t.put("vcpu", vcpu);
-        t.put("memoryMib", memMib);
-        t.put("supportedArchitectures", supportedArchitectures);
-        t.put("currentGeneration", true);
-        return t;
     }
 
     public List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,

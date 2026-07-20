@@ -156,17 +156,17 @@ public class KmsService {
     }
 
     private String resolveKeyId(Map<String, String> tags) {
-        String overrideId = ReservedTags.extractOverrideId(tags);
+        String overrideId = ReservedTags.extractOverrideKeyId(tags);
         if (overrideId == null) {
             return UUID.randomUUID().toString();
         }
 
         String normalized = overrideId.trim();
         if (normalized.isEmpty()) {
-            throw new AwsException("ValidationException", "Override resource ID must not be blank.", 400);
+            throw new AwsException("TagException", "Override resource ID must not be blank.", 400);
         }
         if (normalized.length() > 256) {
-            throw new AwsException("ValidationException", "Override resource ID must be 256 characters or fewer.", 400);
+            throw new AwsException("TagException", "Override resource ID must be 256 characters or fewer.", 400);
         }
         return normalized;
     }
@@ -576,12 +576,12 @@ public class KmsService {
         if (!aliasName.startsWith("alias/")) {
             throw new AwsException("InvalidAliasNameException", "Alias name must begin with 'alias/'", 400);
         }
-        resolveKey(targetKeyId, region); // Validate key exists
+        KmsKey key = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
-        KmsAlias alias = new KmsAlias(aliasName, aliasArn, targetKeyId);
+        KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
         aliasStore.put(region + "::" + aliasName, alias);
-        LOG.infov("Created KMS alias: {0} -> {1}", aliasName, targetKeyId);
+        LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());
     }
 
     public void deleteAlias(String aliasName, String region) {
@@ -593,8 +593,19 @@ public class KmsService {
     }
 
     public List<KmsAlias> listAliases(String region) {
+        return listAliases(null, region);
+    }
+
+    public List<KmsAlias> listAliases(String keyId, String region) {
         String prefix = region + "::";
-        return aliasStore.scan(k -> k.startsWith(prefix));
+        List<KmsAlias> all = aliasStore.scan(k -> k.startsWith(prefix));
+        if (keyId == null || keyId.isBlank()) {
+            return all;
+        }
+        KmsKey key = resolveKey(keyId, region);
+        return all.stream()
+                .filter(a -> key.getKeyId().equals(a.getTargetKeyId()))
+                .toList();
     }
 
     // ──────────────────────────── Crypto Ops (Mocks) ────────────────────────────

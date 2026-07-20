@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,10 @@ import static org.hamcrest.Matchers.*;
 class S3WebsiteIntegrationTest {
 
     private static final String BUCKET = "website-test-bucket";
+
+    private String websiteHost() {
+        return BUCKET + ".s3-website-us-east-1.localhost:" + RestAssured.port;
+    }
 
     @Test
     @Order(1)
@@ -74,19 +79,33 @@ class S3WebsiteIntegrationTest {
 
     @Test
     @Order(5)
-    void indexRedirectionNotWorkingYetWithoutIndexFile() {
-        // Access root - should return XML list because index.html is missing
+    void uploadErrorFile() {
         given()
+            .contentType("text/html")
+            .body("<html><body>Custom Error</body></html>")
         .when()
-            .get("/" + BUCKET)
+            .put("/" + BUCKET + "/error.html")
         .then()
-            .statusCode(200)
-            .contentType("application/xml")
-            .body(containsString("<ListBucketResult"));
+            .statusCode(200);
     }
 
     @Test
     @Order(6)
+    void missingIndexServesErrorDocument() {
+        given()
+            .header("Host", websiteHost())
+        .when()
+            .get("/")
+        .then()
+            .statusCode(404)
+            .contentType("text/html")
+            .header("x-amz-error-code", "NoSuchKey")
+            .header("x-amz-error-message", "The specified key does not exist.")
+            .body(equalTo("<html><body>Custom Error</body></html>"));
+    }
+
+    @Test
+    @Order(7)
     void uploadIndexFile() {
         given()
             .contentType("text/html")
@@ -98,12 +117,12 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void indexRedirectionWorks() {
-        // Access root - should now return index.html content
         given()
+            .header("Host", websiteHost())
         .when()
-            .get("/" + BUCKET)
+            .get("/")
         .then()
             .statusCode(200)
             .contentType("text/html")
@@ -111,7 +130,59 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
+    void missingKeyServesErrorDocument() {
+        given()
+            .header("Host", websiteHost())
+        .when()
+            .get("/missing-page")
+        .then()
+            .statusCode(404)
+            .contentType("text/html")
+            .header("x-amz-error-code", "NoSuchKey")
+            .header("x-amz-error-message", "The specified key does not exist.")
+            .body(equalTo("<html><body>Custom Error</body></html>"));
+    }
+
+    @Test
+    @Order(10)
+    void missingKeyReturnsXmlForRegularApiRequest() {
+        given()
+        .when()
+            .get("/" + BUCKET + "/missing-page")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchKey"));
+    }
+
+    @Test
+    @Order(11)
+    void missingErrorDocumentServesHtmlFallback() {
+        given().delete("/" + BUCKET + "/error.html");
+
+        given()
+            .header("Host", websiteHost())
+        .when()
+            .get("/missing-page")
+        .then()
+            .statusCode(404)
+            .contentType("text/html")
+            .header("x-amz-error-code", "NoSuchKey")
+            .header("x-amz-error-message", "The specified key does not exist.")
+            .body(containsString("404 Not Found"))
+            .body(containsString("NoSuchKey"));
+
+        given()
+            .contentType("text/html")
+            .body("<html><body>Custom Error</body></html>")
+        .when()
+            .put("/" + BUCKET + "/error.html")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(12)
     void deleteWebsiteConfiguration() {
         given()
             .queryParam("website", "")
@@ -120,7 +191,6 @@ class S3WebsiteIntegrationTest {
         .then()
             .statusCode(204);
 
-        // Verify it's gone
         given()
             .queryParam("website", "")
         .when()
@@ -130,9 +200,10 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(13)
     void cleanup() {
         given().delete("/" + BUCKET + "/index.html");
+        given().delete("/" + BUCKET + "/error.html");
         given().delete("/" + BUCKET);
     }
 }

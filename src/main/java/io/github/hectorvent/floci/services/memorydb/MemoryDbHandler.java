@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.services.memorydb.model.Acl;
 import io.github.hectorvent.floci.services.memorydb.model.AuthMode;
 import io.github.hectorvent.floci.services.memorydb.model.Cluster;
+import io.github.hectorvent.floci.services.memorydb.model.User;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -44,6 +46,12 @@ public class MemoryDbHandler {
                 case "DescribeClusters" -> handleDescribeClusters(request);
                 case "UpdateCluster" -> handleUpdateCluster(request);
                 case "DeleteCluster" -> handleDeleteCluster(request);
+                case "CreateUser" -> handleCreateUser(request, region);
+                case "DescribeUsers" -> handleDescribeUsers(request, region);
+                case "DeleteUser" -> handleDeleteUser(request);
+                case "CreateACL" -> handleCreateAcl(request, region);
+                case "DescribeACLs" -> handleDescribeAcls(request, region);
+                case "DeleteACL" -> handleDeleteAcl(request);
                 case "ListTags" -> handleListTags(request);
                 case "TagResource" -> handleTagResource(request);
                 case "UntagResource" -> handleUntagResource(request);
@@ -76,8 +84,6 @@ public class MemoryDbHandler {
         spec.setEngineVersion(text(request, "EngineVersion"));
         spec.setAclName(text(request, "ACLName"));
         spec.setTlsEnabled(request.path("TLSEnabled").asBoolean(false));
-        spec.setAuthToken(text(request, "AuthToken"));
-        spec.setAuthMode(resolveAuthMode(request));
         spec.setTags(parseTags(request.path("Tags")));
         Cluster created = service.createCluster(spec, region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -105,6 +111,61 @@ public class MemoryDbHandler {
         Cluster deleted = service.deleteCluster(text(request, "ClusterName"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Cluster", clusterNode(deleted));
+        return Response.ok(response).build();
+    }
+
+    private Response handleCreateUser(JsonNode request, String region) {
+        User spec = new User();
+        spec.setName(text(request, "UserName"));
+        spec.setAccessString(text(request, "AccessString"));
+        JsonNode authNode = request.path("AuthenticationMode");
+        spec.setAuthMode(parseAuthMode(authNode));
+        spec.setPasswords(parsePasswords(authNode.path("Passwords")));
+        User created = service.createUser(spec, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("User", userNode(created));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeUsers(JsonNode request, String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("Users");
+        for (User user : service.describeUsers(text(request, "UserName"), region)) {
+            arr.add(userNode(user));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteUser(JsonNode request) {
+        User deleted = service.deleteUser(text(request, "UserName"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("User", userNode(deleted));
+        return Response.ok(response).build();
+    }
+
+    private Response handleCreateAcl(JsonNode request, String region) {
+        Acl spec = new Acl();
+        spec.setName(text(request, "ACLName"));
+        spec.setUserNames(parseStringList(request.path("UserNames")));
+        Acl created = service.createAcl(spec, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ACL", aclNode(created));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeAcls(JsonNode request, String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("ACLs");
+        for (Acl acl : service.describeAcls(text(request, "ACLName"), region)) {
+            arr.add(aclNode(acl));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteAcl(JsonNode request) {
+        Acl deleted = service.deleteAcl(text(request, "ACLName"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ACL", aclNode(deleted));
         return Response.ok(response).build();
     }
 
@@ -150,6 +211,46 @@ public class MemoryDbHandler {
         return node;
     }
 
+    private ObjectNode userNode(User user) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Name", user.getName());
+        node.put("Status", user.getStatus());
+        if (user.getAccessString() != null) {
+            node.put("AccessString", user.getAccessString());
+        }
+        if (user.getMinimumEngineVersion() != null) {
+            node.put("MinimumEngineVersion", user.getMinimumEngineVersion());
+        }
+        ObjectNode authentication = node.putObject("Authentication");
+        authentication.put("Type", user.getAuthMode().wireValue());
+        if (user.getAuthMode() == AuthMode.PASSWORD) {
+            authentication.put("PasswordCount", user.getPasswords() != null ? user.getPasswords().size() : 0);
+        }
+        ArrayNode aclNames = node.putArray("ACLNames");
+        service.aclNamesForUser(user.getName()).forEach(aclNames::add);
+        if (user.getArn() != null) {
+            node.put("ARN", user.getArn());
+        }
+        return node;
+    }
+
+    private ObjectNode aclNode(Acl acl) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Name", acl.getName());
+        node.put("Status", acl.getStatus());
+        ArrayNode userNames = node.putArray("UserNames");
+        acl.getUserNames().forEach(userNames::add);
+        if (acl.getMinimumEngineVersion() != null) {
+            node.put("MinimumEngineVersion", acl.getMinimumEngineVersion());
+        }
+        ArrayNode clustersArr = node.putArray("Clusters");
+        service.clustersUsingAcl(acl.getName()).forEach(clustersArr::add);
+        if (acl.getArn() != null) {
+            node.put("ARN", acl.getArn());
+        }
+        return node;
+    }
+
     private ObjectNode tagListResponse(Map<String, String> tags) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("TagList");
@@ -164,11 +265,33 @@ public class MemoryDbHandler {
 
     // ──────────────────────────── Parsing ────────────────────────────
 
-    private AuthMode resolveAuthMode(JsonNode request) {
-        if (request.hasNonNull("AuthToken") && !request.get("AuthToken").asText().isBlank()) {
-            return AuthMode.PASSWORD;
+    private AuthMode parseAuthMode(JsonNode authNode) {
+        String type = authNode.path("Type").asText(null);
+        if (type == null || type.isBlank()) {
+            return null;
         }
-        return AuthMode.NO_AUTH;
+        try {
+            return AuthMode.fromWire(type);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValueException", e.getMessage(), 400);
+        }
+    }
+
+    private List<String> parsePasswords(JsonNode passwordsNode) {
+        return parseStringList(passwordsNode);
+    }
+
+    private List<String> parseStringList(JsonNode node) {
+        List<String> values = new java.util.ArrayList<>();
+        if (node != null && node.isArray()) {
+            node.forEach(n -> {
+                String value = n.asText(null);
+                if (value != null) {
+                    values.add(value);
+                }
+            });
+        }
+        return values;
     }
 
     private Map<String, String> parseTags(JsonNode tagsNode) {

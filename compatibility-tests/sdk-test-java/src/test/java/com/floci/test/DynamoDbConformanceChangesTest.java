@@ -7,14 +7,13 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValueUpdate;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
-import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.BillingMode;
 import software.amazon.awssdk.services.dynamodb.model.ComparisonOperator;
 import software.amazon.awssdk.services.dynamodb.model.Condition;
+import software.amazon.awssdk.services.dynamodb.model.ConditionCheck;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
-import software.amazon.awssdk.services.dynamodb.model.ExpectedAttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
-import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.ExpectedAttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
@@ -37,6 +36,8 @@ import software.amazon.awssdk.services.dynamodb.model.ScanResponse;
 import software.amazon.awssdk.services.dynamodb.model.Select;
 import software.amazon.awssdk.services.dynamodb.model.Tag;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
+import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
@@ -703,6 +704,35 @@ class DynamoDbConformanceChangesTest {
                 .conditionExpression("attribute_not_exists(pk)")
                 .expressionAttributeNames(Map.of("#st", "status"))))
                 .doesNotThrowAnyException();
+    }
+
+    // Reproduces #1604
+    @Test
+    @Order(102)
+    void transactWriteCancellationReasonNullMessageForNonFailedItems() {
+        ddb.putItem(r -> r.tableName(TABLE).item(Map.of("pk", av("cancel-A"), "sk", av("s"))));
+
+        TransactionCanceledException ex = (TransactionCanceledException) catchThrowable(() ->
+                ddb.transactWriteItems(TransactWriteItemsRequest.builder()
+                        .transactItems(
+                                TransactWriteItem.builder().conditionCheck(ConditionCheck.builder()
+                                        .tableName(TABLE)
+                                        .key(Map.of("pk", av("cancel-A"), "sk", av("s")))
+                                        .conditionExpression("attribute_exists(pk)")
+                                        .build()).build(),
+                                TransactWriteItem.builder().conditionCheck(ConditionCheck.builder()
+                                        .tableName(TABLE)
+                                        .key(Map.of("pk", av("cancel-B"), "sk", av("s")))
+                                        .conditionExpression("attribute_exists(pk)")
+                                        .build()).build())
+                        .build()));
+
+        assertThat(ex.cancellationReasons()).hasSize(2);
+
+        assertThat(ex.cancellationReasons().get(0).code()).isEqualTo("None");
+        assertThat(ex.cancellationReasons().get(0).message()).isNull();
+
+        assertThat(ex.cancellationReasons().get(1).code()).isEqualTo("ConditionalCheckFailed");
     }
 
     // -----------------------------------------------------------------------

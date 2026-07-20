@@ -760,7 +760,6 @@ public class ElbV2QueryHandler {
                .end("member");
         }
         xml.end("SslPolicies")
-           .elem("NextMarker", "")
            .end("DescribeSSLPoliciesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeSSLPoliciesResponse");
@@ -1234,8 +1233,12 @@ public class ElbV2QueryHandler {
     // ── Misc helpers ─────────────────────────────────────────────────────────
 
     private Response voidResponse(String responseName) {
+        String actionName = responseName.substring(0, responseName.length() - "Response".length());
+        String resultName = actionName + "Result";
         String xml = new XmlBuilder()
                 .start(responseName, AwsNamespaces.ELB_V2)
+                .start(resultName)
+                .end(resultName)
                 .raw(AwsQueryResponse.responseMetadata())
                 .end(responseName)
                 .build();

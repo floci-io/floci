@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -99,14 +100,79 @@ class SsmCommandServiceDirectExecutionTest {
     }
 
     @Test
+    void unavailableInstanceFailsQueuedCommandInvocation() throws Exception {
+        SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
+        when(executor.supports(eq("i-stale"), eq("AWS-RunShellScript"))).thenReturn(false);
+
+        SsmCommandService service = new SsmCommandService(
+                new InMemoryStorageFactory(),
+                objectMapper,
+                regionResolver,
+                executor);
+
+        Command command = service.sendCommand(objectMapper.readTree("""
+                {
+                  "InstanceIds": ["i-stale"],
+                  "DocumentName": "AWS-RunShellScript",
+                  "Parameters": {
+                    "commands": ["echo hello"]
+                  },
+                  "TimeoutSeconds": 60
+                }
+                """), "us-west-2");
+
+        assertEquals(1, service.failActiveInvocationsForInstance("us-west-2", "i-stale", "Undeliverable"));
+
+        CommandInvocation invocation = service.getCommandInvocation(command.getCommandId(), "i-stale", "us-west-2");
+        assertEquals("Failed", invocation.getStatus());
+        assertEquals("Undeliverable", invocation.getStatusDetails());
+        assertEquals(-1, invocation.getResponseCode());
+        assertEquals("Failed", service.listCommands(command.getCommandId(), null, "us-west-2").getFirst().getStatus());
+        assertTrue(service.getMessages("i-stale", "request-id", 30).isEmpty());
+    }
+
+    @Test
+    void unavailableInstancesFailQueuedCommandInvocationsInBulk() throws Exception {
+        SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
+        when(executor.supports(any(), eq("AWS-RunShellScript"))).thenReturn(false);
+
+        SsmCommandService service = new SsmCommandService(
+                new InMemoryStorageFactory(),
+                objectMapper,
+                regionResolver,
+                executor);
+
+        Command command = service.sendCommand(objectMapper.readTree("""
+                {
+                  "InstanceIds": ["i-stale-a", "i-stale-b", "i-active"],
+                  "DocumentName": "AWS-RunShellScript",
+                  "Parameters": {
+                    "commands": ["echo hello"]
+                  },
+                  "TimeoutSeconds": 60
+                }
+                """), "us-west-2");
+
+        assertEquals(2, service.failActiveInvocationsForInstances(
+                "us-west-2", Set.of("i-stale-a", "i-stale-b"), "Undeliverable"));
+
+        assertEquals("Failed", service.getCommandInvocation(command.getCommandId(), "i-stale-a", "us-west-2").getStatus());
+        assertEquals("Failed", service.getCommandInvocation(command.getCommandId(), "i-stale-b", "us-west-2").getStatus());
+        assertEquals("Pending", service.getCommandInvocation(command.getCommandId(), "i-active", "us-west-2").getStatus());
+        assertTrue(service.getMessages("i-stale-a", "request-id", 30).isEmpty());
+        assertTrue(service.getMessages("i-stale-b", "request-id", 30).isEmpty());
+        assertEquals(1, service.getMessages("i-active", "request-id", 30).size());
+    }
+
+    @Test
     void directTimeoutMarksCommandTimedOut() throws Exception {
         SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
         Instant start = Instant.parse("2026-06-07T00:00:00Z");
-        Instant end = Instant.parse("2026-06-07T00:00:05Z");
+        Instant end = Instant.parse("2026-06-07T00:00:30Z");
         when(executor.supports(eq("i-timeout"), eq("AWS-RunShellScript"))).thenReturn(true);
-        when(executor.executeIfSupported(eq("i-timeout"), eq("AWS-RunShellScript"), any(), eq(5)))
+        when(executor.executeIfSupported(eq("i-timeout"), eq("AWS-RunShellScript"), any(), eq(30)))
                 .thenReturn(Optional.of(new SsmDirectCommandExecutor.ExecutionResult(
-                        "TimedOut", "", "Timed out after 5s", -1, start, end)));
+                        "TimedOut", "", "Timed out after 30s", -1, start, end)));
 
         SsmCommandService service = new SsmCommandService(
                 new InMemoryStorageFactory(),
@@ -121,7 +187,7 @@ class SsmCommandServiceDirectExecutionTest {
                   "Parameters": {
                     "commands": ["sleep 100"]
                   },
-                  "TimeoutSeconds": 5
+                  "TimeoutSeconds": 30
                 }
                 """), "us-west-2");
 
@@ -133,7 +199,7 @@ class SsmCommandServiceDirectExecutionTest {
         assertEquals("TimedOut", invocation.getStatus());
         assertEquals("Execution Timed Out", invocation.getStatusDetails());
         assertEquals(-1, invocation.getResponseCode());
-        assertEquals("Timed out after 5s", invocation.getStandardErrorContent());
+        assertEquals("Timed out after 30s", invocation.getStandardErrorContent());
     }
 
     @Test

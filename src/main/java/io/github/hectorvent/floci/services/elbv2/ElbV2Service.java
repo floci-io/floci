@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -35,6 +37,9 @@ public class ElbV2Service {
 
     @Inject
     StorageFactory storageFactory;
+
+    @Inject
+    EmulatorConfig config;
 
     private static final String CANONICAL_HOSTED_ZONE_ID = "Z35SXDOTRQ7X7K";
 
@@ -157,7 +162,7 @@ public class ElbV2Service {
         String typePrefix = lbTypePrefix(lbType);
         String id = randomHex16();
         String arn = AwsArnUtils.Arn.of("elasticloadbalancing", region, regionResolver.getAccountId(), "loadbalancer/" + typePrefix + "/" + name + "/" + id).toString();
-        String dnsName = name + "-" + id + ".elb.localhost";
+        String dnsName = name + "-" + id + ".elb." + loadBalancerDnsSuffix();
         String vpcId = resolveSubnetVpcId(region, lbType, subnets);
 
         LoadBalancer lb = new LoadBalancer();
@@ -182,6 +187,13 @@ public class ElbV2Service {
             tags.put(arn, new LinkedHashMap<>(initialTags));
         }
         return lb;
+    }
+
+    private String loadBalancerDnsSuffix() {
+        if (config == null) {
+            return EmbeddedDnsServer.DEFAULT_SUFFIX;
+        }
+        return config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX);
     }
 
     public List<LoadBalancer> describeLoadBalancers(String region, List<String> arns, List<String> names,
@@ -245,6 +257,10 @@ public class ElbV2Service {
         LoadBalancer lb = requireLoadBalancer(region, arn);
         lb.getAttributes().putAll(newAttrs);
         persistRegion(loadBalancers, region);
+    }
+
+    LoadBalancer getLoadBalancer(String region, String arn) {
+        return loadBalancers.getOrDefault(region, Map.of()).get(arn);
     }
 
     /** Capacity reservation status for a load balancer. All fields are {@code null} when no
@@ -737,8 +753,8 @@ public class ElbV2Service {
     public List<TargetHealth> describeTargetHealth(String region, String tgArn,
                                                      List<TargetDescription> filterTargets) {
         TargetGroup tg = requireTargetGroup(region, tgArn);
-        List<TargetDescription> candidates = filterTargets != null && !filterTargets.isEmpty()
-                ? filterTargets : tg.getTargets();
+        boolean hasFilterTargets = filterTargets != null && !filterTargets.isEmpty();
+        List<TargetDescription> candidates = hasFilterTargets ? filterTargets : tg.getTargets();
 
         boolean isLambdaTg = "lambda".equals(tg.getTargetType());
         return candidates.stream().map(t -> {
@@ -751,17 +767,24 @@ public class ElbV2Service {
             }
             int port = ElbV2HealthChecker.effectivePort(t, tg);
             th.setHealthCheckPort(String.valueOf(port));
-            String state = healthChecker.getState(tgArn, t.getId(), port);
-            th.setState(state);
-            if ("initial".equals(state)) {
-                th.setReason("Elb.RegistrationInProgress");
-                th.setDescription("Target registration is in progress");
-            } else if ("unhealthy".equals(state)) {
-                th.setReason("Target.FailedHealthChecks");
-                th.setDescription("Health checks failed");
+            if (hasFilterTargets && !isRegisteredTarget(tg, t, port)) {
+                th.setState("unused");
+                th.setReason("Target.NotRegistered");
+                th.setDescription("Target is not registered to the target group");
+                return th;
             }
+            ElbV2HealthChecker.TargetHealthStatus health = healthChecker.getHealth(tgArn, t.getId(), port);
+            th.setState(health.state());
+            th.setReason(health.reason());
+            th.setDescription(health.description());
             return th;
         }).collect(Collectors.toList());
+    }
+
+    private static boolean isRegisteredTarget(TargetGroup targetGroup, TargetDescription candidate, int candidatePort) {
+        return targetGroup.getTargets().stream()
+                .anyMatch(registered -> Objects.equals(registered.getId(), candidate.getId())
+                        && ElbV2HealthChecker.effectivePort(registered, targetGroup) == candidatePort);
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────

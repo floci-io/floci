@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.cloudfront.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public class CloudFrontOriginAccessIdentity {
 
     private String id;

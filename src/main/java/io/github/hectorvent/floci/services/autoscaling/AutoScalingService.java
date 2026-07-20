@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -19,6 +21,16 @@ import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AutoScalingService {
+
+    static final String MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE =
+            "You must use a valid fully-formed launch template. The request must contain the parameter ImageId";
+    static final String INVALID_LAUNCH_TEMPLATE_MESSAGE =
+            "The specified launch template does not exist.";
+    static final String INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE =
+            "Valid requests must contain either the InstanceID parameter "
+                    + "or both the ImageId and InstanceType parameters.";
+    static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
+            "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
     @Inject
     RegionResolver regionResolver;
@@ -58,8 +70,8 @@ public class AutoScalingService {
 
     // ── Launch Configurations ──────────────────────────────────────────────────
 
-    public LaunchConfiguration createLaunchConfiguration(String region, String name, String imageId,
-                                                          String instanceType, String keyName,
+    public LaunchConfiguration createLaunchConfiguration(String region, String name, String instanceId,
+                                                          String imageId, String instanceType, String keyName,
                                                           List<String> securityGroups, String userData,
                                                           String iamInstanceProfile,
                                                           boolean associatePublicIpAddress) {
@@ -68,13 +80,47 @@ public class AutoScalingService {
             throw new AwsException("AlreadyExists",
                     "Launch configuration '" + name + "' already exists.", 400);
         }
+        if (isBlank(instanceId) && (isBlank(imageId) || isBlank(instanceType))) {
+            throw new AwsException("ValidationError", INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE, 400);
+        }
+        if (notBlank(instanceId) && ec2Service != null) {
+            List<Instance> sourceInstances = ec2Service.describeInstances(region, List.of(instanceId), Map.of())
+                    .stream()
+                    .flatMap(reservation -> reservation.getInstances().stream())
+                    .collect(Collectors.toList());
+            if (!sourceInstances.isEmpty()) {
+                Instance source = sourceInstances.getFirst();
+                if (isBlank(imageId)) {
+                    imageId = source.getImageId();
+                }
+                if (isBlank(instanceType)) {
+                    instanceType = source.getInstanceType();
+                }
+                if (isBlank(keyName)) {
+                    keyName = source.getKeyName();
+                }
+                if ((securityGroups == null || securityGroups.isEmpty())
+                        && source.getSecurityGroups() != null) {
+                    securityGroups = source.getSecurityGroups().stream()
+                            .map(group -> group.getGroupId() != null ? group.getGroupId() : group.getGroupName())
+                            .filter(Objects::nonNull)
+                            .collect(Collectors.toList());
+                }
+                if (isBlank(userData)) {
+                    userData = source.getUserData();
+                }
+                if (isBlank(iamInstanceProfile)) {
+                    iamInstanceProfile = source.getIamInstanceProfileArn();
+                }
+            }
+        }
         LaunchConfiguration lc = new LaunchConfiguration();
         lc.setLaunchConfigurationName(name);
         lc.setLaunchConfigurationArn(
                 AwsArnUtils.Arn.of("autoscaling", region, regionResolver.getAccountId(),
                         "launchConfiguration:" + name).toString());
         lc.setImageId(imageId);
-        lc.setInstanceType(instanceType != null ? instanceType : "t3.micro");
+        lc.setInstanceType(instanceType);
         lc.setKeyName(keyName);
         lc.setSecurityGroups(securityGroups != null ? new ArrayList<>(securityGroups) : new ArrayList<>());
         lc.setUserData(userData);
@@ -118,7 +164,8 @@ public class AutoScalingService {
                                                     List<String> targetGroupArns, List<String> lbNames,
                                                     String healthCheckType, int healthCheckGracePeriod,
                                                     List<String> terminationPolicies,
-                                                    Map<String, String> tags) {
+                                                    Map<String, String> tags,
+                                                    Map<String, Boolean> tagPropagateAtLaunch) {
         String key = asgKey(region, name);
         if (groups.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -131,6 +178,8 @@ public class AutoScalingService {
                     "Valid requests must contain either LaunchTemplate, LaunchConfigurationName, "
                             + "InstanceId or MixedInstancesPolicy parameter.", 400);
         }
+        validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
+                launchTemplateVersion, mixedInstancesPolicy);
 
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setAutoScalingGroupName(name);
@@ -158,6 +207,9 @@ public class AutoScalingService {
         if (tags != null) {
             asg.getTags().putAll(tags);
         }
+        if (tagPropagateAtLaunch != null) {
+            asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
+        }
         groups.put(key, asg);
         return asg;
     }
@@ -174,6 +226,20 @@ public class AutoScalingService {
                                         List<String> terminationPolicies) {
         AutoScalingGroup asg = requireGroup(region, name);
         validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+        if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
+            throw new AwsException("ValidationError",
+                    "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
+        }
+        rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
+                launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
+        LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
+                launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
+        validateEffectiveLaunchImage(region,
+                effectiveIdentity.launchConfigurationName(),
+                effectiveIdentity.launchTemplateId(),
+                effectiveIdentity.launchTemplateName(),
+                effectiveIdentity.launchTemplateVersion(),
+                effectiveIdentity.mixedInstancesPolicy());
         if (launchConfigName != null) {
             asg.setLaunchConfigurationName(launchConfigName);
             asg.setLaunchTemplateId(null);
@@ -264,15 +330,22 @@ public class AutoScalingService {
         groups.put(asgKey(region, name), asg);
     }
 
-    public void createOrUpdateTags(String region, String resourceId, String resourceType, Map<String, String> tags) {
+    public void createOrUpdateTags(
+            String region,
+            String resourceId,
+            String resourceType,
+            Map<String, String> tags,
+            Map<String, Boolean> tagPropagateAtLaunch) {
         AutoScalingGroup asg = requireTaggableGroup(region, resourceId, resourceType);
         asg.getTags().putAll(tags);
+        asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
     public void deleteTags(String region, String resourceId, String resourceType, List<String> tagKeys) {
         AutoScalingGroup asg = requireTaggableGroup(region, resourceId, resourceType);
         tagKeys.forEach(asg.getTags()::remove);
+        tagKeys.forEach(asg.getTagPropagateAtLaunch()::remove);
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
@@ -668,6 +741,107 @@ public class AutoScalingService {
         return value != null && !value.isBlank();
     }
 
+    private LaunchIdentity effectiveLaunchIdentity(AutoScalingGroup asg,
+                                                   String launchConfigName,
+                                                   String launchTemplateId,
+                                                   String launchTemplateName,
+                                                   String launchTemplateVersion,
+                                                   MixedInstancesPolicy mixedInstancesPolicy) {
+        LaunchIdentity identity = new LaunchIdentity(
+                asg.getLaunchConfigurationName(),
+                asg.getLaunchTemplateId(),
+                asg.getLaunchTemplateName(),
+                asg.getLaunchTemplateVersion(),
+                asg.getMixedInstancesPolicy());
+        if (launchConfigName != null) {
+            return new LaunchIdentity(launchConfigName, null, null, null, null);
+        }
+        if (launchTemplateId != null || launchTemplateName != null) {
+            return new LaunchIdentity(null, launchTemplateId, launchTemplateName, launchTemplateVersion, null);
+        }
+        if (mixedInstancesPolicy != null) {
+            return new LaunchIdentity(null, null, null, null, mixedInstancesPolicy);
+        }
+        return identity;
+    }
+
+    private void validateEffectiveLaunchImage(String region,
+                                              String launchConfigName,
+                                              String launchTemplateId,
+                                              String launchTemplateName,
+                                              String launchTemplateVersion,
+                                              MixedInstancesPolicy mixedInstancesPolicy) {
+        if (launchConfigName != null) {
+            return;
+        }
+        if (launchTemplateId != null || launchTemplateName != null) {
+            validateLaunchTemplateImage(region, launchTemplateId, launchTemplateName, launchTemplateVersion);
+            return;
+        }
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                mixedInstancesLaunchTemplateSpecification(mixedInstancesPolicy);
+        if (specification != null) {
+            validateLaunchTemplateImage(region,
+                    specification.getLaunchTemplateId(),
+                    specification.getLaunchTemplateName(),
+                    specification.getVersion());
+        }
+    }
+
+    private void validateLaunchTemplateImage(String region, String launchTemplateId,
+                                             String launchTemplateName, String launchTemplateVersion) {
+        if (ec2Service == null) {
+            return;
+        }
+        List<String> versions = isBlank(launchTemplateVersion) ? List.of() : List.of(launchTemplateVersion);
+        List<LaunchTemplate> launchTemplateVersions = ec2Service.describeLaunchTemplateVersions(
+                region,
+                launchTemplateId,
+                launchTemplateName,
+                versions);
+        if (launchTemplateVersions.isEmpty()) {
+            throw invalidLaunchTemplate();
+        }
+        if (isBlank(launchTemplateVersions.getFirst().getImageId())) {
+            throw missingLaunchTemplateImageId();
+        }
+    }
+
+    private static MixedInstancesPolicy.LaunchTemplateSpecification mixedInstancesLaunchTemplateSpecification(
+            MixedInstancesPolicy policy) {
+        if (policy == null || policy.getLaunchTemplate() == null) {
+            return null;
+        }
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                policy.getLaunchTemplate().getLaunchTemplateSpecification();
+        if (specification == null) {
+            return null;
+        }
+        if (isBlank(specification.getLaunchTemplateId()) && isBlank(specification.getLaunchTemplateName())) {
+            return null;
+        }
+        return specification;
+    }
+
+    private static AwsException missingLaunchTemplateImageId() {
+        return new AwsException("ValidationError", MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, 400);
+    }
+
+    private static AwsException invalidLaunchTemplate() {
+        return new AwsException("ValidationError", INVALID_LAUNCH_TEMPLATE_MESSAGE, 400);
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    private record LaunchIdentity(
+            String launchConfigurationName,
+            String launchTemplateId,
+            String launchTemplateName,
+            String launchTemplateVersion,
+            MixedInstancesPolicy mixedInstancesPolicy) {}
+
     private static String instanceRefreshKey(String region, String asgName, String refreshId) {
         return region + "::" + asgName + "::" + refreshId;
     }
@@ -678,6 +852,37 @@ public class AutoScalingService {
                 || "Cancelling".equals(status)
                 || "RollbackInProgress".equals(status)
                 || "Baking".equals(status);
+    }
+
+    private void rejectDesiredConfigurationUpdateDuringActiveRefresh(String region, String asgName,
+                                                                     String launchConfigName,
+                                                                     String launchTemplateId,
+                                                                     String launchTemplateName,
+                                                                     String launchTemplateVersion,
+                                                                     MixedInstancesPolicy mixedInstancesPolicy) {
+        if (!updatesLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy)) {
+            return;
+        }
+        boolean activeDesiredConfigurationRefresh = instanceRefreshes.values().stream()
+                .filter(r -> region.equals(r.getRegion()))
+                .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
+                .filter(r -> isActiveRefreshStatus(r.getStatus()))
+                .anyMatch(InstanceRefresh::hasDesiredConfiguration);
+        if (activeDesiredConfigurationRefresh) {
+            throw new AwsException("ValidationError", ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE, 400);
+        }
+    }
+
+    private static boolean updatesLaunchSource(String launchConfigName,
+                                               String launchTemplateId,
+                                               String launchTemplateName,
+                                               String launchTemplateVersion,
+                                               MixedInstancesPolicy mixedInstancesPolicy) {
+        return launchConfigName != null
+                || launchTemplateId != null
+                || launchTemplateName != null
+                || launchTemplateVersion != null
+                || mixedInstancesPolicy != null;
     }
 
     private static String normalizeRefreshStrategy(String strategy) {

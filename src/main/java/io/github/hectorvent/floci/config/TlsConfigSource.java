@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -48,6 +49,11 @@ public class TlsConfigSource implements ConfigSource {
     private static final String TLS_DIR = "tls";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    // host.docker.internal: how Lambda containers reach Floci when it runs on the host (not in a container).
+    private static final List<String> DEFAULT_SAN_HOSTNAMES = List.of(
+            "localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
+            "localhost.floci.io", "*.localhost.floci.io", "host.docker.internal");
+
     private final Map<String, String> properties = new HashMap<>();
 
     public TlsConfigSource() {
@@ -76,13 +82,13 @@ public class TlsConfigSource implements ConfigSource {
                 // Extract current hostname configuration
                 List<String> customHostnames = extractCustomHostnames();
                 List<String> currentHostnames = new ArrayList<>();
-                currentHostnames.addAll(List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                        "localhost.floci.io", "*.localhost.floci.io"));
+                currentHostnames.addAll(DEFAULT_SAN_HOSTNAMES);
                 currentHostnames.addAll(customHostnames);
                 
-                // Check if hostname configuration has changed
-                if (hostnameConfigChanged(tlsDir, currentHostnames)) {
-                    // Configuration changed or metadata missing - regenerate certificate
+                // Regenerate when the hostname config changed, or when the existing certificate
+                // is a legacy non-self-signed cert (issuer != subject) — those cannot serve as a
+                // trust anchor for clients that install them, so an upgrade must replace them.
+                if (hostnameConfigChanged(tlsDir, currentHostnames) || !isSelfSigned(certFile)) {
                     generateSelfSignedCert(tlsDir, certFile, keyFile);
                 } else {
                     // Configuration unchanged - reuse existing certificate
@@ -168,12 +174,11 @@ public class TlsConfigSource implements ConfigSource {
             // Extract custom hostnames and combine with defaults
             List<String> customHostnames = extractCustomHostnames();
             List<String> allSans = new ArrayList<>();
-            allSans.addAll(List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                    "localhost.floci.io", "*.localhost.floci.io"));
+            allSans.addAll(DEFAULT_SAN_HOSTNAMES);
             allSans.addAll(customHostnames);
 
             CertificateGenerator gen = new CertificateGenerator();
-            CertificateGenerator.GeneratedCertificate generated = gen.generateCertificate(
+            CertificateGenerator.GeneratedCertificate generated = gen.generateSelfSignedCertificate(
                     "localhost",
                     allSans,
                     KeyAlgorithm.RSA_2048);
@@ -194,6 +199,21 @@ public class TlsConfigSource implements ConfigSource {
         if (!Files.isReadable(Path.of(path))) {
             throw new IllegalStateException(
                     description + " file not found or not readable: " + path);
+        }
+    }
+
+    /**
+     * Returns {@code true} if the certificate at {@code certFile} is genuinely self-signed
+     * (issuer == subject) and therefore usable as a trust anchor. Legacy Floci certs carried a
+     * cosmetic Amazon issuer DN and return {@code false} here, triggering regeneration on upgrade.
+     */
+    private boolean isSelfSigned(Path certFile) {
+        try {
+            X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
+            return cert.getIssuerX500Principal().equals(cert.getSubjectX500Principal());
+        } catch (Exception e) {
+            LOG.warnv("TLS: could not inspect existing certificate ({0}); regenerating", e.getMessage());
+            return false;
         }
     }
 

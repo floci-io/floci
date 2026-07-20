@@ -82,6 +82,34 @@ class BackupIntegrationTest {
             .statusCode(400);
     }
 
+    @Test
+    @Order(14)
+    void getBackupVaultNotificationsReturnsResourceNotFound() {
+        // Notifications are never configured in the emulator; the AWS Backup API returns
+        // ResourceNotFoundException (HTTP 400) in that case, which clients branch on.
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/backup-vaults/" + VAULT_NAME + "/notification-configuration")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(15)
+    void getBackupVaultAccessPolicyReturnsResourceNotFound() {
+        // Access policy is never configured in the emulator; the AWS Backup API returns
+        // ResourceNotFoundException (HTTP 400) in that case, which clients branch on.
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/backup-vaults/" + VAULT_NAME + "/access-policy")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     // ── Plan ───────────────────────────────────────────────────────────────────
 
     @Test

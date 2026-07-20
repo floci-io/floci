@@ -38,6 +38,18 @@ class ServiceCatalogRoutingIntegrationTest {
     }
 
     @Test
+    void rpcV2ServiceNamesDeriveFromTargetPrefixes() {
+        // The smithy-rpc-v2 path segment is the service shape name == target prefix
+        // without the trailing dot (what the AWS SDKs actually send on the wire).
+        assertEquals("dynamodb", catalog.byCborSdkServiceId("DynamoDB_20120810").orElseThrow().externalKey());
+        assertEquals("dynamodb", catalog.byCborSdkServiceId("DynamoDBStreams_20120810").orElseThrow().externalKey());
+        assertEquals("kinesis", catalog.byCborSdkServiceId("Kinesis_20131202").orElseThrow().externalKey());
+        assertEquals("sqs", catalog.byCborSdkServiceId("AmazonSQS").orElseThrow().externalKey());
+        assertEquals("sns", catalog.byCborSdkServiceId("SNS_20100331").orElseThrow().externalKey());
+        assertEquals("states", catalog.byCborSdkServiceId("AWSStepFunctions").orElseThrow().externalKey());
+    }
+
+    @Test
     void queryProtocolAliasesAreDeclaredOnDescriptors() {
         assertTrue(catalog.byCredentialScope("sesv2").orElseThrow().supportsProtocol(ServiceProtocol.QUERY));
         assertTrue(catalog.byCredentialScope("cognito-idp").orElseThrow().supportsProtocol(ServiceProtocol.QUERY));

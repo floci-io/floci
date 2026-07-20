@@ -167,6 +167,13 @@ public class GlueJsonHandler {
             case "TagResource" -> handleTagResource(request);
             case "UntagResource" -> handleUntagResource(request);
             case "GetTags" -> handleGetTags(request);
+            // Read-only Glue actions for resources the emulator does not model. The AWS SDK
+            // expects each to return a 200 with its result key present (empty), so we emit the
+            // documented empty shape rather than an InvalidAction 400 that callers can't read.
+            case "GetJobs" -> Response.ok(Map.of("Jobs", List.of())).build();
+            case "GetCrawlers" -> Response.ok(Map.of("Crawlers", List.of())).build();
+            case "ListDataQualityRulesets" -> Response.ok(Map.of("Rulesets", List.of())).build();
+            case "GetSecurityConfigurations" -> Response.ok(Map.of("SecurityConfigurations", List.of())).build();
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
     }

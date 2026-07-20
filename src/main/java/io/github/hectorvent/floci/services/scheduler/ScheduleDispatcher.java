@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.scheduler;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.scheduler.SchedulerExpressionParser.Kind;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.quarkus.runtime.ShutdownEvent;
@@ -40,7 +41,7 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  */
 @ApplicationScoped
-public class ScheduleDispatcher {
+public class ScheduleDispatcher implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(ScheduleDispatcher.class);
 
@@ -79,6 +80,11 @@ public class ScheduleDispatcher {
 
     void onStop(@Observes ShutdownEvent ignored) {
         executor.shutdownNow();
+    }
+
+    public void clear() {
+        lastFireByArn.clear();
+        firedOnceByArn.clear();
     }
 
     void tickSafely() {

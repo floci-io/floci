@@ -95,6 +95,31 @@ class SsmSendCommandIntegrationTest {
 
     @Test
     @Order(3)
+    void sendCommandRejectsTimeoutBelowAwsMinimum() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.SendCommand")
+            .contentType(SSM_CT)
+            .body("""
+                {
+                    "InstanceIds": ["%s"],
+                    "DocumentName": "AWS-RunShellScript",
+                    "Parameters": {
+                        "commands": ["echo hello"]
+                    },
+                    "TimeoutSeconds": 1
+                }
+                """.formatted(INSTANCE_ID))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Value '1' at 'timeoutSeconds' failed to satisfy constraint"))
+            .body("message", containsString("greater than or equal to 30"));
+    }
+
+    @Test
+    @Order(4)
     void sendCommandCreatesCommandRecord() {
         String response = given()
             .header("X-Amz-Target", "AmazonSSM.SendCommand")
@@ -124,7 +149,7 @@ class SsmSendCommandIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void listCommandsReturnsCreatedCommand() {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListCommands")
@@ -139,7 +164,7 @@ class SsmSendCommandIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void listCommandInvocationsReturnsInvocation() {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListCommandInvocations")
@@ -159,7 +184,7 @@ class SsmSendCommandIntegrationTest {
     // ── ec2messages agent protocol ─────────────────────────────────────────
 
     @Test
-    @Order(6)
+    @Order(7)
     void agentGetsEndpoint() {
         given()
             .header("X-Amz-Target", "AmazonSSMMessageDeliveryService.GetEndpoint")
@@ -179,7 +204,7 @@ class SsmSendCommandIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void agentPollsAndGetsMessage() {
         given()
             .header("X-Amz-Target", "AmazonSSMMessageDeliveryService.GetMessages")
@@ -202,7 +227,7 @@ class SsmSendCommandIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void agentAcknowledgesMessage() {
         // First poll to get the message ID
         String msgId = given()
@@ -267,7 +292,7 @@ class SsmSendCommandIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void agentSendsReplyAndCommandStatusUpdates() {
         // Send a fresh command
         String resp = given()
@@ -337,7 +362,7 @@ class SsmSendCommandIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void cancelCommandUpdatesStatus() {
         String resp = given()
             .header("X-Amz-Target", "AmazonSSM.SendCommand")
@@ -379,7 +404,7 @@ class SsmSendCommandIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void sendCommandDirectlyExecutesForContainerBackedInstance() {
         Instant start = Instant.parse("2026-06-07T00:00:00Z");
         Instant end = Instant.parse("2026-06-07T00:00:01Z");

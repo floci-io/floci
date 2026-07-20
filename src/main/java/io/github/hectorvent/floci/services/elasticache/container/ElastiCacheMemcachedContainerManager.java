@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -67,7 +68,7 @@ public class ElastiCacheMemcachedContainerManager {
     public ElastiCacheContainerHandle start(String clusterId, String image) {
         LOG.infov("Starting Memcached container for cluster: {0}", clusterId);
 
-        String containerName = "floci-memcached-" + clusterId;
+        String containerName = ContainerStorageHelper.resourceName(config, "memcached", null, clusterId);
         lifecycleManager.removeIfExists(containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)

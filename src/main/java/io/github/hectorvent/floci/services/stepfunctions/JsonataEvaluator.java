@@ -63,10 +63,26 @@ public class JsonataEvaluator {
      * {@code [$states.result.Items.{"id": id}]}.
      */
     JsonNode evaluate(String expression, JsonNode statesVar) {
+        return evaluate(expression, statesVar, null);
+    }
+
+    JsonNode evaluate(String expression, JsonNode statesVar, JsonNode variables) {
         String expr = isExpression(expression) ? unwrap(expression) : expression;
         try {
             Jsonata jsonataExpr = jsonata(expr);
             Jsonata.Frame frame = jsonataExpr.createFrame();
+            // Workflow variables (the Assign field) are referenced as top-level $name in AWS's
+            // JSONata dialect, e.g. $CheckpointCount. They are bound alongside $states, never
+            // inside it: AWS reserves $states for input/result/errorOutput/context only. $states is
+            // bound last so that reservation holds even if a definition assigns a variable named
+            // "states", which AWS rejects but Floci does not yet validate.
+            if (variables != null && variables.isObject()) {
+                Iterator<Map.Entry<String, JsonNode>> fields = variables.fields();
+                while (fields.hasNext()) {
+                    Map.Entry<String, JsonNode> entry = fields.next();
+                    frame.bind(entry.getKey(), toObject(entry.getValue()));
+                }
+            }
             frame.bind("states", toObject(statesVar));
             Object result = jsonataExpr.evaluate(null, frame);
             return toJsonNode(result);
@@ -83,13 +99,17 @@ public class JsonataEvaluator {
      * All other strings pass through unchanged.
      */
     JsonNode resolveTemplate(JsonNode template, JsonNode statesVar) {
+        return resolveTemplate(template, statesVar, null);
+    }
+
+    JsonNode resolveTemplate(JsonNode template, JsonNode statesVar, JsonNode variables) {
         if (template == null || template.isNull() || template.isMissingNode()) {
             return template;
         }
         if (template.isTextual()) {
             String text = template.asText();
             if (isExpression(text)) {
-                return evaluate(text, statesVar);
+                return evaluate(text, statesVar, variables);
             }
             return template;
         }
@@ -98,7 +118,7 @@ public class JsonataEvaluator {
             Iterator<Map.Entry<String, JsonNode>> fields = template.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = fields.next();
-                JsonNode value = resolveTemplate(entry.getValue(), statesVar);
+                JsonNode value = resolveTemplate(entry.getValue(), statesVar, variables);
                 // Per JSONata spec: undefined (null) values are omitted from object output,
                 // matching real AWS Step Functions behavior.
                 if (value != null && !value.isNull() && !value.isMissingNode()) {
@@ -111,7 +131,7 @@ public class JsonataEvaluator {
             ArrayNode resolved = objectMapper.createArrayNode();
             for (int i = 0; i < template.size(); i++) {
                 JsonNode element = template.get(i);
-                JsonNode value = resolveTemplate(element, statesVar);
+                JsonNode value = resolveTemplate(element, statesVar, variables);
                 // Per real AWS behavior: undefined array elements fail the execution.
                 // Unlike object fields (which are omitted), undefined in an array is a runtime error.
                 if (value == null || value.isNull() || value.isMissingNode()) {

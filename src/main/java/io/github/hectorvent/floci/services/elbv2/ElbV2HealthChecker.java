@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
@@ -11,6 +12,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.List;
@@ -18,7 +20,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class ElbV2HealthChecker {
+public class ElbV2HealthChecker implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(ElbV2HealthChecker.class);
 
@@ -71,6 +73,12 @@ public class ElbV2HealthChecker {
         states.remove(tgArn);
     }
 
+    public void clear() {
+        timers.values().forEach(vertx::cancelTimer);
+        timers.clear();
+        states.clear();
+    }
+
     public void addTargets(String tgArn, List<TargetDescription> targets, TargetGroup tg) {
         if (config.services().elbv2().mock()) {
             return;
@@ -80,6 +88,9 @@ public class ElbV2HealthChecker {
             int port = effectivePort(t, tg);
             String key = stateKey(t.getId(), port);
             tgStates.putIfAbsent(key, new TargetState());
+        }
+        if (Boolean.TRUE.equals(tg.getHealthCheckEnabled())) {
+            vertx.setTimer(1, ignored -> probeAll(tgArn, tg));
         }
     }
 
@@ -95,15 +106,19 @@ public class ElbV2HealthChecker {
     }
 
     public String getState(String tgArn, String targetId, int port) {
+        return getHealth(tgArn, targetId, port).state();
+    }
+
+    public TargetHealthStatus getHealth(String tgArn, String targetId, int port) {
         Map<String, TargetState> tgStates = states.get(tgArn);
         if (tgStates == null) {
-            return "initial";
+            return TargetHealthStatus.registrationInProgress();
         }
         TargetState s = tgStates.get(stateKey(targetId, port));
         if (s == null) {
-            return "initial";
+            return TargetHealthStatus.registrationInProgress();
         }
-        return s.status;
+        return new TargetHealthStatus(s.status, s.reason, s.description);
     }
 
     public boolean isHealthy(String tgArn, TargetDescription target, int port) {
@@ -146,12 +161,19 @@ public class ElbV2HealthChecker {
                     state.consecutiveSuccesses++;
                     if (state.consecutiveSuccesses >= healthyThreshold) {
                         state.status = "healthy";
+                        state.reason = null;
+                        state.description = null;
+                    } else if ("initial".equals(state.status)) {
+                        state.reason = "Elb.InitialHealthChecking";
+                        state.description = "Initial health checks in progress";
                     }
                 } else {
                     state.consecutiveSuccesses = 0;
                     state.consecutiveFailures++;
                     if (state.consecutiveFailures >= unhealthyThreshold) {
                         state.status = "unhealthy";
+                        state.reason = "Target.ResponseCodeMismatch";
+                        state.description = "Health checks failed with these codes: [" + statusCode + "]";
                     }
                 }
             }).onFailure(err -> {
@@ -159,6 +181,13 @@ public class ElbV2HealthChecker {
                 state.consecutiveFailures++;
                 if (state.consecutiveFailures >= unhealthyThreshold) {
                     state.status = "unhealthy";
+                    if (isTimeout(err)) {
+                        state.reason = "Target.Timeout";
+                        state.description = "Request timed out";
+                    } else {
+                        state.reason = "Target.FailedHealthChecks";
+                        state.description = "Health checks failed";
+                    }
                 }
                 LOG.debugv("Health check failed for {0}:{1} - {2}", host, port, err.getMessage());
             });
@@ -197,12 +226,34 @@ public class ElbV2HealthChecker {
                 .anyMatch(codeStr::equals);
     }
 
+    private static boolean isTimeout(Throwable err) {
+        Throwable current = err;
+        while (current != null) {
+            if (current instanceof SocketTimeoutException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private static String stateKey(String targetId, int port) {
         return targetId + ":" + port;
     }
 
+    public record TargetHealthStatus(String state, String reason, String description) {
+        private static TargetHealthStatus registrationInProgress() {
+            return new TargetHealthStatus(
+                    "initial",
+                    "Elb.RegistrationInProgress",
+                    "Target registration is in progress");
+        }
+    }
+
     private static class TargetState {
         volatile String status = "initial";
+        volatile String reason = "Elb.RegistrationInProgress";
+        volatile String description = "Target registration is in progress";
         volatile int consecutiveSuccesses = 0;
         volatile int consecutiveFailures = 0;
     }

@@ -2,11 +2,7 @@ package io.github.hectorvent.floci.services.athena;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.MethodOrderer;
-import org.junit.jupiter.api.Order;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.*;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -334,5 +330,51 @@ class AthenaIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
             .body("message", equalTo("The primary workgroup cannot be deleted."));
+    }
+
+    @Test
+    @Order(12)
+    void getTableMetadataTimestampsAreSerializedAsEpochSecondsNumbers() {
+        given()
+                .header("X-Amz-Target", "AWSGlue.CreateDatabase")
+                .contentType(CONTENT_TYPE)
+                .body("{ \"DatabaseInput\": { \"Name\": \"ts-format-test\" } }")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "AWSGlue.CreateTable")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "DatabaseName": "ts-format-test",
+                          "TableInput": {
+                            "Name": "events",
+                            "TableType": "EXTERNAL_TABLE",
+                            "StorageDescriptor": {
+                              "Location": "s3://bucket/events",
+                              "Columns": [ { "Name": "id", "Type": "string" } ]
+                            }
+                          }
+                        }
+                        """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "AmazonAthena.GetTableMetadata")
+                .contentType(CONTENT_TYPE)
+                .body("{ \"CatalogName\": \"AwsDataCatalog\", \"DatabaseName\": \"ts-format-test\", \"TableName\": \"events\" }")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("TableMetadata.Name", equalTo("events"))
+                .body("TableMetadata.CreateTime", instanceOf(Number.class))
+                .body("TableMetadata.LastAccessTime", instanceOf(Number.class));
     }
 }

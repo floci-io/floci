@@ -35,6 +35,7 @@ import software.amazon.awssdk.services.ssm.model.PutParameterResponse;
 import software.amazon.awssdk.services.ssm.model.RemoveTagsFromResourceRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandResponse;
+import software.amazon.awssdk.services.ssm.model.SsmException;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -244,6 +245,25 @@ class SsmTest {
 
     @Test
     @Order(13)
+    void sendCommandRejectsTimeoutBelowAwsMinimum() {
+        assertThatThrownBy(() -> ssm.sendCommand(SendCommandRequest.builder()
+                .documentName("AWS-RunShellScript")
+                .instanceIds(COMMAND_INSTANCE_ID)
+                .parameters(Map.of("commands", List.of("echo floci-sdk")))
+                .timeoutSeconds(1)
+                .build()))
+                .isInstanceOfSatisfying(SsmException.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().serviceName()).isEqualTo("Ssm");
+                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .contains("Value '1' at 'timeoutSeconds' failed to satisfy constraint")
+                            .contains("greater than or equal to 30");
+                });
+    }
+
+    @Test
+    @Order(14)
     void sendCommandCreatesPendingInvocation() {
         SendCommandResponse response = ssm.sendCommand(SendCommandRequest.builder()
                 .documentName("AWS-RunShellScript")
@@ -269,7 +289,7 @@ class SsmTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void listRunCommandsAndInvocations() {
         ListCommandsResponse commands = ssm.listCommands(
                 ListCommandsRequest.builder().commandId(commandId).build());
@@ -296,7 +316,7 @@ class SsmTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void cancelCommandUpdatesInvocationStatus() {
         ssm.cancelCommand(CancelCommandRequest.builder()
                 .commandId(commandId)

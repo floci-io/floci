@@ -63,7 +63,7 @@ class SecretsManagerServiceTest {
     @Test
     void putSecretValueRotatesVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, null);
+        service.putSecretValue("my-secret", "v2", null, null, REGION, null);
 
         SecretVersion current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
         assertEquals("v2", current.getSecretString());
@@ -77,14 +77,14 @@ class SecretsManagerServiceTest {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         service.deleteSecret("my-secret", null, true, REGION);
         assertThrows(AwsException.class, () ->
-                service.putSecretValue("my-secret", "v2", null, REGION, null));
+                service.putSecretValue("my-secret", "v2", null, null, REGION, null));
     }
 
     @Test
     void putSecretValuePendingStage() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT"));
-        service.putSecretValue("my-secret", "v3", null, REGION, List.of("AWSPENDING"));
+        service.putSecretValue("my-secret", "v2", null, null, REGION, List.of("AWSCURRENT"));
+        service.putSecretValue("my-secret", "v3", null, null, REGION, List.of("AWSPENDING"));
 
         SecretVersion previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
         assertEquals("v1", previous.getSecretString());
@@ -104,7 +104,7 @@ class SecretsManagerServiceTest {
         assertEquals("v1", current.getSecretString());
 
         // adding new secret version, previous will be v1, current will be v2
-        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT"));
+        service.putSecretValue("my-secret", "v2", null, null, REGION, List.of("AWSCURRENT"));
         SecretVersion previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
         assertEquals("v1", previous.getSecretString());
         current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
@@ -112,7 +112,7 @@ class SecretsManagerServiceTest {
 
         // adding new secret version v3, current and pending will be v3,
         // previous will be v2
-        service.putSecretValue("my-secret", "v3", null, REGION, List.of("AWSCURRENT", "AWSPENDING"));
+        service.putSecretValue("my-secret", "v3", null, null, REGION, List.of("AWSCURRENT", "AWSPENDING"));
         previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
         assertEquals("v2", previous.getSecretString());
         current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
@@ -127,13 +127,13 @@ class SecretsManagerServiceTest {
 
         // no stages
         Assertions.assertThrows(AwsException.class, () ->
-            service.putSecretValue("my-secret", "v2", null, REGION, List.of())
+            service.putSecretValue("my-secret", "v2", null, null, REGION, List.of())
         );
         // more than 20
         List<String> stages =
                 IntStream.range(0, 21).mapToObj(i -> "stage" + i).toList();
         Assertions.assertThrows(AwsException.class, () ->
-                service.putSecretValue("my-secret", "v2", null, REGION, stages)
+                service.putSecretValue("my-secret", "v2", null, null, REGION, stages)
         );
     }
 
@@ -142,12 +142,12 @@ class SecretsManagerServiceTest {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         // Stage name is 0-length
         Assertions.assertThrows(AwsException.class, () ->
-                service.putSecretValue("my-secret", "v2", null, REGION, List.of(""))
+                service.putSecretValue("my-secret", "v2", null, null, REGION, List.of(""))
         );
         // Stage name is larger than 256 characters
         String stageName = RandomStringUtils.randomAlphanumeric(257);
         Assertions.assertThrows(AwsException.class, () ->
-                service.putSecretValue("my-secret", "v2", null, REGION, List.of(stageName))
+                service.putSecretValue("my-secret", "v2", null, null, REGION, List.of(stageName))
         );
 
     }
@@ -213,13 +213,65 @@ class SecretsManagerServiceTest {
     }
 
     @Test
-    void rotateSecret() {
-        service.createSecret("my-secret", "value", null, null, null, null, REGION);
-        Secret rotated = service.rotateSecret("my-secret",
+    void rotateSecret() throws Exception {
+        // We need a mocked LambdaService for testing the orchestrator.
+        // The service in the setUp method doesn't have it.
+        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        
+        io.github.hectorvent.floci.services.lambda.model.InvokeResult successResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+        // Assume success response
+        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+                .thenReturn(successResult);
+
+        SecretsManagerService svc = new SecretsManagerService(
+                new InMemoryStorage<String, Secret>(), 30,
+                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+
+        svc.createSecret("my-secret", "value", null, null, null, null, REGION);
+        
+        Secret.RotationRules rules = new Secret.RotationRules(30, null, null);
+        
+        Secret rotated = svc.rotateSecret("my-secret", "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                 "arn:aws:lambda:us-east-1:000000000000:function:rotate",
-                Map.of("AutomaticallyAfterDays", 30), true, REGION);
+                rules, true, REGION);
 
         assertTrue(rotated.isRotationEnabled());
+        
+        // Verify lambda invoked 4 times
+        org.mockito.Mockito.verify(mockLambda, org.mockito.Mockito.timeout(5000).times(4))
+                .invoke(org.mockito.Mockito.eq(REGION),
+                        org.mockito.Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"), 
+                        org.mockito.Mockito.any(byte[].class),
+                        org.mockito.Mockito.eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.RequestResponse));
+    }
+
+    @Test
+    void rotateSecretNotImmediate() throws Exception {
+        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        
+        io.github.hectorvent.floci.services.lambda.model.InvokeResult successResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+                .thenReturn(successResult);
+
+        SecretsManagerService svc = new SecretsManagerService(
+                new InMemoryStorage<String, Secret>(), 30,
+                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+
+        svc.createSecret("my-secret", "value", null, null, null, null, REGION);
+        Secret.RotationRules rules = new Secret.RotationRules(30, null, null);
+        
+        svc.rotateSecret("my-secret", "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "arn:aws:lambda:us-east-1:000000000000:function:rotate",
+                rules, false, REGION);
+
+        // Verify lambda invoked 1 time (testSecret only for non-immediate rotation)
+        org.mockito.Mockito.verify(mockLambda, org.mockito.Mockito.timeout(5000).times(1))
+                .invoke(org.mockito.Mockito.eq(REGION),
+                        org.mockito.Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"), 
+                        org.mockito.Mockito.any(byte[].class),
+                        org.mockito.Mockito.eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.RequestResponse));
     }
 
     @Test
@@ -254,7 +306,7 @@ class SecretsManagerServiceTest {
     @Test
     void listSecretVersionIds() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, null);
+        service.putSecretValue("my-secret", "v2", null, null, REGION, null);
 
         Map<String, List<String>> versions = service.listSecretVersionIds("my-secret", REGION);
         assertEquals(2, versions.size());
@@ -270,7 +322,7 @@ class SecretsManagerServiceTest {
         SecretVersion v1 = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
         String v1Id = v1.getVersionId();
 
-        service.putSecretValue("my-secret", "v2", null, REGION, null);
+        service.putSecretValue("my-secret", "v2", null, null, REGION, null);
 
         SecretVersion fetched = service.getSecretValue("my-secret", v1Id, null, REGION);
         assertEquals("v1", fetched.getSecretString());
@@ -281,32 +333,73 @@ class SecretsManagerServiceTest {
         service.createSecret("secret1", "value1", null, null, null, null, REGION);
         service.createSecret("secret2", "value2", null, null, null, null, REGION);
 
-        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
                 List.of("secret1", "secret2"), REGION);
 
+        List<SecretsManagerService.BatchSecretValue> values = result.values();
         assertEquals(2, values.size());
         assertTrue(values.stream().anyMatch(v -> "secret1".equals(v.name()) && "value1".equals(v.secretString())));
         assertTrue(values.stream().anyMatch(v -> "secret2".equals(v.name()) && "value2".equals(v.secretString())));
+
+        assertEquals(0, result.errors().size());
     }
 
     @Test
-    void batchGetSecretValueSkipsDeleted() {
+    void batchGetSecretValueReportsDeletedInErrors() {
         service.createSecret("secret1", "value1", null, null, null, null, REGION);
         service.createSecret("secret2", "value2", null, null, null, null, REGION);
         service.deleteSecret("secret1", 7, false, REGION);
 
-        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
                 List.of("secret1", "secret2"), REGION);
 
+        List<SecretsManagerService.BatchSecretValue> values = result.values();
         assertEquals(1, values.size());
         assertEquals("secret2", values.getFirst().name());
+
+        List<SecretsManagerService.BatchGetSecretValueError> errors = result.errors();
+        assertEquals(1, errors.size());
+        assertEquals("secret1", errors.getFirst().secretId());
+        assertEquals("InvalidRequestException", errors.getFirst().errorCode());
+        assertEquals("You can't perform this operation on the secret because it was marked for deletion.",
+                errors.getFirst().message());
     }
 
     @Test
-    void batchGetSecretValueThrowsIfNotFound() {
+    void batchGetSecretValueReportsMissingCurrentVersionInErrors() {
         service.createSecret("secret1", "value1", null, null, null, null, REGION);
-        assertThrows(AwsException.class, () ->
-                service.batchGetSecretValue(List.of("secret1", "non-existent"), REGION));
+
+        Secret secret = service.describeSecret("secret1", REGION);
+        SecretVersion version = secret.getVersions().get(secret.getCurrentVersionId());
+        version.setVersionStages(List.of());
+
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
+                List.of("secret1"), REGION);
+
+        assertEquals(0, result.values().size());
+
+        List<SecretsManagerService.BatchGetSecretValueError> errors = result.errors();
+        assertEquals(1, errors.size());
+        assertEquals("secret1", errors.getFirst().secretId());
+        assertEquals("ResourceNotFoundException", errors.getFirst().errorCode());
+    }
+
+    @Test
+    void batchGetSecretValueReportsMissingInErrors() {
+        service.createSecret("secret1", "value1", null, null, null, null, REGION);
+
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
+                List.of("secret1", "non-existent"), REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = result.values();
+        assertEquals(1, values.size());
+        assertEquals("secret1", values.getFirst().name());
+
+        List<SecretsManagerService.BatchGetSecretValueError> errors = result.errors();
+        assertEquals(1, errors.size());
+        assertEquals("non-existent", errors.getFirst().secretId());
+        assertEquals("ResourceNotFoundException", errors.getFirst().errorCode());
+        assertEquals("Secrets Manager can't find the specified secret.", errors.getFirst().message());
     }
 
     @Test
@@ -431,7 +524,7 @@ class SecretsManagerServiceTest {
     @Test
     void updateSecretVersionStageRemoveFromMustMatchCurrentVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, null);
+        service.putSecretValue("my-secret", "v2", null, null, REGION, null);
 
         String v1Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
         String v2Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
@@ -452,7 +545,7 @@ class SecretsManagerServiceTest {
     @Test
     void updateSecretVersionStageMovesCustomLabel() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT", "MYSTAGE"));
+        service.putSecretValue("my-secret", "v2", null, null, REGION, List.of("AWSCURRENT", "MYSTAGE"));
 
         String v1Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
         String v2Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
@@ -469,7 +562,7 @@ class SecretsManagerServiceTest {
     @Test
     void updateSecretVersionStageMoveAwsCurrentAddsAwsPrevious() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, null);
+        service.putSecretValue("my-secret", "v2", null, null, REGION, null);
 
         String v1Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
         String v2Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
@@ -500,8 +593,8 @@ class SecretsManagerServiceTest {
     @Test
     void updateSecretVersionStageMoveAwsCurrentCleansUpPreviousFromMultiStageVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, null);
-        service.putSecretValue("my-secret", "v3", null, REGION, null);
+        service.putSecretValue("my-secret", "v2", null, null, REGION, null);
+        service.putSecretValue("my-secret", "v3", null, null, REGION, null);
 
         String v1Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
         String v3Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
@@ -524,8 +617,8 @@ class SecretsManagerServiceTest {
     @Test
     void updateSecretVersionStageMoveAwsCurrentRemovesPreviousOnlyVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, null);
-        service.putSecretValue("my-secret", "v3", null, REGION, null);
+        service.putSecretValue("my-secret", "v2", null, null, REGION, null);
+        service.putSecretValue("my-secret", "v3", null, null, REGION, null);
 
         String v3Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
         String v2Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
@@ -541,7 +634,7 @@ class SecretsManagerServiceTest {
     }
 
     @Test
-    void updateSecretVersionStageRemovesLabelOnly() {
+    void rotateSecretRemovesAwsCurrentOnlyRemovesLabel() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         String v1Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
 
@@ -554,5 +647,170 @@ class SecretsManagerServiceTest {
         SecretVersion v1After = service.getSecretValue("my-secret", v1Id, null, REGION);
         assertFalse(v1After.getVersionStages().contains("CUSTOMLABEL"));
         assertTrue(v1After.getVersionStages().contains("AWSCURRENT"));
+    }
+
+    @Test
+    void rotateSecretFailsEarly() throws Exception {
+        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+
+        io.github.hectorvent.floci.services.lambda.model.InvokeResult successResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+        io.github.hectorvent.floci.services.lambda.model.InvokeResult errorResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+        errorResult.setFunctionError("Unhandled");
+
+        // Fail on second invocation (setSecret)
+        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+                .thenReturn(successResult)
+                .thenReturn(errorResult);
+
+        SecretsManagerService svc = new SecretsManagerService(
+                new InMemoryStorage<String, Secret>(), 30,
+                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+
+        svc.createSecret("my-secret", "value", null, null, null, null, REGION);
+        Secret.RotationRules rules = new Secret.RotationRules(30, null, null);
+
+        svc.rotateSecret("my-secret", "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "arn:aws:lambda:us-east-1:000000000000:function:rotate",
+                rules, true, REGION);
+
+        // Verify lambda invoked 2 times only (createSecret, setSecret)
+        org.mockito.Mockito.verify(mockLambda, org.mockito.Mockito.timeout(5000).times(2))
+                .invoke(org.mockito.Mockito.eq(REGION),
+                        org.mockito.Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"),
+                        org.mockito.Mockito.any(byte[].class),
+                        org.mockito.Mockito.eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.RequestResponse));
+    }
+
+    @Test
+    void rotateSecret_actuallyChangesTheStoredSecretValue() throws Exception {
+        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        String lambdaArn = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
+
+        SecretsManagerService svc = new SecretsManagerService(
+                new InMemoryStorage<String, Secret>(), 30,
+                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+
+        svc.createSecret("my-secret", "old-value", null, null, null, null, REGION);
+
+        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+                .thenAnswer(invocation -> {
+                    byte[] payloadBytes = invocation.getArgument(2);
+                    com.fasterxml.jackson.databind.JsonNode payload = new com.fasterxml.jackson.databind.ObjectMapper().readTree(payloadBytes);
+                    String step = payload.get("Step").asText();
+                    String token = payload.get("ClientRequestToken").asText();
+
+                    switch (step) {
+                        case "createSecret" ->
+                                svc.putSecretValue("my-secret", "new-rotated-value", null, token, REGION, List.of("AWSPENDING"));
+                        case "finishSecret" ->
+                                svc.updateSecretVersionStage("my-secret", token,
+                                        svc.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId(),
+                                        "AWSCURRENT", REGION);
+                        default -> { /* setSecret, testSecret: no-op for this test */ }
+                    }
+                    io.github.hectorvent.floci.services.lambda.model.InvokeResult ok = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+                    ok.setStatusCode(200);
+                    return ok;
+                });
+
+        svc.rotateSecret("my-secret", "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                lambdaArn, null, true, REGION);
+
+        long end = System.currentTimeMillis() + 2000;
+        boolean passed = false;
+        while (System.currentTimeMillis() < end) {
+            try {
+                SecretVersion current = svc.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
+                assertEquals("new-rotated-value", current.getSecretString());
+                passed = true;
+                break;
+            } catch (Throwable t) {
+                Thread.sleep(100);
+            }
+        }
+        assertTrue(passed, "Failed to wait for rotation completion");
+    }
+
+    @Test
+    void rotateSecret_previousRotationInProgressThrows() throws Exception {
+        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        String lambdaArn = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
+
+        SecretsManagerService svc = new SecretsManagerService(
+                new InMemoryStorage<String, Secret>(), 30,
+                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+
+        svc.createSecret("my-secret", "old-value", null, null, null, null, REGION);
+
+        // Put an AWSPENDING version to simulate an ongoing rotation
+        svc.putSecretValue("my-secret", "pending-value", null, "a1b2c3d4-e5f6-7890-abcd-ef1234567890", REGION, List.of("AWSPENDING"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+            svc.rotateSecret("my-secret", "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    lambdaArn, null, true, REGION)
+        );
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void rotateSecret_concurrentCallsLockingWorks() throws Exception {
+        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        String lambdaArn = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
+
+        SecretsManagerService svc = new SecretsManagerService(
+                new InMemoryStorage<String, Secret>(), 30,
+                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+
+        svc.createSecret("my-secret", "old-value", null, null, null, null, REGION);
+        
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        
+        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+                .thenAnswer(invocation -> {
+                    // Create secret and hold the lock on executor to simulate delay
+                    byte[] payloadBytes = invocation.getArgument(2);
+                    com.fasterxml.jackson.databind.JsonNode payload = new com.fasterxml.jackson.databind.ObjectMapper().readTree(payloadBytes);
+                    String step = payload.get("Step").asText();
+                    String token = payload.get("ClientRequestToken").asText();
+
+                    if ("createSecret".equals(step)) {
+                        svc.putSecretValue("my-secret", "new-rotated-value", null, token, REGION, List.of("AWSPENDING"));
+                        latch.await();
+                    }
+
+                    io.github.hectorvent.floci.services.lambda.model.InvokeResult ok = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+                    ok.setStatusCode(200);
+                    return ok;
+                });
+
+        // Trigger first rotation
+        svc.rotateSecret("my-secret", "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                lambdaArn, null, true, REGION);
+                
+        // Wait until AWSPENDING is set by the background thread
+        long end = System.currentTimeMillis() + 2000;
+        boolean pendingFound = false;
+        while (System.currentTimeMillis() < end) {
+            try {
+                svc.getSecretValue("my-secret", null, "AWSPENDING", REGION);
+                pendingFound = true;
+                break;
+            } catch (Exception e) {
+                Thread.sleep(100);
+            }
+        }
+        assertTrue(pendingFound, "AWSPENDING version was not created in time");
+
+        // Trigger second rotation while the first one is running and holds AWSPENDING
+        AwsException ex = assertThrows(AwsException.class, () ->
+            svc.rotateSecret("my-secret", "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    lambdaArn, null, true, REGION)
+        );
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+        latch.countDown();
     }
 }

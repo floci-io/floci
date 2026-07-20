@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -57,6 +58,7 @@ public class CloudFrontService {
     private final StorageBackend<String, FieldLevelEncryptionProfile> fleProfileStore;
     private final StorageBackend<String, MonitoringSubscription> monitoringStore;
     private final String accountId;
+    private final String domainSuffix;
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config) {
@@ -95,6 +97,7 @@ public class CloudFrontService {
         this.monitoringStore = factory.create("cloudfront", "cloudfront-monitoring-subscriptions.json",
                 new TypeReference<Map<String, MonitoringSubscription>>() {});
         this.accountId = config.defaultAccountId();
+        this.domainSuffix = config.services().cloudfront().domainSuffix();
     }
 
     // ── Distributions ─────────────────────────────────────────────────────────
@@ -102,8 +105,8 @@ public class CloudFrontService {
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
         String id = generateDistributionId();
         dist.setId(id);
-        dist.setArn("arn:aws:cloudfront::" + accountId + ":distribution/" + id);
-        dist.setDomainName(id + ".cloudfront.net");
+        dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
+        dist.setDomainName(id + "." + domainSuffix);
         dist.setStatus("Deployed");
         dist.setLastModifiedTime(Instant.now());
         dist.setEtag(UUID.randomUUID().toString());
@@ -773,7 +776,7 @@ public class CloudFrontService {
     // ── Realtime Log Configs ──────────────────────────────────────────────────
 
     public synchronized RealtimeLogConfig createRealtimeLogConfig(RealtimeLogConfig cfg) {
-        String arn = "arn:aws:cloudfront::" + accountId + ":realtime-log-config/" + cfg.getName();
+        String arn = AwsArnUtils.Arn.of("cloudfront", "", accountId, "realtime-log-config/" + cfg.getName()).toString();
         cfg.setArn(arn);
         realtimeLogConfigStore.put(cfg.getName(), cfg);
         return cfg;
@@ -793,7 +796,7 @@ public class CloudFrontService {
 
     public synchronized RealtimeLogConfig updateRealtimeLogConfig(RealtimeLogConfig updated) {
         getRealtimeLogConfig(updated.getName());
-        String arn = "arn:aws:cloudfront::" + accountId + ":realtime-log-config/" + updated.getName();
+        String arn = AwsArnUtils.Arn.of("cloudfront", "", accountId, "realtime-log-config/" + updated.getName()).toString();
         updated.setArn(arn);
         realtimeLogConfigStore.put(updated.getName(), updated);
         return updated;
@@ -816,8 +819,8 @@ public class CloudFrontService {
     public synchronized StreamingDistribution createStreamingDistribution(StreamingDistribution sd) {
         String id = generateDistributionId();
         sd.setId(id);
-        sd.setArn("arn:aws:cloudfront::" + accountId + ":streaming-distribution/" + id);
-        sd.setDomainName(id + ".cloudfront.net");
+        sd.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "streaming-distribution/" + id).toString());
+        sd.setDomainName(id + "." + domainSuffix);
         sd.setStatus("Deployed");
         sd.setLastModifiedTime(Instant.now());
         sd.setEtag(UUID.randomUUID().toString());

@@ -6,13 +6,18 @@ import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
+
+import org.mockito.ArgumentCaptor;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -23,6 +28,7 @@ class EventBridgeInvokerTest {
     private EventBridgeInvoker invoker;
     private SqsService sqsService;
     private BatchService batchService;
+    private FirehoseService firehoseService;
 
     @BeforeEach
     void setUp() {
@@ -30,11 +36,13 @@ class EventBridgeInvokerTest {
         sqsService = mock(SqsService.class);
         SnsService snsService = mock(SnsService.class);
         batchService = mock(BatchService.class);
+        firehoseService = mock(FirehoseService.class);
         invoker = new EventBridgeInvoker(
                 lambdaService,
                 sqsService,
                 snsService,
                 batchService,
+                firehoseService,
                 new ObjectMapper(),
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
         );
@@ -121,6 +129,34 @@ class EventBridgeInvokerTest {
                 isNull(),
                 eq("us-west-2")
         );
+    }
+
+    @Test
+    void invokeTarget_firehoseTarget_putsEventJsonAsRecordData() {
+        Target target = new Target("id1",
+                "arn:aws:firehose:us-east-1:000000000000:deliverystream/my-stream", null, null);
+        String event = "{\"source\":\"local.test\",\"detail\":{\"orderId\":\"o-1\"}}";
+
+        invoker.invokeTarget(target, event, "us-east-1");
+
+        ArgumentCaptor<Record> captor = ArgumentCaptor.forClass(Record.class);
+        verify(firehoseService).putRecord(eq("my-stream"), captor.capture());
+        // The event JSON is the record Data verbatim: no wrapping, no trailing newline.
+        assertEquals(event, new String(captor.getValue().getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void invokeTarget_firehoseTarget_deliversInputOverrideNotEnvelope() {
+        Target target = new Target("id1",
+                "arn:aws:firehose:us-east-1:000000000000:deliverystream/my-stream",
+                "{\"custom\":\"payload\"}", null);
+
+        invoker.invokeTarget(target, "{\"ignored\":true}", "us-east-1");
+
+        ArgumentCaptor<Record> captor = ArgumentCaptor.forClass(Record.class);
+        verify(firehoseService).putRecord(eq("my-stream"), captor.capture());
+        assertEquals("{\"custom\":\"payload\"}",
+                new String(captor.getValue().getData(), StandardCharsets.UTF_8));
     }
 
     @Test

@@ -15,6 +15,7 @@ public class ContainerDefinition {
     private boolean essential = true;
     private List<PortMapping> portMappings;
     private List<KeyValuePair> environment;
+    private List<Secret> secrets;
     private List<String> command;
     private List<String> entryPoint;
     private List<MountPoint> mountPoints;
@@ -42,6 +43,9 @@ public class ContainerDefinition {
 
     public List<KeyValuePair> getEnvironment() { return environment; }
     public void setEnvironment(List<KeyValuePair> environment) { this.environment = environment; }
+
+    public List<Secret> getSecrets() { return secrets; }
+    public void setSecrets(List<Secret> secrets) { this.secrets = secrets; }
 
     public List<String> getCommand() { return command; }
     public void setCommand(List<String> command) { this.command = command; }

@@ -8,16 +8,24 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 
 ## Supported Management Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
+| `ValidateIamAuthToken` | Validate an IAM auth token (data-plane auth) |
 | `CreateReplicationGroup` | Start a new Redis/Valkey cluster |
 | `DescribeReplicationGroups` | List clusters and their connection info |
+| `ModifyReplicationGroup` | - |
 | `DeleteReplicationGroup` | Stop and remove a cluster |
 | `CreateUser` | Create an ElastiCache IAM user |
 | `DescribeUsers` | List ElastiCache users |
 | `ModifyUser` | Update user access strings |
 | `DeleteUser` | Remove an ElastiCache user |
-| `ValidateIamAuthToken` | Validate an IAM auth token (data-plane auth) |
+| `CreateCacheCluster` | - |
+| `DescribeCacheClusters` | - |
+| `DeleteCacheCluster` | - |
+| `DescribeCacheSubnetGroups` | - |
+| `DescribeCacheParameterGroups` | - |
+<!-- floci:actions:end -->
 
 ## Configuration
 

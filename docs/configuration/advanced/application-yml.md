@@ -45,6 +45,16 @@ floci:
   storage:
     mode: memory                      # memory | persistent | hybrid | wal
     persistent-path: ./data
+    # EFS access-point emulation for the shared local Docker volumes that back ECS
+    # efsVolumeConfiguration mounts. All opt-in; with no overrides a shared volume is a plain
+    # named volume (root:root 0755), so existing behaviour is unchanged. See docs/services/ecs.md.
+    efs:
+      # owner-uid: 1001            # CreationInfo.OwnerUid (set together with owner-gid)
+      # owner-gid: 1001            # CreationInfo.OwnerGid (set together with owner-uid)
+      # root-permissions: "2775"   # CreationInfo.Permissions; 3-4 octal digits (4-digit carries setgid/sticky)
+      init-image: busybox:stable   # image for the one-off chown/chmod of the volume root
+      # mount-user: "1001:1001"    # PosixUser: run mounting containers as uid[:gid]
+      # mount-group-add: 2000      # supplementary gid added to mounting containers
     wal:
       compaction-interval-ms: 30000
     services:
@@ -151,6 +161,7 @@ floci:
 
     rds:
       enabled: true
+      mock: false                             # true = clusters/instances created without Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
