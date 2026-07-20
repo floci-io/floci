@@ -44,6 +44,7 @@ Floci emulates 68 AWS services. See the [Services Overview](services/index.md) f
 | Athena | JSON 1.1 |
 | Glue Data Catalog + Schema Registry | JSON 1.1 |
 | Data Firehose | JSON 1.1 |
+| Managed Service for Apache Flink | JSON 1.1 |
 | ECS | JSON 1.1 |
 | EC2 | EC2 Query |
 | Lightsail | JSON 1.1 |

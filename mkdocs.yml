@@ -85,6 +85,7 @@ nav:
     - Cognito: services/cognito.md
     - KMS: services/kms.md
     - Kinesis: services/kinesis.md
+    - Managed Service for Apache Flink: services/kinesisanalytics.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
     - Step Functions: services/step-functions.md
