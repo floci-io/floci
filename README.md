@@ -190,7 +190,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config · CloudTrail\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -293,7 +293,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Elastic Beanstalk | In-process | Applications, application versions, environments, configuration templates, platform and solution stack metadata |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
-| CloudTrail | In-process | Trail lifecycle, event selectors, logging status; management API only |
+| CloudTrail | In-process | Trails, event selectors (S3 data events with bucket/prefix matching), `StartLogging`/`StopLogging`, scheduled gzipped log file emission to the destination bucket at AWS-shaped key paths, IAM-deny path emits `AccessDenied` records |
 | CloudFront | In-process | Distributions, origins, cache behaviors, invalidations, tagging |
 | WAF v2 | In-process | Web ACLs, IP sets, regex pattern sets, rule groups, logging configs, resource associations, tagging (REGIONAL and CLOUDFRONT scopes) |
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
