@@ -36,6 +36,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -1603,42 +1604,250 @@ class RdsServiceTest {
     }
 
     @Test
-    void modifyDbProxyPersistenceFailureLeavesStoredStateUntouched() {
-        StorageBackend<String, DbProxy> proxies = mock(StorageBackend.class);
-        StorageBackend<String, DbProxyTargetGroup> targetGroups = mock(StorageBackend.class);
-        DbProxy proxy = new DbProxy();
-        proxy.setDbProxyName("app-proxy");
-        proxy.setDbProxyArn("arn:aws:rds:us-east-1:123456789012:db-proxy:prx-abc");
-        proxy.setDbProxyResourceId("prx-abc");
-        proxy.setEngineFamily("POSTGRESQL");
-        proxy.setRoleArn(PROXY_ROLE_ARN);
-        proxy.setVpcSubnetIds(PROXY_SUBNET_IDS);
-        proxy.setAuth(PROXY_AUTH);
-        proxy.setCreatedAt(Instant.now());
-        proxy.setUpdatedAt(proxy.getCreatedAt());
-        DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
-        targetGroup.setDbProxyName("app-proxy");
-        targetGroup.setTargetGroupName("default");
-        targetGroup.setTargetGroupArn(
-                "arn:aws:rds:us-east-1:123456789012:target-group:prx-tg-abc");
-        targetGroup.setDefaultTargetGroup(true);
-        targetGroup.setCreatedAt(proxy.getCreatedAt());
-        targetGroup.setUpdatedAt(proxy.getCreatedAt());
-        when(proxies.get("us-east-1::app-proxy")).thenReturn(Optional.of(proxy));
-        when(targetGroups.get("us-east-1::app-proxy")).thenReturn(Optional.of(targetGroup));
-        org.mockito.Mockito.doThrow(new IllegalStateException("simulated persistence failure"))
-                .when(proxies).put(eq("us-east-1::app-proxy"), any());
-        RdsService service = new RdsService(containerManager, proxyManager, ec2Service,
-                regionResolver, config, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                null, null, proxies, targetGroups);
+    void createDbProxyPreservesOriginalFailureWhenProxyCleanupFails() {
+        InMemoryStorage<String, DbProxy> proxies = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = spy(new InMemoryStorage<>());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        String proxyKey = "us-east-1::first-proxy";
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated target-group persistence failure");
+        IllegalStateException cleanupFailure =
+                new IllegalStateException("simulated proxy cleanup failure");
+        doThrow(persistenceFailure).when(targetGroups).put(eq(proxyKey), any());
+        doThrow(cleanupFailure).doCallRealMethod().when(proxies).delete(proxyKey);
 
-        assertThrows(IllegalStateException.class, () -> service.modifyDbProxy(
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.createDbProxy(
+                        "first-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                        PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of()));
+
+        assertSame(persistenceFailure, thrown);
+        assertTrue(List.of(thrown.getSuppressed()).contains(cleanupFailure));
+        verify(targetGroups).delete(proxyKey);
+        DbProxy first = proxies.get(proxyKey).orElseThrow();
+        DbProxy second = service.createDbProxy(
+                "second-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        assertNotEquals(first.getProxyPort(), second.getProxyPort());
+
+        service.deleteDbProxy("first-proxy", "us-east-1");
+        DbProxy third = service.createDbProxy(
+                "third-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        assertEquals(first.getProxyPort(), third.getProxyPort());
+    }
+
+    @Test
+    void createDbProxyContinuesCleanupWhenTargetGroupCleanupFails() {
+        InMemoryStorage<String, DbProxy> proxies = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = spy(new InMemoryStorage<>());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        String proxyKey = "us-east-1::first-proxy";
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated post-mutation persistence failure");
+        IllegalStateException cleanupFailure =
+                new IllegalStateException("simulated post-mutation cleanup failure");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw persistenceFailure;
+        }).doCallRealMethod().when(targetGroups).put(eq(proxyKey), any());
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw cleanupFailure;
+        }).doCallRealMethod().when(targetGroups).delete(proxyKey);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.createDbProxy(
+                        "first-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                        PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of()));
+
+        assertSame(persistenceFailure, thrown);
+        assertTrue(List.of(thrown.getSuppressed()).contains(cleanupFailure));
+        assertTrue(proxies.get(proxyKey).isEmpty());
+        assertTrue(targetGroups.get(proxyKey).isEmpty());
+        DbProxy replacement = service.createDbProxy(
+                "replacement-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        assertEquals(5432, replacement.getProxyPort());
+    }
+
+    @Test
+    void createDbProxyRestoresRetryOwnerWhenTargetGroupCleanupFailsBeforeMutation() {
+        InMemoryStorage<String, DbProxy> proxies = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = spy(new InMemoryStorage<>());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        String proxyKey = "us-east-1::first-proxy";
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated post-mutation persistence failure");
+        IllegalStateException cleanupFailure =
+                new IllegalStateException("simulated pre-mutation cleanup failure");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw persistenceFailure;
+        }).doCallRealMethod().when(targetGroups).put(eq(proxyKey), any());
+        doThrow(cleanupFailure).doCallRealMethod().when(targetGroups).delete(proxyKey);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.createDbProxy(
+                        "first-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                        PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of()));
+
+        assertSame(persistenceFailure, thrown);
+        assertTrue(List.of(thrown.getSuppressed()).contains(cleanupFailure));
+        DbProxy first = proxies.get(proxyKey).orElseThrow();
+        assertTrue(targetGroups.get(proxyKey).isPresent());
+        DbProxy second = service.createDbProxy(
+                "second-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        assertNotEquals(first.getProxyPort(), second.getProxyPort());
+
+        service.deleteDbProxy("first-proxy", "us-east-1");
+        DbProxy third = service.createDbProxy(
+                "third-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        assertEquals(first.getProxyPort(), third.getProxyPort());
+    }
+
+    @Test
+    void modifyDbProxyPersistenceFailureLeavesStoredStateUntouched() {
+        InMemoryStorage<String, DbProxy> proxies = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = new InMemoryStorage<>();
+        DbProxy proxy = persistedProxy(
+                "app-proxy", "us-east-1", "123456789012", "abc", 5432);
+        DbProxyTargetGroup targetGroup = persistedTargetGroup(
+                "app-proxy", "us-east-1", "123456789012", "abc");
+        proxies.put("us-east-1::app-proxy", proxy);
+        targetGroups.put("us-east-1::app-proxy", targetGroup);
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated post-mutation persistence failure");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw persistenceFailure;
+        }).doCallRealMethod().when(proxies).put(eq("us-east-1::app-proxy"), any());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.modifyDbProxy(
                 "app-proxy", null, null, null, null, true,
                 null, null, null, "us-east-1"));
 
+        assertSame(persistenceFailure, thrown);
         assertFalse(proxy.isDebugLogging());
         assertSame(proxy, service.getDbProxy("app-proxy", "us-east-1"));
+    }
+
+    @Test
+    void modifyDbProxyRestartsOriginalRelayWhenInitialStopPartiallySucceeds() {
+        InMemoryStorage<String, DbProxy> proxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        DbProxy proxy = persistedProxy(
+                "app-proxy", "us-east-1", "123456789012", "relay", 5432);
+        proxy.setDefaultAuthScheme("NONE");
+        proxy.setIamAuth(false);
+        DbProxyTargetGroup targetGroup = persistedTargetGroup(
+                "app-proxy", "us-east-1", "123456789012", "relay");
+        targetGroup.setTargets(List.of(new DbProxyTarget(
+                "RDS_INSTANCE", "db1",
+                "arn:aws:rds:us-east-1:123456789012:db:db1", "localhost", 15432)));
+        DbInstance instance = persistedInstance("db1", "123456789012", "secret", 15432);
+        instance.setContainerHost("localhost");
+        instance.setContainerPort(15432);
+        proxies.put("us-east-1::app-proxy", proxy);
+        targetGroups.put("us-east-1::app-proxy", targetGroup);
+        instances.put("db1", instance);
+        AtomicBoolean relayRunning = new AtomicBoolean(true);
+        IllegalStateException stopFailure =
+                new IllegalStateException("simulated post-stop failure");
+        doAnswer(invocation -> {
+            relayRunning.set(false);
+            throw stopFailure;
+        }).when(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
+        java.util.ArrayList<Boolean> startedModes = new java.util.ArrayList<>();
+        doAnswer(invocation -> {
+            startedModes.add(invocation.getArgument(2));
+            relayRunning.set(true);
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
+                anyInt(), any(), any(), any(), any());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
+        DbProxyAuth requiredAuth = new DbProxyAuth(
+                "SECRETS", PROXY_AUTH.getFirst().getSecretArn(), "REQUIRED", null, null);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.modifyDbProxy("app-proxy", null, List.of(requiredAuth),
+                        null, null, null, null, null, null, "us-east-1"));
+
+        assertSame(stopFailure, thrown);
+        assertTrue(relayRunning.get());
+        assertEquals(List.of(false), startedModes);
+        assertSame(proxy, proxies.get("us-east-1::app-proxy").orElseThrow());
+        assertFalse(proxy.isIamAuth());
+    }
+
+    @Test
+    void modifyDbProxyRestoresDurableStateAndRelayAfterPostMutationFailure() {
+        InMemoryStorage<String, DbProxy> proxies = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        DbProxy proxy = persistedProxy(
+                "app-proxy", "us-east-1", "123456789012", "relay", 5432);
+        proxy.setDefaultAuthScheme("NONE");
+        proxy.setIamAuth(false);
+        DbProxyTargetGroup targetGroup = persistedTargetGroup(
+                "app-proxy", "us-east-1", "123456789012", "relay");
+        targetGroup.setTargets(List.of(new DbProxyTarget(
+                "RDS_INSTANCE", "db1",
+                "arn:aws:rds:us-east-1:123456789012:db:db1", "localhost", 15432)));
+        DbInstance instance = persistedInstance("db1", "123456789012", "secret", 15432);
+        instance.setContainerHost("localhost");
+        instance.setContainerPort(15432);
+        proxies.put("us-east-1::app-proxy", proxy);
+        targetGroups.put("us-east-1::app-proxy", targetGroup);
+        instances.put("db1", instance);
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated post-mutation persistence failure");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw persistenceFailure;
+        }).doCallRealMethod().when(proxies).put(eq("us-east-1::app-proxy"), any());
+        AtomicBoolean relayRunning = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            relayRunning.set(false);
+            return null;
+        }).when(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
+        java.util.ArrayList<Boolean> startedModes = new java.util.ArrayList<>();
+        doAnswer(invocation -> {
+            startedModes.add(invocation.getArgument(2));
+            relayRunning.set(true);
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
+                anyInt(), any(), any(), any(), any());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
+        DbProxyAuth requiredAuth = new DbProxyAuth(
+                "SECRETS", PROXY_AUTH.getFirst().getSecretArn(), "REQUIRED", null, null);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.modifyDbProxy("app-proxy", null, List.of(requiredAuth),
+                        null, null, null, null, null, null, "us-east-1"));
+
+        assertSame(persistenceFailure, thrown);
+        assertTrue(relayRunning.get());
+        assertEquals(List.of(true, false), startedModes);
+        DbProxy restored = proxies.get("us-east-1::app-proxy").orElseThrow();
+        assertSame(proxy, restored);
+        assertFalse(restored.isIamAuth());
+        assertEquals("DISABLED", restored.getAuth().getFirst().getIamAuth());
     }
 
     @Test
@@ -1716,6 +1925,36 @@ class RdsServiceTest {
                 rdsService.configureDbProxyTargetGroup("app-proxy", "default", 80, null);
         assertEquals(80, configured.getMaxConnectionsPercent());
         assertEquals(40, configured.getMaxIdleConnectionsPercent());
+    }
+
+    @Test
+    void targetGroupConfigurationRestoresStateAfterPostMutationPersistenceFailure() {
+        InMemoryStorage<String, DbProxy> proxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = spy(new InMemoryStorage<>());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbProxy(
+                "app-proxy", "MYSQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        DbProxyTargetGroup original = targetGroups.get(
+                "us-east-1::app-proxy").orElseThrow();
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated post-mutation persistence failure");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw persistenceFailure;
+        }).doCallRealMethod().when(targetGroups).put(eq("us-east-1::app-proxy"), any());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.configureDbProxyTargetGroup(
+                        "app-proxy", "default", 80, 20, 45,
+                        "SET application_name = 'floci'",
+                        List.of("EXCLUDE_VARIABLE_SETS"), "us-east-1"));
+
+        assertSame(persistenceFailure, thrown);
+        assertProxyTargetGroupState(original,
+                targetGroups.get("us-east-1::app-proxy").orElseThrow());
     }
 
     @Test
@@ -1821,6 +2060,70 @@ class RdsServiceTest {
     }
 
     @Test
+    void clearingTargetGroupRestoresConfigurationAndRelayAfterPersistenceFailure() {
+        InMemoryStorage<String, DbProxy> proxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        DbProxy proxy = persistedProxy(
+                "app-proxy", "us-east-1", "123456789012", "clear", 5432);
+        DbProxyTargetGroup targetGroup = persistedTargetGroup(
+                "app-proxy", "us-east-1", "123456789012", "clear");
+        targetGroup.setMaxConnectionsPercent(73);
+        targetGroup.setMaxIdleConnectionsPercent(29);
+        targetGroup.setConnectionBorrowTimeout(45);
+        targetGroup.setInitQuery("SET application_name = 'floci'");
+        targetGroup.setSessionPinningFilters(List.of("EXCLUDE_VARIABLE_SETS"));
+        targetGroup.setTargets(List.of(new DbProxyTarget(
+                "RDS_INSTANCE", "db1",
+                "arn:aws:rds:us-east-1:123456789012:db:db1", "localhost", 15432)));
+        DbInstance instance = persistedInstance("db1", "123456789012", "secret", 15432);
+        instance.setContainerHost("localhost");
+        instance.setContainerPort(15432);
+        proxies.put("us-east-1::app-proxy", proxy);
+        targetGroups.put("us-east-1::app-proxy", targetGroup);
+        instances.put("db1", instance);
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated post-mutation persistence failure");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw persistenceFailure;
+        }).doCallRealMethod().when(targetGroups).put(eq("us-east-1::app-proxy"), any());
+        AtomicBoolean relayRunning = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            relayRunning.set(false);
+            return null;
+        }).when(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
+        doAnswer(invocation -> {
+            relayRunning.set(true);
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
+                anyInt(), any(), any(), any(), any());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.clearDbProxyTargetGroupByArn(
+                        targetGroup.getTargetGroupArn(), "us-east-1"));
+
+        assertSame(persistenceFailure, thrown);
+        assertTrue(relayRunning.get());
+        assertProxyTargetGroupState(targetGroup,
+                targetGroups.get("us-east-1::app-proxy").orElseThrow());
+
+        service.clearDbProxyTargetGroupByArn(
+                targetGroup.getTargetGroupArn(), "us-east-1");
+        DbProxyTargetGroup cleared = targetGroups.get(
+                "us-east-1::app-proxy").orElseThrow();
+        assertFalse(relayRunning.get());
+        assertTrue(cleared.getTargets().isEmpty());
+        assertEquals(100, cleared.getMaxConnectionsPercent());
+        assertEquals(50, cleared.getMaxIdleConnectionsPercent());
+        assertEquals(120, cleared.getConnectionBorrowTimeout());
+        assertNull(cleared.getInitQuery());
+        assertTrue(cleared.getSessionPinningFilters().isEmpty());
+    }
+
+    @Test
     void sqlServerTargetGroupUsesEngineSpecificPoolDefaults() {
         rdsService.createDbProxy("sqlserver-proxy", "SQLSERVER", true, false,
                 PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
@@ -1869,38 +2172,75 @@ class RdsServiceTest {
     }
 
     @Test
-    void deregistrationDoesNotStopRelayWhenTargetGroupPersistenceFails() {
-        StorageBackend<String, DbProxy> proxies = mock(StorageBackend.class);
-        StorageBackend<String, DbProxyTargetGroup> targetGroups = mock(StorageBackend.class);
-        DbProxy proxy = new DbProxy();
-        proxy.setDbProxyName("app-proxy");
-        proxy.setDbProxyArn("arn:aws:rds:us-east-1:123456789012:db-proxy:prx-abc");
-        proxy.setDbProxyResourceId("prx-abc");
-        proxy.setCreatedAt(Instant.now());
-        proxy.setUpdatedAt(proxy.getCreatedAt());
-        DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
-        targetGroup.setDbProxyName("app-proxy");
-        targetGroup.setTargetGroupName("default");
-        targetGroup.setTargetGroupArn(
-                "arn:aws:rds:us-east-1:123456789012:target-group:prx-tg-abc");
-        targetGroup.setDefaultTargetGroup(true);
-        targetGroup.setCreatedAt(proxy.getCreatedAt());
-        targetGroup.setUpdatedAt(proxy.getCreatedAt());
-        targetGroup.setTargets(List.of(new DbProxyTarget("TRACKED_CLUSTER", "cluster1",
-                "arn:aws:rds:us-east-1:123456789012:cluster:cluster1", "localhost", 5432)));
-        when(proxies.get("us-east-1::app-proxy")).thenReturn(Optional.of(proxy));
-        when(targetGroups.get("us-east-1::app-proxy")).thenReturn(Optional.of(targetGroup));
-        org.mockito.Mockito.doThrow(new IllegalStateException("simulated persistence failure"))
-                .when(targetGroups).put(eq("us-east-1::app-proxy"), any());
-        RdsService service = new RdsService(containerManager, proxyManager, ec2Service,
-                regionResolver, config, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                null, null, proxies, targetGroups);
+    void deregistrationRestoresTargetAndRelayAfterStopAndPersistenceFailures() {
+        InMemoryStorage<String, DbProxy> proxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        DbProxy proxy = persistedProxy(
+                "app-proxy", "us-east-1", "123456789012", "abc", 5432);
+        DbProxyTargetGroup targetGroup = persistedTargetGroup(
+                "app-proxy", "us-east-1", "123456789012", "abc");
+        targetGroup.setMaxConnectionsPercent(77);
+        targetGroup.setMaxIdleConnectionsPercent(31);
+        targetGroup.setConnectionBorrowTimeout(45);
+        targetGroup.setInitQuery("SET application_name = 'floci'");
+        targetGroup.setSessionPinningFilters(List.of("EXCLUDE_VARIABLE_SETS"));
+        targetGroup.setTargets(List.of(new DbProxyTarget(
+                "RDS_INSTANCE", "db1",
+                "arn:aws:rds:us-east-1:123456789012:db:db1", "localhost", 15432)));
+        DbInstance instance = persistedInstance("db1", "123456789012", "secret", 15432);
+        instance.setContainerHost("localhost");
+        instance.setContainerPort(15432);
+        proxies.put("us-east-1::app-proxy", proxy);
+        targetGroups.put("us-east-1::app-proxy", targetGroup);
+        instances.put("db1", instance);
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("simulated post-mutation persistence failure");
+        doCallRealMethod().doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw persistenceFailure;
+        }).doCallRealMethod().when(targetGroups).put(eq("us-east-1::app-proxy"), any());
+        AtomicBoolean relayRunning = new AtomicBoolean(true);
+        IllegalStateException stopFailure =
+                new IllegalStateException("simulated post-stop failure");
+        doAnswer(invocation -> {
+            relayRunning.set(false);
+            throw stopFailure;
+        }).doAnswer(invocation -> {
+            relayRunning.set(false);
+            return null;
+        }).when(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
+        doAnswer(invocation -> {
+            relayRunning.set(true);
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
+                anyInt(), any(), any(), any(), any());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
 
-        assertThrows(IllegalStateException.class, () -> service.deregisterDbProxyTargets(
-                "app-proxy", "default", List.of("cluster1"), List.of()));
+        IllegalStateException stopThrown = assertThrows(IllegalStateException.class, () ->
+                service.deregisterDbProxyTargets(
+                        "app-proxy", "default", List.of(), List.of("db1")));
 
-        verify(proxyManager, never()).stopProxy(any());
+        assertSame(stopFailure, stopThrown);
+        assertTrue(relayRunning.get());
+        assertProxyTargetGroupState(targetGroup,
+                targetGroups.get("us-east-1::app-proxy").orElseThrow());
+
+        IllegalStateException persistenceThrown = assertThrows(IllegalStateException.class, () ->
+                service.deregisterDbProxyTargets(
+                        "app-proxy", "default", List.of(), List.of("db1")));
+
+        assertSame(persistenceFailure, persistenceThrown);
+        assertTrue(relayRunning.get());
+        assertProxyTargetGroupState(targetGroup,
+                targetGroups.get("us-east-1::app-proxy").orElseThrow());
+
+        service.deregisterDbProxyTargets(
+                "app-proxy", "default", List.of(), List.of("db1"));
+        assertFalse(relayRunning.get());
+        assertTrue(targetGroups.get("us-east-1::app-proxy").orElseThrow()
+                .getTargets().isEmpty());
     }
 
     @Test
@@ -1946,6 +2286,50 @@ class RdsServiceTest {
                 anyBoolean(), eq(3306), eq("localhost"), eq(3306),
                 eq("admin"), eq("secret"), eq("app"), any());
         verify(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
+    }
+
+    @Test
+    void registrationStopsRelayWhenStartupPartiallySucceeds() {
+        InMemoryStorage<String, DbProxy> proxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        DbProxy proxy = persistedProxy(
+                "mysql-proxy", "us-east-1", "123456789012", "current", 3306);
+        proxy.setEngineFamily("MYSQL");
+        DbProxyTargetGroup targetGroup = persistedTargetGroup(
+                "mysql-proxy", "us-east-1", "123456789012", "current");
+        DbInstance instance = persistedInstance(
+                "mysql-db", "123456789012", "secret", 3306);
+        instance.setEngine(DatabaseEngine.MYSQL);
+        instance.setContainerHost("localhost");
+        instance.setContainerPort(3306);
+        proxies.put("us-east-1::mysql-proxy", proxy);
+        targetGroups.put("us-east-1::mysql-proxy", targetGroup);
+        instances.put("mysql-db", instance);
+        AtomicBoolean relayRunning = new AtomicBoolean(false);
+        IllegalStateException startupFailure =
+                new IllegalStateException("simulated post-start failure");
+        doAnswer(invocation -> {
+            relayRunning.set(true);
+            throw startupFailure;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
+                anyInt(), any(), any(), any(), any());
+        doAnswer(invocation -> {
+            relayRunning.set(false);
+            return null;
+        }).when(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
+        RdsService service = proxyStoreService(
+                regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
+                service.registerDbProxyTargets(
+                        "mysql-proxy", "default", List.of(), List.of("mysql-db"), 0, 0));
+
+        assertSame(startupFailure, thrown);
+        assertFalse(relayRunning.get());
+        assertSame(proxy, proxies.get("us-east-1::mysql-proxy").orElseThrow());
+        assertTrue(targetGroups.get("us-east-1::mysql-proxy").orElseThrow()
+                .getTargets().isEmpty());
     }
 
     @Test
@@ -2366,20 +2750,52 @@ class RdsServiceTest {
         InMemoryStorage<String, DbProxy> proxies = new InMemoryStorage<>();
         InMemoryStorage<String, DbProxyTargetGroup> targetGroups =
                 spy(new InMemoryStorage<>());
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups,
-                new InMemoryStorage<>(), new InMemoryStorage<>());
+                instances, new InMemoryStorage<>());
         DbProxy first = service.createDbProxy(
                 "first-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
                 PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
-        doThrow(new IllegalStateException("simulated target-group delete failure"))
-                .doCallRealMethod()
-                .when(targetGroups).delete("us-east-1::first-proxy");
+        DbProxyTargetGroup originalTargetGroup = targetGroups.get(
+                "us-east-1::first-proxy").orElseThrow();
+        originalTargetGroup.setMaxConnectionsPercent(79);
+        originalTargetGroup.setMaxIdleConnectionsPercent(33);
+        originalTargetGroup.setConnectionBorrowTimeout(45);
+        originalTargetGroup.setInitQuery("SET application_name = 'floci'");
+        originalTargetGroup.setSessionPinningFilters(List.of("EXCLUDE_VARIABLE_SETS"));
+        originalTargetGroup.setTargets(List.of(new DbProxyTarget(
+                "RDS_INSTANCE", "db1",
+                "arn:aws:rds:us-east-1:123456789012:db:db1", "localhost", 15432)));
+        DbInstance instance = persistedInstance("db1", "123456789012", "secret", 15432);
+        instance.setContainerHost("localhost");
+        instance.setContainerPort(15432);
+        instances.put("db1", instance);
+        AtomicBoolean relayRunning = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            relayRunning.set(false);
+            return null;
+        }).when(proxyManager).stopProxy("db-proxy:" + first.getDbProxyArn());
+        doAnswer(invocation -> {
+            relayRunning.set(true);
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
+                anyInt(), any(), any(), any(), any());
+        IllegalStateException deleteFailure =
+                new IllegalStateException("simulated post-mutation target-group delete failure");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw deleteFailure;
+        }).doCallRealMethod().when(targetGroups).delete("us-east-1::first-proxy");
 
-        assertThrows(IllegalStateException.class, () ->
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
                 service.deleteDbProxy("first-proxy", "us-east-1"));
+        assertSame(deleteFailure, thrown);
         assertEquals(first.getDbProxyArn(),
                 service.getDbProxy("first-proxy", "us-east-1").getDbProxyArn());
+        assertProxyTargetGroupState(originalTargetGroup,
+                targetGroups.get("us-east-1::first-proxy").orElseThrow());
+        assertTrue(relayRunning.get());
 
         DbProxy second = service.createDbProxy(
                 "second-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
@@ -2387,6 +2803,7 @@ class RdsServiceTest {
         assertNotEquals(first.getProxyPort(), second.getProxyPort());
 
         assertDoesNotThrow(() -> service.deleteDbProxy("first-proxy", "us-east-1"));
+        assertFalse(relayRunning.get());
         DbProxy third = service.createDbProxy(
                 "third-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
                 PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
@@ -2398,21 +2815,52 @@ class RdsServiceTest {
         InMemoryStorage<String, DbProxy> proxies =
                 spy(new InMemoryStorage<String, DbProxy>());
         InMemoryStorage<String, DbProxyTargetGroup> targetGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups,
-                new InMemoryStorage<>(), new InMemoryStorage<>());
+                instances, new InMemoryStorage<>());
         DbProxy first = service.createDbProxy(
                 "first-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
                 PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        DbProxyTargetGroup originalTargetGroup = targetGroups.get(
+                "us-east-1::first-proxy").orElseThrow();
+        originalTargetGroup.setMaxConnectionsPercent(79);
+        originalTargetGroup.setMaxIdleConnectionsPercent(33);
+        originalTargetGroup.setConnectionBorrowTimeout(45);
+        originalTargetGroup.setInitQuery("SET application_name = 'floci'");
+        originalTargetGroup.setSessionPinningFilters(List.of("EXCLUDE_VARIABLE_SETS"));
+        originalTargetGroup.setTargets(List.of(new DbProxyTarget(
+                "RDS_INSTANCE", "db1",
+                "arn:aws:rds:us-east-1:123456789012:db:db1", "localhost", 15432)));
+        DbInstance instance = persistedInstance("db1", "123456789012", "secret", 15432);
+        instance.setContainerHost("localhost");
+        instance.setContainerPort(15432);
+        instances.put("db1", instance);
+        AtomicBoolean relayRunning = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            relayRunning.set(false);
+            return null;
+        }).when(proxyManager).stopProxy("db-proxy:" + first.getDbProxyArn());
+        doAnswer(invocation -> {
+            relayRunning.set(true);
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
+                anyInt(), any(), any(), any(), any());
+        IllegalStateException deleteFailure =
+                new IllegalStateException("simulated post-mutation proxy delete failure");
         doAnswer(invocation -> {
             invocation.callRealMethod();
-            throw new IllegalStateException("simulated post-mutation delete failure");
+            throw deleteFailure;
         }).doCallRealMethod().when(proxies).delete("us-east-1::first-proxy");
 
-        assertThrows(IllegalStateException.class, () ->
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () ->
                 service.deleteDbProxy("first-proxy", "us-east-1"));
+        assertSame(deleteFailure, thrown);
         assertEquals(first.getDbProxyArn(), proxies.get(
                 "us-east-1::first-proxy").orElseThrow().getDbProxyArn());
+        assertProxyTargetGroupState(originalTargetGroup,
+                targetGroups.get("us-east-1::first-proxy").orElseThrow());
+        assertTrue(relayRunning.get());
 
         DbProxy second = service.createDbProxy(
                 "second-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
@@ -2420,6 +2868,7 @@ class RdsServiceTest {
         assertNotEquals(first.getProxyPort(), second.getProxyPort());
 
         assertDoesNotThrow(() -> service.deleteDbProxy("first-proxy", "us-east-1"));
+        assertFalse(relayRunning.get());
         DbProxy third = service.createDbProxy(
                 "third-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
                 PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
@@ -3039,6 +3488,33 @@ class RdsServiceTest {
         targetGroup.setCreatedAt(persistedGenerationTime(suffix));
         targetGroup.setUpdatedAt(targetGroup.getCreatedAt());
         return targetGroup;
+    }
+
+    private static void assertProxyTargetGroupState(
+            DbProxyTargetGroup expected, DbProxyTargetGroup actual) {
+        assertEquals(expected.getDbProxyName(), actual.getDbProxyName());
+        assertEquals(expected.getTargetGroupName(), actual.getTargetGroupName());
+        assertEquals(expected.getTargetGroupArn(), actual.getTargetGroupArn());
+        assertEquals(expected.getStatus(), actual.getStatus());
+        assertEquals(expected.isDefaultTargetGroup(), actual.isDefaultTargetGroup());
+        assertEquals(expected.getCreatedAt(), actual.getCreatedAt());
+        assertEquals(expected.getUpdatedAt(), actual.getUpdatedAt());
+        assertEquals(expected.getMaxConnectionsPercent(), actual.getMaxConnectionsPercent());
+        assertEquals(expected.getMaxIdleConnectionsPercent(), actual.getMaxIdleConnectionsPercent());
+        assertEquals(expected.getConnectionBorrowTimeout(), actual.getConnectionBorrowTimeout());
+        assertEquals(expected.getInitQuery(), actual.getInitQuery());
+        assertEquals(expected.getSessionPinningFilters(), actual.getSessionPinningFilters());
+        assertEquals(expected.getTargets().size(), actual.getTargets().size());
+        for (int index = 0; index < expected.getTargets().size(); index++) {
+            DbProxyTarget expectedTarget = expected.getTargets().get(index);
+            DbProxyTarget actualTarget = actual.getTargets().get(index);
+            assertEquals(expectedTarget.getType(), actualTarget.getType());
+            assertEquals(expectedTarget.getRdsResourceId(), actualTarget.getRdsResourceId());
+            assertEquals(expectedTarget.getTargetArn(), actualTarget.getTargetArn());
+            assertEquals(expectedTarget.getEndpoint(), actualTarget.getEndpoint());
+            assertEquals(expectedTarget.getPort(), actualTarget.getPort());
+            assertEquals(expectedTarget.getTargetHealth(), actualTarget.getTargetHealth());
+        }
     }
 
     private static Instant persistedGenerationTime(String suffix) {

@@ -24,33 +24,78 @@ public class RdsProxyManager {
         this.sigV4Validator = sigV4Validator;
     }
 
-    public void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
-                           int proxyPort, String backendHost, int backendPort,
-                           String masterUsername, String masterPassword, String dbName,
-                           RdsAuthProxy.PasswordValidator passwordValidator) {
+    public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
+                                        int proxyPort, String backendHost, int backendPort,
+                                        String masterUsername, String masterPassword, String dbName,
+                                        RdsAuthProxy.PasswordValidator passwordValidator) {
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,
                 masterUsername, masterPassword, dbName, sigV4Validator, passwordValidator);
         try {
             proxy.start(proxyPort);
-            proxies.put(instanceId, proxy);
         } catch (IOException e) {
-            throw new RuntimeException("Failed to start RDS proxy for instance " + instanceId
-                    + " on port " + proxyPort, e);
+            RuntimeException failure = new RuntimeException(
+                    "Failed to start RDS proxy for instance " + instanceId
+                            + " on port " + proxyPort, e);
+            cleanupFailedStart(proxy, failure);
+            throw failure;
+        } catch (RuntimeException e) {
+            RuntimeException failure = new RuntimeException(
+                    "Failed to register RDS proxy for instance " + instanceId
+                            + " on port " + proxyPort, e);
+            cleanupFailedStart(proxy, failure);
+            throw failure;
+        }
+        RdsAuthProxy previous;
+        try {
+            previous = proxies.put(instanceId, proxy);
+        } catch (RuntimeException e) {
+            RuntimeException failure = new RuntimeException(
+                    "Failed to register RDS proxy for instance " + instanceId
+                            + " on port " + proxyPort, e);
+            cleanupFailedStart(proxy, failure);
+            throw failure;
+        }
+        if (previous != null) {
+            try {
+                previous.stop();
+            } catch (RuntimeException e) {
+                proxies.put(instanceId, previous);
+                RuntimeException failure = new RuntimeException(
+                        "Failed to replace RDS proxy for instance " + instanceId, e);
+                cleanupFailedStart(proxy, failure);
+                throw failure;
+            }
         }
     }
 
-    public void stopProxy(String instanceId) {
-        RdsAuthProxy proxy = proxies.remove(instanceId);
+    public synchronized void stopProxy(String instanceId) {
+        RdsAuthProxy proxy = proxies.get(instanceId);
         if (proxy != null) {
             proxy.stop();
+            proxies.remove(instanceId, proxy);
             LOG.infov("Stopped RDS proxy for instance {0}", instanceId);
         }
     }
 
-    public void stopAll() {
-        proxies.values().forEach(RdsAuthProxy::stop);
-        proxies.clear();
+    public synchronized void stopAll() {
+        proxies.forEach((instanceId, proxy) -> {
+            try {
+                proxy.stop();
+                proxies.remove(instanceId, proxy);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to stop RDS proxy for instance {0} during shutdown",
+                        instanceId);
+            }
+        });
         LOG.info("Stopped all RDS proxies");
+    }
+
+    private void cleanupFailedStart(RdsAuthProxy proxy, RuntimeException failure) {
+        try {
+            proxy.stop();
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
     }
 }

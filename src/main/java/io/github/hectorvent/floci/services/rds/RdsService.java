@@ -1052,8 +1052,9 @@ public class RdsService implements Resettable {
         String effectiveRegion = effectiveRegion(region);
         String vpcId = resolveDbProxyVpc(vpcSubnetIds, effectiveRegion);
         String proxyKey = dbProxyKey(effectiveRegion, dbProxyName);
+        String accountId = currentAccountId();
         if (findDbProxy(dbProxyName, effectiveRegion).isPresent()
-                || scopedKeyExists(proxies, currentAccountId(), proxyKey)) {
+                || scopedKeyExists(proxies, accountId, proxyKey)) {
             throw new AwsException("DBProxyAlreadyExistsFault",
                     "DB proxy " + dbProxyName + " already exists.", 400);
         }
@@ -1103,13 +1104,29 @@ public class RdsService implements Resettable {
         targetGroup.setUpdatedAt(now);
 
         try {
-            proxies.put(proxyKey, proxy);
-            proxyTargetGroups.put(proxyKey, targetGroup);
-        } catch (RuntimeException e) {
-            proxies.delete(proxyKey);
-            proxyTargetGroups.delete(proxyKey);
-            releaseProxyPort(proxyPort);
-            throw e;
+            putProxyForAccount(accountId, proxyKey, proxy);
+            putTargetGroupForAccount(accountId, proxyKey, targetGroup);
+        } catch (RuntimeException createFailure) {
+            attemptRollback(createFailure,
+                    () -> deleteTargetGroupKey(accountId, proxyKey));
+            attemptRollback(createFailure,
+                    () -> deleteProxyKey(accountId, proxyKey));
+            boolean stateRemoved = false;
+            try {
+                stateRemoved = getProxyForAccount(accountId, proxyKey).isEmpty()
+                        && getTargetGroupForAccount(accountId, proxyKey).isEmpty();
+            } catch (RuntimeException verificationFailure) {
+                createFailure.addSuppressed(verificationFailure);
+            }
+            if (stateRemoved) {
+                releaseProxyPort(proxyPort);
+                throw createFailure;
+            }
+            attemptRollback(createFailure,
+                    () -> putProxyForAccount(accountId, proxyKey, proxy));
+            attemptRollback(createFailure,
+                    () -> putTargetGroupForAccount(accountId, proxyKey, targetGroup));
+            throw createFailure;
         }
         LOG.infov("DB proxy {0} created (mock={1}), endpoint={2}",
                 dbProxyName, String.valueOf(mock), proxy.getEndpoint());
@@ -1178,24 +1195,37 @@ public class RdsService implements Resettable {
         }
 
         updated.setUpdatedAt(Instant.now());
+        String accountId = accountIdFromArn(existing.getDbProxyArn());
         if (registeredTarget == null || config.services().rds().mock()
                 || existing.isIamAuth() == updated.isIamAuth()) {
-            proxies.put(proxyKey, updated);
-            return updated;
+            try {
+                putProxyForAccount(accountId, proxyKey, updated);
+                return updated;
+            } catch (RuntimeException updateFailure) {
+                attemptRollback(updateFailure,
+                        () -> putProxyForAccount(accountId, proxyKey, existing));
+                throw updateFailure;
+            }
         }
 
-        proxyManager.stopProxy(dbProxyRelayKey(existing));
+        try {
+            proxyManager.stopProxy(dbProxyRelayKey(existing));
+        } catch (RuntimeException stopFailure) {
+            attemptRollback(stopFailure,
+                    () -> startDbProxyRelay(existing, registeredTarget));
+            throw stopFailure;
+        }
         try {
             startDbProxyRelay(updated, registeredTarget);
-            proxies.put(proxyKey, updated);
+            putProxyForAccount(accountId, proxyKey, updated);
             return updated;
         } catch (RuntimeException updateFailure) {
-            try {
-                proxyManager.stopProxy(dbProxyRelayKey(updated));
-                startDbProxyRelay(existing, registeredTarget);
-            } catch (RuntimeException rollbackFailure) {
-                updateFailure.addSuppressed(rollbackFailure);
-            }
+            attemptRollback(updateFailure,
+                    () -> proxyManager.stopProxy(dbProxyRelayKey(updated)));
+            attemptRollback(updateFailure,
+                    () -> putProxyForAccount(accountId, proxyKey, existing));
+            attemptRollback(updateFailure,
+                    () -> startDbProxyRelay(existing, registeredTarget));
             throw updateFailure;
         }
     }
@@ -1309,23 +1339,12 @@ public class RdsService implements Resettable {
                     "The default target group already has a registered target.", 400);
         }
 
-        if (!config.services().rds().mock()) {
+        boolean realMode = !config.services().rds().mock();
+        if (realMode) {
             if (backendHost == null || backendPort <= 0) {
                 throw new AwsException("InvalidDBProxyStateFault",
                         "Target backend for proxy " + dbProxyName + " is not available.", 400);
             }
-            String effectiveMasterUser = masterUser != null ? masterUser : "root";
-            final String targetId = target.getRdsResourceId();
-            final boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
-            final String accountId = accountIdFromArn(proxy.getDbProxyArn());
-            final String targetRegion = regionFromArn(proxy.getDbProxyArn());
-            proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(), proxy.getProxyPort(),
-                    backendHost, backendPort, effectiveMasterUser, masterPassword, dbName,
-                    (user, pw) -> isCluster
-                            ? validateDbClusterPasswordForScope(
-                                    accountId, targetRegion, targetId, user, pw)
-                            : validateDbPasswordForScope(
-                                    accountId, targetRegion, targetId, user, pw));
         }
 
         DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(targetGroup);
@@ -1346,29 +1365,34 @@ public class RdsService implements Resettable {
             updatedProxy.setUpdatedAt(Instant.now());
         }
         try {
-            proxyTargetGroups.put(proxyKey, updatedTargetGroup);
+            if (realMode) {
+                String effectiveMasterUser = masterUser != null ? masterUser : "root";
+                final String targetId = target.getRdsResourceId();
+                final boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
+                final String targetRegion = regionFromArn(proxy.getDbProxyArn());
+                proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(),
+                        proxy.getProxyPort(), backendHost, backendPort, effectiveMasterUser,
+                        masterPassword, dbName,
+                        (user, pw) -> isCluster
+                                ? validateDbClusterPasswordForScope(
+                                        proxyAccountId, targetRegion, targetId, user, pw)
+                                : validateDbPasswordForScope(
+                                        proxyAccountId, targetRegion, targetId, user, pw));
+            }
+            putTargetGroupForAccount(proxyAccountId, proxyKey, updatedTargetGroup);
             if (updatedProxy != null) {
-                proxies.put(proxyKey, updatedProxy);
+                putProxyForAccount(proxyAccountId, proxyKey, updatedProxy);
             }
         } catch (RuntimeException e) {
-            try {
-                proxyTargetGroups.put(proxyKey, targetGroup);
-            } catch (RuntimeException rollbackFailure) {
-                e.addSuppressed(rollbackFailure);
+            if (realMode) {
+                attemptRollback(e,
+                        () -> proxyManager.stopProxy(dbProxyRelayKey(proxy)));
             }
+            attemptRollback(e,
+                    () -> putTargetGroupForAccount(proxyAccountId, proxyKey, targetGroup));
             if (updatedProxy != null) {
-                try {
-                    proxies.put(proxyKey, proxy);
-                } catch (RuntimeException rollbackFailure) {
-                    e.addSuppressed(rollbackFailure);
-                }
-            }
-            if (!config.services().rds().mock()) {
-                try {
-                    proxyManager.stopProxy(dbProxyRelayKey(proxy));
-                } catch (RuntimeException stopFailure) {
-                    e.addSuppressed(stopFailure);
-                }
+                attemptRollback(e,
+                        () -> putProxyForAccount(proxyAccountId, proxyKey, proxy));
             }
             throw e;
         }
@@ -1425,8 +1449,16 @@ public class RdsService implements Resettable {
             return targetGroup;
         }
         updatedTargetGroup.setUpdatedAt(Instant.now());
-        proxyTargetGroups.put(dbProxyKey(effectiveRegion, dbProxyName), updatedTargetGroup);
-        return updatedTargetGroup;
+        String proxyKey = dbProxyKey(effectiveRegion, dbProxyName);
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        try {
+            putTargetGroupForAccount(accountId, proxyKey, updatedTargetGroup);
+            return updatedTargetGroup;
+        } catch (RuntimeException updateFailure) {
+            attemptRollback(updateFailure,
+                    () -> putTargetGroupForAccount(accountId, proxyKey, targetGroup));
+            throw updateFailure;
+        }
     }
 
     public synchronized DbProxyTargetGroup reconcileDbProxyTargetGroup(
@@ -1481,17 +1513,15 @@ public class RdsService implements Resettable {
                     maxConnectionsPercent, maxIdleConnectionsPercent,
                     connectionBorrowTimeout, initQuery, sessionPinningFilters, effectiveRegion);
         } catch (RuntimeException reconciliationFailure) {
-            try {
-                if (!config.services().rds().mock()) {
-                    proxyManager.stopProxy(dbProxyRelayKey(proxy));
-                    if (currentTarget != null) {
-                        startDbProxyRelay(proxy, currentTarget);
-                    }
-                }
-                proxyTargetGroups.put(dbProxyKey(effectiveRegion, dbProxyName), original);
-            } catch (RuntimeException rollbackFailure) {
-                reconciliationFailure.addSuppressed(rollbackFailure);
+            if (!config.services().rds().mock()) {
+                attemptRollback(reconciliationFailure,
+                        () -> proxyManager.stopProxy(dbProxyRelayKey(proxy)));
             }
+            String proxyKey = dbProxyKey(effectiveRegion, dbProxyName);
+            String accountId = accountIdFromArn(proxy.getDbProxyArn());
+            attemptRollback(reconciliationFailure,
+                    () -> putTargetGroupForAccount(accountId, proxyKey, original));
+            restartDbProxyRelayAfterFailure(proxy, original, reconciliationFailure);
             throw reconciliationFailure;
         }
     }
@@ -1511,8 +1541,16 @@ public class RdsService implements Resettable {
             return targetGroup;
         }
         updated.setUpdatedAt(Instant.now());
-        proxyTargetGroups.put(dbProxyKey(region, proxy.getDbProxyName()), updated);
-        return updated;
+        String proxyKey = dbProxyKey(region, proxy.getDbProxyName());
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        try {
+            putTargetGroupForAccount(accountId, proxyKey, updated);
+            return updated;
+        } catch (RuntimeException updateFailure) {
+            attemptRollback(updateFailure,
+                    () -> putTargetGroupForAccount(accountId, proxyKey, targetGroup));
+            throw updateFailure;
+        }
     }
 
     public void deregisterDbProxyTargets(String dbProxyName, String targetGroupName,
@@ -1547,10 +1585,7 @@ public class RdsService implements Resettable {
                     "The specified target is not registered with proxy " + dbProxyName + ".", 404);
         }
         updatedTargetGroup.setUpdatedAt(Instant.now());
-        proxyTargetGroups.put(dbProxyKey(effectiveRegion, dbProxyName), updatedTargetGroup);
-        if (!config.services().rds().mock()) {
-            proxyManager.stopProxy(dbProxyRelayKey(proxy));
-        }
+        persistTargetGroupAfterRelayStop(proxy, targetGroup, updatedTargetGroup, effectiveRegion);
     }
 
     public DbProxy getDbProxy(String name) {
@@ -1632,11 +1667,7 @@ public class RdsService implements Resettable {
         clearedTargetGroup.setInitQuery(null);
         clearedTargetGroup.setSessionPinningFilters(List.of());
         clearedTargetGroup.setUpdatedAt(Instant.now());
-        proxyTargetGroups.put(dbProxyKey(effectiveRegion, clearedTargetGroup.getDbProxyName()),
-                clearedTargetGroup);
-        if (!targetGroup.getTargets().isEmpty() && !config.services().rds().mock()) {
-            proxyManager.stopProxy(dbProxyRelayKey(proxy));
-        }
+        persistTargetGroupAfterRelayStop(proxy, targetGroup, clearedTargetGroup, effectiveRegion);
     }
 
     public synchronized DbProxyTargetGroup getDbProxyTargetGroupByArn(
@@ -1663,20 +1694,51 @@ public class RdsService implements Resettable {
         String effectiveRegion = effectiveRegion(region);
         String proxyKey = dbProxyKey(effectiveRegion, name);
         DbProxy proxy = getDbProxy(name, effectiveRegion);
-        if (!config.services().rds().mock()) {
-            proxyManager.stopProxy(dbProxyRelayKey(proxy));
-        }
-        proxyTargetGroups.delete(proxyKey);
-        deleteLegacyProxyState(name, effectiveRegion);
-        try {
-            proxies.delete(proxyKey);
-        } catch (RuntimeException e) {
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        Optional<DbProxyTargetGroup> canonicalTargetGroup =
+                getTargetGroupForAccount(accountId, proxyKey);
+        Optional<DbProxyTargetGroup> legacyTargetGroup =
+                getTargetGroupForAccount(accountId, name)
+                        .filter(candidate -> targetGroupBelongsTo(
+                                candidate, accountId, effectiveRegion)
+                                && Objects.equals(name, candidate.getDbProxyName()));
+        Optional<DbProxy> legacyProxy = getProxyForAccount(accountId, name)
+                .filter(candidate -> proxyBelongsTo(candidate, accountId, effectiveRegion)
+                        && Objects.equals(name, candidate.getDbProxyName()));
+        DbProxyTargetGroup relayTargetGroup = canonicalTargetGroup
+                .filter(candidate -> targetGroupMatchesProxy(candidate, proxy))
+                .or(() -> legacyTargetGroup
+                        .filter(candidate -> targetGroupMatchesProxy(candidate, proxy)))
+                .orElse(null);
+        boolean realMode = !config.services().rds().mock();
+        if (realMode) {
             try {
-                putProxyForAccount(currentAccountId(), proxyKey, proxy);
-            } catch (RuntimeException restoreFailure) {
-                e.addSuppressed(restoreFailure);
+                proxyManager.stopProxy(dbProxyRelayKey(proxy));
+            } catch (RuntimeException stopFailure) {
+                restartDbProxyRelayAfterFailure(proxy, relayTargetGroup, stopFailure);
+                throw stopFailure;
             }
-            throw e;
+        }
+        try {
+            deleteTargetGroupKey(accountId, proxyKey);
+            if (legacyTargetGroup.isPresent()) {
+                deleteTargetGroupKey(accountId, name);
+            }
+            if (legacyProxy.isPresent()) {
+                deleteProxyKey(accountId, name);
+            }
+            deleteProxyKey(accountId, proxyKey);
+        } catch (RuntimeException deleteFailure) {
+            attemptRollback(deleteFailure,
+                    () -> putProxyForAccount(accountId, proxyKey, proxy));
+            canonicalTargetGroup.ifPresent(targetGroup -> attemptRollback(deleteFailure,
+                    () -> putTargetGroupForAccount(accountId, proxyKey, targetGroup)));
+            legacyProxy.ifPresent(candidate -> attemptRollback(deleteFailure,
+                    () -> putProxyForAccount(accountId, name, candidate)));
+            legacyTargetGroup.ifPresent(targetGroup -> attemptRollback(deleteFailure,
+                    () -> putTargetGroupForAccount(accountId, name, targetGroup)));
+            restartDbProxyRelayAfterFailure(proxy, relayTargetGroup, deleteFailure);
+            throw deleteFailure;
         }
         releaseProxyPort(proxy.getProxyPort());
         LOG.infov("DB proxy {0} deleted", name);
@@ -2408,6 +2470,13 @@ public class RdsService implements Resettable {
         }
     }
 
+    private Optional<DbProxy> getProxyForAccount(String accountId, String key) {
+        if (proxies instanceof AccountAwareStorageBackend<DbProxy> aware) {
+            return aware.getForAccount(accountId, key);
+        }
+        return proxies.get(key);
+    }
+
     private void deleteProxyKey(String accountId, String key) {
         if (proxies instanceof AccountAwareStorageBackend<DbProxy> aware) {
             aware.deleteForAccount(accountId, key);
@@ -2425,6 +2494,14 @@ public class RdsService implements Resettable {
         }
     }
 
+    private Optional<DbProxyTargetGroup> getTargetGroupForAccount(
+            String accountId, String key) {
+        if (proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware) {
+            return aware.getForAccount(accountId, key);
+        }
+        return proxyTargetGroups.get(key);
+    }
+
     private void deleteTargetGroupKey(String accountId, String key) {
         if (proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware) {
             aware.deleteForAccount(accountId, key);
@@ -2433,20 +2510,56 @@ public class RdsService implements Resettable {
         }
     }
 
-    private void deleteLegacyProxyState(String dbProxyName, String region) {
-        String accountId = currentAccountId();
-        Optional<DbProxyTargetGroup> legacyTargetGroup =
-                proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware
-                        ? aware.getForAccount(accountId, dbProxyName)
-                        : proxyTargetGroups.get(dbProxyName);
-        if (legacyTargetGroup.filter(candidate ->
-                targetGroupBelongsTo(candidate, accountId, region)).isPresent()) {
-            deleteTargetGroupKey(accountId, dbProxyName);
+    private void attemptRollback(RuntimeException failure, Runnable rollback) {
+        try {
+            rollback.run();
+        } catch (RuntimeException rollbackFailure) {
+            if (rollbackFailure != failure) {
+                failure.addSuppressed(rollbackFailure);
+            }
         }
-        Optional<DbProxy> legacyProxy = proxies instanceof AccountAwareStorageBackend<DbProxy> aware
-                ? aware.getForAccount(accountId, dbProxyName) : proxies.get(dbProxyName);
-        if (legacyProxy.filter(candidate -> proxyBelongsTo(candidate, accountId, region)).isPresent()) {
-            deleteProxyKey(accountId, dbProxyName);
+    }
+
+    private void restartDbProxyRelayAfterFailure(
+            DbProxy proxy, DbProxyTargetGroup targetGroup, RuntimeException failure) {
+        if (config.services().rds().mock()
+                || targetGroup == null || targetGroup.getTargets().isEmpty()
+                || !targetGroupMatchesProxy(targetGroup, proxy)
+                || !"available".equals(proxy.getStatus())
+                || "IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
+            return;
+        }
+        attemptRollback(failure,
+                () -> startDbProxyRelay(proxy, targetGroup.getTargets().getFirst()));
+    }
+
+    private void persistTargetGroupAfterRelayStop(
+            DbProxy proxy, DbProxyTargetGroup original,
+            DbProxyTargetGroup updated, String region) {
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        String proxyKey = dbProxyKey(region, proxy.getDbProxyName());
+        boolean realMode = !config.services().rds().mock();
+        DbProxyTarget desiredTarget = updated.getTargets().isEmpty()
+                ? null : updated.getTargets().getFirst();
+        boolean relayTransition = realMode
+                && (!original.getTargets().isEmpty() || desiredTarget != null);
+        try {
+            if (relayTransition && !original.getTargets().isEmpty()) {
+                proxyManager.stopProxy(dbProxyRelayKey(proxy));
+            }
+            putTargetGroupForAccount(accountId, proxyKey, updated);
+            if (relayTransition && desiredTarget != null) {
+                startDbProxyRelay(proxy, desiredTarget);
+            }
+        } catch (RuntimeException transitionFailure) {
+            if (relayTransition) {
+                attemptRollback(transitionFailure,
+                        () -> proxyManager.stopProxy(dbProxyRelayKey(proxy)));
+            }
+            attemptRollback(transitionFailure,
+                    () -> putTargetGroupForAccount(accountId, proxyKey, original));
+            restartDbProxyRelayAfterFailure(proxy, original, transitionFailure);
+            throw transitionFailure;
         }
     }
 
