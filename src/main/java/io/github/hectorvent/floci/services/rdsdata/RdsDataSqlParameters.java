@@ -23,8 +23,9 @@ import java.util.UUID;
  * <p>The Data API uses named placeholders ({@code :name}); JDBC uses positional
  * {@code ?}. {@link #parse(String)} rewrites the SQL to positional form while
  * recording the placeholder order, and {@link #bind} binds each value variant.
- * Both are engine-agnostic, so MySQL, MariaDB, and PostgreSQL resources share
- * the same code path.
+ * The rewrite is shared across MySQL, MariaDB, and PostgreSQL; the only
+ * dialect difference is whether a backslash escapes quotes inside string
+ * literals (see {@link #parse(String, boolean)}).
  */
 final class RdsDataSqlParameters {
 
@@ -40,12 +41,26 @@ final class RdsDataSqlParameters {
     }
 
     /**
+     * Rewrites {@code :name} placeholders to positional {@code ?} without
+     * treating backslash as a string-literal escape (the PostgreSQL default
+     * with {@code standard_conforming_strings} on).
+     */
+    static ParsedSql parse(String sql) {
+        return parse(sql, false);
+    }
+
+    /**
      * Rewrites {@code :name} placeholders to positional {@code ?}, skipping over
      * string literals, quoted/backtick identifiers, line and block comments,
      * PostgreSQL {@code ::} casts, and PostgreSQL dollar-quoted strings so a
      * colon inside any of those is left untouched.
+     *
+     * @param backslashEscapes when {@code true}, a backslash inside a single- or
+     *        double-quoted string escapes the next character (MySQL/MariaDB
+     *        default, i.e. {@code NO_BACKSLASH_ESCAPES} disabled). Backtick
+     *        identifiers never honor backslash escaping.
      */
-    static ParsedSql parse(String sql) {
+    static ParsedSql parse(String sql, boolean backslashEscapes) {
         StringBuilder out = new StringBuilder(sql.length());
         List<String> order = new ArrayList<>();
         int len = sql.length();
@@ -72,7 +87,7 @@ final class RdsDataSqlParameters {
             }
 
             if (c == '\'' || c == '"' || c == '`') {
-                i = copyQuoted(sql, i, c, out);
+                i = copyQuoted(sql, i, c, out, backslashEscapes);
                 continue;
             }
 
@@ -153,24 +168,30 @@ final class RdsDataSqlParameters {
                     "arrayValue is not supported for parameter :" + name
                             + " by this local RDS Data API implementation.", 400);
         } else if (value.has("stringValue")) {
-            bindString(statement, index, value.get("stringValue").asText(), typeHint);
+            bindString(statement, index, name, value.get("stringValue").asText(), typeHint);
         } else {
             throw new AwsException("BadRequestException",
                     "Parameter :" + name + " has no supported value field.", 400);
         }
     }
 
-    private static void bindString(PreparedStatement statement, int index, String value, String typeHint)
+    private static void bindString(PreparedStatement statement, int index, String name, String value, String typeHint)
             throws SQLException {
         String hint = typeHint == null ? "" : typeHint.toUpperCase();
-        switch (hint) {
-            case "DECIMAL" -> statement.setBigDecimal(index, new BigDecimal(value));
-            case "TIMESTAMP" -> statement.setTimestamp(index, Timestamp.valueOf(value));
-            case "DATE" -> statement.setDate(index, Date.valueOf(value));
-            case "TIME" -> statement.setTime(index, Time.valueOf(value));
-            case "UUID" -> statement.setObject(index, UUID.fromString(value));
-            case "JSON" -> statement.setObject(index, value, Types.OTHER);
-            default -> statement.setString(index, value);
+        try {
+            switch (hint) {
+                case "DECIMAL" -> statement.setBigDecimal(index, new BigDecimal(value));
+                case "TIMESTAMP" -> statement.setTimestamp(index, Timestamp.valueOf(value));
+                case "DATE" -> statement.setDate(index, Date.valueOf(value));
+                case "TIME" -> statement.setTime(index, Time.valueOf(value));
+                case "UUID" -> statement.setObject(index, UUID.fromString(value));
+                case "JSON" -> statement.setObject(index, value, Types.OTHER);
+                default -> statement.setString(index, value);
+            }
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException",
+                    "Parameter :" + name + " value \"" + value + "\" is not a valid "
+                            + hint + " for the supplied typeHint.", 400);
         }
     }
 
@@ -183,13 +204,19 @@ final class RdsDataSqlParameters {
         }
     }
 
-    private static int copyQuoted(String sql, int start, char quote, StringBuilder out) {
+    private static int copyQuoted(String sql, int start, char quote, StringBuilder out, boolean backslashEscapes) {
         int len = sql.length();
+        boolean escapable = backslashEscapes && quote != '`';
         out.append(quote);
         int i = start + 1;
         while (i < len) {
             char c = sql.charAt(i);
             out.append(c);
+            if (escapable && c == '\\' && i + 1 < len) {
+                out.append(sql.charAt(i + 1));
+                i += 2;
+                continue;
+            }
             if (c == quote) {
                 if (i + 1 < len && sql.charAt(i + 1) == quote) {
                     out.append(quote);

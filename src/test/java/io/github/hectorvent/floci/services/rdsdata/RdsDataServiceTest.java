@@ -122,6 +122,58 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void rejectsMalformedTypeHintValueWithBadRequest() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode select = harness.request(
+                "select id from data_api_items where created_at = :ts");
+        ArrayNode params = objectMapper.createArrayNode();
+        params.add(hintedStringParam("ts", "not-a-timestamp", "TIMESTAMP"));
+        select.set("parameters", params);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(select, REGION));
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains(":ts"));
+    }
+
+    @Test
+    void rejectsMalformedUuidTypeHintValueWithBadRequest() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode select = harness.request("select id from data_api_items where id = :id");
+        ArrayNode params = objectMapper.createArrayNode();
+        params.add(hintedStringParam("id", "not-a-uuid", "UUID"));
+        select.set("parameters", params);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(select, REGION));
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void rejectsDuplicateParameterNames() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode select = harness.request("select 1 from data_api_items where id = :id");
+        ArrayNode params = objectMapper.createArrayNode();
+        params.add(stringParam("id", "first"));
+        params.add(stringParam("id", "second"));
+        select.set("parameters", params);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(select, REGION));
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains(":id"));
+    }
+
+    @Test
     void commitsRollsBackAndRejectsInvalidTransactionRequests() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();

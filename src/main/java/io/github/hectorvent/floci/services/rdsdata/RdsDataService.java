@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -121,7 +122,7 @@ public class RdsDataService implements Resettable {
                     requireActiveTransaction(transactionId, tx);
                     validateTransactionIdentity(tx, request);
                     tx.refresh(transactionTtl);
-                    return executeOnConnection(tx.connection, sql, parameters, includeMetadata);
+                    return executeOnConnection(tx.connection, tx.engine, sql, parameters, includeMetadata);
                 }
             }
 
@@ -129,7 +130,7 @@ public class RdsDataService implements Resettable {
             Credentials credentials = credentials(request, target, region);
             String database = databaseName(request, target);
             try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
-                return executeOnConnection(connection, sql, parameters, includeMetadata);
+                return executeOnConnection(connection, target.engine(), sql, parameters, includeMetadata);
             }
         } catch (SQLException e) {
             throw databaseError(e);
@@ -149,7 +150,7 @@ public class RdsDataService implements Resettable {
             connection = connectionFactory.open(target, credentials.username(), credentials.password(), database);
             connection.setAutoCommit(false);
             String transactionId = UUID.randomUUID().toString();
-            transactions.put(transactionId, new TransactionContext(transactionId, connection, target.arn(), database, transactionTtl));
+            transactions.put(transactionId, new TransactionContext(transactionId, connection, target.engine(), target.arn(), database, transactionTtl));
 
             ObjectNode response = objectMapper.createObjectNode();
             response.put("transactionId", transactionId);
@@ -210,7 +211,7 @@ public class RdsDataService implements Resettable {
         return response;
     }
 
-    private ObjectNode executeOnConnection(Connection connection, String sql,
+    private ObjectNode executeOnConnection(Connection connection, DatabaseEngine engine, String sql,
                                            Map<String, JsonNode> parameters, boolean includeMetadata)
             throws SQLException {
         if (parameters.isEmpty()) {
@@ -218,11 +219,23 @@ public class RdsDataService implements Resettable {
                 return buildResponse(statement, statement.execute(sql), includeMetadata);
             }
         }
-        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql);
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
             RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
             return buildResponse(statement, statement.execute(), includeMetadata);
         }
+    }
+
+    /**
+     * Whether a backslash escapes quotes inside string literals for {@code engine}.
+     * MySQL and MariaDB honor {@code \'} by default (NO_BACKSLASH_ESCAPES disabled);
+     * PostgreSQL treats backslash literally with {@code standard_conforming_strings} on.
+     */
+    private static boolean usesBackslashEscapes(DatabaseEngine engine) {
+        return switch (engine) {
+            case MYSQL, MARIADB -> true;
+            case POSTGRES -> false;
+        };
     }
 
     private ObjectNode buildResponse(Statement statement, boolean hasResultSet, boolean includeMetadata)
@@ -425,7 +438,10 @@ public class RdsDataService implements Resettable {
                 throw new AwsException("BadRequestException",
                         "Each SqlParameter requires a name.", 400);
             }
-            byName.put(name, parameter);
+            if (byName.putIfAbsent(name, parameter) != null) {
+                throw new AwsException("BadRequestException",
+                        "Duplicate parameter name :" + name + " in the parameter set.", 400);
+            }
         }
         return byName;
     }
@@ -471,13 +487,15 @@ public class RdsDataService implements Resettable {
     private static final class TransactionContext {
         private final String id;
         private final Connection connection;
+        private final DatabaseEngine engine;
         private final String resourceArn;
         private final String database;
         private volatile Instant expiresAt;
 
-        private TransactionContext(String id, Connection connection, String resourceArn, String database, Duration ttl) {
+        private TransactionContext(String id, Connection connection, DatabaseEngine engine, String resourceArn, String database, Duration ttl) {
             this.id = id;
             this.connection = connection;
+            this.engine = engine;
             this.resourceArn = resourceArn;
             this.database = database;
             refresh(ttl);

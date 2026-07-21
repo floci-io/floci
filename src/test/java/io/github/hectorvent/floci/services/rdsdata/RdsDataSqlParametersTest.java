@@ -61,4 +61,33 @@ class RdsDataSqlParametersTest {
         assertEquals("select $tag$ :nope $tag$ where id = ?", parsed.sql());
         assertEquals(List.of("id"), parsed.parameterOrder());
     }
+
+    @Test
+    void treatsBackslashAsEscapeInStringLiteralWhenEnabled() {
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select * from t where note = 'it\\'s a :id' and id = :id", true);
+
+        assertEquals("select * from t where note = 'it\\'s a :id' and id = ?", parsed.sql());
+        assertEquals(List.of("id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void treatsBackslashQuoteAsClosingQuoteWhenEscapesDisabled() {
+        // PostgreSQL default (standard_conforming_strings on): backslash is literal,
+        // so the first unescaped quote closes the literal.
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select 'a\\' as c, :id", false);
+
+        assertEquals("select 'a\\' as c, ?", parsed.sql());
+        assertEquals(List.of("id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void ignoresBackslashInsideBacktickIdentifierEvenWhenEscapesEnabled() {
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select `a\\` , id from t where id = :id", true);
+
+        assertEquals("select `a\\` , id from t where id = ?", parsed.sql());
+        assertEquals(List.of("id"), parsed.parameterOrder());
+    }
 }
