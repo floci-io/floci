@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
@@ -56,6 +57,44 @@ class CloudWatchLogsServiceTest {
     void createLogGroupBlankNameThrows() {
         assertThrows(AwsException.class, () ->
                 service.createLogGroup("", null, null, REGION));
+    }
+
+    @Test
+    void explicitAccountLogWritesRemainIsolatedOutsideRequestContext() {
+        InMemoryStorage<String, LogGroup> rawGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, LogStream> rawStreams = new InMemoryStorage<>();
+        InMemoryStorage<String, LogEvent> rawEvents = new InMemoryStorage<>();
+        CloudWatchLogsService accountService = new CloudWatchLogsService(
+                new AccountAwareStorageBackend<>(rawGroups, null, "000000000000"),
+                new AccountAwareStorageBackend<>(rawStreams, null, "000000000000"),
+                new AccountAwareStorageBackend<>(rawEvents, null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                10_000, new RegionResolver(REGION, "000000000000"));
+        String accountA = "111111111111";
+        String accountB = "222222222222";
+
+        for (String accountId : List.of(accountA, accountB)) {
+            accountService.createLogGroupForAccount(
+                    accountId, "/aws/rds/instance/db1/error", null, null, REGION);
+            accountService.createLogStreamForAccount(
+                    accountId, "/aws/rds/instance/db1/error", "stream", REGION);
+            accountService.putLogEventsForAccount(
+                    accountId, "/aws/rds/instance/db1/error", "stream",
+                    List.of(Map.of("timestamp", 1L, "message", accountId)), REGION);
+        }
+
+        String groupKey = REGION + "::/aws/rds/instance/db1/error";
+        String streamKey = groupKey + "::stream";
+        assertTrue(rawGroups.get(accountA + "/" + groupKey).isPresent());
+        assertTrue(rawGroups.get(accountB + "/" + groupKey).isPresent());
+        assertTrue(rawStreams.get(accountA + "/" + streamKey).isPresent());
+        assertTrue(rawStreams.get(accountB + "/" + streamKey).isPresent());
+        assertEquals(1, rawEvents.keys().stream()
+                .filter(key -> key.startsWith(accountA + "/" + streamKey + "::"))
+                .count());
+        assertEquals(1, rawEvents.keys().stream()
+                .filter(key -> key.startsWith(accountB + "/" + streamKey + "::"))
+                .count());
     }
 
     @Test

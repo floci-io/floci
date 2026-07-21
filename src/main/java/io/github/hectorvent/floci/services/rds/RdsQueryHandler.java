@@ -54,41 +54,43 @@ public class RdsQueryHandler {
         try {
             return switch (action) {
                 case "CreateDBInstance" -> handleCreateDbInstance(params, region);
-                case "DescribeDBInstances" -> handleDescribeDbInstances(params);
-                case "DeleteDBInstance" -> handleDeleteDbInstance(params);
-                case "ModifyDBInstance" -> handleModifyDbInstance(params);
-                case "RebootDBInstance" -> handleRebootDbInstance(params);
+                case "DescribeDBInstances" -> handleDescribeDbInstances(params, region);
+                case "DeleteDBInstance" -> handleDeleteDbInstance(params, region);
+                case "ModifyDBInstance" -> handleModifyDbInstance(params, region);
+                case "RebootDBInstance" -> handleRebootDbInstance(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params, region);
                 case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params, region);
                 case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params, region);
-                case "DeleteDBSubnetGroup" -> handleDeleteDbSubnetGroup(params);
+                case "DeleteDBSubnetGroup" -> handleDeleteDbSubnetGroup(params, region);
                 case "CreateDBCluster" -> handleCreateDbCluster(params, region);
-                case "DescribeDBClusters" -> handleDescribeDbClusters(params);
-                case "DeleteDBCluster" -> handleDeleteDbCluster(params);
-                case "ModifyDBCluster" -> handleModifyDbCluster(params);
-                case "CreateDBParameterGroup" -> handleCreateDbParameterGroup(params);
-                case "DescribeDBParameterGroups" -> handleDescribeDbParameterGroups(params);
-                case "DeleteDBParameterGroup" -> handleDeleteDbParameterGroup(params);
-                case "ModifyDBParameterGroup" -> handleModifyDbParameterGroup(params);
-                case "DescribeDBParameters" -> handleDescribeDbParameters(params);
-                case "CreateDBClusterParameterGroup" -> handleCreateDbClusterParameterGroup(params);
-                case "DescribeDBClusterParameterGroups" -> handleDescribeDbClusterParameterGroups(params);
-                case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params);
-                case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params);
-                case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params);
+                case "DescribeDBClusters" -> handleDescribeDbClusters(params, region);
+                case "DeleteDBCluster" -> handleDeleteDbCluster(params, region);
+                case "ModifyDBCluster" -> handleModifyDbCluster(params, region);
+                case "CreateDBParameterGroup" -> handleCreateDbParameterGroup(params, region);
+                case "DescribeDBParameterGroups" -> handleDescribeDbParameterGroups(params, region);
+                case "DeleteDBParameterGroup" -> handleDeleteDbParameterGroup(params, region);
+                case "ModifyDBParameterGroup" -> handleModifyDbParameterGroup(params, region);
+                case "DescribeDBParameters" -> handleDescribeDbParameters(params, region);
+                case "CreateDBClusterParameterGroup" -> handleCreateDbClusterParameterGroup(params, region);
+                case "DescribeDBClusterParameterGroups" -> handleDescribeDbClusterParameterGroups(params, region);
+                case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params, region);
+                case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params, region);
+                case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params, region);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
-                case "DescribeDBProxies" -> handleDescribeDbProxies(params);
+                case "DescribeDBProxies" -> handleDescribeDbProxies(params, region);
                 case "CreateDBProxy" -> handleCreateDbProxy(params, region);
-                case "DeleteDBProxy" -> handleDeleteDbProxy(params);
-                case "RegisterDBProxyTargets" -> handleRegisterDbProxyTargets(params);
-                case "DeregisterDBProxyTargets" -> handleDeregisterDbProxyTargets(params);
-                case "DescribeDBProxyTargetGroups" -> handleDescribeDbProxyTargetGroups(params);
-                case "DescribeDBProxyTargets" -> handleDescribeDbProxyTargets(params);
+                case "ModifyDBProxy" -> handleModifyDbProxy(params, region);
+                case "DeleteDBProxy" -> handleDeleteDbProxy(params, region);
+                case "RegisterDBProxyTargets" -> handleRegisterDbProxyTargets(params, region);
+                case "DeregisterDBProxyTargets" -> handleDeregisterDbProxyTargets(params, region);
+                case "DescribeDBProxyTargetGroups" -> handleDescribeDbProxyTargetGroups(params, region);
+                case "ModifyDBProxyTargetGroup" -> handleModifyDbProxyTargetGroup(params, region);
+                case "DescribeDBProxyTargets" -> handleDescribeDbProxyTargets(params, region);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
-                case "AddTagsToResource" -> handleAddTagsToResource(params);
-                case "ListTagsForResource" -> handleListTagsForResource(params);
-                case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params);
+                case "AddTagsToResource" -> handleAddTagsToResource(params, region);
+                case "ListTagsForResource" -> handleListTagsForResource(params, region);
+                case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params, region);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", AwsNamespaces.RDS, 400);
             };
@@ -147,13 +149,14 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbInstances(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbInstances(
+            MultivaluedMap<String, String> params, String region) {
         String filterId = params.getFirst("DBInstanceIdentifier");
         if (filterId == null || filterId.isBlank()) {
             filterId = extractRdsFilterValue(params, "db-instance-id");
         }
         try {
-            Collection<DbInstance> result = service.listDbInstances(filterId);
+            Collection<DbInstance> result = service.listDbInstances(filterId, region);
             XmlBuilder xml = new XmlBuilder().start("DBInstances");
             for (DbInstance i : result) {
                 xml.start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance");
@@ -165,14 +168,15 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDeleteDbInstance(MultivaluedMap<String, String> params) {
+    private Response handleDeleteDbInstance(
+            MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBInstanceIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbInstance instance = service.getDbInstance(id);
-            service.deleteDbInstance(id);
+            DbInstance instance = service.getDbInstance(id, region);
+            service.deleteDbInstance(id, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("DeleteDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -180,7 +184,8 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleModifyDbInstance(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbInstance(
+            MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBInstanceIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
@@ -192,7 +197,8 @@ public class RdsQueryHandler {
         try {
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             DbInstance instance = service.modifyDbInstance(
-                    id, newPassword, iamEnabled, dbSubnetGroupName, vpcSecurityGroupIds);
+                    id, newPassword, iamEnabled, dbSubnetGroupName,
+                    vpcSecurityGroupIds, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -224,21 +230,21 @@ public class RdsQueryHandler {
                 AwsNamespaces.RDS, xml.build())).build();
     }
 
-    private Response handleAddTagsToResource(MultivaluedMap<String, String> params) {
+    private Response handleAddTagsToResource(MultivaluedMap<String, String> params, String region) {
         String resourceName = params.getFirst("ResourceName");
         try {
-            service.addTagsToResource(resourceName, parseTags(params));
+            service.addTagsToResource(resourceName, parseTags(params), region);
             return Response.ok(AwsQueryResponse.envelope("AddTagsToResource", AwsNamespaces.RDS, "")).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
     }
 
-    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params, String region) {
         String resourceName = params.getFirst("ResourceName");
         try {
             XmlBuilder xml = new XmlBuilder().start("TagList");
-            writeTags(xml, service.listTagsForResource(resourceName));
+            writeTags(xml, service.listTagsForResource(resourceName, region));
             xml.end("TagList");
             return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
@@ -246,10 +252,10 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params) {
+    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params, String region) {
         String resourceName = params.getFirst("ResourceName");
         try {
-            service.removeTagsFromResource(resourceName, memberList(params, "TagKeys"));
+            service.removeTagsFromResource(resourceName, memberList(params, "TagKeys"), region);
             return Response.ok(AwsQueryResponse.envelope("RemoveTagsFromResource", AwsNamespaces.RDS, "")).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -304,27 +310,29 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDeleteDbSubnetGroup(MultivaluedMap<String, String> params) {
+    private Response handleDeleteDbSubnetGroup(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBSubnetGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue",
                     "DBSubnetGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            service.deleteDbSubnetGroup(name);
+            service.deleteDbSubnetGroup(name, region);
             return Response.ok(AwsQueryResponse.envelope("DeleteDBSubnetGroup", AwsNamespaces.RDS, "")).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
     }
 
-    private Response handleRebootDbInstance(MultivaluedMap<String, String> params) {
+    private Response handleRebootDbInstance(
+            MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBInstanceIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbInstance instance = service.rebootDbInstance(id);
+            DbInstance instance = service.rebootDbInstance(id, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RebootDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -366,13 +374,14 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbClusters(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbClusters(
+            MultivaluedMap<String, String> params, String region) {
         String filterId = params.getFirst("DBClusterIdentifier");
         if (filterId == null || filterId.isBlank()) {
             filterId = extractRdsFilterValue(params, "db-cluster-id");
         }
         try {
-            Collection<DbCluster> result = service.listDbClusters(filterId);
+            Collection<DbCluster> result = service.listDbClusters(filterId, region);
             XmlBuilder xml = new XmlBuilder().start("DBClusters");
             for (DbCluster c : result) {
                 xml.start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster");
@@ -384,14 +393,15 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDeleteDbCluster(MultivaluedMap<String, String> params) {
+    private Response handleDeleteDbCluster(
+            MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBClusterIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbCluster cluster = service.getDbCluster(id);
-            service.deleteDbCluster(id);
+            DbCluster cluster = service.getDbCluster(id, region);
+            service.deleteDbCluster(id, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("DeleteDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -399,7 +409,8 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleModifyDbCluster(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbCluster(
+            MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBClusterIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterIdentifier is required.", AwsNamespaces.RDS, 400);
@@ -408,7 +419,7 @@ public class RdsQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
         try {
-            DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled);
+            DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -418,7 +429,8 @@ public class RdsQueryHandler {
 
     // ── Parameter Groups ──────────────────────────────────────────────────────
 
-    private Response handleCreateDbParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBParameterGroupName");
         String family = params.getFirst("DBParameterGroupFamily");
         String description = params.getFirst("Description");
@@ -426,7 +438,8 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbParameterGroup group = service.createDbParameterGroup(name, family, description);
+            DbParameterGroup group = service.createDbParameterGroup(
+                    name, family, description, region);
             String result = paramGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateDBParameterGroup", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -434,10 +447,11 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbParameterGroups(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbParameterGroups(
+            MultivaluedMap<String, String> params, String region) {
         String filterName = params.getFirst("DBParameterGroupName");
         try {
-            Collection<DbParameterGroup> result = service.listDbParameterGroups(filterName);
+            Collection<DbParameterGroup> result = service.listDbParameterGroups(filterName, region);
             XmlBuilder xml = new XmlBuilder().start("DBParameterGroups");
             for (DbParameterGroup g : result) {
                 xml.start("DBParameterGroup").raw(paramGroupInnerXml(g)).end("DBParameterGroup");
@@ -449,20 +463,22 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDeleteDbParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleDeleteDbParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBParameterGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            service.deleteDbParameterGroup(name);
+            service.deleteDbParameterGroup(name, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteDBParameterGroup", AwsNamespaces.RDS)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
     }
 
-    private Response handleModifyDbParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBParameterGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
@@ -479,7 +495,7 @@ public class RdsQueryHandler {
             }
         }
         try {
-            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters);
+            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters, region);
             String result = new XmlBuilder()
                     .elem("DBParameterGroupName", group.getDbParameterGroupName())
                     .build();
@@ -489,13 +505,14 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbParameters(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbParameters(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBParameterGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbParameterGroup group = service.getDbParameterGroup(name);
+            DbParameterGroup group = service.getDbParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
                 xml.start("member")
@@ -513,7 +530,8 @@ public class RdsQueryHandler {
 
     // ── Cluster Parameter Groups ──────────────────────────────────────────────
 
-    private Response handleCreateDbClusterParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbClusterParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBClusterParameterGroupName");
         String family = params.getFirst("DBParameterGroupFamily");
         String description = params.getFirst("Description");
@@ -521,7 +539,8 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbClusterParameterGroup group = service.createDbClusterParameterGroup(name, family, description);
+            DbClusterParameterGroup group = service.createDbClusterParameterGroup(
+                    name, family, description, region);
             String result = clusterParamGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateDBClusterParameterGroup", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -529,10 +548,12 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbClusterParameterGroups(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbClusterParameterGroups(
+            MultivaluedMap<String, String> params, String region) {
         String filterName = params.getFirst("DBClusterParameterGroupName");
         try {
-            Collection<DbClusterParameterGroup> result = service.listDbClusterParameterGroups(filterName);
+            Collection<DbClusterParameterGroup> result =
+                    service.listDbClusterParameterGroups(filterName, region);
             XmlBuilder xml = new XmlBuilder().start("DBClusterParameterGroups");
             for (DbClusterParameterGroup g : result) {
                 xml.start("DBClusterParameterGroup").raw(clusterParamGroupInnerXml(g)).end("DBClusterParameterGroup");
@@ -544,20 +565,22 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDeleteDbClusterParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleDeleteDbClusterParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBClusterParameterGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            service.deleteDbClusterParameterGroup(name);
+            service.deleteDbClusterParameterGroup(name, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteDBClusterParameterGroup", AwsNamespaces.RDS)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
     }
 
-    private Response handleModifyDbClusterParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbClusterParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBClusterParameterGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
@@ -574,7 +597,8 @@ public class RdsQueryHandler {
             }
         }
         try {
-            DbClusterParameterGroup group = service.modifyDbClusterParameterGroup(name, parameters);
+            DbClusterParameterGroup group = service.modifyDbClusterParameterGroup(
+                    name, parameters, region);
             String result = new XmlBuilder()
                     .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
                     .build();
@@ -584,13 +608,14 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbClusterParameters(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbClusterParameters(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBClusterParameterGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbClusterParameterGroup group = service.getDbClusterParameterGroup(name);
+            DbClusterParameterGroup group = service.getDbClusterParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
                 xml.start("member")
@@ -616,9 +641,9 @@ public class RdsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DescribeDBSnapshots", AwsNamespaces.RDS, result)).build();
     }
 
-    private Response handleDescribeDbProxies(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbProxies(MultivaluedMap<String, String> params, String region) {
         XmlBuilder xml = new XmlBuilder().start("DBProxies");
-        for (DbProxy p : service.listDbProxies(params.getFirst("DBProxyName"))) {
+        for (DbProxy p : service.listDbProxies(params.getFirst("DBProxyName"), region)) {
             xml.start("member").raw(dbProxyInnerXml(p)).end("member");
         }
         xml.end("DBProxies");
@@ -626,6 +651,10 @@ public class RdsQueryHandler {
     }
 
     private Response handleCreateDbProxy(MultivaluedMap<String, String> params, String region) {
+        validateIpv4NetworkType(params.getFirst("EndpointNetworkType"),
+                "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
+        validateIpv4NetworkType(params.getFirst("TargetConnectionNetworkType"),
+                "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         String name = params.getFirst("DBProxyName");
         String engineFamily = params.getFirst("EngineFamily");
         boolean requireTls = "true".equalsIgnoreCase(params.getFirst("RequireTLS"));
@@ -642,39 +671,67 @@ public class RdsQueryHandler {
         String roleArn = params.getFirst("RoleArn");
         List<String> subnetIds = memberList(params, "VpcSubnetIds");
         List<String> sgIds = memberList(params, "VpcSecurityGroupIds");
-        List<DbProxyAuth> auth = new java.util.ArrayList<>();
-        for (int idx = 1; ; idx++) {
-            String secretArn = params.getFirst("Auth.member." + idx + ".SecretArn");
-            String authScheme = params.getFirst("Auth.member." + idx + ".AuthScheme");
-            String iamAuth = params.getFirst("Auth.member." + idx + ".IAMAuth");
-            if (secretArn == null && authScheme == null && iamAuth == null) {
-                break;
-            }
-            auth.add(new DbProxyAuth(authScheme, secretArn, iamAuth,
-                    params.getFirst("Auth.member." + idx + ".ClientPasswordAuthType"),
-                    params.getFirst("Auth.member." + idx + ".Description")));
-        }
-        boolean iamEnabled = auth.stream().anyMatch(a -> "REQUIRED".equalsIgnoreCase(a.getIamAuth()));
-        DbProxy proxy = service.createDbProxy(name, engineFamily, requireTls, iamEnabled, roleArn,
+        List<DbProxyAuth> auth = parseProxyAuth(params);
+        String defaultAuthScheme = params.getFirst("DefaultAuthScheme");
+        boolean iamEnabled = auth.stream().anyMatch(a ->
+                "REQUIRED".equalsIgnoreCase(a.getIamAuth())
+                        || "ENABLED".equalsIgnoreCase(a.getIamAuth()));
+        iamEnabled = iamEnabled || "IAM_AUTH".equalsIgnoreCase(defaultAuthScheme);
+        DbProxy proxy = service.createDbProxy(
+                name, engineFamily, requireTls, iamEnabled, defaultAuthScheme, roleArn,
                 subnetIds, sgIds, auth, idleClientTimeout, debugLogging, parseTags(params), region);
         String result = new XmlBuilder().start("DBProxy").raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
         return Response.ok(AwsQueryResponse.envelope("CreateDBProxy", AwsNamespaces.RDS, result)).build();
     }
 
-    private Response handleDeleteDbProxy(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbProxy(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
-        DbProxy proxy = service.getDbProxy(name);
+        String newName = params.getFirst("NewDBProxyName");
+        if (newName != null && !newName.isBlank()) {
+            throw new AwsException("UnsupportedOperation",
+                    "NewDBProxyName is not supported; renaming a persisted proxy requires "
+                            + "an atomic storage-key migration.", 400);
+        }
+        List<DbProxyAuth> auth = hasProxyAuthKeys(params) ? parseProxyAuth(params) : null;
+        List<String> securityGroups = hasMemberKeys(params, "SecurityGroups")
+                ? memberList(params, "SecurityGroups")
+                : (hasMemberKeys(params, "VpcSecurityGroupIds")
+                ? vpcSecurityGroupIds(params) : null);
+        DbProxy proxy = service.modifyDbProxy(
+                name,
+                params.getFirst("DefaultAuthScheme"),
+                auth,
+                parseOptionalBoolean(params, "RequireTLS"),
+                parseOptionalInteger(params, "IdleClientTimeout"),
+                parseOptionalBoolean(params, "DebugLogging"),
+                params.getFirst("RoleArn"),
+                securityGroups,
+                null,
+                region);
+        String result = new XmlBuilder().start("DBProxy")
+                .raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
+        return Response.ok(AwsQueryResponse.envelope(
+                "ModifyDBProxy", AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleDeleteDbProxy(MultivaluedMap<String, String> params, String region) {
+        String name = params.getFirst("DBProxyName");
+        DbProxy proxy = service.getDbProxy(name, region);
         String result = new XmlBuilder().start("DBProxy").raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
-        service.deleteDbProxy(name);
+        service.deleteDbProxy(name, region);
         return Response.ok(AwsQueryResponse.envelope("DeleteDBProxy", AwsNamespaces.RDS, result)).build();
     }
 
-    private Response handleRegisterDbProxyTargets(MultivaluedMap<String, String> params) {
+    private Response handleRegisterDbProxyTargets(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
         String tgName = params.getFirst("TargetGroupName");
+        if (tgName == null || tgName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetGroupName is required.", 400);
+        }
         List<String> clusterIds = memberList(params, "DBClusterIdentifiers");
         List<String> instanceIds = memberList(params, "DBInstanceIdentifiers");
-        DbProxyTargetGroup tg = service.registerDbProxyTargets(name, tgName, clusterIds, instanceIds, 0, 0);
+        DbProxyTargetGroup tg = service.registerDbProxyTargets(
+                name, tgName, clusterIds, instanceIds, 0, 0, region);
         XmlBuilder xml = new XmlBuilder().start("DBProxyTargets");
         for (DbProxyTarget t : tg.getTargets()) {
             xml.start("member").raw(dbProxyTargetInnerXml(t)).end("member");
@@ -683,28 +740,68 @@ public class RdsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("RegisterDBProxyTargets", AwsNamespaces.RDS, xml.build())).build();
     }
 
-    private Response handleDeregisterDbProxyTargets(MultivaluedMap<String, String> params) {
-        service.deregisterDbProxyTargets(params.getFirst("DBProxyName"), params.getFirst("TargetGroupName"),
-                memberList(params, "DBClusterIdentifiers"), memberList(params, "DBInstanceIdentifiers"));
+    private Response handleDeregisterDbProxyTargets(MultivaluedMap<String, String> params, String region) {
+        String targetGroupName = params.getFirst("TargetGroupName");
+        if (targetGroupName == null || targetGroupName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetGroupName is required.", 400);
+        }
+        service.deregisterDbProxyTargets(params.getFirst("DBProxyName"), targetGroupName,
+                memberList(params, "DBClusterIdentifiers"), memberList(params, "DBInstanceIdentifiers"), region);
         return Response.ok(AwsQueryResponse.envelope("DeregisterDBProxyTargets", AwsNamespaces.RDS, "")).build();
     }
 
-    private Response handleDescribeDbProxyTargetGroups(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbProxyTargetGroups(
+            MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
         XmlBuilder xml = new XmlBuilder().start("TargetGroups");
         for (DbProxyTargetGroup tg : service.describeDbProxyTargetGroups(
-                name, params.getFirst("TargetGroupName"))) {
+                name, params.getFirst("TargetGroupName"), region)) {
             xml.start("member").raw(dbProxyTargetGroupInnerXml(tg)).end("member");
         }
         xml.end("TargetGroups");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBProxyTargetGroups", AwsNamespaces.RDS, xml.build())).build();
     }
 
-    private Response handleDescribeDbProxyTargets(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbProxyTargetGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String targetGroupName = params.getFirst("TargetGroupName");
+        if (targetGroupName == null || targetGroupName.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "TargetGroupName is required.", 400);
+        }
+        String newName = params.getFirst("NewName");
+        if (newName != null && !newName.isBlank()) {
+            throw new AwsException("UnsupportedOperation",
+                    "The default DB proxy target group cannot be renamed.", 400);
+        }
+        String poolPrefix = "ConnectionPoolConfig.";
+        List<String> pinningFilters = hasMemberKeys(
+                params, poolPrefix + "SessionPinningFilters")
+                ? memberList(params, poolPrefix + "SessionPinningFilters") : null;
+        DbProxyTargetGroup targetGroup = service.configureDbProxyTargetGroup(
+                params.getFirst("DBProxyName"),
+                targetGroupName,
+                parseOptionalInteger(params, poolPrefix + "MaxConnectionsPercent"),
+                parseOptionalInteger(params, poolPrefix + "MaxIdleConnectionsPercent"),
+                parseOptionalInteger(params, poolPrefix + "ConnectionBorrowTimeout"),
+                params.containsKey(poolPrefix + "InitQuery")
+                        ? params.getFirst(poolPrefix + "InitQuery") : null,
+                pinningFilters,
+                region);
+        String result = new XmlBuilder().start("DBProxyTargetGroup")
+                .raw(dbProxyTargetGroupInnerXml(targetGroup)).end("DBProxyTargetGroup").build();
+        return Response.ok(AwsQueryResponse.envelope(
+                "ModifyDBProxyTargetGroup", AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleDescribeDbProxyTargets(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
         String tgName = params.getFirst("TargetGroupName");
+        if (tgName == null || tgName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetGroupName is required.", 400);
+        }
         XmlBuilder xml = new XmlBuilder().start("Targets");
-        for (DbProxyTarget t : service.describeDbProxyTargets(name, tgName)) {
+        for (DbProxyTarget t : service.describeDbProxyTargets(name, tgName, region)) {
             xml.start("member").raw(dbProxyTargetInnerXml(t)).end("member");
         }
         xml.end("Targets");
@@ -719,8 +816,16 @@ public class RdsQueryHandler {
                 .elem("EngineFamily", p.getEngineFamily())
                 .elem("Endpoint", p.getEndpoint())
                 .elem("RequireTLS", String.valueOf(p.isRequireTls()))
+                .elem("DefaultAuthScheme", p.getDefaultAuthScheme())
+                .elem("EndpointNetworkType", p.getEndpointNetworkType() != null
+                        ? p.getEndpointNetworkType() : "IPV4")
+                .elem("TargetConnectionNetworkType", p.getTargetConnectionNetworkType() != null
+                        ? p.getTargetConnectionNetworkType() : "IPV4")
                 .elem("IdleClientTimeout", p.getIdleClientTimeout())
                 .elem("DebugLogging", String.valueOf(p.isDebugLogging()));
+        if (p.getVpcId() != null) {
+            xml.elem("VpcId", p.getVpcId());
+        }
         if (p.getRoleArn() != null) {
             xml.elem("RoleArn", p.getRoleArn());
         }
@@ -735,6 +840,9 @@ public class RdsQueryHandler {
             }
             if (a.getDescription() != null) {
                 xml.elem("Description", a.getDescription());
+            }
+            if (a.getUserName() != null) {
+                xml.elem("UserName", a.getUserName());
             }
             xml.end("member");
         }
@@ -752,7 +860,30 @@ public class RdsQueryHandler {
         if (p.getCreatedAt() != null) {
             xml.elem("CreatedDate", p.getCreatedAt().toString());
         }
+        if (p.getUpdatedAt() != null) {
+            xml.elem("UpdatedDate", p.getUpdatedAt().toString());
+        }
         return xml.build();
+    }
+
+    private static void validateIpv4NetworkType(
+            String value, String parameterName, boolean dualAllowed, String validValues) {
+        if (value == null) {
+            return;
+        }
+        if ("IPV4".equalsIgnoreCase(value)) {
+            return;
+        }
+        boolean supportedAwsValue = "IPV6".equalsIgnoreCase(value)
+                || (dualAllowed && "DUAL".equalsIgnoreCase(value));
+        if (value.isBlank() || !supportedAwsValue) {
+            throw new AwsException("InvalidParameterValue",
+                    parameterName + " must be " + validValues + ".", 400);
+        }
+        throw new AwsException("UnsupportedOperation",
+                parameterName + " " + value.toUpperCase()
+                        + " is not supported because Floci currently exposes IPv4 proxy networking only.",
+                400);
     }
 
     private String dbProxyTargetGroupInnerXml(DbProxyTargetGroup tg) {
@@ -765,6 +896,15 @@ public class RdsQueryHandler {
                 .start("ConnectionPoolConfig")
                   .elem("MaxConnectionsPercent", tg.getMaxConnectionsPercent())
                   .elem("MaxIdleConnectionsPercent", tg.getMaxIdleConnectionsPercent())
+                  .elem("ConnectionBorrowTimeout", tg.getConnectionBorrowTimeout());
+        if (tg.getInitQuery() != null) {
+            xml.elem("InitQuery", tg.getInitQuery());
+        }
+        xml.start("SessionPinningFilters");
+        for (String filter : tg.getSessionPinningFilters()) {
+            xml.elem("member", filter);
+        }
+        xml.end("SessionPinningFilters")
                 .end("ConnectionPoolConfig");
         if (tg.getCreatedAt() != null) {
             xml.elem("CreatedDate", tg.getCreatedAt().toString());
@@ -1014,7 +1154,17 @@ public class RdsQueryHandler {
         if (groupName == null || groupName.isBlank() || "default".equalsIgnoreCase(groupName)) {
             return fallbackSubnetGroup(instance, "default", "default subnet group");
         }
-        return service.getDbSubnetGroup(groupName);
+        return service.getDbSubnetGroup(
+                groupName, regionFromRdsArn(instance.getDbInstanceArn()));
+    }
+
+    private String regionFromRdsArn(String arn) {
+        if (arn == null || arn.isBlank()) {
+            return config.defaultRegion();
+        }
+        String[] parts = arn.split(":", 6);
+        return parts.length == 6 && !parts[3].isBlank()
+                ? parts[3] : config.defaultRegion();
     }
 
     private DbSubnetGroup fallbackSubnetGroup(DbInstance instance, String name, String description) {
@@ -1074,6 +1224,7 @@ public class RdsQueryHandler {
             case DELETING -> "deleting";
             case REBOOTING -> "rebooting";
             case MODIFYING -> "modifying";
+            case FAILED -> "failed";
         };
     }
 
@@ -1126,6 +1277,62 @@ public class RdsQueryHandler {
             return Integer.parseInt(key.substring(dot + 1));
         } catch (NumberFormatException e) {
             return Integer.MAX_VALUE;
+        }
+    }
+
+    private static List<DbProxyAuth> parseProxyAuth(MultivaluedMap<String, String> params) {
+        List<DbProxyAuth> auth = new java.util.ArrayList<>();
+        for (int index = 1; ; index++) {
+            String prefix = "Auth.member." + index + ".";
+            String authScheme = params.getFirst(prefix + "AuthScheme");
+            String secretArn = params.getFirst(prefix + "SecretArn");
+            String iamAuth = params.getFirst(prefix + "IAMAuth");
+            String passwordType = params.getFirst(prefix + "ClientPasswordAuthType");
+            String description = params.getFirst(prefix + "Description");
+            String userName = params.getFirst(prefix + "UserName");
+            if (authScheme == null && secretArn == null && iamAuth == null
+                    && passwordType == null && description == null && userName == null) {
+                break;
+            }
+            DbProxyAuth entry = new DbProxyAuth(
+                    authScheme, secretArn, iamAuth, passwordType, description);
+            entry.setUserName(userName);
+            auth.add(entry);
+        }
+        return auth;
+    }
+
+    private static boolean hasProxyAuthKeys(MultivaluedMap<String, String> params) {
+        return params.keySet().stream().anyMatch(key -> key.startsWith("Auth.member."));
+    }
+
+    private static Boolean parseOptionalBoolean(
+            MultivaluedMap<String, String> params, String parameterName) {
+        String value = params.getFirst(parameterName);
+        if (value == null) {
+            return null;
+        }
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new AwsException("InvalidParameterValue",
+                parameterName + " must be true or false.", 400);
+    }
+
+    private static Integer parseOptionalInteger(
+            MultivaluedMap<String, String> params, String parameterName) {
+        String value = params.getFirst(parameterName);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    parameterName + " must be an integer.", 400);
         }
     }
 

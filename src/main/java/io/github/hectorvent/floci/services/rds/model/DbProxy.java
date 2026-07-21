@@ -24,12 +24,17 @@ public class DbProxy {
     private int proxyPort;               // relay port (engine family default, or a pool port if taken)
     private String engineFamily;         // POSTGRESQL | MYSQL | SQLSERVER (as sent by the client)
     private boolean requireTls = true;
-    private boolean iamAuth;             // true if any Auth[].IAMAuth == REQUIRED
+    private boolean iamAuth;             // effective relay auth from DefaultAuthScheme/Auth[]
+    private String defaultAuthScheme = "NONE"; // NONE | IAM_AUTH
     private String roleArn;
     private int idleClientTimeout = 1800;
     private boolean debugLogging;
     private String status = "available";
     private Instant createdAt;
+    private Instant updatedAt;
+    private String vpcId;
+    private String endpointNetworkType = "IPV4";
+    private String targetConnectionNetworkType = "IPV4";
     private List<String> vpcSubnetIds = new ArrayList<>();
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
     private List<DbProxyAuth> auth = new ArrayList<>();
@@ -66,6 +71,11 @@ public class DbProxy {
     public boolean isIamAuth() { return iamAuth; }
     public void setIamAuth(boolean iamAuth) { this.iamAuth = iamAuth; }
 
+    public String getDefaultAuthScheme() { return defaultAuthScheme; }
+    public void setDefaultAuthScheme(String defaultAuthScheme) {
+        this.defaultAuthScheme = defaultAuthScheme;
+    }
+
     public String getRoleArn() { return roleArn; }
     public void setRoleArn(String roleArn) { this.roleArn = roleArn; }
 
@@ -80,6 +90,22 @@ public class DbProxy {
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+
+    public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
+
+    public String getVpcId() { return vpcId; }
+    public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public String getEndpointNetworkType() { return endpointNetworkType; }
+    public void setEndpointNetworkType(String endpointNetworkType) {
+        this.endpointNetworkType = endpointNetworkType;
+    }
+
+    public String getTargetConnectionNetworkType() { return targetConnectionNetworkType; }
+    public void setTargetConnectionNetworkType(String targetConnectionNetworkType) {
+        this.targetConnectionNetworkType = targetConnectionNetworkType;
+    }
 
     public List<String> getVpcSubnetIds() { return vpcSubnetIds; }
     public void setVpcSubnetIds(List<String> vpcSubnetIds) {

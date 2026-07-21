@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
@@ -21,6 +22,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -126,11 +128,17 @@ public class CloudWatchLogsService {
     // ──────────────────────────── Log Groups ────────────────────────────
 
     public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
+        createLogGroupForAccount(null, name, retentionInDays, tags, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
         }
         String key = groupKey(region, name);
-        if (groupStore.get(key).isPresent()) {
+        if (getForAccount(groupStore, accountId, key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
                     "The specified log group already exists: " + name, 400);
         }
@@ -141,7 +149,7 @@ public class CloudWatchLogsService {
         if (tags != null) {
             group.setTags(new HashMap<>(tags));
         }
-        groupStore.put(key, group);
+        putForAccount(groupStore, accountId, key, group);
         LOG.infov("Created log group: {0} in region {1}", name, region);
     }
 
@@ -230,13 +238,18 @@ public class CloudWatchLogsService {
     // ──────────────────────────── Log Streams ────────────────────────────
 
     public void createLogStream(String groupName, String streamName, String region) {
+        createLogStreamForAccount(null, groupName, streamName, region);
+    }
+
+    public void createLogStreamForAccount(
+            String accountId, String groupName, String streamName, String region) {
         String groupKey = groupKey(region, groupName);
-        groupStore.get(groupKey)
+        getForAccount(groupStore, accountId, groupKey)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
 
         String streamKey = streamKey(region, groupName, streamName);
-        if (streamStore.get(streamKey).isPresent()) {
+        if (getForAccount(streamStore, accountId, streamKey).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
                     "The specified log stream already exists: " + streamName, 400);
         }
@@ -246,7 +259,7 @@ public class CloudWatchLogsService {
         stream.setLogStreamName(streamName);
         stream.setCreatedTime(System.currentTimeMillis());
         stream.setUploadSequenceToken(UUID.randomUUID().toString());
-        streamStore.put(streamKey, stream);
+        putForAccount(streamStore, accountId, streamKey, stream);
         LOG.infov("Created log stream: {0}/{1}", groupName, streamName);
     }
 
@@ -286,8 +299,14 @@ public class CloudWatchLogsService {
 
     public String putLogEvents(String groupName, String streamName,
                                List<Map<String, Object>> events, String region) {
+        return putLogEventsForAccount(null, groupName, streamName, events, region);
+    }
+
+    public String putLogEventsForAccount(
+            String accountId, String groupName, String streamName,
+            List<Map<String, Object>> events, String region) {
         String streamKey = streamKey(region, groupName, streamName);
-        LogStream stream = streamStore.get(streamKey)
+        LogStream stream = getForAccount(streamStore, accountId, streamKey)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log stream does not exist: " + streamName, 400));
 
@@ -308,7 +327,7 @@ public class CloudWatchLogsService {
             logEvent.setSequence(ingestionSequence.incrementAndGet());
 
             String eventKey = eventKey(region, groupName, streamName, ts, logEvent.getEventId());
-            eventStore.put(eventKey, logEvent);
+            putForAccount(eventStore, accountId, eventKey, logEvent);
 
             totalBytes += msg.getBytes().length + 26; // approx overhead
             if (minTs == null || ts < minTs) { minTs = ts; }
@@ -328,9 +347,30 @@ public class CloudWatchLogsService {
         stream.setStoredBytes(stream.getStoredBytes() + totalBytes);
         String nextToken = UUID.randomUUID().toString();
         stream.setUploadSequenceToken(nextToken);
-        streamStore.put(streamKey, stream);
+        putForAccount(streamStore, accountId, streamKey, stream);
 
         return nextToken;
+    }
+
+    private <V> Optional<V> getForAccount(
+            StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            return aware.getForAccount(accountId, key);
+        }
+        return store.get(key);
+    }
+
+    private <V> void putForAccount(
+            StorageBackend<String, V> store, String accountId, String key, V value) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            aware.putForAccount(accountId, key, value);
+            return;
+        }
+        store.put(key, value);
     }
 
     public record LogEventsResult(List<LogEvent> events, String nextForwardToken, String nextBackwardToken) {}

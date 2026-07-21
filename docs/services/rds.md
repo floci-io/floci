@@ -40,10 +40,12 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBSnapshots` | - |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
+| `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
 | `DeleteDBProxy` | Delete a DB proxy |
 | `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
 | `DeregisterDBProxyTargets` | Remove a cluster or instance from a proxy target group |
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
+| `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
 | `DescribeDBClusterSnapshots` | - |
 | `AddTagsToResource` | Add tags to a DB resource |
@@ -109,6 +111,16 @@ services:
     hostnames on the same engine-default port. The standard Docker Compose mapping also exposes
     only the `7001-7099` instance/cluster proxy range, not `1433`, `3306`, or `5432`. Use mock mode
     for DB proxy provisioning workflows until a dedicated endpoint-routing design is implemented.
+
+!!! note "DB proxy control-plane settings"
+
+    Proxy and target-group settings are persisted and round-trip through the RDS Query API and
+    CloudFormation. Pool sizing, borrow timeout, idle timeout, TLS, init-query, and session-pinning
+    settings are currently control-plane metadata; the TCP relay does not yet implement those data-plane
+    behaviors. `DefaultAuthScheme=IAM_AUTH` is supported for control-plane workflows, but a real-mode
+    proxy using that scheme cannot register a target until backend IAM authentication is implemented.
+    DB proxies currently support `IPV4` for both endpoint and target connections; `IPV6` and `DUAL`
+    endpoint networking require additional listener and Docker-network support.
 
 ## Examples
 

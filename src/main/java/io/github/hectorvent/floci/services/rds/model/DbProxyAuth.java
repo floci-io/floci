@@ -11,6 +11,7 @@ public class DbProxyAuth {
     private String iamAuth;                 // "REQUIRED" | "DISABLED"
     private String clientPasswordAuthType;  // nullable
     private String description;             // nullable
+    private String userName;                // nullable; used by end-to-end IAM authentication
 
     public DbProxyAuth() {}
 
@@ -37,4 +38,7 @@ public class DbProxyAuth {
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+
+    public String getUserName() { return userName; }
+    public void setUserName(String userName) { this.userName = userName; }
 }

@@ -343,14 +343,16 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
                 case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBParameterGroup" -> provisionDbParameterGroup(resource, properties, engine, stackName);
+                case "AWS::RDS::DBParameterGroup" ->
+                        provisionDbParameterGroup(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBClusterParameterGroup" ->
-                        provisionDbClusterParameterGroup(resource, properties, engine, stackName);
+                        provisionDbClusterParameterGroup(
+                                resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBProxy" -> provisionDbProxy(resource, properties, engine, region);
                 case "AWS::RDS::DBProxyTargetGroup" ->
-                        provisionDbProxyTargetGroup(resource, properties, engine);
+                        provisionDbProxyTargetGroup(resource, properties, engine, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
@@ -459,13 +461,16 @@ public class CloudFormationResourceProvisioner {
             case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
-            case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
-            case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
-            case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId);
-            case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId);
-            case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
-            case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
-            case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
+            case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId, region);
+            case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId, region);
+            case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId, region);
+            case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId, region);
+            case "AWS::RDS::DBSubnetGroup" ->
+                    rdsService.deleteDbSubnetGroup(physicalId, region);
+            case "AWS::RDS::DBParameterGroup" ->
+                    rdsService.deleteDbParameterGroup(physicalId, region);
+            case "AWS::RDS::DBClusterParameterGroup" ->
+                    rdsService.deleteDbClusterParameterGroup(physicalId, region);
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
             case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
             case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
@@ -968,7 +973,7 @@ public class CloudFormationResourceProvisioner {
     }
 
     private void provisionDbParameterGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String stackName) {
+                                           String stackName, String region) {
         String name = resolveOptional(props, "DBParameterGroupName", engine);
         if (name == null || name.isBlank()) {
             name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -976,13 +981,15 @@ public class CloudFormationResourceProvisioner {
         String family = resolveOptional(props, "Family", engine);
         String description = firstNonBlank(resolveOptional(props, "Description", engine),
                 "Managed by CloudFormation");
-        var group = rdsService.createDbParameterGroup(name, family, description);
+        var group = rdsService.createDbParameterGroup(
+                name, family, description, region);
         r.setPhysicalId(group.getDbParameterGroupName());
         r.getAttributes().put("DBParameterGroupName", group.getDbParameterGroupName());
     }
 
     private void provisionDbClusterParameterGroup(StackResource r, JsonNode props,
-                                                  CloudFormationTemplateEngine engine, String stackName) {
+                                                  CloudFormationTemplateEngine engine,
+                                                  String stackName, String region) {
         String name = resolveOptional(props, "DBClusterParameterGroupName", engine);
         if (name == null || name.isBlank()) {
             name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
@@ -990,7 +997,8 @@ public class CloudFormationResourceProvisioner {
         String family = resolveOptional(props, "Family", engine);
         String description = firstNonBlank(resolveOptional(props, "Description", engine),
                 "Managed by CloudFormation");
-        var group = rdsService.createDbClusterParameterGroup(name, family, description);
+        var group = rdsService.createDbClusterParameterGroup(
+                name, family, description, region);
         r.setPhysicalId(group.getDbClusterParameterGroupName());
         r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
     }
@@ -1060,29 +1068,72 @@ public class CloudFormationResourceProvisioner {
                                   String region) {
         String name = resolveOptional(props, "DBProxyName", engine);
         String engineFamily = resolveOptional(props, "EngineFamily", engine);
+        String defaultAuthScheme = resolveOptional(props, "DefaultAuthScheme", engine);
+        if (defaultAuthScheme == null) {
+            defaultAuthScheme = "NONE";
+        } else if (defaultAuthScheme.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "DefaultAuthScheme must be NONE or IAM_AUTH.", 400);
+        }
+        String endpointNetworkType = resolveOptional(props, "EndpointNetworkType", engine);
+        String targetConnectionNetworkType = resolveOptional(
+                props, "TargetConnectionNetworkType", engine);
+        validateIpv4DbProxyNetworkType(endpointNetworkType,
+                "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
+        validateIpv4DbProxyNetworkType(targetConnectionNetworkType,
+                "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         boolean requireTls = parseBoolProp(props, "RequireTLS", engine);
         boolean debugLogging = parseBoolProp(props, "DebugLogging", engine);
         Integer configuredIdleClientTimeout = parseOptionalIntProp(props, "IdleClientTimeout", engine);
         int idleClientTimeout = configuredIdleClientTimeout != null ? configuredIdleClientTimeout : 1800;
         String roleArn = resolveOptional(props, "RoleArn", engine);
         List<String> subnetIds = resolveStringList(props, "VpcSubnetIds", engine);
-        if (subnetIds.size() < 2) {
+        if (subnetIds.stream().distinct().count() < 2) {
             throw new AwsException("InvalidParameterValue",
-                    "AWS::RDS::DBProxy VpcSubnetIds must contain at least two subnet IDs.", 400);
+                    "AWS::RDS::DBProxy VpcSubnetIds must contain at least two distinct subnet IDs.", 400);
         }
         List<String> sgIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         List<DbProxyAuth> auth = parseProxyAuth(props, engine);
-        boolean iamAuth = auth.stream().anyMatch(a -> "REQUIRED".equalsIgnoreCase(a.getIamAuth()));
-        var proxy = rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth, roleArn,
-                subnetIds, sgIds, auth, idleClientTimeout, debugLogging,
-                parseCfnTags(props != null ? props.get("Tags") : null, engine), region);
+        boolean iamAuth = "IAM_AUTH".equalsIgnoreCase(defaultAuthScheme)
+                || auth.stream().anyMatch(a ->
+                "REQUIRED".equalsIgnoreCase(a.getIamAuth())
+                        || "ENABLED".equalsIgnoreCase(a.getIamAuth()));
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+        var proxy = r.getPhysicalId() == null
+                ? rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth,
+                defaultAuthScheme, roleArn, subnetIds, sgIds, auth, idleClientTimeout,
+                debugLogging, tags, region)
+                : updateDbProxy(r, name, engineFamily, defaultAuthScheme, requireTls,
+                idleClientTimeout, debugLogging, roleArn, subnetIds, sgIds, auth, tags, region);
         r.setPhysicalId(proxy.getDbProxyName());              // Ref -> DBProxyName
         r.getAttributes().put("Endpoint", proxy.getEndpoint());   // GetAtt "Endpoint" (bare host)
         r.getAttributes().put("DBProxyArn", proxy.getDbProxyArn());
+        if (proxy.getVpcId() != null) {
+            r.getAttributes().put("VpcId", proxy.getVpcId());
+        }
+    }
+
+    private io.github.hectorvent.floci.services.rds.model.DbProxy updateDbProxy(
+            StackResource resource, String name, String engineFamily, String defaultAuthScheme,
+            boolean requireTls, int idleClientTimeout, boolean debugLogging, String roleArn,
+            List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
+            Map<String, String> tags, String region) {
+        var existing = rdsService.getDbProxy(resource.getPhysicalId(), region);
+        if (!Objects.equals(existing.getDbProxyName(), name)
+                || engineFamily == null
+                || !existing.getEngineFamily().equalsIgnoreCase(engineFamily)
+                || !Set.copyOf(existing.getVpcSubnetIds()).equals(Set.copyOf(subnetIds))) {
+            throw new AwsException("UnsupportedOperation",
+                    "Changing DBProxyName, EngineFamily, or VpcSubnetIds requires CloudFormation "
+                            + "replacement, which is not yet supported by Floci.", 400);
+        }
+        return rdsService.modifyDbProxy(existing.getDbProxyName(), defaultAuthScheme, auth,
+                requireTls, idleClientTimeout, debugLogging, roleArn,
+                securityGroupIds, tags, region);
     }
 
     private void provisionDbProxyTargetGroup(StackResource r, JsonNode props,
-                                             CloudFormationTemplateEngine engine) {
+                                             CloudFormationTemplateEngine engine, String region) {
         String dbProxyName = resolveOptional(props, "DBProxyName", engine);
         String targetGroupName = resolveOptional(props, "TargetGroupName", engine);
         if (!"default".equals(targetGroupName)) {
@@ -1093,29 +1144,40 @@ public class CloudFormationResourceProvisioner {
         List<String> instanceIds = resolveStringList(props, "DBInstanceIdentifiers", engine);
         Integer maxConn = null;
         Integer maxIdle = null;
+        Integer connectionBorrowTimeout = null;
+        String initQuery = null;
+        List<String> sessionPinningFilters = List.of();
         if (props != null && props.has("ConnectionPoolConfigurationInfo")) {
             JsonNode cpc = props.get("ConnectionPoolConfigurationInfo");
             maxConn = parseOptionalIntProp(cpc, "MaxConnectionsPercent", engine);
             maxIdle = parseOptionalIntProp(cpc, "MaxIdleConnectionsPercent", engine);
+            connectionBorrowTimeout = parseOptionalIntProp(cpc, "ConnectionBorrowTimeout", engine);
+            initQuery = resolveOptional(cpc, "InitQuery", engine);
+            sessionPinningFilters = resolveStringList(cpc, "SessionPinningFilters", engine);
         }
-        var hasTargets = !clusterIds.isEmpty() || !instanceIds.isEmpty();
-        var tg = hasTargets
-                ? rdsService.registerDbProxyTargets(dbProxyName, targetGroupName,
-                        clusterIds, instanceIds, 0, 0)
-                : rdsService.configureDbProxyTargetGroup(dbProxyName, targetGroupName, maxConn, maxIdle);
-        if (hasTargets) {
-            try {
-                tg = rdsService.configureDbProxyTargetGroup(dbProxyName, targetGroupName, maxConn, maxIdle);
-            } catch (RuntimeException configurationFailure) {
-                try {
-                    rdsService.deregisterDbProxyTargets(dbProxyName, targetGroupName,
-                            clusterIds, instanceIds);
-                } catch (RuntimeException rollbackFailure) {
-                    configurationFailure.addSuppressed(rollbackFailure);
-                }
-                throw configurationFailure;
+        if (maxIdle != null && maxConn == null) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxConnectionsPercent is required when MaxIdleConnectionsPercent is specified.",
+                    400);
+        }
+        if (r.getPhysicalId() != null) {
+            var existing = rdsService.getDbProxyTargetGroupByArn(r.getPhysicalId(), region);
+            if (!Objects.equals(existing.getDbProxyName(), dbProxyName)
+                    || !Objects.equals(existing.getTargetGroupName(), targetGroupName)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Changing DBProxyName or TargetGroupName requires CloudFormation replacement.",
+                        400);
             }
         }
+        var proxy = rdsService.getDbProxy(dbProxyName, region);
+        int effectiveMaxConnections = maxConn != null ? maxConn
+                : ("SQLSERVER".equals(proxy.getEngineFamily()) ? 10 : 100);
+        int effectiveMaxIdle = maxIdle != null ? maxIdle : effectiveMaxConnections / 2;
+        int effectiveBorrowTimeout = connectionBorrowTimeout != null ? connectionBorrowTimeout : 120;
+        var tg = rdsService.reconcileDbProxyTargetGroup(
+                dbProxyName, targetGroupName, clusterIds, instanceIds,
+                effectiveMaxConnections, effectiveMaxIdle, effectiveBorrowTimeout,
+                initQuery, sessionPinningFilters, region);
         r.setPhysicalId(tg.getTargetGroupArn());              // Ref -> TargetGroupArn
         r.getAttributes().put("TargetGroupArn", tg.getTargetGroupArn());
         r.getAttributes().put("DBProxyName", tg.getDbProxyName());
@@ -1131,15 +1193,36 @@ public class CloudFormationResourceProvisioner {
                 entry.setIamAuth(resolveOptional(a, "IAMAuth", engine));
                 entry.setClientPasswordAuthType(resolveOptional(a, "ClientPasswordAuthType", engine));
                 entry.setDescription(resolveOptional(a, "Description", engine));
+                entry.setUserName(resolveOptional(a, "UserName", engine));
                 auth.add(entry);
             }
         }
         return auth;
     }
 
-    private void deleteDbProxySafe(String name) {
+    private void validateIpv4DbProxyNetworkType(
+            String value, String propertyName, boolean dualAllowed, String validValues) {
+        if (value == null) {
+            return;
+        }
+        if ("IPV4".equalsIgnoreCase(value)) {
+            return;
+        }
+        boolean supportedAwsValue = "IPV6".equalsIgnoreCase(value)
+                || (dualAllowed && "DUAL".equalsIgnoreCase(value));
+        if (value.isBlank() || !supportedAwsValue) {
+            throw new AwsException("InvalidParameterValue",
+                    propertyName + " must be " + validValues + ".", 400);
+        }
+        throw new AwsException("UnsupportedOperation",
+                propertyName + " " + value.toUpperCase()
+                        + " is not supported because Floci currently exposes IPv4 proxy networking only.",
+                400);
+    }
+
+    private void deleteDbProxySafe(String name, String region) {
         try {
-            rdsService.deleteDbProxy(name);
+            rdsService.deleteDbProxy(name, region);
         } catch (AwsException e) {
             if (!"DBProxyNotFoundFault".equals(e.getErrorCode())) {
                 throw e;
@@ -1148,9 +1231,9 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    private void clearDbProxyTargetGroupSafe(String targetGroupArn) {
+    private void clearDbProxyTargetGroupSafe(String targetGroupArn, String region) {
         try {
-            rdsService.clearDbProxyTargetGroupByArn(targetGroupArn);
+            rdsService.clearDbProxyTargetGroupByArn(targetGroupArn, region);
         } catch (AwsException e) {
             if (!"DBProxyTargetGroupNotFoundFault".equals(e.getErrorCode())) {
                 throw e;

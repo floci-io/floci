@@ -115,13 +115,14 @@ public class RdsDataService implements Resettable {
                 TransactionContext tx = transaction(transactionId);
                 synchronized (tx) {
                     requireActiveTransaction(transactionId, tx);
-                    validateTransactionIdentity(tx, request);
+                    validateTransactionIdentity(tx, request, region);
                     tx.refresh(transactionTtl);
                     return executeOnConnection(tx.connection, sql, includeMetadata);
                 }
             }
 
-            RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
+            RdsDataResourceResolver.DatabaseTarget target =
+                    resourceResolver.resolve(resourceArn, region);
             Credentials credentials = credentials(request, target, region);
             String database = databaseName(request, target);
             try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
@@ -136,7 +137,8 @@ public class RdsDataService implements Resettable {
         cleanupExpiredTransactions();
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
-        RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
+        RdsDataResourceResolver.DatabaseTarget target =
+                resourceResolver.resolve(resourceArn, region);
         Credentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
 
@@ -145,7 +147,8 @@ public class RdsDataService implements Resettable {
             connection = connectionFactory.open(target, credentials.username(), credentials.password(), database);
             connection.setAutoCommit(false);
             String transactionId = UUID.randomUUID().toString();
-            transactions.put(transactionId, new TransactionContext(transactionId, connection, target.arn(), database, transactionTtl));
+            transactions.put(transactionId, new TransactionContext(
+                    transactionId, connection, target.arn(), database, region, transactionTtl));
 
             ObjectNode response = objectMapper.createObjectNode();
             response.put("transactionId", transactionId);
@@ -158,14 +161,14 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    public ObjectNode commitTransaction(JsonNode request) {
+    public ObjectNode commitTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn);
+            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -182,14 +185,14 @@ public class RdsDataService implements Resettable {
         return response;
     }
 
-    public ObjectNode rollbackTransaction(JsonNode request) {
+    public ObjectNode rollbackTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn);
+            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -346,21 +349,26 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    private void validateTransactionIdentity(TransactionContext tx, JsonNode request) {
-        validateTransactionResource(tx, requiredText(request, "resourceArn"));
+    private void validateTransactionIdentity(
+            TransactionContext tx, JsonNode request, String region) {
+        validateTransactionResource(tx, requiredText(request, "resourceArn"), region);
         String database = textOrNull(request, "database");
         if (database != null && !database.isBlank() && !database.equals(tx.database)) {
             throw transactionNotFound(tx.id);
         }
     }
 
-    private void validateTransactionResource(TransactionContext tx, String resourceArn) {
+    private void validateTransactionResource(
+            TransactionContext tx, String resourceArn, String region) {
+        if (region == null || region.isBlank() || !region.equals(tx.region)) {
+            throw transactionNotFound(tx.id);
+        }
         if (resourceArn.equals(tx.resourceArn)) {
             return;
         }
         RdsDataResourceResolver.DatabaseTarget target;
         try {
-            target = resourceResolver.resolve(resourceArn);
+            target = resourceResolver.resolve(resourceArn, region);
         } catch (AwsException e) {
             throw transactionNotFound(tx.id);
         }
@@ -440,13 +448,17 @@ public class RdsDataService implements Resettable {
         private final Connection connection;
         private final String resourceArn;
         private final String database;
+        private final String region;
         private volatile Instant expiresAt;
 
-        private TransactionContext(String id, Connection connection, String resourceArn, String database, Duration ttl) {
+        private TransactionContext(
+                String id, Connection connection, String resourceArn,
+                String database, String region, Duration ttl) {
             this.id = id;
             this.connection = connection;
             this.resourceArn = resourceArn;
             this.database = database;
+            this.region = region;
             refresh(ttl);
         }
 

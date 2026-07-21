@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -105,6 +106,21 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     /**
+     * Returns every stored entry with its raw delegate key intact.
+     *
+     * <p>Startup migrations use this form when the key itself is part of a resource's identity.
+     * Keeping the account prefix prevents a value stored under a corrupt or foreign key from
+     * being re-keyed solely from mutable fields in the value.
+     */
+    public Map<String, V> scanAllAccountsWithRawKeys() {
+        Map<String, V> result = new LinkedHashMap<>();
+        for (String rawKey : delegate.keys()) {
+            delegate.get(rawKey).ifPresent(value -> result.put(rawKey, value));
+        }
+        return result;
+    }
+
+    /**
      * Returns all entries across every account as a map of logical-key (account prefix stripped)
      * to value. Entries without a slash-prefixed account segment are skipped.
      */
@@ -125,6 +141,97 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return delegate.get(accountId + "/" + key);
     }
 
+    /**
+     * Returns an explicitly scoped entry, or safely migrates a matching legacy unscoped entry.
+     *
+     * <p>The caller-supplied predicate must establish that the legacy value belongs to the
+     * destination account. This opt-in path avoids {@link #get(String)}'s request-context fallback,
+     * which cannot validate ownership before migrating old data.
+     */
+    public synchronized Optional<V> getForAccountMigratingLegacy(
+            String accountId, String key, Predicate<V> legacyOwner) {
+        Optional<V> scoped = getForAccount(accountId, key);
+        if (scoped.isPresent()) {
+            return scoped;
+        }
+        Optional<V> legacy = delegate.get(key).filter(legacyOwner);
+        if (legacy.isEmpty()) {
+            return Optional.empty();
+        }
+        delegate.put(accountId + "/" + key, legacy.get());
+        delegate.delete(key);
+        return legacy;
+    }
+
+    /**
+     * Returns an explicitly scoped entry, or safely migrates one of several older key shapes.
+     *
+     * <p>This is intended for resources whose logical key gained another scope component after
+     * account isolation was already deployed. Both account-prefixed legacy keys and older
+     * unprefixed keys are considered, but only when {@code legacyOwner} proves that the stored
+     * value belongs to the requested destination scope. The destination is written before the
+     * source is removed so a failed write cannot orphan the legacy value.
+     */
+    public synchronized Optional<V> getForAccountMigratingLegacyKeys(
+            String accountId, String key, List<String> legacyKeys,
+            Predicate<V> legacyOwner) {
+        return getForAccountMigratingLegacyKeys(
+                accountId, key, legacyKeys, legacyOwner, true);
+    }
+
+    /**
+     * Variant of {@link #getForAccountMigratingLegacyKeys(String, String, List, Predicate)} that
+     * can exclude unprefixed legacy keys when the value cannot prove account ownership.
+     */
+    public synchronized Optional<V> getForAccountMigratingLegacyKeys(
+            String accountId, String key, List<String> legacyKeys,
+            Predicate<V> legacyOwner, boolean includeUnscopedLegacyKeys) {
+        String destinationKey = accountId + "/" + key;
+        Set<String> candidates = new LinkedHashSet<>();
+        if (includeUnscopedLegacyKeys) {
+            candidates.add(key);
+        }
+        if (legacyKeys != null) {
+            for (String legacyKey : legacyKeys) {
+                if (legacyKey == null || legacyKey.isBlank()) {
+                    continue;
+                }
+                candidates.add(accountId + "/" + legacyKey);
+                if (includeUnscopedLegacyKeys) {
+                    candidates.add(legacyKey);
+                }
+            }
+        }
+        candidates.remove(destinationKey);
+
+        Optional<V> scoped = delegate.get(destinationKey);
+        if (scoped.isPresent()) {
+            if (scoped.filter(legacyOwner).isEmpty()) {
+                // A value under the destination key that does not belong to the requested
+                // scope is corrupt. Preserve both it and every legacy candidate so the
+                // caller fails closed without deleting the recoverable owned value.
+                return Optional.empty();
+            }
+            for (String candidateKey : candidates) {
+                if (delegate.get(candidateKey).filter(legacyOwner).isPresent()) {
+                    delegate.delete(candidateKey);
+                }
+            }
+            return scoped;
+        }
+
+        for (String candidateKey : candidates) {
+            Optional<V> legacy = delegate.get(candidateKey).filter(legacyOwner);
+            if (legacy.isEmpty()) {
+                continue;
+            }
+            delegate.put(destinationKey, legacy.get());
+            delegate.delete(candidateKey);
+            return legacy;
+        }
+        return Optional.empty();
+    }
+
     public void putForAccount(String accountId, String key, V value) {
         delegate.put(accountId + "/" + key, value);
     }
@@ -136,6 +243,13 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     public List<V> scanForAccount(String accountId, Predicate<String> keyFilter) {
         String prefix = accountId + "/";
         return delegate.scan(k -> k.startsWith(prefix) && keyFilter.test(k.substring(prefix.length())));
+    }
+
+    /** Returns unprefixed pre-account values that satisfy an ownership predicate. */
+    public List<V> scanUnscopedLegacy(Predicate<V> legacyOwner) {
+        return delegate.scan(k -> !k.contains("/")).stream()
+                .filter(legacyOwner)
+                .toList();
     }
 
     public Set<String> keysForAccount(String accountId) {

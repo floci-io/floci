@@ -22,6 +22,9 @@ public class DbProxyTargetGroup {
     private Instant updatedAt;
     private int maxConnectionsPercent = 100;
     private int maxIdleConnectionsPercent = 50;
+    private int connectionBorrowTimeout = 120;
+    private String initQuery;
+    private List<String> sessionPinningFilters = new ArrayList<>();
     private List<DbProxyTarget> targets = new ArrayList<>();
 
     public DbProxyTargetGroup() {}
@@ -52,6 +55,20 @@ public class DbProxyTargetGroup {
 
     public int getMaxIdleConnectionsPercent() { return maxIdleConnectionsPercent; }
     public void setMaxIdleConnectionsPercent(int maxIdleConnectionsPercent) { this.maxIdleConnectionsPercent = maxIdleConnectionsPercent; }
+
+    public int getConnectionBorrowTimeout() { return connectionBorrowTimeout; }
+    public void setConnectionBorrowTimeout(int connectionBorrowTimeout) {
+        this.connectionBorrowTimeout = connectionBorrowTimeout;
+    }
+
+    public String getInitQuery() { return initQuery; }
+    public void setInitQuery(String initQuery) { this.initQuery = initQuery; }
+
+    public List<String> getSessionPinningFilters() { return sessionPinningFilters; }
+    public void setSessionPinningFilters(List<String> sessionPinningFilters) {
+        this.sessionPinningFilters = sessionPinningFilters != null
+                ? new ArrayList<>(sessionPinningFilters) : new ArrayList<>();
+    }
 
     public List<DbProxyTarget> getTargets() { return targets; }
     public void setTargets(List<DbProxyTarget> targets) {
