@@ -3,10 +3,10 @@ package com.floci.test;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.kinesisanalyticsv2.KinesisAnalyticsV2Client;
 import software.amazon.awssdk.services.kinesisanalyticsv2.model.ApplicationDetail;
@@ -28,33 +28,40 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Exercises the real Apache Flink container path for Managed Service for Apache Flink
- * (Kinesis Analytics V2): CreateApplication lands in READY (no container yet), StartApplication
- * provisions an {@code apache/flink} JobManager and the application transitions to RUNNING once the
- * JobManager REST API answers, StopApplication tears it down back to READY. Also confirms the
- * AWS-faithful rejection of a runtime Floci cannot back with a plain Flink image.
+ * Ordered lifecycle for Managed Service for Apache Flink (Kinesis Analytics V2), exercised against a
+ * specific Flink runtime supplied by {@link #runtime()}. Concrete subclasses pin a runtime so the suite
+ * guards both the Flink 1.x and 2.x lines (Flink 2.0 changed the config system and boots slower):
+ * CreateApplication → READY, StartApplication provisions a real {@code apache/flink} cluster and the
+ * application transitions to RUNNING, ListApplications, StopApplication → READY, unsupported-runtime
+ * rejection, DeleteApplication.
  *
- * <p>Requires a running Floci with {@code kinesis-analytics.mock=false} and a working Docker daemon.
- * When the application never reaches RUNNING (Docker/Flink unavailable in CI), the dependent
- * assertions skip rather than fail, mirroring {@code AmazonMqTest} / {@code MskTest}.
+ * <p>Uses {@code PER_CLASS} instance lifecycle so each concrete subclass gets its own state (static
+ * fields would collide across subclasses). Requires a running Floci with
+ * {@code kinesis-analytics.mock=false} and a working Docker daemon; when the application never reaches
+ * RUNNING (Docker/Flink unavailable in CI), the dependent assertions skip rather than fail, mirroring
+ * {@code AmazonMqTest} / {@code MskTest}.
  */
-@DisplayName("Managed Service for Apache Flink (Kinesis Analytics V2)")
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class KinesisAnalyticsV2Test {
+abstract class AbstractKinesisAnalyticsV2LifecycleTest {
 
-    private static KinesisAnalyticsV2Client kda;
-    private static String applicationName = TestFixtures.uniqueName("flink-app");
-    private static Instant createTimestamp;
-    private static boolean reachedRunning;
     private static final String ROLE = "arn:aws:iam::000000000000:role/flink-exec";
 
+    /** The Flink {@code RuntimeEnvironment} under test, e.g. {@code FLINK-1_18} or {@code FLINK-2_3}. */
+    protected abstract String runtime();
+
+    private KinesisAnalyticsV2Client kda;
+    private String applicationName = TestFixtures.uniqueName("flink-app");
+    private Instant createTimestamp;
+    private boolean reachedRunning;
+
     @BeforeAll
-    static void setup() {
+    void setup() {
         kda = TestFixtures.kinesisAnalyticsV2Client();
     }
 
     @AfterAll
-    static void cleanup() {
+    void cleanup() {
         if (kda != null) {
             if (applicationName != null && createTimestamp != null) {
                 try {
@@ -76,9 +83,12 @@ class KinesisAnalyticsV2Test {
     @Test
     @Order(1)
     void createApplicationLandsReady() {
+        // runtime() is passed as a String: FLINK-2_3 is newer than this SDK's RuntimeEnvironment enum
+        // (2.44.14). The generated builder supports the String overload; assert via
+        // runtimeEnvironmentAsString() so both the enum-known (1.18) and newer (2.3) values work.
         CreateApplicationResponse response = kda.createApplication(CreateApplicationRequest.builder()
                 .applicationName(applicationName)
-                .runtimeEnvironment(RuntimeEnvironment.FLINK_1_18)
+                .runtimeEnvironment(runtime())
                 .serviceExecutionRole(ROLE)
                 .build());
 
@@ -87,6 +97,7 @@ class KinesisAnalyticsV2Test {
         assertThat(detail.applicationARN()).contains(":kinesisanalytics:");
         // AWS-faithful: a freshly created application is READY, not RUNNING.
         assertThat(detail.applicationStatus()).isEqualTo(ApplicationStatus.READY);
+        assertThat(detail.runtimeEnvironmentAsString()).isEqualTo(runtime());
         createTimestamp = detail.createTimestamp();
     }
 
@@ -108,13 +119,14 @@ class KinesisAnalyticsV2Test {
         Assumptions.assumeTrue(started,
                 "StartApplication failed (Docker likely unavailable); skipping RUNNING checks");
 
-        ApplicationDetail detail = waitForStatus(ApplicationStatus.RUNNING, Duration.ofSeconds(180));
+        // Flink 2.x boots noticeably slower than 1.x (multi-pass JVM config parser), so allow more time.
+        ApplicationDetail detail = waitForStatus(ApplicationStatus.RUNNING, Duration.ofSeconds(300));
         Assumptions.assumeTrue(detail != null,
                 "Application did not reach RUNNING (Docker/Flink likely unavailable); skipping");
 
         reachedRunning = true;
         assertThat(detail.applicationStatus()).isEqualTo(ApplicationStatus.RUNNING);
-        assertThat(detail.runtimeEnvironment()).isEqualTo(RuntimeEnvironment.FLINK_1_18);
+        assertThat(detail.runtimeEnvironmentAsString()).isEqualTo(runtime());
     }
 
     @Test
@@ -146,8 +158,8 @@ class KinesisAnalyticsV2Test {
     @Test
     @Order(5)
     void unsupportedRuntimeRejected() {
-        // Floci only backs FLINK-1_x runtimes with a plain Flink image; the SQL and Studio
-        // (Zeppelin) runtimes are rejected with InvalidArgumentException.
+        // Floci only backs FLINK-x_y runtimes with a plain Flink image; the SQL and Studio (Zeppelin)
+        // runtimes are rejected with InvalidArgumentException.
         assertThatThrownBy(() -> kda.createApplication(CreateApplicationRequest.builder()
                 .applicationName(TestFixtures.uniqueName("flink-bad"))
                 .runtimeEnvironment(RuntimeEnvironment.ZEPPELIN_FLINK_3_0)
@@ -172,7 +184,7 @@ class KinesisAnalyticsV2Test {
     }
 
     /** Best-effort: stop the application if it is RUNNING/STARTING so it can be deleted from READY. */
-    private static void ensureStopped() {
+    private void ensureStopped() {
         try {
             ApplicationStatus status = kda.describeApplication(DescribeApplicationRequest.builder()
                     .applicationName(applicationName)
@@ -189,7 +201,7 @@ class KinesisAnalyticsV2Test {
         }
     }
 
-    private static ApplicationDetail waitForStatus(ApplicationStatus target, Duration timeout) {
+    private ApplicationDetail waitForStatus(ApplicationStatus target, Duration timeout) {
         Instant deadline = Instant.now().plus(timeout);
         while (Instant.now().isBefore(deadline)) {
             ApplicationDetail detail = kda.describeApplication(DescribeApplicationRequest.builder()
@@ -208,7 +220,7 @@ class KinesisAnalyticsV2Test {
         return null;
     }
 
-    private static void requireApp() {
+    private void requireApp() {
         Assumptions.assumeTrue(applicationName != null,
                 "Application must exist from earlier ordered test");
     }
