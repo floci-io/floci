@@ -1,0 +1,5016 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Fast, free, open-source local AWS emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci/services/ec2/">
+      
+      
+        <link rel="prev" href="../opensearch/">
+      
+      
+        <link rel="next" href="../lightsail/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>EC2 - Floci</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#ec2" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Floci" class="md-header__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Floci
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              EC2
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testcontainers/" class="md-tabs__link">
+          
+  
+  
+  Testcontainers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../contributing/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Contributing
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Floci" class="md-nav__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    Floci
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/aws-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/migrate-from-localstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrate from LocalStack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Images
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ports Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/multi-account/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Account Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/initialization-hooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Initialization Hooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_9" id="__nav_3_9_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ssm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSM Parameter Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SES
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dynamodb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DynamoDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cognito/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cognito
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kinesis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kinesis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secrets-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudformation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFormation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../step-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Step Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    STS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elasticache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ElastiCache
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memorydb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MemoryDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rds/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rds-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS Data API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../msk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MSK (Kafka)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../neptune/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Neptune
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docdb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DocumentDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../athena/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Athena
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firehose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Firehose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eventbridge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pipes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Pipes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudwatch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../acm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ACM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ecs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ecr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-groups-tagging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Groups Tagging API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EKS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../opensearch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenSearch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EC2
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EC2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#instance-execution-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance Execution Model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ami-to-docker-image-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AMI to Docker Image Mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="AMI to Docker Image Mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cloud-image-derived-ami-guests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud-image-derived AMI guests
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ssh-key-injection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSH Key Injection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-group-port-publishing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security Group Port Publishing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#userdata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UserData
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instance-metadata-service-imds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance Metadata Service (IMDS)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instance Metadata Service (IMDS)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#supported-imds-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported IMDS endpoints
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#default-resources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default Resources
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Actions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported Actions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#instances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instances
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#vpcs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        VPCs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subnets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subnets
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#security-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security Groups
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#key-pairs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Pairs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#amis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AMIs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#internet-gateways" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Internet Gateways
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#route-tables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Route Tables
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#network-acls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network ACLs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#prefix-lists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prefix Lists
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nat-gateways" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NAT Gateways
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#elastic-ips" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Elastic IPs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#availability-zones-regions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Availability Zones &amp; Regions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance Types
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#launch-templates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Launch Templates
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iam-instance-profiles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM Instance Profiles
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#network-interfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network Interfaces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#volumes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Volumes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Requirements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Notes
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lightsail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lightsail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../appconfig/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppConfig
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bedrock-runtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bedrock Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ELB v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../autoscaling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auto Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elastic-beanstalk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Elastic Beanstalk
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codebuild/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeBuild
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../batch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Batch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codedeploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeDeploy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codepipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodePipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Backup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudtrail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudTrail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudfront/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFront
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../route53/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Route53
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Cloud Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS IoT Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../appsync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppSync
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transfer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transfer Family
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Config
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudtrail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudTrail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../emr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EMR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wafv2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WAF v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../textract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Textract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transcribe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transcribe
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pricing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pricing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ce/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Explorer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cur/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost and Usage Reports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bcm-data-exports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BCM Data Exports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testcontainers
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testcontainers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/java/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Java
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/nodejs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Node.js / TypeScript
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/python/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/go/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Go
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#instance-execution-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance Execution Model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ami-to-docker-image-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AMI to Docker Image Mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="AMI to Docker Image Mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cloud-image-derived-ami-guests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud-image-derived AMI guests
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ssh-key-injection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSH Key Injection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-group-port-publishing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security Group Port Publishing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#userdata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UserData
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instance-metadata-service-imds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance Metadata Service (IMDS)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instance Metadata Service (IMDS)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#supported-imds-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported IMDS endpoints
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#default-resources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default Resources
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Actions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported Actions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#instances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instances
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#vpcs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        VPCs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subnets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subnets
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#security-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security Groups
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#key-pairs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Pairs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#amis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AMIs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#internet-gateways" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Internet Gateways
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#route-tables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Route Tables
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#network-acls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network ACLs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#prefix-lists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prefix Lists
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nat-gateways" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NAT Gateways
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#elastic-ips" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Elastic IPs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#availability-zones-regions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Availability Zones &amp; Regions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance Types
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#launch-templates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Launch Templates
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iam-instance-profiles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM Instance Profiles
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#network-interfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network Interfaces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#volumes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Volumes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Requirements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Notes
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="ec2">EC2</h1>
+<p><strong>Protocol:</strong> EC2 Query (XML) — <code>POST http://localhost:4566/</code> with <code>Action=</code> parameter</p>
+<h2 id="instance-execution-model">Instance Execution Model</h2>
+<p><code>RunInstances</code> launches a <strong>real Docker container</strong> for each instance. By default, the container is kept alive with <code>tail -f /dev/null</code> so any base image works regardless of its default CMD. Catalog entries that opt into the <code>systemd</code> guest runtime start <code>/sbin/init</code> instead, with the Docker mounts needed for a systemd-based cloud-image guest.</p>
+<table>
+<thead>
+<tr>
+<th>EC2 state</th>
+<th>Docker operation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pending → running</code></td>
+<td>Container created and started</td>
+</tr>
+<tr>
+<td><code>running → stopping → stopped</code></td>
+<td><code>docker stop</code> (30 s timeout, then SIGKILL)</td>
+</tr>
+<tr>
+<td><code>stopped → pending → running</code></td>
+<td><code>docker start</code></td>
+</tr>
+<tr>
+<td><code>running → shutting-down → terminated</code></td>
+<td><code>docker rm -f</code></td>
+</tr>
+<tr>
+<td>Reboot</td>
+<td><code>docker restart</code></td>
+</tr>
+</tbody>
+</table>
+<p>Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned.</p>
+<h2 id="ami-to-docker-image-mapping">AMI to Docker Image Mapping</h2>
+<p>Floci resolves AMI IDs to Docker images from the EC2 image catalog at
+<code>src/main/resources/ec2/image-catalog.yaml</code>. The same catalog stores the
+fallback Docker image, per-AMI Docker image mappings, and <code>DescribeImages</code>
+metadata.</p>
+<table>
+<thead>
+<tr>
+<th>AMI ID</th>
+<th>Aliases</th>
+<th>Docker image</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ami-0abcdef1234567890</code></td>
+<td><code>ami-amazonlinux2</code></td>
+<td><code>public.ecr.aws/amazonlinux/amazonlinux:2</code></td>
+</tr>
+<tr>
+<td><code>ami-0abcdef1234567891</code></td>
+<td><code>ami-amazonlinux2023</code></td>
+<td><code>public.ecr.aws/amazonlinux/amazonlinux:2023</code></td>
+</tr>
+<tr>
+<td><code>ami-0abcdef1234567892</code></td>
+<td><code>ami-ubuntu2004</code></td>
+<td><code>public.ecr.aws/docker/library/ubuntu:20.04</code></td>
+</tr>
+<tr>
+<td><code>ami-ubuntu2204</code></td>
+<td></td>
+<td><code>public.ecr.aws/docker/library/ubuntu:22.04</code></td>
+</tr>
+<tr>
+<td><code>ami-ubuntu2404-arm64</code></td>
+<td><code>ami-ubuntu2404</code></td>
+<td><code>public.ecr.aws/docker/library/ubuntu:24.04</code></td>
+</tr>
+<tr>
+<td><code>ami-ubuntu2404-amd64</code></td>
+<td></td>
+<td><code>public.ecr.aws/docker/library/ubuntu:24.04</code></td>
+</tr>
+<tr>
+<td><code>ami-ubuntu2404-cloud-arm64</code></td>
+<td><code>ami-ubuntu2404-cloud</code></td>
+<td><code>floci/ami-ubuntu:24.04-arm64</code></td>
+</tr>
+<tr>
+<td><code>ami-debian12</code></td>
+<td></td>
+<td><code>public.ecr.aws/docker/library/debian:12</code></td>
+</tr>
+<tr>
+<td><code>ami-alpine</code></td>
+<td></td>
+<td><code>public.ecr.aws/docker/library/alpine:latest</code></td>
+</tr>
+<tr>
+<td><code>ami-0abcdef1234567893</code></td>
+<td></td>
+<td><code>public.ecr.aws/amazonlinux/amazonlinux:2023</code></td>
+</tr>
+</tbody>
+</table>
+<p>Any unrecognized AMI ID (including real AWS AMI IDs like <code>ami-0abc12345678</code>) falls back to the catalog <code>defaultDockerImage</code> (<code>public.ecr.aws/amazonlinux/amazonlinux:2023</code> by default).</p>
+<h3 id="cloud-image-derived-ami-guests">Cloud-image-derived AMI guests</h3>
+<p>The <code>ami-ubuntu2404-cloud</code> entry is an experimental Ubuntu 24.04 guest image built from Canonical cloud-image artifacts, not from the Docker-library <code>ubuntu:24.04</code> image. It is intended for EC2 workflows that need packages such as <code>systemd</code> and <code>cloud-init</code> to match a real Ubuntu cloud image more closely.</p>
+<p>This mode is opt-in by AMI selection, not by a global configuration switch.
+Existing catalog entries, including <code>ami-ubuntu2404</code>, keep their current
+Docker-library image mapping and default <code>tail -f /dev/null</code> container
+lifecycle. The cloud-image-derived entry is a separate AMI ID and alias, so
+<code>DescribeImages</code> can advertise it while existing callers continue to get the
+old behavior unless they choose <code>ami-ubuntu2404-cloud-arm64</code> or the
+<code>ami-ubuntu2404-cloud</code> alias.</p>
+<p>The Java metadata-driven builder lives at <code>io.github.hectorvent.floci.tools.ami.AmiImageTool</code>. Its recipe is checked in at <code>docker/ec2/ami-images/image-build-metadata.yaml</code>, and generated context/provenance defaults to <code>target/ami-images/&lt;image-id&gt;/</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>./mvnw<span class="w"> </span>-q<span class="w"> </span>-DskipTests<span class="w"> </span>compile<span class="w"> </span>exec:java<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span>-Dexec.mainClass<span class="o">=</span>io.github.hectorvent.floci.tools.ami.AmiImageTool<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span>-Dexec.args<span class="o">=</span><span class="s2">&quot;plan --image-id ubuntu-24.04-arm64&quot;</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>./mvnw<span class="w"> </span>-q<span class="w"> </span>-DskipTests<span class="w"> </span>compile<span class="w"> </span>exec:java<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span>-Dexec.mainClass<span class="o">=</span>io.github.hectorvent.floci.tools.ami.AmiImageTool<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span>-Dexec.args<span class="o">=</span><span class="s2">&quot;generate --image-id ubuntu-24.04-arm64&quot;</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>./mvnw<span class="w"> </span>-q<span class="w"> </span>-DskipTests<span class="w"> </span>compile<span class="w"> </span>exec:java<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">  </span>-Dexec.mainClass<span class="o">=</span>io.github.hectorvent.floci.tools.ami.AmiImageTool<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">  </span>-Dexec.args<span class="o">=</span><span class="s2">&quot;build --image-id ubuntu-24.04-arm64&quot;</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>./mvnw<span class="w"> </span>-q<span class="w"> </span>-DskipTests<span class="w"> </span>compile<span class="w"> </span>exec:java<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">  </span>-Dexec.mainClass<span class="o">=</span>io.github.hectorvent.floci.tools.ami.AmiImageTool<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">  </span>-Dexec.args<span class="o">=</span><span class="s2">&quot;smoke --image-id ubuntu-24.04-arm64&quot;</span>
+</code></pre></div>
+<h2 id="ssh-key-injection">SSH Key Injection</h2>
+<p>If <code>KeyName</code> is specified at launch, Floci looks up the stored key pair's public key material (set via <code>ImportKeyPair</code>) and copies it into <code>/root/.ssh/authorized_keys</code> inside the container at boot. It then attempts to start <code>sshd</code> if present. The SSH port (container port 22) is mapped to a host port from the configured range (default 2200–2299).</p>
+<p>Key pairs created with <code>CreateKeyPair</code> contain dummy private key material. Import a real key pair with <code>ImportKeyPair</code> to enable working SSH access.</p>
+<h2 id="security-group-port-publishing">Security Group Port Publishing</h2>
+<p>When an instance's security groups open a TCP port to a CIDR source, Floci publishes that port on the host so you can reach the app from <code>localhost</code>. For each opened port Floci starts a small <code>alpine/socat</code> sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP. This works both for rules present at launch and for rules added later with <code>authorize-security-group-ingress</code>; revoking the rule removes the forward. The mapping (<code>app port -&gt; host port</code>) is written to the logs:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>Published EC2 instance i-0abc... app port 80 on host port 30000 (socat -&gt; 172.17.0.3:80)
+</code></pre></div>
+<p>Notes and limitations:</p>
+<ul>
+<li>The app inside the instance must listen on <code>0.0.0.0</code> (not <code>127.0.0.1</code>) for the forward to reach it.</li>
+<li>Only CIDR-sourced TCP rules are published. A port opened only to a referenced security group (or via a prefix list) is not published, matching AWS: those grant reachability from the referenced group's private IPs, not from the host. The source CIDR value itself is not enforced, so a CIDR-sourced port is reachable whether the rule is <code>0.0.0.0/0</code> or narrower.</li>
+<li>Ports are aggregated across all of the instance's security groups, SSH (22) is never re-forwarded, and any single rule whose port span exceeds <code>max-published-ports-per-instance</code> (default 20) is skipped so an allow-all range cannot spawn thousands of sidecars. The total published per instance is capped at the same limit.</li>
+<li>Stopping an instance tears down its forwards; starting it again does not automatically restore them (re-run <code>authorize-security-group-ingress</code>, or recreate the instance).</li>
+<li>Set <code>publish-security-group-ports: false</code> (<code>FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS=false</code>) to keep security groups as metadata only.</li>
+</ul>
+<h2 id="userdata">UserData</h2>
+<p><code>UserData</code> must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into <code>/tmp/user-data.sh</code> inside the container, and executes the script directly after SSH key injection so the script shebang selects the interpreter. Output is captured and logged.</p>
+<p>EC2 containers receive <code>AWS_EC2_METADATA_SERVICE_ENDPOINT</code> for IMDS and <code>AWS_ENDPOINT_URL</code> for AWS service API calls back to Floci.</p>
+<h2 id="instance-metadata-service-imds">Instance Metadata Service (IMDS)</h2>
+<p>Floci runs an IMDS-compatible HTTP server on port <code>9169</code> of the host. Each launched container receives the environment variable <code>AWS_EC2_METADATA_SERVICE_ENDPOINT</code> pointing to this server.</p>
+<p>Both IMDSv1 (no token) and IMDSv2 (token-based) flows are supported:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># IMDSv2 — get a token first</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span><span class="s2">&quot;http://169.254.169.254/latest/api/token&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;x-aws-ec2-metadata-token-ttl-seconds: 21600&quot;</span><span class="k">)</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="c1"># Then use the token for metadata requests</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;x-aws-ec2-metadata-token: </span><span class="nv">$TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span>http://169.254.169.254/latest/meta-data/instance-id
+</code></pre></div>
+<h3 id="supported-imds-endpoints">Supported IMDS endpoints</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Returns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /latest/meta-data/instance-id</code></td>
+<td>Instance ID</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/ami-id</code></td>
+<td>Image ID</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/instance-type</code></td>
+<td>Instance type</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/local-ipv4</code></td>
+<td>Private IP</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/public-ipv4</code></td>
+<td>Public IP (<code>127.0.0.1</code>)</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/public-hostname</code></td>
+<td>Public hostname</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/local-hostname</code></td>
+<td>Private DNS name</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/hostname</code></td>
+<td>Private DNS name</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/mac</code></td>
+<td>MAC address of first ENI</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/security-groups</code></td>
+<td>Security group names</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/placement/availability-zone</code></td>
+<td>AZ</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/placement/region</code></td>
+<td>Region</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/iam/info</code></td>
+<td>IAM instance profile info</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/iam/security-credentials/</code></td>
+<td>Role name list</td>
+</tr>
+<tr>
+<td><code>GET /latest/meta-data/iam/security-credentials/{role}</code></td>
+<td>Temporary credentials</td>
+</tr>
+<tr>
+<td><code>GET /latest/user-data</code></td>
+<td>UserData script</td>
+</tr>
+<tr>
+<td><code>GET /latest/dynamic/instance-identity/document</code></td>
+<td>Identity document JSON</td>
+</tr>
+</tbody>
+</table>
+<p>IAM credentials are served when the instance has an <code>IamInstanceProfile.Arn</code> set at launch. The container can then call other Floci services with full SigV4 validation using the standard AWS SDK credential chain.</p>
+<h2 id="default-resources">Default Resources</h2>
+<p>Floci seeds the following resources on first use in each region so Terraform, the AWS CLI, and SDK clients work out of the box without any setup:</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>ID</th>
+<th>Details</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Default VPC</td>
+<td><code>vpc-default</code></td>
+<td>CIDR <code>172.31.0.0/16</code></td>
+</tr>
+<tr>
+<td>Default Subnet (AZ a)</td>
+<td><code>subnet-default-a</code></td>
+<td>CIDR <code>172.31.0.0/20</code></td>
+</tr>
+<tr>
+<td>Default Subnet (AZ b)</td>
+<td><code>subnet-default-b</code></td>
+<td>CIDR <code>172.31.16.0/20</code></td>
+</tr>
+<tr>
+<td>Default Subnet (AZ c)</td>
+<td><code>subnet-default-c</code></td>
+<td>CIDR <code>172.31.32.0/20</code></td>
+</tr>
+<tr>
+<td>Default Security Group</td>
+<td><code>sg-default</code></td>
+<td><code>groupName=default</code>, all-traffic egress</td>
+</tr>
+<tr>
+<td>Default Internet Gateway</td>
+<td><code>igw-default</code></td>
+<td>Attached to default VPC</td>
+</tr>
+<tr>
+<td>Main Route Table</td>
+<td><code>rtb-default</code></td>
+<td>Associated with default VPC</td>
+</tr>
+<tr>
+<td>Default Network ACL</td>
+<td><code>acl-default</code></td>
+<td>Allow-all, associated with the default subnets</td>
+</tr>
+</tbody>
+</table>
+<h2 id="supported-actions">Supported Actions</h2>
+<h3 id="instances">Instances</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RunInstances</td>
+<td>Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode.</td>
+</tr>
+<tr>
+<td>DescribeInstances</td>
+<td>Lists or returns stored EC2 instances.</td>
+</tr>
+<tr>
+<td>TerminateInstances</td>
+<td>Terminates instances and updates their stored lifecycle state.</td>
+</tr>
+<tr>
+<td>StartInstances</td>
+<td>Starts stopped instances and their local runtime when applicable.</td>
+</tr>
+<tr>
+<td>StopInstances</td>
+<td>Stops running instances and updates their stored lifecycle state.</td>
+</tr>
+<tr>
+<td>RebootInstances</td>
+<td>Reboots instances through the local EC2 service model.</td>
+</tr>
+<tr>
+<td>DescribeInstanceStatus</td>
+<td>Returns status records for stored instances.</td>
+</tr>
+<tr>
+<td>DescribeInstanceAttribute</td>
+<td>Returns a supported attribute for an instance.</td>
+</tr>
+<tr>
+<td>ModifyInstanceAttribute</td>
+<td>Updates supported mutable attributes for an instance.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="vpcs">VPCs</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateVpc</td>
+<td>Creates a VPC with the requested CIDR block.</td>
+</tr>
+<tr>
+<td>DescribeVpcs</td>
+<td>Lists or returns stored VPCs.</td>
+</tr>
+<tr>
+<td>DeleteVpc</td>
+<td>Deletes a VPC from the local EC2 store.</td>
+</tr>
+<tr>
+<td>ModifyVpcAttribute</td>
+<td>Updates supported VPC attributes.</td>
+</tr>
+<tr>
+<td>DescribeVpcAttribute</td>
+<td>Returns a supported VPC attribute.</td>
+</tr>
+<tr>
+<td>DescribeVpcEndpointServices</td>
+<td>Returns an empty local VPC endpoint service catalog.</td>
+</tr>
+<tr>
+<td>CreateVpcEndpoint</td>
+<td>Creates a VPC endpoint record.</td>
+</tr>
+<tr>
+<td>DescribeVpcEndpoints</td>
+<td>Lists or returns stored VPC endpoints.</td>
+</tr>
+<tr>
+<td>DeleteVpcEndpoints</td>
+<td>Deletes VPC endpoint records.</td>
+</tr>
+<tr>
+<td>CreateDefaultVpc</td>
+<td>Creates or returns the default VPC for the region.</td>
+</tr>
+<tr>
+<td>AssociateVpcCidrBlock</td>
+<td>Adds a secondary CIDR block association to a VPC.</td>
+</tr>
+<tr>
+<td>DisassociateVpcCidrBlock</td>
+<td>Removes a secondary CIDR block association from a VPC.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="subnets">Subnets</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateSubnet</td>
+<td>Creates a subnet in a VPC.</td>
+</tr>
+<tr>
+<td>DescribeSubnets</td>
+<td>Lists or returns stored subnets.</td>
+</tr>
+<tr>
+<td>DeleteSubnet</td>
+<td>Deletes a subnet from the local EC2 store.</td>
+</tr>
+<tr>
+<td>ModifySubnetAttribute</td>
+<td>Updates supported subnet attributes.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="security-groups">Security Groups</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateSecurityGroup</td>
+<td>Creates a security group in a VPC.</td>
+</tr>
+<tr>
+<td>DescribeSecurityGroups</td>
+<td>Lists or returns stored security groups.</td>
+</tr>
+<tr>
+<td>DeleteSecurityGroup</td>
+<td>Deletes a security group from the local EC2 store.</td>
+</tr>
+<tr>
+<td>AuthorizeSecurityGroupIngress</td>
+<td>Adds inbound permissions to a security group.</td>
+</tr>
+<tr>
+<td>AuthorizeSecurityGroupEgress</td>
+<td>Adds outbound permissions to a security group.</td>
+</tr>
+<tr>
+<td>RevokeSecurityGroupIngress</td>
+<td>Removes inbound permissions from a security group.</td>
+</tr>
+<tr>
+<td>RevokeSecurityGroupEgress</td>
+<td>Removes outbound permissions from a security group.</td>
+</tr>
+<tr>
+<td>DescribeSecurityGroupRules</td>
+<td>Lists stored security group rules.</td>
+</tr>
+<tr>
+<td>ModifySecurityGroupRules</td>
+<td>Updates supported fields on security group rules.</td>
+</tr>
+<tr>
+<td>UpdateSecurityGroupRuleDescriptionsIngress</td>
+<td>Updates descriptions on matching inbound security group rules.</td>
+</tr>
+<tr>
+<td>UpdateSecurityGroupRuleDescriptionsEgress</td>
+<td>Updates descriptions on matching outbound security group rules.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="key-pairs">Key Pairs</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateKeyPair</td>
+<td>Creates and stores a local key pair.</td>
+</tr>
+<tr>
+<td>DescribeKeyPairs</td>
+<td>Lists or returns stored key pairs.</td>
+</tr>
+<tr>
+<td>DeleteKeyPair</td>
+<td>Deletes a key pair from the local EC2 store.</td>
+</tr>
+<tr>
+<td>ImportKeyPair</td>
+<td>Imports a public key as a local key pair.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="amis">AMIs</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DescribeImages</td>
+<td>Returns AMI metadata known to the local EC2 service.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tags">Tags</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateTags</td>
+<td>Adds tags to supported EC2 resources.</td>
+</tr>
+<tr>
+<td>DeleteTags</td>
+<td>Removes tags from supported EC2 resources.</td>
+</tr>
+<tr>
+<td>DescribeTags</td>
+<td>Lists tags stored for EC2 resources.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="internet-gateways">Internet Gateways</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateInternetGateway</td>
+<td>Creates an internet gateway.</td>
+</tr>
+<tr>
+<td>DescribeInternetGateways</td>
+<td>Lists or returns stored internet gateways.</td>
+</tr>
+<tr>
+<td>DeleteInternetGateway</td>
+<td>Deletes an internet gateway.</td>
+</tr>
+<tr>
+<td>AttachInternetGateway</td>
+<td>Attaches an internet gateway to a VPC.</td>
+</tr>
+<tr>
+<td>DetachInternetGateway</td>
+<td>Detaches an internet gateway from a VPC.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="route-tables">Route Tables</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateRouteTable</td>
+<td>Creates a route table in a VPC.</td>
+</tr>
+<tr>
+<td>DescribeRouteTables</td>
+<td>Lists or returns stored route tables.</td>
+</tr>
+<tr>
+<td>DeleteRouteTable</td>
+<td>Deletes a route table from the local EC2 store.</td>
+</tr>
+<tr>
+<td>AssociateRouteTable</td>
+<td>Associates a route table with a subnet.</td>
+</tr>
+<tr>
+<td>DisassociateRouteTable</td>
+<td>Removes a route table association.</td>
+</tr>
+<tr>
+<td>CreateRoute</td>
+<td>Adds a route to a route table.</td>
+</tr>
+<tr>
+<td>DeleteRoute</td>
+<td>Removes a route from a route table.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="network-acls">Network ACLs</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateNetworkAcl</td>
+<td>Creates a network ACL in a VPC.</td>
+</tr>
+<tr>
+<td>DescribeNetworkAcls</td>
+<td>Lists or returns stored network ACLs.</td>
+</tr>
+<tr>
+<td>DeleteNetworkAcl</td>
+<td>Deletes a network ACL from the local EC2 store.</td>
+</tr>
+<tr>
+<td>CreateNetworkAclEntry</td>
+<td>Adds an entry to a network ACL.</td>
+</tr>
+<tr>
+<td>ReplaceNetworkAclEntry</td>
+<td>Replaces an entry in a network ACL.</td>
+</tr>
+<tr>
+<td>DeleteNetworkAclEntry</td>
+<td>Removes an entry from a network ACL.</td>
+</tr>
+<tr>
+<td>ReplaceNetworkAclAssociation</td>
+<td>Replaces the network ACL associated with a subnet.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="prefix-lists">Prefix Lists</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DescribePrefixLists</td>
+<td>Returns prefix lists known to the local EC2 service.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="nat-gateways">NAT Gateways</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateNatGateway</td>
+<td>Creates a NAT gateway record.</td>
+</tr>
+<tr>
+<td>DescribeNatGateways</td>
+<td>Lists or returns stored NAT gateways.</td>
+</tr>
+<tr>
+<td>DeleteNatGateway</td>
+<td>Deletes a NAT gateway record.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="elastic-ips">Elastic IPs</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AllocateAddress</td>
+<td>Allocates an Elastic IP address record.</td>
+</tr>
+<tr>
+<td>DescribeAddresses</td>
+<td>Lists or returns stored Elastic IP address records.</td>
+</tr>
+<tr>
+<td>DescribeAddressesAttribute</td>
+<td>Returns allocation ID and public IP attributes for Elastic IP addresses.</td>
+</tr>
+<tr>
+<td>AssociateAddress</td>
+<td>Associates an Elastic IP address with a resource.</td>
+</tr>
+<tr>
+<td>DisassociateAddress</td>
+<td>Removes an Elastic IP address association.</td>
+</tr>
+<tr>
+<td>ReleaseAddress</td>
+<td>Releases an Elastic IP address record.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="availability-zones-regions">Availability Zones &amp; Regions</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DescribeAvailabilityZones</td>
+<td>Returns the configured local availability zones.</td>
+</tr>
+<tr>
+<td>DescribeRegions</td>
+<td>Returns the regions known to the local EC2 service.</td>
+</tr>
+<tr>
+<td>DescribeAccountAttributes</td>
+<td>Returns local account-level EC2 attributes.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="instance-types">Instance Types</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DescribeInstanceTypes</td>
+<td>Returns instance type metadata known to the local EC2 service.</td>
+</tr>
+<tr>
+<td>DescribeInstanceTypeOfferings</td>
+<td>Returns instance type offerings for the requested location filters.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="launch-templates">Launch Templates</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateLaunchTemplate</td>
+<td>Creates a launch template with an initial version.</td>
+</tr>
+<tr>
+<td>CreateLaunchTemplateVersion</td>
+<td>Creates a new launch template version, optionally from a source version.</td>
+</tr>
+<tr>
+<td>DescribeLaunchTemplates</td>
+<td>Lists or returns stored launch templates.</td>
+</tr>
+<tr>
+<td>DescribeLaunchTemplateVersions</td>
+<td>Lists versions stored for a launch template.</td>
+</tr>
+<tr>
+<td>ModifyLaunchTemplate</td>
+<td>Updates launch template metadata such as the default version.</td>
+</tr>
+<tr>
+<td>DeleteLaunchTemplate</td>
+<td>Deletes a launch template and its versions.</td>
+</tr>
+</tbody>
+</table>
+<p>Launch templates store versioned launch data. New template versions can be created from an existing source version, and <code>ModifyLaunchTemplate</code> updates the default version used by later launches.</p>
+<h3 id="iam-instance-profiles">IAM Instance Profiles</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DescribeIamInstanceProfileAssociations</td>
+<td>Lists IAM instance profile associations known to the local EC2 service.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="network-interfaces">Network Interfaces</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DescribeNetworkInterfaces</td>
+<td>Lists network interfaces known to the local EC2 service.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="volumes">Volumes</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CreateVolume</td>
+<td>Creates an EBS volume record.</td>
+</tr>
+<tr>
+<td>DescribeVolumes</td>
+<td>Lists or returns stored EBS volume records.</td>
+</tr>
+<tr>
+<td>DeleteVolume</td>
+<td>Deletes an EBS volume record.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="configuration">Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Environment variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_IMDS_PORT</code></td>
+<td><code>9169</code></td>
+<td>Host port for the IMDS server</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_SSH_PORT_RANGE_START</code></td>
+<td><code>2200</code></td>
+<td>Start of SSH host port range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_SSH_PORT_RANGE_END</code></td>
+<td><code>2299</code></td>
+<td>End of SSH host port range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS</code></td>
+<td><code>true</code></td>
+<td>Publish security-group TCP ingress ports on the host via socat sidecars</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_APP_PORT_RANGE_START</code></td>
+<td><code>30000</code></td>
+<td>Start of the host-port range for published app ports</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_APP_PORT_RANGE_END</code></td>
+<td><code>30999</code></td>
+<td>End of the host-port range for published app ports</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE</code></td>
+<td><code>20</code></td>
+<td>Max published ports per instance; also the widest single-rule span published</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_SOCAT_IMAGE</code></td>
+<td><code>alpine/socat</code></td>
+<td>Image used for the port-forwarding sidecar</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_MOCK</code></td>
+<td><code>false</code></td>
+<td>Skip Docker; instances jump directly to final state (useful for tests)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="requirements">Requirements</h2>
+<p>EC2 requires the Docker socket to be accessible (same as Lambda, ECS, and other container services):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">services</span><span class="p">:</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">floci</span><span class="p">:</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">floci/floci:latest</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;4566:4566&quot;</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;9169:9169&quot;</span><span class="w">   </span><span class="c1"># IMDS — expose if containers need to reach it externally</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/run/docker.sock:/var/run/docker.sock</span>
+</code></pre></div>
+<p>The IMDS port (<code>9169</code>) only needs to be published if you are running EC2 containers outside the default Docker bridge network.</p>
+<h2 id="examples">Examples</h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">AWS_ENDPOINT_URL</span><span class="o">=</span>http://localhost:4566
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="c1"># Import an SSH key pair for injection at launch</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>aws<span class="w"> </span>ec2<span class="w"> </span>import-key-pair<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span>--key-name<span class="w"> </span>my-key<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">  </span>--public-key-material<span class="w"> </span>fileb://~/.ssh/id_rsa.pub<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="c1"># Launch a real Docker container instance with UserData</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>aws<span class="w"> </span>ec2<span class="w"> </span>run-instances<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">  </span>--image-id<span class="w"> </span>ami-amazonlinux2023<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="w">  </span>--instance-type<span class="w"> </span>t2.micro<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="w">  </span>--min-count<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="w">  </span>--max-count<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="w">  </span>--key-name<span class="w"> </span>my-key<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="w">  </span>--user-data<span class="w"> </span><span class="s1">&#39;#!/bin/bash</span>
+<a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a><span class="s1">yum install -y nginx</span>
+<a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a><span class="s1">systemctl start nginx&#39;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a>
+<a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a><span class="c1"># Launch with an IAM instance profile (credentials served via IMDS)</span>
+<a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a>aws<span class="w"> </span>ec2<span class="w"> </span>run-instances<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a><span class="w">  </span>--image-id<span class="w"> </span>ami-amazonlinux2023<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a><span class="w">  </span>--instance-type<span class="w"> </span>t2.micro<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a><span class="w">  </span>--min-count<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a><span class="w">  </span>--max-count<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a><span class="w">  </span>--iam-instance-profile<span class="w"> </span><span class="nv">Arn</span><span class="o">=</span>arn:aws:iam::000000000000:instance-profile/my-app-role<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-28" name="__codelineno-4-28" href="#__codelineno-4-28"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-29" name="__codelineno-4-29" href="#__codelineno-4-29"></a>
+<a id="__codelineno-4-30" name="__codelineno-4-30" href="#__codelineno-4-30"></a><span class="c1"># Describe running instances</span>
+<a id="__codelineno-4-31" name="__codelineno-4-31" href="#__codelineno-4-31"></a>aws<span class="w"> </span>ec2<span class="w"> </span>describe-instances<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-32" name="__codelineno-4-32" href="#__codelineno-4-32"></a><span class="w">  </span>--filters<span class="w"> </span><span class="s2">&quot;Name=instance-state-name,Values=running&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-33" name="__codelineno-4-33" href="#__codelineno-4-33"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-34" name="__codelineno-4-34" href="#__codelineno-4-34"></a>
+<a id="__codelineno-4-35" name="__codelineno-4-35" href="#__codelineno-4-35"></a><span class="c1"># Stop and start an instance</span>
+<a id="__codelineno-4-36" name="__codelineno-4-36" href="#__codelineno-4-36"></a>aws<span class="w"> </span>ec2<span class="w"> </span>stop-instances<span class="w"> </span>--instance-ids<span class="w"> </span>i-XXXXX<span class="w"> </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-37" name="__codelineno-4-37" href="#__codelineno-4-37"></a>aws<span class="w"> </span>ec2<span class="w"> </span>start-instances<span class="w"> </span>--instance-ids<span class="w"> </span>i-XXXXX<span class="w"> </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-38" name="__codelineno-4-38" href="#__codelineno-4-38"></a>
+<a id="__codelineno-4-39" name="__codelineno-4-39" href="#__codelineno-4-39"></a><span class="c1"># Terminate an instance</span>
+<a id="__codelineno-4-40" name="__codelineno-4-40" href="#__codelineno-4-40"></a>aws<span class="w"> </span>ec2<span class="w"> </span>terminate-instances<span class="w"> </span>--instance-ids<span class="w"> </span>i-XXXXX<span class="w"> </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-41" name="__codelineno-4-41" href="#__codelineno-4-41"></a>
+<a id="__codelineno-4-42" name="__codelineno-4-42" href="#__codelineno-4-42"></a><span class="c1"># Create a VPC and subnet</span>
+<a id="__codelineno-4-43" name="__codelineno-4-43" href="#__codelineno-4-43"></a>aws<span class="w"> </span>ec2<span class="w"> </span>create-vpc<span class="w"> </span>--cidr-block<span class="w"> </span><span class="m">10</span>.0.0.0/16<span class="w"> </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-44" name="__codelineno-4-44" href="#__codelineno-4-44"></a>aws<span class="w"> </span>ec2<span class="w"> </span>create-subnet<span class="w"> </span>--vpc-id<span class="w"> </span>vpc-XXXXX<span class="w"> </span>--cidr-block<span class="w"> </span><span class="m">10</span>.0.1.0/24<span class="w"> </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-45" name="__codelineno-4-45" href="#__codelineno-4-45"></a>
+<a id="__codelineno-4-46" name="__codelineno-4-46" href="#__codelineno-4-46"></a><span class="c1"># Create and configure a security group</span>
+<a id="__codelineno-4-47" name="__codelineno-4-47" href="#__codelineno-4-47"></a>aws<span class="w"> </span>ec2<span class="w"> </span>create-security-group<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-48" name="__codelineno-4-48" href="#__codelineno-4-48"></a><span class="w">  </span>--group-name<span class="w"> </span>my-sg<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-49" name="__codelineno-4-49" href="#__codelineno-4-49"></a><span class="w">  </span>--description<span class="w"> </span><span class="s2">&quot;My security group&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-50" name="__codelineno-4-50" href="#__codelineno-4-50"></a><span class="w">  </span>--vpc-id<span class="w"> </span>vpc-XXXXX<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-51" name="__codelineno-4-51" href="#__codelineno-4-51"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-52" name="__codelineno-4-52" href="#__codelineno-4-52"></a>
+<a id="__codelineno-4-53" name="__codelineno-4-53" href="#__codelineno-4-53"></a>aws<span class="w"> </span>ec2<span class="w"> </span>authorize-security-group-ingress<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-54" name="__codelineno-4-54" href="#__codelineno-4-54"></a><span class="w">  </span>--group-id<span class="w"> </span>sg-XXXXX<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-55" name="__codelineno-4-55" href="#__codelineno-4-55"></a><span class="w">  </span>--protocol<span class="w"> </span>tcp<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-56" name="__codelineno-4-56" href="#__codelineno-4-56"></a><span class="w">  </span>--port<span class="w"> </span><span class="m">22</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-57" name="__codelineno-4-57" href="#__codelineno-4-57"></a><span class="w">  </span>--cidr<span class="w"> </span><span class="m">0</span>.0.0.0/0<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-58" name="__codelineno-4-58" href="#__codelineno-4-58"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-59" name="__codelineno-4-59" href="#__codelineno-4-59"></a>
+<a id="__codelineno-4-60" name="__codelineno-4-60" href="#__codelineno-4-60"></a><span class="c1"># Allocate and associate an Elastic IP</span>
+<a id="__codelineno-4-61" name="__codelineno-4-61" href="#__codelineno-4-61"></a>aws<span class="w"> </span>ec2<span class="w"> </span>allocate-address<span class="w"> </span>--domain<span class="w"> </span>vpc<span class="w"> </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-4-62" name="__codelineno-4-62" href="#__codelineno-4-62"></a>aws<span class="w"> </span>ec2<span class="w"> </span>associate-address<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-63" name="__codelineno-4-63" href="#__codelineno-4-63"></a><span class="w">  </span>--allocation-id<span class="w"> </span>eipalloc-XXXXX<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-64" name="__codelineno-4-64" href="#__codelineno-4-64"></a><span class="w">  </span>--instance-id<span class="w"> </span>i-XXXXX<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-65" name="__codelineno-4-65" href="#__codelineno-4-65"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+</code></pre></div>
+<h2 id="notes">Notes</h2>
+<ul>
+<li><code>DescribeImages</code> returns AMIs from the EC2 image catalog, including common AMIs and Floci-native AMI IDs.</li>
+<li>Key material returned by <code>CreateKeyPair</code> is a dummy RSA PEM — not usable for real SSH. Use <code>ImportKeyPair</code> for working SSH access.</li>
+<li>Security group rules are not enforced as a firewall (Docker bridge networking handles routing), but TCP ingress rules opened to a CIDR source are published on the host via socat sidecars so the instance's app is reachable from <code>localhost</code> — see <a href="#security-group-port-publishing">Security Group Port Publishing</a>.</li>
+<li>The IMDS server identifies which instance is calling via IMDSv2 tokens (mapped at token issuance time) or by the container's bridge IP for IMDSv1.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,5695 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Fast, free, open-source local AWS emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci/configuration/environment-variables/">
+      
+      
+        <link rel="prev" href="../../getting-started/migrate-from-localstack/">
+      
+      
+        <link rel="next" href="../docker-images/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Environment Variables - Floci</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#environment-variables-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Floci" class="md-header__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Floci
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Environment Variables
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../services/" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testcontainers/" class="md-tabs__link">
+          
+  
+  
+  Testcontainers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../contributing/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Contributing
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Floci" class="md-nav__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    Floci
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/aws-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/migrate-from-localstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrate from LocalStack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#global" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#browser-cors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Browser CORS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tls-https" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS / HTTPS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wire-protocols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wire Protocols
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Storage">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-service-storage-overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-service storage overrides
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#docker-daemon" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker Daemon
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Docker Daemon">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#registry-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registry credentials
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DNS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialization-hooks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initialization Hooks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-shared" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Shared
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-core" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Core
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Services — Core">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ssm-parameter-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSM (Parameter Store)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sqs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SNS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#s3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        S3
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dynamodb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DynamoDB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lambda" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lambda
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#api-gateway" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API Gateway
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iam" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kms" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        KMS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kinesis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Kinesis
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#firehose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Firehose
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#eventbridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EventBridge
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scheduler" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduler
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloudwatch-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CloudWatch Logs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloudwatch-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CloudWatch Metrics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#secrets-manager" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Secrets Manager
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cognito" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cognito
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-functions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step Functions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloudformation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CloudFormation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#acm-certificate-manager" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ACM (Certificate Manager)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ses-simple-email-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SES (Simple Email Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-container-backed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Container-Backed
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Services — Container-Backed">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#elasticache" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ElastiCache
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RDS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#opensearch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenSearch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#msk-managed-streaming-for-kafka" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MSK (Managed Streaming for Kafka)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecr-elastic-container-registry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECR (Elastic Container Registry)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#eks-elastic-kubernetes-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EKS (Elastic Kubernetes Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecs-elastic-container-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECS (Elastic Container Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ec2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EC2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#athena" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Athena
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-additional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Additional
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Images
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ports Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi-account/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Account Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../initialization-hooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Initialization Hooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_9" id="__nav_3_9_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/ssm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSM Parameter Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/sns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/ses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SES
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/dynamodb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DynamoDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/api-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cognito/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cognito
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/kinesis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kinesis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/secrets-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cloudformation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFormation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/step-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Step Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    STS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/elasticache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ElastiCache
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/memorydb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MemoryDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/rds/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/rds-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS Data API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/msk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MSK (Kafka)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/glue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/neptune/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Neptune
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/docdb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DocumentDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/athena/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Athena
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/firehose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Firehose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/eventbridge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/pipes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Pipes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cloudwatch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/acm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ACM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/ecs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/ecr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/resource-groups-tagging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Groups Tagging API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/eks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EKS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/opensearch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenSearch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/ec2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EC2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/lightsail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lightsail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/appconfig/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppConfig
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/bedrock-runtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bedrock Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/elb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ELB v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/autoscaling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auto Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/elastic-beanstalk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Elastic Beanstalk
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/codebuild/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeBuild
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/batch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Batch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/codedeploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeDeploy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/codepipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodePipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/backup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Backup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cloudtrail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudTrail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cloudfront/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFront
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/route53/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Route53
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cloudmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Cloud Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/iot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS IoT Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/appsync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppSync
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/transfer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transfer Family
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Config
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cloudtrail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudTrail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/emr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EMR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/wafv2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WAF v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/textract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Textract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/transcribe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transcribe
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/pricing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pricing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/ce/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Explorer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/cur/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost and Usage Reports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/bcm-data-exports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BCM Data Exports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testcontainers
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testcontainers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/java/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Java
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/nodejs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Node.js / TypeScript
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/python/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/go/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Go
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#global" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#browser-cors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Browser CORS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tls-https" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS / HTTPS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wire-protocols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wire Protocols
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Storage">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-service-storage-overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-service storage overrides
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#docker-daemon" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker Daemon
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Docker Daemon">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#registry-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registry credentials
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DNS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialization-hooks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initialization Hooks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-shared" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Shared
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-core" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Core
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Services — Core">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ssm-parameter-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSM (Parameter Store)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sqs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SNS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#s3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        S3
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dynamodb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DynamoDB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lambda" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lambda
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#api-gateway" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API Gateway
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iam" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kms" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        KMS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kinesis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Kinesis
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#firehose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Firehose
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#eventbridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EventBridge
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scheduler" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduler
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloudwatch-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CloudWatch Logs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloudwatch-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CloudWatch Metrics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#secrets-manager" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Secrets Manager
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cognito" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cognito
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-functions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step Functions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloudformation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CloudFormation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#acm-certificate-manager" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ACM (Certificate Manager)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ses-simple-email-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SES (Simple Email Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-container-backed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Container-Backed
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Services — Container-Backed">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#elasticache" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ElastiCache
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RDS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#opensearch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenSearch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#msk-managed-streaming-for-kafka" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MSK (Managed Streaming for Kafka)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecr-elastic-container-registry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECR (Elastic Container Registry)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#eks-elastic-kubernetes-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EKS (Elastic Kubernetes Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecs-elastic-container-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECS (Elastic Container Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ec2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EC2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#athena" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Athena
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-additional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services — Additional
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="environment-variables-reference">Environment Variables Reference</h1>
+<p>Floci is configured exclusively through environment variables. Every option below maps directly to a <code>FLOCI_*</code> variable — no YAML file is needed when running the published Docker image.</p>
+<hr />
+<h2 id="global">Global</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_BASE_URL</code></td>
+<td><code>http://localhost:4566</code></td>
+<td>Base URL embedded in response fields (SQS <code>QueueUrl</code>, pre-signed URLs, etc.)</td>
+</tr>
+<tr>
+<td><code>FLOCI_HOSTNAME</code></td>
+<td><em>(none)</em></td>
+<td>Overrides only the hostname part of <code>FLOCI_BASE_URL</code>. Set to the Compose service name (e.g. <code>floci</code>) so other containers can reach Floci by DNS</td>
+</tr>
+<tr>
+<td><code>FLOCI_DEFAULT_REGION</code></td>
+<td><code>us-east-1</code></td>
+<td>AWS region used in ARNs and API responses</td>
+</tr>
+<tr>
+<td><code>FLOCI_DEFAULT_ACCOUNT_ID</code></td>
+<td><code>000000000000</code></td>
+<td>Fallback account ID used in ARNs when the request's access key is not exactly 12 digits. When the access key IS 12 digits, it is used directly as the account ID — see <a href="../multi-account/">Multi-Account Isolation</a></td>
+</tr>
+<tr>
+<td><code>FLOCI_DEFAULT_AVAILABILITY_ZONE</code></td>
+<td><code>us-east-1a</code></td>
+<td>Availability zone reported in EC2 and other responses</td>
+</tr>
+<tr>
+<td><code>FLOCI_MAX_REQUEST_SIZE</code></td>
+<td><code>512</code></td>
+<td>Maximum HTTP request body size in megabytes</td>
+</tr>
+<tr>
+<td><code>FLOCI_ECR_BASE_URI</code></td>
+<td><code>public.ecr.aws</code></td>
+<td>Base URI for public ECR image references</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="authentication">Authentication</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_AUTH_VALIDATE_SIGNATURES</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, verifies AWS Signature V4 on every request. Leave <code>false</code> for local development</td>
+</tr>
+<tr>
+<td><code>FLOCI_AUTH_PRESIGN_SECRET</code></td>
+<td><code>local-emulator-secret</code></td>
+<td>Secret used to sign and verify pre-signed URLs</td>
+</tr>
+</tbody>
+</table>
+<h2 id="browser-cors">Browser CORS</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SECURITY_EXTRA_CORS_ALLOWED_ORIGINS</code></td>
+<td><em>(none)</em></td>
+<td>Comma-separated browser origins allowed to call Floci directly. Alias: <code>EXTRA_CORS_ALLOWED_ORIGINS</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_SECURITY_EXTRA_CORS_ALLOWED_HEADERS</code></td>
+<td><em>(none)</em></td>
+<td>Additional header names to include in <code>Access-Control-Allow-Headers</code>. Alias: <code>EXTRA_CORS_ALLOWED_HEADERS</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_SECURITY_EXTRA_CORS_EXPOSE_HEADERS</code></td>
+<td><em>(none)</em></td>
+<td>Additional header names to include in <code>Access-Control-Expose-Headers</code>. Alias: <code>EXTRA_CORS_EXPOSE_HEADERS</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_SECURITY_DISABLE_CORS_HEADERS</code></td>
+<td><code>false</code></td>
+<td>Disable Floci's global CORS response headers. Alias: <code>DISABLE_CORS_HEADERS</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_SECURITY_CORS_ALLOW_PRIVATE_NETWORK</code></td>
+<td><code>false</code></td>
+<td>Answer Private Network Access preflights with <code>Access-Control-Allow-Private-Network: true</code>, letting a page on a public/secure origin reach this loopback backend. Only applies after the origin passes the allow-list above.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="tls-https">TLS / HTTPS</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_TLS_ENABLED</code></td>
+<td><code>false</code></td>
+<td>Enable TLS/HTTPS on all endpoints (HTTP remains available simultaneously)</td>
+</tr>
+<tr>
+<td><code>FLOCI_TLS_CERT_PATH</code></td>
+<td><em>(none)</em></td>
+<td>Path to a PEM certificate file. When set, disables auto-generation</td>
+</tr>
+<tr>
+<td><code>FLOCI_TLS_KEY_PATH</code></td>
+<td><em>(none)</em></td>
+<td>Path to a PEM private key file. Required when <code>FLOCI_TLS_CERT_PATH</code> is set</td>
+</tr>
+<tr>
+<td><code>FLOCI_TLS_SELF_SIGNED</code></td>
+<td><code>true</code></td>
+<td>Auto-generate and persist a self-signed certificate when no cert/key paths are provided</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../tls/">TLS / HTTPS</a> for SDK configuration examples and WebSocket (<code>wss://</code>) support.</p>
+<hr />
+<h2 id="wire-protocols">Wire Protocols</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_PROTOCOLS_STRICT_CLAIMING</code></td>
+<td><code>false</code></td>
+<td>Reject RPC-signaled requests that no supported wire protocol claims, per the <a href="https://smithy.io/2.0/guides/wire-protocol-selection.html">Smithy wire-protocol-selection guide</a> (e.g. an unknown <code>Smithy-Protocol</code> header value or an unimplemented <code>rpc-v2-json</code> request). When disabled such requests are logged and pass through</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="storage">Storage</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_STORAGE_MODE</code></td>
+<td><code>memory</code></td>
+<td>Global storage backend: <code>memory</code>, <code>persistent</code>, <code>hybrid</code>, or <code>wal</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_STORAGE_PERSISTENT_PATH</code></td>
+<td><code>./data</code></td>
+<td>Container-side directory for persistent and hybrid storage</td>
+</tr>
+<tr>
+<td><code>FLOCI_STORAGE_HOST_PERSISTENT_PATH</code></td>
+<td><code>./data</code></td>
+<td>Host-side path for Docker volume bind-mounts (RDS, OpenSearch, MSK, ECR data). When unset, Floci uses named Docker volumes</td>
+</tr>
+<tr>
+<td><code>FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE</code></td>
+<td><code>false</code></td>
+<td>Remove named Docker volumes immediately when the resource is deleted</td>
+</tr>
+<tr>
+<td><code>FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS</code></td>
+<td><code>30000</code></td>
+<td>How often (ms) the WAL compaction runs. Only applies when <code>FLOCI_STORAGE_MODE=wal</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="per-service-storage-overrides">Per-service storage overrides</h3>
+<p>Each service can override the global storage mode and flush interval. Replace <code>&lt;SERVICE&gt;</code> with the uppercase service name:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>FLOCI_STORAGE_SERVICES_&lt;SERVICE&gt;_MODE=hybrid
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>FLOCI_STORAGE_SERVICES_&lt;SERVICE&gt;_FLUSH_INTERVAL_MS=5000
+</code></pre></div>
+<p>Available service names: <code>SSM</code>, <code>SQS</code>, <code>S3</code>, <code>DYNAMODB</code>, <code>SNS</code>, <code>LAMBDA</code>, <code>CLOUDWATCHLOGS</code>, <code>CLOUDWATCHMETRICS</code>, <code>SECRETSMANAGER</code>, <code>ACM</code>, <code>OPENSEARCH</code>, <code>RDS</code>, <code>ELASTICACHE</code>, <code>APPCONFIG</code>, <code>APPCONFIGDATA</code>, <code>BACKUP</code>.</p>
+<p>See <a href="../storage/">Storage Modes</a> for a full explanation of each mode.</p>
+<hr />
+<h2 id="docker-daemon">Docker Daemon</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_DOCKER_DOCKER_HOST</code></td>
+<td><code>unix:///var/run/docker.sock</code></td>
+<td>Docker daemon socket path or TCP address</td>
+</tr>
+<tr>
+<td><code>FLOCI_DOCKER_DOCKER_CONFIG_PATH</code></td>
+<td><em>(none)</em></td>
+<td>Path to a directory containing Docker's <code>config.json</code> for registry auth</td>
+</tr>
+<tr>
+<td><code>FLOCI_DOCKER_IMAGE_REGISTRY_BASE</code></td>
+<td><em>(none)</em></td>
+<td>Optional registry/repository base for every Docker image Floci launches. When set, <code>postgres:16-alpine</code> resolves as <code>&lt;base&gt;/postgres:16-alpine</code> and <code>public.ecr.aws/docker/library/ubuntu:24.04</code> resolves as <code>&lt;base&gt;/public.ecr.aws/docker/library/ubuntu:24.04</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_DOCKER_LOG_MAX_SIZE</code></td>
+<td><code>10m</code></td>
+<td>Log rotation max size for spawned containers (e.g. <code>10m</code>, <code>1g</code>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_DOCKER_LOG_MAX_FILE</code></td>
+<td><code>3</code></td>
+<td>Number of rotated log files to keep for spawned containers</td>
+</tr>
+<tr>
+<td><code>FLOCI_DOCKER_RESOURCE_NAMESPACE</code></td>
+<td><em>(none)</em></td>
+<td>Optional namespace prefix for managed child Docker container and volume names</td>
+</tr>
+</tbody>
+</table>
+<h3 id="registry-credentials">Registry credentials</h3>
+<p>Provide credentials for private registries (e.g. for Lambda base images). Use incrementing indexes (<code>0</code>, <code>1</code>, <code>2</code>, …) for multiple registries:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER</code></td>
+<td>Registry hostname (e.g. <code>ghcr.io</code>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME</code></td>
+<td>Registry username</td>
+</tr>
+<tr>
+<td><code>FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD</code></td>
+<td>Registry password or token</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="dns">DNS</h2>
+<p>Floci's embedded DNS server always resolves the following wildcard suffixes to Floci's container IP — no configuration required:</p>
+<table>
+<thead>
+<tr>
+<th>Built-in suffix</th>
+<th>Covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>localhost.floci.io</code></td>
+<td><code>localhost.floci.io</code> and <code>*.localhost.floci.io</code> (e.g. <code>my-bucket.s3.localhost.floci.io</code>)</td>
+</tr>
+<tr>
+<td><code>localhost.localstack.cloud</code></td>
+<td><code>localhost.localstack.cloud</code> and <code>*.localhost.localstack.cloud</code> (e.g. <code>my-bucket.s3.localhost.localstack.cloud</code>)</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_DNS_EXTRA_SUFFIXES</code></td>
+<td><em>(none)</em></td>
+<td>Comma-separated list of additional hostname suffixes to resolve to Floci's container IP. Use this for custom domains beyond the built-in ones above (e.g. a private internal suffix).</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="initialization-hooks">Initialization Hooks</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_INIT_HOOKS_SHELL_EXECUTABLE</code></td>
+<td><code>/bin/sh</code></td>
+<td>Shell used to execute hook scripts</td>
+</tr>
+<tr>
+<td><code>FLOCI_INIT_HOOKS_TIMEOUT_SECONDS</code></td>
+<td><code>30</code></td>
+<td>Maximum time a single hook script may run</td>
+</tr>
+<tr>
+<td><code>FLOCI_INIT_HOOKS_SHUTDOWN_GRACE_PERIOD_SECONDS</code></td>
+<td><code>2</code></td>
+<td>Time allowed for stop hooks to complete during shutdown</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../initialization-hooks/">Initialization Hooks</a> for lifecycle phases and script conventions.</p>
+<hr />
+<h2 id="services-shared">Services — Shared</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network name used by all container-backed services (Lambda, RDS, ElastiCache, ECS, OpenSearch, EKS, MSK). Per-service overrides take precedence</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="services-core">Services — Core</h2>
+<h3 id="ssm-parameter-store">SSM (Parameter Store)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_SSM_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the SSM service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SSM_MAX_PARAMETER_HISTORY</code></td>
+<td><code>5</code></td>
+<td>Maximum number of historical versions kept per parameter</td>
+</tr>
+</tbody>
+</table>
+<h3 id="sqs">SQS</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_SQS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the SQS service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT</code></td>
+<td><code>30</code></td>
+<td>Default message visibility timeout in seconds</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE</code></td>
+<td><code>1048576</code></td>
+<td>Maximum message body size in bytes (1 MB)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE</code></td>
+<td><code>false</code></td>
+<td>Reset the deduplication cache when a FIFO queue is purged</td>
+</tr>
+</tbody>
+</table>
+<h3 id="sns">SNS</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_SNS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the SNS service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="s3">S3</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_S3_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the S3 service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS</code></td>
+<td><code>3600</code></td>
+<td>Default pre-signed URL expiry when none is specified</td>
+</tr>
+</tbody>
+</table>
+<h3 id="dynamodb">DynamoDB</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_DYNAMODB_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the DynamoDB service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="lambda">Lambda</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Lambda service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_EPHEMERAL</code></td>
+<td><code>false</code></td>
+<td>Remove Lambda containers immediately after each invocation</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB</code></td>
+<td><code>128</code></td>
+<td>Default memory allocation for functions that don't specify one</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS</code></td>
+<td><code>3</code></td>
+<td>Default invocation timeout in seconds</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT</code></td>
+<td><code>9200</code></td>
+<td>First port in the Lambda Runtime API port range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT</code></td>
+<td><code>9299</code></td>
+<td>Last port in the Lambda Runtime API port range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_CODE_PATH</code></td>
+<td><code>./data/lambda-code</code></td>
+<td>Container path where Lambda deployment ZIPs are stored</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS</code></td>
+<td><code>1000</code></td>
+<td>How often (ms) the SQS and Kinesis event source pollers check for new messages</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS</code></td>
+<td><code>300</code></td>
+<td>Seconds of inactivity before an idle Lambda container is removed</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT</code></td>
+<td><code>1000</code></td>
+<td>Maximum concurrent Lambda invocations across all functions in a region</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN</code></td>
+<td><code>100</code></td>
+<td>Minimum unreserved concurrency pool</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED</code></td>
+<td><code>false</code></td>
+<td>Watch Lambda code directories for changes and reload without redeployment</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS</code></td>
+<td><em>(none)</em></td>
+<td>Comma-separated host paths that hot-reload is allowed to watch</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network for Lambda containers (overrides <code>FLOCI_SERVICES_DOCKER_NETWORK</code>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE</code></td>
+<td><em>(none)</em></td>
+<td>Explicit host/IP Lambda containers use to reach the Runtime API, bypassing auto-detection (e.g. rootless Podman)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH</code></td>
+<td><em>(none)</em></td>
+<td>Host path bind-mounted read-only at <code>/opt/aws-config</code> inside Lambda containers for real credential discovery</td>
+</tr>
+</tbody>
+</table>
+<h3 id="api-gateway">API Gateway</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_APIGATEWAY_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the API Gateway v1 (REST) service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_APIGATEWAYV2_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the API Gateway v2 (HTTP + WebSocket) service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="iam">IAM</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_IAM_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the IAM service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, enforce IAM policies on API calls. Leave <code>false</code> for most local development scenarios</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL</code></td>
+<td><code>false</code></td>
+<td>Create a local <code>floci-deployer</code> IAM user with <code>AdministratorAccess</code> and static <code>floci</code>/<code>floci</code> credentials</td>
+</tr>
+</tbody>
+</table>
+<h3 id="kms">KMS</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_KMS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the KMS service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="kinesis">Kinesis</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_KINESIS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Kinesis Data Streams service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="firehose">Firehose</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_FIREHOSE_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Kinesis Data Firehose service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="eventbridge">EventBridge</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_EVENTBRIDGE_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the EventBridge service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="scheduler">Scheduler</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_SCHEDULER_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the EventBridge Scheduler service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SCHEDULER_INVOCATION_ENABLED</code></td>
+<td><code>true</code></td>
+<td>When <code>false</code>, schedules are stored but never invoked</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SCHEDULER_TICK_INTERVAL_SECONDS</code></td>
+<td><code>10</code></td>
+<td>How often (seconds) the scheduler checks for due schedules</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cloudwatch-logs">CloudWatch Logs</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_CLOUDWATCHLOGS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the CloudWatch Logs service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY</code></td>
+<td><code>10000</code></td>
+<td>Maximum log events returned by a single <code>FilterLogEvents</code> call</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cloudwatch-metrics">CloudWatch Metrics</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_CLOUDWATCHMETRICS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the CloudWatch Metrics service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="secrets-manager">Secrets Manager</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_SECRETSMANAGER_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Secrets Manager service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SECRETSMANAGER_DEFAULT_RECOVERY_WINDOW_DAYS</code></td>
+<td><code>30</code></td>
+<td>Default recovery window for deleted secrets</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cognito">Cognito</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_COGNITO_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Cognito User Pools service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="step-functions">Step Functions</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_STEPFUNCTIONS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Step Functions service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cloudformation">CloudFormation</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_CLOUDFORMATION_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the CloudFormation service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="acm-certificate-manager">ACM (Certificate Manager)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_ACM_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the ACM service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ACM_VALIDATION_WAIT_SECONDS</code></td>
+<td><code>0</code></td>
+<td>Simulated delay before a requested certificate transitions to <code>ISSUED</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="ses-simple-email-service">SES (Simple Email Service)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_SES_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the SES service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SES_SMTP_HOST</code></td>
+<td><em>(none)</em></td>
+<td>SMTP relay host for outbound email. When unset, emails are captured in memory only</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SES_SMTP_PORT</code></td>
+<td><code>25</code></td>
+<td>SMTP relay port</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SES_SMTP_USER</code></td>
+<td><em>(none)</em></td>
+<td>SMTP username</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SES_SMTP_PASS</code></td>
+<td><em>(none)</em></td>
+<td>SMTP password</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_SES_SMTP_STARTTLS</code></td>
+<td><code>DISABLED</code></td>
+<td>STARTTLS mode: <code>DISABLED</code>, <code>OPTIONAL</code>, or <code>REQUIRED</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="pipes">Pipes</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_PIPES_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the EventBridge Pipes service</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="services-container-backed">Services — Container-Backed</h2>
+<p>These services spawn Docker containers. They require access to the Docker socket (<code>/var/run/docker.sock</code>).</p>
+<h3 id="elasticache">ElastiCache</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_ELASTICACHE_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the ElastiCache service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT</code></td>
+<td><code>6379</code></td>
+<td>First port in the ElastiCache proxy range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ELASTICACHE_PROXY_MAX_PORT</code></td>
+<td><code>6399</code></td>
+<td>Last port in the ElastiCache proxy range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE</code></td>
+<td><code>valkey/valkey:8</code></td>
+<td>Default Docker image for cache clusters</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ELASTICACHE_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network for ElastiCache containers (overrides <code>FLOCI_SERVICES_DOCKER_NETWORK</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="rds">RDS</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the RDS service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, DB clusters and instances are created instantly without a real container or auth proxy (API only)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_PROXY_BASE_PORT</code></td>
+<td><code>7001</code></td>
+<td>First port in the RDS proxy range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_PROXY_MAX_PORT</code></td>
+<td><code>7099</code></td>
+<td>Last port in the RDS proxy range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE</code></td>
+<td><code>postgres:16-alpine</code></td>
+<td>Default PostgreSQL Docker image</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE</code></td>
+<td><code>mysql:8.0</code></td>
+<td>Default MySQL Docker image</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE</code></td>
+<td><code>mariadb:11</code></td>
+<td>Default MariaDB Docker image</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network for RDS containers (overrides <code>FLOCI_SERVICES_DOCKER_NETWORK</code>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_DATA_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the RDS Data API service. Requires <code>FLOCI_SERVICES_RDS_ENABLED=true</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS</code></td>
+<td><code>180</code></td>
+<td>Idle timeout, in seconds, before leaked RDS Data API transactions expire</td>
+</tr>
+</tbody>
+</table>
+<h3 id="opensearch">OpenSearch</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_OPENSEARCH_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the OpenSearch service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_OPENSEARCH_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, domains are created instantly without a real container (API only)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE</code></td>
+<td><code>opensearchproject/opensearch:2</code></td>
+<td>Docker image for OpenSearch domains</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT</code></td>
+<td><code>9400</code></td>
+<td>First port in the OpenSearch proxy range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT</code></td>
+<td><code>9499</code></td>
+<td>Last port in the OpenSearch proxy range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN</code></td>
+<td><code>false</code></td>
+<td>Keep OpenSearch containers running when Floci stops</td>
+</tr>
+</tbody>
+</table>
+<h3 id="msk-managed-streaming-for-kafka">MSK (Managed Streaming for Kafka)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_MSK_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the MSK service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_MSK_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, clusters are created instantly without a real Redpanda container</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_MSK_DEFAULT_IMAGE</code></td>
+<td><code>redpandadata/redpanda:latest</code></td>
+<td>Docker image for Kafka/Redpanda brokers</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ecr-elastic-container-registry">ECR (Elastic Container Registry)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the ECR service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_REGISTRY_IMAGE</code></td>
+<td><code>registry:2</code></td>
+<td>Docker image for the ECR registry sidecar</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_REGISTRY_CONTAINER_NAME</code></td>
+<td><code>floci-ecr-registry</code></td>
+<td>Name of the ECR registry sidecar container</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT</code></td>
+<td><code>5100</code></td>
+<td>First port in the ECR registry range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT</code></td>
+<td><code>5199</code></td>
+<td>Last port in the ECR registry range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_TLS_ENABLED</code></td>
+<td><code>false</code></td>
+<td>Enable TLS for the ECR registry</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN</code></td>
+<td><code>true</code></td>
+<td>Keep the ECR registry container running when Floci stops</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_URI_STYLE</code></td>
+<td><code>hostname</code></td>
+<td>Repository URI style: <code>hostname</code> (<code>&lt;account&gt;.dkr.ecr.&lt;region&gt;.localhost</code>) or <code>path</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECR_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network for the ECR registry container</td>
+</tr>
+</tbody>
+</table>
+<h3 id="eks-elastic-kubernetes-service">EKS (Elastic Kubernetes Service)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the EKS service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, clusters are created instantly without a real container</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_PROVIDER</code></td>
+<td><code>k3s</code></td>
+<td>Kubernetes provider (<code>k3s</code>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_DEFAULT_IMAGE</code></td>
+<td><code>rancher/k3s:latest</code></td>
+<td>Docker image for EKS clusters</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT</code></td>
+<td><code>6500</code></td>
+<td>First port in the Kubernetes API server range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_API_SERVER_MAX_PORT</code></td>
+<td><code>6599</code></td>
+<td>Last port in the Kubernetes API server range</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_KEEP_RUNNING_ON_SHUTDOWN</code></td>
+<td><code>false</code></td>
+<td>Keep EKS containers running when Floci stops</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EKS_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network for EKS containers</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ecs-elastic-container-service">ECS (Elastic Container Service)</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the ECS service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, tasks are registered but not actually run</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB</code></td>
+<td><code>512</code></td>
+<td>Default task memory when not specified in the task definition</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS</code></td>
+<td><code>256</code></td>
+<td>Default task CPU units when not specified in the task definition</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network for ECS task containers</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ec2">EC2</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the EC2 service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, instances are registered in state but no containers are spawned</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_IMDS_PORT</code></td>
+<td><code>9169</code></td>
+<td>Port for the EC2 Instance Metadata Service (IMDS) endpoint</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_SSH_PORT_RANGE_START</code></td>
+<td><code>2200</code></td>
+<td>First port in the SSH port range for EC2 instances</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_EC2_SSH_PORT_RANGE_END</code></td>
+<td><code>2299</code></td>
+<td>Last port in the SSH port range</td>
+</tr>
+</tbody>
+</table>
+<h3 id="athena">Athena</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_ATHENA_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Athena service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ATHENA_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, queries are accepted but not executed</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ATHENA_DEFAULT_IMAGE</code></td>
+<td><code>floci/floci-duck:latest</code></td>
+<td>Docker image for the DuckDB query engine</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ATHENA_DUCK_URL</code></td>
+<td><em>(none)</em></td>
+<td>URL of an existing DuckDB service. When set, Floci skips managing the container</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="services-additional">Services — Additional</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_GLUE_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Glue service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_APPSYNC_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the AppSync service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_BEDROCK_RUNTIME_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Bedrock Runtime service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_TEXTRACT_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Textract service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_TRANSFER_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Transfer Family service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ROUTE53_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Route 53 service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ELBV2_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the ELBv2 (ALB/NLB) service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ELBV2_MOCK</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, load balancers are registered but no containers are spawned</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_AUTOSCALING_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the Auto Scaling service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_CODEBUILD_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the CodeBuild service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_CODEBUILD_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Docker network for CodeBuild build containers</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_CODEDEPLOY_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the CodeDeploy service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_BACKUP_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the AWS Backup service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS</code></td>
+<td><code>3</code></td>
+<td>Simulated delay before backup jobs transition to <code>COMPLETED</code></td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_APPCONFIG_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the AppConfig service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_APPCONFIGDATA_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable the AppConfig Data service</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
