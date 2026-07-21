@@ -160,6 +160,21 @@ class KinesisAnalyticsV2ServiceTest {
     }
 
     @Test
+    void startApplicationPreservesAwsExceptionFromCodeFetch() {
+        // A bad application-code S3 location makes startCluster throw AwsException(InvalidArgumentException).
+        // It must propagate as-is (400 client error), not be masked as InternalFailureException (500).
+        FlinkContainerManager failing = Mockito.mock(FlinkContainerManager.class);
+        Mockito.doThrow(new AwsException("InvalidArgumentException",
+                        "Unable to fetch application code from s3://b/missing.jar", 400))
+                .when(failing).startCluster(Mockito.any());
+        KinesisAnalyticsV2Service realMode = buildService(false, failing);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> realMode.startApplication("demo"));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
     void createApplicationStoresCodeConfig() {
         FlinkApplication app = service.createApplication("coded", "FLINK-1_18", ROLE, null, null,
                 "flink-code", "app.jar", "v2", 4);

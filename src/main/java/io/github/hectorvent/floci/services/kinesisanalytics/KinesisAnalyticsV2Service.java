@@ -154,8 +154,14 @@ public class KinesisAnalyticsV2Service {
                 // observes the JobManager REST API answering.
                 containerManager.startCluster(app);
                 app.setApplicationStatus(ApplicationStatus.STARTING);
+            } catch (AwsException e) {
+                // Already an AWS-shaped client error (e.g. a missing/empty/unreadable application-code
+                // S3 object from readJar); preserve its error code and message rather than masking it
+                // as a 500.
+                throw e;
             } catch (RuntimeException e) {
-                // Keep the cause in the logs; don't leak internal details into the AWS envelope.
+                // Unexpected provisioning failure (e.g. Docker unavailable). Keep the cause in the logs;
+                // don't leak internal details into the AWS envelope.
                 LOG.errorv(e, "Failed to start application {0}", applicationName);
                 throw new AwsException("InternalFailureException",
                         "Failed to start application " + applicationName, 500);
