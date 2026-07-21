@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **cloudtrail:** new in-process service. Supports `CreateTrail`, `DescribeTrails`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors`, `GetEventSelectors`, `StartLogging`, `StopLogging`, `GetTrailStatus`, `LookupEvents`. S3 data events on hooked ops (`PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `ListObjects`, `GetObjectAcl`) are buffered per-trail and flushed as gzipped JSON log files into the destination bucket at AWS-shaped key paths (`AWSLogs/${account}/CloudTrail/${region}/yyyy/MM/dd/${file}.json.gz`) at a configurable cadence. IAM-enforcement denials emit matching `AccessDenied` records.
+- **iam:** seeded `AWSCloudTrail_FullAccess` and `AWSCloudTrail_ReadOnlyAccess` AWS managed policies.
+- **iam:** distinguish `s3:GetObjectAcl` / `s3:PutObjectAcl` / `s3:Get|Put|DeleteObjectTagging` from base S3 ops via `?acl` / `?tagging` query parameters when resolving an action for IAM enforcement.
+
 ## [1.5.33] - 2026-07-15
 
 ### Added
@@ -423,7 +429,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - bump `actions/checkout` from 4 to 6.0.2 ([#1159](https://github.com/floci-io/floci/pull/1159))
 - bump `aws-actions/configure-aws-credentials` from 4 to 6.1.2 ([#1158](https://github.com/floci-io/floci/pull/1158))
 - bump the actions-minor-patch group with 5 updates ([#1157](https://github.com/floci-io/floci/pull/1157))
-
 ## [1.5.21] - 2026-05-31
 
 ### Added
