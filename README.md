@@ -324,7 +324,7 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | DocumentDB | `mongo:7.0` | MongoDB engine; MongoDB wire protocol on port 27017 |
 | MSK | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda |
 | Amazon MQ | `rabbitmq:3-management` | RabbitMQ broker; AMQP on port 5672, management console on 15672 |
-| Managed Service for Apache Flink | `apache/flink:<version>` | Apache Flink JobManager; image chosen per RuntimeEnvironment (FLINK-1_15 … FLINK-1_20) |
+| Managed Service for Apache Flink | `apache/flink:<version>` | Apache Flink JobManager; image chosen per RuntimeEnvironment (FLINK-1_15 … FLINK-1_20, FLINK-2_0 … FLINK-2_3) |
 | EC2 | AMI-mapped Linux images | Linux containers, SSH key injection, UserData, IMDS, IAM credentials |
 | ECS | User-specified task image | Container lifecycle, start, stop, health checks |
 | EKS | `rancher/k3s:latest` | Kubernetes API server via k3s |

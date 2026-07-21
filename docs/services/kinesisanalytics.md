@@ -80,15 +80,18 @@ container matches the requested version:
 
 | RuntimeEnvironment | Image |
 |---|---|
+| `FLINK-2_3` | `apache/flink:2.3` |
+| `FLINK-2_2` | `apache/flink:2.2` |
+| `FLINK-2_1` | `apache/flink:2.1` |
+| `FLINK-2_0` | `apache/flink:2.0` |
 | `FLINK-1_20` | `apache/flink:1.20` |
 | `FLINK-1_19` | `apache/flink:1.19` |
 | `FLINK-1_18` | `apache/flink:1.18` |
-| `FLINK-1_17` | `apache/flink:1.17` |
-| `FLINK-1_16` | `apache/flink:1.16` |
 | `FLINK-1_15` | `apache/flink:1.15` |
 
-The SQL (`SQL-1_0`) and Studio (`ZEPPELIN-FLINK-*`) runtimes have no plain Flink image and are
-rejected with `InvalidArgumentException`.
+The set mirrors the runtimes AWS Managed Service for Apache Flink offers; `FLINK-1_16` and `FLINK-1_17`
+are not offered by AWS and are rejected. The SQL (`SQL-1_0`) and Studio (`ZEPPELIN-FLINK-*`) runtimes
+have no plain Flink image and are also rejected with `InvalidArgumentException`.
 
 ## Configuration
 

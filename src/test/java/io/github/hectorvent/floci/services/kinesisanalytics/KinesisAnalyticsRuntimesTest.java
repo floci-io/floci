@@ -16,6 +16,10 @@ class KinesisAnalyticsRuntimesTest {
         assertEquals("apache/flink:1.18", KinesisAnalyticsRuntimes.imageFor("FLINK-1_18"));
         assertEquals("apache/flink:1.19", KinesisAnalyticsRuntimes.imageFor("FLINK-1_19"));
         assertEquals("apache/flink:1.20", KinesisAnalyticsRuntimes.imageFor("FLINK-1_20"));
+        // Flink 2.x line
+        assertEquals("apache/flink:2.0", KinesisAnalyticsRuntimes.imageFor("FLINK-2_0"));
+        assertEquals("apache/flink:2.2", KinesisAnalyticsRuntimes.imageFor("FLINK-2_2"));
+        assertEquals("apache/flink:2.3", KinesisAnalyticsRuntimes.imageFor("FLINK-2_3"));
     }
 
     @Test
@@ -31,6 +35,9 @@ class KinesisAnalyticsRuntimesTest {
         // SQL / ZEPPELIN studio runtimes and bogus values have no plain Flink image.
         assertThrows(AwsException.class, () -> KinesisAnalyticsRuntimes.imageFor("SQL-1_0"));
         assertThrows(AwsException.class, () -> KinesisAnalyticsRuntimes.imageFor("FLINK-9_9"));
+        // AWS does not offer 1.16 / 1.17, so Floci rejects them too.
+        assertThrows(AwsException.class, () -> KinesisAnalyticsRuntimes.imageFor("FLINK-1_16"));
+        assertThrows(AwsException.class, () -> KinesisAnalyticsRuntimes.imageFor("FLINK-1_17"));
     }
 
     @Test

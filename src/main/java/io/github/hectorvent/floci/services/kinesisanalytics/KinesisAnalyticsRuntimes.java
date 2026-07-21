@@ -31,12 +31,16 @@ public final class KinesisAnalyticsRuntimes {
     private static final Map<String, String> RUNTIME_TO_IMAGE = new LinkedHashMap<>();
 
     static {
-        // Pinned to major.minor tags — reproducible and guaranteed present on Docker Hub.
+        // Pinned to major.minor tags — reproducible and guaranteed present on Docker Hub. The set
+        // mirrors the runtimes AWS Managed Service for Apache Flink offers: the 2.x line, plus the
+        // supported 1.x versions. AWS does not offer FLINK-1_16 / FLINK-1_17, so they are omitted.
+        RUNTIME_TO_IMAGE.put("FLINK-2_3", "apache/flink:2.3");
+        RUNTIME_TO_IMAGE.put("FLINK-2_2", "apache/flink:2.2");
+        RUNTIME_TO_IMAGE.put("FLINK-2_1", "apache/flink:2.1");
+        RUNTIME_TO_IMAGE.put("FLINK-2_0", "apache/flink:2.0");
         RUNTIME_TO_IMAGE.put("FLINK-1_20", "apache/flink:1.20");
         RUNTIME_TO_IMAGE.put("FLINK-1_19", "apache/flink:1.19");
         RUNTIME_TO_IMAGE.put("FLINK-1_18", "apache/flink:1.18");
-        RUNTIME_TO_IMAGE.put("FLINK-1_17", "apache/flink:1.17");
-        RUNTIME_TO_IMAGE.put("FLINK-1_16", "apache/flink:1.16");
         RUNTIME_TO_IMAGE.put("FLINK-1_15", "apache/flink:1.15");
     }
 
