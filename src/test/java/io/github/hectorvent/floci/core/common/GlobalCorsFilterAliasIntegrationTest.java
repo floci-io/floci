@@ -11,6 +11,7 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 @TestProfile(GlobalCorsFilterAliasIntegrationTest.AliasProfile.class)
@@ -31,6 +32,18 @@ public class GlobalCorsFilterAliasIntegrationTest {
         .then()
             .statusCode(204)
             .header("Access-Control-Allow-Origin", equalTo("http://localhost:4000"));
+    }
+
+    @Test
+    void preflightFromUnlistedOriginGetsNoGlobalCorsHeaders() {
+        given()
+            .header("Origin", "http://localhost:5000")
+            .header("Access-Control-Request-Method", "PUT")
+        .when()
+            .options("/my-bucket/some-key")
+        .then()
+            .statusCode(403)
+            .header("Access-Control-Allow-Origin", nullValue());
     }
 
     public static final class AliasProfile implements QuarkusTestProfile {
