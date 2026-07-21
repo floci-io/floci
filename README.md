@@ -271,7 +271,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets, steps, security configurations, tagging |
 | Data Firehose | In-process | Streaming delivery, NDJSON flush to S3 |
-| Managed Service for Apache Flink | Real Docker | Kinesis Analytics V2 control plane; StartApplication provisions a real Apache Flink JobManager, image selected per RuntimeEnvironment |
+| Managed Service for Apache Flink | Real Docker | Kinesis Analytics V2 control plane; StartApplication runs a real Flink cluster (JobManager + TaskManager, image per RuntimeEnvironment), pulls the application JAR from local S3, and submits the job |
 | ECS | Real Docker | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |
 | Lightsail | In-process | Instances, disks, static IPs, key pairs, ports, tags, regions, blueprints, bundles, operations |

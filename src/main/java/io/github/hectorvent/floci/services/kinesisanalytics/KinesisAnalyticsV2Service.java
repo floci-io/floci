@@ -81,6 +81,14 @@ public class KinesisAnalyticsV2Service {
     public FlinkApplication createApplication(String applicationName, String runtimeEnvironment,
                                               String serviceExecutionRole, String applicationDescription,
                                               String applicationMode) {
+        return createApplication(applicationName, runtimeEnvironment, serviceExecutionRole,
+                applicationDescription, applicationMode, null, null, null, 1);
+    }
+
+    public FlinkApplication createApplication(String applicationName, String runtimeEnvironment,
+                                              String serviceExecutionRole, String applicationDescription,
+                                              String applicationMode, String codeS3Bucket, String codeS3Key,
+                                              String codeS3ObjectVersion, int parallelism) {
         if (applicationName == null || applicationName.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ApplicationName is required", 400);
         }
@@ -109,6 +117,10 @@ public class KinesisAnalyticsV2Service {
         app.setApplicationDescription(applicationDescription);
         // AWS-faithful: a freshly created application is READY (not RUNNING); no container yet.
         app.setApplicationStatus(ApplicationStatus.READY);
+        app.setCodeS3Bucket(codeS3Bucket);
+        app.setCodeS3Key(codeS3Key);
+        app.setCodeS3ObjectVersion(codeS3ObjectVersion);
+        app.setParallelism(parallelism < 1 ? 1 : parallelism);
 
         storage.put(applicationName, app);
         LOG.infov("Created Kinesis Analytics V2 application {0}", applicationName);
@@ -235,7 +247,7 @@ public class KinesisAnalyticsV2Service {
                 }
                 for (FlinkApplication app : allApplications()) {
                     if (app.getApplicationStatus() == ApplicationStatus.STARTING
-                            && containerManager.isReady(app)) {
+                            && containerManager.advanceToRunning(app)) {
                         LOG.infov("Kinesis Analytics V2 application {0} is now RUNNING",
                                 app.getApplicationName());
                         app.setApplicationStatus(ApplicationStatus.RUNNING);

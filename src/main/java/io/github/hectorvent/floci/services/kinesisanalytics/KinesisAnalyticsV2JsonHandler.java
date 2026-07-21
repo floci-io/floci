@@ -52,9 +52,29 @@ public class KinesisAnalyticsV2JsonHandler {
         String applicationDescription = request.path("ApplicationDescription").asText(null);
         String applicationMode = request.path("ApplicationMode").asText(null);
 
+        // Application code (the Flink JAR in S3) + parallelism, from ApplicationConfiguration.
+        JsonNode appConfig = request.path("ApplicationConfiguration");
+        JsonNode s3 = appConfig.path("ApplicationCodeConfiguration").path("CodeContent")
+                .path("S3ContentLocation");
+        String codeBucket = bucketFromArn(s3.path("BucketARN").asText(null));
+        String codeKey = s3.path("FileKey").asText(null);
+        String codeVersion = s3.path("ObjectVersion").asText(null);
+        int parallelism = appConfig.path("FlinkApplicationConfiguration")
+                .path("ParallelismConfiguration").path("Parallelism").asInt(1);
+
         FlinkApplication app = service.createApplication(applicationName, runtimeEnvironment,
-                serviceExecutionRole, applicationDescription, applicationMode);
+                serviceExecutionRole, applicationDescription, applicationMode,
+                codeBucket, codeKey, codeVersion, parallelism);
         return applicationDetailResponse(app);
+    }
+
+    /** Extracts the bucket name from an S3 bucket ARN ({@code arn:aws:s3:::bucket}). */
+    private static String bucketFromArn(String bucketArn) {
+        if (bucketArn == null) {
+            return null;
+        }
+        String prefix = "arn:aws:s3:::";
+        return bucketArn.startsWith(prefix) ? bucketArn.substring(prefix.length()) : bucketArn;
     }
 
     private Response handleDescribeApplication(JsonNode request) {
@@ -147,6 +167,30 @@ public class KinesisAnalyticsV2JsonHandler {
         if (app.getLastUpdateTimestamp() != null) {
             detail.put("LastUpdateTimestamp", app.getLastUpdateTimestamp().toEpochMilli() / 1000.0);
         }
+        if (app.hasCode()) {
+            detail.set("ApplicationConfigurationDescription", applicationConfigurationNode(app));
+        }
         return detail;
+    }
+
+    private ObjectNode applicationConfigurationNode(FlinkApplication app) {
+        ObjectNode config = objectMapper.createObjectNode();
+
+        ObjectNode codeDesc = config.putObject("ApplicationCodeConfigurationDescription");
+        codeDesc.put("CodeContentType", "ZIPFILE");
+        ObjectNode s3Desc = codeDesc.putObject("CodeContentDescription")
+                .putObject("S3ApplicationCodeLocationDescription");
+        s3Desc.put("BucketARN", "arn:aws:s3:::" + app.getCodeS3Bucket());
+        s3Desc.put("FileKey", app.getCodeS3Key());
+        if (app.getCodeS3ObjectVersion() != null) {
+            s3Desc.put("ObjectVersion", app.getCodeS3ObjectVersion());
+        }
+
+        config.putObject("FlinkApplicationConfigurationDescription")
+                .putObject("ParallelismConfigurationDescription")
+                .put("Parallelism", app.getParallelism())
+                .put("CurrentParallelism", app.getParallelism());
+
+        return config;
     }
 }

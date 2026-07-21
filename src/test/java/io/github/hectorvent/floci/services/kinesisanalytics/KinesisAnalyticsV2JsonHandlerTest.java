@@ -118,6 +118,41 @@ class KinesisAnalyticsV2JsonHandlerTest {
     }
 
     @Test
+    void createWithCodeConfigEchoesItOnDescribe() {
+        ObjectNode s3 = MAPPER.createObjectNode();
+        s3.put("BucketARN", "arn:aws:s3:::flink-code");
+        s3.put("FileKey", "app.jar");
+        ObjectNode codeCfg = MAPPER.createObjectNode();
+        codeCfg.set("CodeContent", MAPPER.createObjectNode().set("S3ContentLocation", s3));
+        codeCfg.put("CodeContentType", "ZIPFILE");
+        ObjectNode flinkCfg = MAPPER.createObjectNode();
+        flinkCfg.set("ParallelismConfiguration", MAPPER.createObjectNode().put("Parallelism", 3));
+        ObjectNode appCfg = MAPPER.createObjectNode();
+        appCfg.set("ApplicationCodeConfiguration", codeCfg);
+        appCfg.set("FlinkApplicationConfiguration", flinkCfg);
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("ApplicationName", "coded");
+        req.put("RuntimeEnvironment", "FLINK-1_18");
+        req.put("ServiceExecutionRole", ROLE);
+        req.set("ApplicationConfiguration", appCfg);
+        assertThat(handler.handle("CreateApplication", req, REGION).getStatus(), is(200));
+
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("ApplicationName", "coded");
+        ObjectNode detail = (ObjectNode) entity(handler.handle("DescribeApplication", describe, REGION))
+                .get("ApplicationDetail");
+        var loc = detail.get("ApplicationConfigurationDescription")
+                .get("ApplicationCodeConfigurationDescription")
+                .get("CodeContentDescription").get("S3ApplicationCodeLocationDescription");
+        assertEquals("arn:aws:s3:::flink-code", loc.get("BucketARN").asText());
+        assertEquals("app.jar", loc.get("FileKey").asText());
+        assertEquals(3, detail.get("ApplicationConfigurationDescription")
+                .get("FlinkApplicationConfigurationDescription")
+                .get("ParallelismConfigurationDescription").get("Parallelism").asInt());
+    }
+
+    @Test
     void unsupportedActionReturns400() {
         Response resp = handler.handle("BogusAction", MAPPER.createObjectNode(), REGION);
         assertThat(resp.getStatus(), is(400));

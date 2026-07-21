@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
@@ -156,6 +157,24 @@ class KinesisAnalyticsV2ServiceTest {
         KinesisAnalyticsV2Service realMode = realModeServiceWithFailingManager();
         realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null);
         assertThrows(AwsException.class, () -> realMode.startApplication("demo"));
+    }
+
+    @Test
+    void createApplicationStoresCodeConfig() {
+        FlinkApplication app = service.createApplication("coded", "FLINK-1_18", ROLE, null, null,
+                "flink-code", "app.jar", "v2", 4);
+        assertTrue(app.hasCode());
+        assertEquals("flink-code", app.getCodeS3Bucket());
+        assertEquals("app.jar", app.getCodeS3Key());
+        assertEquals("v2", app.getCodeS3ObjectVersion());
+        assertEquals(4, app.getParallelism());
+    }
+
+    @Test
+    void createApplicationWithoutCodeHasNoCode() {
+        FlinkApplication app = create("bare");
+        assertFalse(app.hasCode());
+        assertEquals(1, app.getParallelism());
     }
 
     private KinesisAnalyticsV2Service mockModeService() {

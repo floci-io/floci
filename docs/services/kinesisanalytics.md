@@ -4,9 +4,9 @@
 **Endpoint:** `http://localhost:4566/`
 
 Floci emulates Amazon Managed Service for Apache Flink (the Kinesis Analytics V2 API). Unlike a
-pure mock, Floci provisions a **real Apache Flink JobManager** as a Docker sidecar when an
-application is started, so the application reaches a genuine `RUNNING` state backed by a live Flink
-cluster on Floci's Docker network.
+pure mock, Floci runs a **real Apache Flink cluster** as Docker sidecars when an application is
+started and **submits the application's JAR** to it, so the application reaches a genuine `RUNNING`
+state backed by a live Flink job on Floci's Docker network.
 
 ## Supported Actions
 
@@ -24,15 +24,54 @@ cluster on Floci's Docker network.
 
 ## How it works
 
-1. **CreateApplication**: registers the application in the `READY` state. No container is started
-   yet — this mirrors AWS, where a freshly created application is not running.
-2. **StartApplication**: launches an `apache/flink` JobManager container on Floci's Docker network.
-   The application transitions `STARTING → RUNNING` once the JobManager REST API responds.
-3. **StopApplication**: stops and removes the Flink container and returns the application to `READY`.
-4. **DeleteApplication**: tears down any container and removes the application.
+1. **CreateApplication**: registers the application in the `READY` state and stores its
+   `ApplicationConfiguration` (the S3 location of the Flink JAR and the parallelism). No container is
+   started yet — this mirrors AWS, where a freshly created application is not running.
+2. **StartApplication**: reads the application JAR from Floci's local S3, launches an `apache/flink`
+   **JobManager** container (plus a **TaskManager** for task slots) on Floci's Docker network, uploads
+   the JAR to the cluster and runs it. The application transitions `STARTING → RUNNING` once the Flink
+   job itself is `RUNNING`. An application created **without** code comes up `RUNNING` as a bare
+   cluster (no job).
+3. **StopApplication**: cancels the Flink job, tears down the JobManager and TaskManager, and returns
+   the application to `READY`.
+4. **DeleteApplication**: requires the application be stopped (`READY`); tears down any cluster and
+   removes the application.
 
-Because the Flink container joins Floci's Docker network, the JobManager can reach
-`http://floci:4566` to consume local Kinesis or MSK data streams.
+Because the Flink containers join Floci's Docker network, the job can reach `http://floci:4566` to
+consume local Kinesis or MSK data streams.
+
+### Deploying application code (a Flink JAR)
+
+Pass an `ApplicationConfiguration` with an `ApplicationCodeConfiguration` pointing at a JAR in Floci's
+local S3, exactly as with real AWS:
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+
+# 1. Upload your Flink job JAR to (local) S3
+aws s3 mb s3://flink-code
+aws s3 cp my-flink-app.jar s3://flink-code/app.jar
+
+# 2. Create the application pointing at that JAR
+aws kinesisanalyticsv2 create-application \
+  --application-name jobdemo --runtime-environment FLINK-1_18 \
+  --service-execution-role arn:aws:iam::000000000000:role/x \
+  --application-configuration '{
+    "ApplicationCodeConfiguration": {
+      "CodeContent": { "S3ContentLocation": {
+        "BucketARN": "arn:aws:s3:::flink-code", "FileKey": "app.jar" } },
+      "CodeContentType": "ZIPFILE" },
+    "FlinkApplicationConfiguration": {
+      "ParallelismConfiguration": { "ConfigurationType": "CUSTOM", "Parallelism": 1 } }
+  }'
+
+# 3. Start it — Floci pulls the JAR, runs it on the cluster, and reaches RUNNING
+aws kinesisanalyticsv2 start-application --application-name jobdemo --run-configuration '{}'
+aws kinesisanalyticsv2 describe-application --application-name jobdemo  # ApplicationStatus: RUNNING
+```
+
+The job's main class is taken from the JAR's manifest (as in AWS Managed Flink). Not yet emulated:
+`EnvironmentProperties` injection, snapshots/savepoints, and in-place code updates.
 
 ## Supported runtimes
 

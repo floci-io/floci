@@ -61,6 +61,23 @@ public class FlinkApplication {
     // readiness probe. Re-resolved on every StartApplication, so it is transient bookkeeping.
     private String restEndpoint;
 
+    // TaskManager container id (only present when a job is deployed; the JobManager alone has no
+    // task slots). Bookkeeping, not part of the AWS shape.
+    private String taskManagerContainerId;
+
+    // Flink job id assigned once the application JAR is submitted to the cluster; used to poll job
+    // state and to cancel on stop. Bookkeeping, not part of the AWS shape.
+    private String flinkJobId;
+
+    // ApplicationCodeConfiguration.CodeContent.S3ContentLocation — the S3 object holding the Flink
+    // application JAR. These ARE echoed back on DescribeApplication (built explicitly by the handler).
+    private String codeS3Bucket;
+    private String codeS3Key;
+    private String codeS3ObjectVersion;
+
+    // FlinkApplicationConfiguration.ParallelismConfiguration.Parallelism (defaults to 1).
+    private int parallelism = 1;
+
     public FlinkApplication() {}
 
     public FlinkApplication(String applicationName, String applicationArn,
@@ -115,4 +132,28 @@ public class FlinkApplication {
 
     public String getRestEndpoint() { return restEndpoint; }
     public void setRestEndpoint(String restEndpoint) { this.restEndpoint = restEndpoint; }
+
+    public String getTaskManagerContainerId() { return taskManagerContainerId; }
+    public void setTaskManagerContainerId(String taskManagerContainerId) { this.taskManagerContainerId = taskManagerContainerId; }
+
+    public String getFlinkJobId() { return flinkJobId; }
+    public void setFlinkJobId(String flinkJobId) { this.flinkJobId = flinkJobId; }
+
+    public String getCodeS3Bucket() { return codeS3Bucket; }
+    public void setCodeS3Bucket(String codeS3Bucket) { this.codeS3Bucket = codeS3Bucket; }
+
+    public String getCodeS3Key() { return codeS3Key; }
+    public void setCodeS3Key(String codeS3Key) { this.codeS3Key = codeS3Key; }
+
+    public String getCodeS3ObjectVersion() { return codeS3ObjectVersion; }
+    public void setCodeS3ObjectVersion(String codeS3ObjectVersion) { this.codeS3ObjectVersion = codeS3ObjectVersion; }
+
+    public int getParallelism() { return parallelism; }
+    public void setParallelism(int parallelism) { this.parallelism = parallelism; }
+
+    /** True when the application has a code artifact to deploy (S3 JAR), i.e. a job should run. */
+    public boolean hasCode() {
+        return codeS3Bucket != null && !codeS3Bucket.isBlank()
+                && codeS3Key != null && !codeS3Key.isBlank();
+    }
 }
