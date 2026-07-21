@@ -1186,7 +1186,33 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
 
+        deleteVpcDefaultResources(region, vpcId);
         vpcs.delete(key(region, vpcId));
+    }
+
+    private void deleteVpcDefaultResources(String region, String vpcId) {
+        securityGroups.scan(k -> true).stream()
+                .filter(group -> region.equals(group.getRegion()))
+                .filter(group -> vpcId.equals(group.getVpcId()))
+                .filter(group -> "default".equals(group.getGroupName()))
+                .forEach(group -> {
+                    securityGroupRules.scan(k -> k.startsWith(region + "::")).stream()
+                            .filter(rule -> group.getGroupId().equals(rule.getGroupId()))
+                            .forEach(rule -> securityGroupRules.delete(
+                                    key(region, rule.getSecurityGroupRuleId())));
+                    securityGroups.delete(key(region, group.getGroupId()));
+                });
+        routeTables.scan(k -> true).stream()
+                .filter(table -> region.equals(table.getRegion()))
+                .filter(table -> vpcId.equals(table.getVpcId()))
+                .filter(table -> table.getAssociations().stream()
+                        .anyMatch(association -> association.isMain()))
+                .forEach(table -> routeTables.delete(key(region, table.getRouteTableId())));
+        networkAcls.scan(k -> true).stream()
+                .filter(acl -> region.equals(acl.getRegion()))
+                .filter(acl -> vpcId.equals(acl.getVpcId()))
+                .filter(acl -> acl.isDefault())
+                .forEach(acl -> networkAcls.delete(key(region, acl.getNetworkAclId())));
     }
 
     public void modifyVpcAttribute(String region, String vpcId, String attribute, String value) {

@@ -35,6 +35,64 @@ import static org.mockito.Mockito.when;
 class Ec2ServiceTest {
 
     @Test
+    void deleteVpcRemovesVpcOwnedDefaultResourcesAndRules() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.77.0.0/16", false).getVpcId();
+        SecurityGroup defaultGroup = service.describeSecurityGroups(region, List.of(), List.of(), Map.of()).stream()
+                .filter(group -> vpcId.equals(group.getVpcId()) && "default".equals(group.getGroupName()))
+                .findFirst().orElseThrow();
+        String mainRouteTableId = service.describeRouteTables(region, List.of(), Map.of()).stream()
+                .filter(table -> vpcId.equals(table.getVpcId()))
+                .filter(table -> table.getAssociations().stream().anyMatch(association -> association.isMain()))
+                .findFirst().orElseThrow().getRouteTableId();
+        String defaultNetworkAclId = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                .filter(acl -> vpcId.equals(acl.getVpcId()) && acl.isDefault())
+                .findFirst().orElseThrow().getNetworkAclId();
+        assertFalse(service.describeSecurityGroupRules(region, List.of(defaultGroup.getGroupId()), List.of()).isEmpty());
+
+        service.deleteVpc(region, vpcId);
+
+        assertTrue(service.describeSecurityGroups(region, List.of(defaultGroup.getGroupId()), List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeRouteTables(region, List.of(mainRouteTableId), Map.of()).isEmpty());
+        assertTrue(service.describeNetworkAcls(region, List.of(defaultNetworkAclId), Map.of()).isEmpty());
+        assertTrue(service.describeSecurityGroupRules(region, List.of(defaultGroup.getGroupId()), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteVpcDoesNotRemoveAnotherVpcDefaults() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String deletedVpcId = service.createVpc(region, "10.78.0.0/16", false).getVpcId();
+        String preservedVpcId = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup preservedGroup = service.describeSecurityGroups(region, List.of(), List.of(), Map.of()).stream()
+                .filter(group -> preservedVpcId.equals(group.getVpcId()) && "default".equals(group.getGroupName()))
+                .findFirst().orElseThrow();
+        String preservedRouteTableId = service.describeRouteTables(region, List.of(), Map.of()).stream()
+                .filter(table -> preservedVpcId.equals(table.getVpcId()))
+                .filter(table -> table.getAssociations().stream().anyMatch(association -> association.isMain()))
+                .findFirst().orElseThrow().getRouteTableId();
+        String preservedNetworkAclId = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                .filter(acl -> preservedVpcId.equals(acl.getVpcId()) && acl.isDefault())
+                .findFirst().orElseThrow().getNetworkAclId();
+
+        service.deleteVpc(region, deletedVpcId);
+
+        assertEquals(preservedGroup.getGroupId(), service.describeSecurityGroups(
+                region, List.of(preservedGroup.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+        assertEquals(preservedRouteTableId,
+                service.describeRouteTables(region, List.of(preservedRouteTableId), Map.of()).getFirst().getRouteTableId());
+        assertEquals(preservedNetworkAclId,
+                service.describeNetworkAcls(region, List.of(preservedNetworkAclId), Map.of()).getFirst().getNetworkAclId());
+    }
+
+    @Test
     void describeVpcPeeringConnectionsReturnsEmptyWhenNoneExist() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
