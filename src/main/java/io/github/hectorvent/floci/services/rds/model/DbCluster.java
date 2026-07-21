@@ -11,6 +11,7 @@ public class DbCluster {
 
     private String dbClusterIdentifier;
     private DatabaseEngine engine;
+    private String engineParameter;
     private String engineVersion;
     private String masterUsername;
     private String masterPassword;
@@ -62,6 +63,9 @@ public class DbCluster {
 
     public DatabaseEngine getEngine() { return engine; }
     public void setEngine(DatabaseEngine engine) { this.engine = engine; }
+
+    public String getEngineParameter() { return engineParameter; }
+    public void setEngineParameter(String engineParameter) { this.engineParameter = engineParameter; }
 
     public String getEngineVersion() { return engineVersion; }
     public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }

@@ -588,7 +588,8 @@ public class RdsQueryHandler {
 
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
-        String engineStr = i.getEngine() != null ? i.getEngine().name() : "";
+        String engineStr = i.getEngineParameter() != null ? i.getEngineParameter() :
+                           (i.getEngine() != null ? i.getEngine().name().toLowerCase() : "");
         String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()
@@ -736,7 +737,8 @@ public class RdsQueryHandler {
     private String dbClusterInnerXml(DbCluster c) {
         DbEndpoint ep = c.getEndpoint();
         DbEndpoint readerEp = c.getReaderEndpoint();
-        String engineStr = c.getEngine() != null ? c.getEngine().name() : "";
+        String engineStr = c.getEngineParameter() != null ? c.getEngineParameter() :
+                           (c.getEngine() != null ? c.getEngine().name().toLowerCase() : "");
         String statusStr = c.getStatus() != null ? statusLabel(c.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()

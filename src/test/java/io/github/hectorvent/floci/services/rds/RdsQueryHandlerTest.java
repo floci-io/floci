@@ -517,6 +517,32 @@ class RdsQueryHandlerTest {
                 "Did not expect nested DBSubnetGroupName inside DBCluster");
     }
 
+    @Test
+    void describeDbInstances_returnsOriginalEngineParameter() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setEngineParameter("aurora-postgresql");
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Engine>aurora-postgresql</Engine>"),
+                "Engine parameter should be returned as 'aurora-postgresql', not 'postgres'");
+    }
+
+    @Test
+    void describeDbClusters_returnsOriginalEngineParameter() {
+        DbCluster cluster = makeCluster("mycluster");
+        cluster.setEngineParameter("aurora-mysql");
+        when(service.listDbClusters(null)).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Engine>aurora-mysql</Engine>"),
+                "Engine parameter should be returned as 'aurora-mysql', not 'mysql'");
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private static MultivaluedMap<String, String> params() {

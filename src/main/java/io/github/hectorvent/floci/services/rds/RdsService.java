@@ -239,6 +239,7 @@ public class RdsService {
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
+        instance.setEngineParameter(engineParam);
         instance.setDbSubnetGroupName(dbSubnetGroupName);
         instance.setContainerId(containerId);
         instance.setContainerHost(containerHost);
@@ -326,10 +327,12 @@ public class RdsService {
 
     private static String managedMasterSecretString(DbInstance instance) {
         try {
+            String engineStr = instance.getEngineParameter() != null ? instance.getEngineParameter() :
+                               (instance.getEngine() != null ? instance.getEngine().name().toLowerCase() : "");
             return JSON.writeValueAsString(Map.of(
                     "username", instance.getMasterUsername(),
                     "password", instance.getMasterPassword(),
-                    "engine", instance.getEngine().name().toLowerCase(),
+                    "engine", engineStr,
                     "host", instance.getEndpoint().address(),
                     "port", instance.getEndpoint().port(),
                     "dbname", instance.getDbName() == null ? "" : instance.getDbName(),
@@ -497,6 +500,7 @@ public class RdsService {
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
+        cluster.setEngineParameter(engineParam);
         cluster.setContainerId(handle.getContainerId());
         cluster.setContainerHost(handle.getHost());
         cluster.setContainerPort(handle.getPort());
