@@ -39,6 +39,9 @@ import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.kafka.KafkaClient;
 import software.amazon.awssdk.services.mq.MqClient;
 import software.amazon.awssdk.services.athena.AthenaClient;
+import software.amazon.awssdk.services.athena.model.GetQueryExecutionRequest;
+import software.amazon.awssdk.services.athena.model.QueryExecutionState;
+import software.amazon.awssdk.services.athena.model.QueryExecutionStatus;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
@@ -399,6 +402,30 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
+    }
+
+    static QueryExecutionStatus awaitAthenaQueryTerminal(
+            AthenaClient athena, String queryExecutionId, Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            QueryExecutionStatus status = athena.getQueryExecution(
+                    GetQueryExecutionRequest.builder()
+                            .queryExecutionId(queryExecutionId)
+                            .build())
+                    .queryExecution()
+                    .status();
+            QueryExecutionState state = status.state();
+            if (state != QueryExecutionState.QUEUED && state != QueryExecutionState.RUNNING) {
+                return status;
+            }
+
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return status;
+            }
+            long sleepMillis = Math.min(500, Math.max(1, Duration.ofNanos(remainingNanos).toMillis()));
+            Thread.sleep(sleepMillis);
+        }
     }
 
     public static GlueClient glueClient() {
