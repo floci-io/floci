@@ -245,6 +245,19 @@ class S3WebsiteIntegrationTest {
 
     @Test
     @Order(17)
+    void directoryRedirectPreservesQueryString() {
+        given()
+            .header("Host", websiteHost())
+            .redirects().follow(false)
+        .when()
+            .get("/docs?code=abc&state=xyz")
+        .then()
+            .statusCode(302)
+            .header("Location", equalTo("/docs/?code=abc&state=xyz"));
+    }
+
+    @Test
+    @Order(18)
     void nestedDirectoryServesIndexDocument() {
         given()
             .contentType("text/html")
@@ -264,7 +277,7 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void directoryWithoutIndexServesErrorDocument() {
         // A trailing-slash request whose prefix has no index document falls back to the error document.
         given()

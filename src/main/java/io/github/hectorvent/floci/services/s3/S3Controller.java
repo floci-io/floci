@@ -2219,7 +2219,8 @@ public class S3Controller {
         // The routing layer strips a trailing slash from the object key, so recover the "directory"
         // intent from the raw request path: a trailing slash (or the site root) means "serve this
         // prefix's index document"; the prefix is the key without any trailing slash.
-        String rawPath = currentVertxRequest.getCurrent().request().path();
+        var request = currentVertxRequest.getCurrent().request();
+        String rawPath = request.path();
         boolean directory = key.isEmpty() || rawPath.endsWith("/");
         String prefix = key.endsWith("/") ? key.substring(0, key.length() - 1) : key;
 
@@ -2244,8 +2245,10 @@ public class S3Controller {
         // as a "folder" (an index document lives beneath it) 302-redirects to the slash-terminated form
         // so the page's relative asset URLs resolve against the right base (matching real S3).
         if (!s3Service.objectExists(bucket, prefix) && s3Service.objectExists(bucket, prefix + "/" + index)) {
+            String query = request.query();
+            String location = rawPath + "/" + (query == null ? "" : "?" + query);
             return Response.status(Response.Status.FOUND)
-                    .header("Location", rawPath + "/")
+                    .header("Location", location)
                     .build();
         }
         return null;
