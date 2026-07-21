@@ -2304,6 +2304,39 @@ public class AslExecutor {
             case "States.UUID" -> {
                 yield objectMapper.getNodeFactory().textNode(java.util.UUID.randomUUID().toString());
             }
+            case "States.JsonMerge" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 3 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.JsonMerge requires exactly 3 arguments");
+                }
+                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                JsonNode deepArg = resolveIntrinsicArg(parts.get(2).trim(), root, context);
+                if (!deepArg.isBoolean()) {
+                    // AWS rejects a non-boolean third argument rather than coercing it to false.
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.JsonMerge third argument must be a boolean");
+                }
+                boolean deep = deepArg.asBoolean();
+                // Validate argument types before rejecting the deep-merge flag, matching AWS error
+                // ordering: two non-objects passed with true yield "requires two JSON objects", not
+                // "shallow merge only".
+                if (!a.isObject() || !b.isObject()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.JsonMerge requires two JSON objects");
+                }
+                if (deep) {
+                    // AWS Step Functions only supports the shallow merge (third argument false).
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.JsonMerge supports only shallow merge (third argument must be false)");
+                }
+                // Shallow merge: second object's top-level fields override the first's.
+                var merged = objectMapper.createObjectNode();
+                a.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
+                b.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
+                yield merged;
+            }
             default -> throw new FailStateException("States.Runtime",
                     "Unsupported intrinsic function: " + fnName);
         };
@@ -2336,6 +2369,12 @@ public class AslExecutor {
         }
         if (arg.startsWith("\"") && arg.endsWith("\"")) {
             return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+        }
+        if ("true".equals(arg) || "false".equals(arg)) {
+            return objectMapper.getNodeFactory().booleanNode(Boolean.parseBoolean(arg));
+        }
+        if ("null".equals(arg)) {
+            return objectMapper.getNodeFactory().nullNode();
         }
         try {
             return objectMapper.getNodeFactory().numberNode(Long.parseLong(arg));
