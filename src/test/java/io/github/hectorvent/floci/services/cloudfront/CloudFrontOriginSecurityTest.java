@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetAddress;
+import java.net.Inet6Address;
 import java.net.URI;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,6 +30,19 @@ class CloudFrontOriginSecurityTest {
         assertFalse(CloudFrontServingController.isBlockedOriginAddress(InetAddress.getByName("8.8.8.8")));
         assertFalse(CloudFrontServingController.isBlockedOriginAddress(
                 InetAddress.getByName("2606:4700:4700::1111")));
+        assertFalse(CloudFrontServingController.isBlockedOriginAddress(ipv4MappedAddress("8.8.8.8")));
+    }
+
+    @Test
+    void blocksPrivateAndSpecialUseIpv4MappedAddresses() throws Exception {
+        for (String address : new String[] {
+                "0.0.0.0", "127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.0.1",
+                "169.254.169.254", "100.64.0.1", "192.0.0.1", "192.0.2.1", "198.18.0.1",
+                "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1"
+        }) {
+            assertTrue(CloudFrontServingController.isBlockedOriginAddress(ipv4MappedAddress(address)),
+                    "IPv4-mapped " + address + " must not be reachable as a default custom origin");
+        }
     }
 
     @Test
@@ -65,5 +79,13 @@ class CloudFrontOriginSecurityTest {
         assertThrows(IllegalArgumentException.class, () ->
                 CloudFrontServingController.buildCustomOriginUri(
                         "http", "example.com", 0, "/", null));
+    }
+
+    private static InetAddress ipv4MappedAddress(String address) throws Exception {
+        byte[] mapped = new byte[16];
+        mapped[10] = (byte) 0xff;
+        mapped[11] = (byte) 0xff;
+        System.arraycopy(InetAddress.getByName(address).getAddress(), 0, mapped, 12, 4);
+        return Inet6Address.getByAddress(null, mapped, -1);
     }
 }
