@@ -121,6 +121,32 @@ class IamActionRegistryTest {
         assertNull(registry.resolve("kms", ctx));
     }
 
+    @Test
+    void s3AclOnTrailingSlashKeyIsObjectLevel() {
+        // /bucket/folder/?acl — trailing slash is a valid key character, so this
+        // must be s3:GetObjectAcl, not s3:GetBucketAcl.
+        MultivaluedMap<String, String> acl = new MultivaluedHashMap<>();
+        acl.add("acl", "");
+        ContainerRequestContext ctx = mockCtx("GET", "/bucket/folder/", acl, null, "");
+        assertEquals("s3:GetObjectAcl", registry.resolve("s3", ctx));
+    }
+
+    @Test
+    void s3TaggingOnTrailingSlashKeyIsObjectLevel() {
+        MultivaluedMap<String, String> tagging = new MultivaluedHashMap<>();
+        tagging.add("tagging", "");
+        ContainerRequestContext ctx = mockCtx("GET", "/bucket/folder/", tagging, null, "");
+        assertEquals("s3:GetObjectTagging", registry.resolve("s3", ctx));
+    }
+
+    @Test
+    void s3AclOnBucketRootIsStillBucketLevel() {
+        MultivaluedMap<String, String> acl = new MultivaluedHashMap<>();
+        acl.add("acl", "");
+        ContainerRequestContext ctx = mockCtx("GET", "/bucket/", acl, null, "");
+        assertEquals("s3:GetBucketAcl", registry.resolve("s3", ctx));
+    }
+
     // -------------------------------------------------------------------------
 
     private static ContainerRequestContext mockCtx(String method, String path,
