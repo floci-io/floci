@@ -6,15 +6,19 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -30,6 +34,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -60,6 +65,7 @@ public class Ec2ContainerManager {
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
     private final Ec2MetadataServer metadataServer;
+    private final Ec2PortForwardManager portForwardManager;
 
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ec2-container-launcher");
@@ -76,7 +82,8 @@ public class Ec2ContainerManager {
                                DockerClient dockerClient,
                                PortAllocator portAllocator,
                                EmulatorConfig config,
-                               Ec2MetadataServer metadataServer) {
+                               Ec2MetadataServer metadataServer,
+                               Ec2PortForwardManager portForwardManager) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -86,6 +93,7 @@ public class Ec2ContainerManager {
         this.portAllocator = portAllocator;
         this.config = config;
         this.metadataServer = metadataServer;
+        this.portForwardManager = portForwardManager;
     }
 
     /**
@@ -99,12 +107,24 @@ public class Ec2ContainerManager {
      * @param region      AWS region (for CloudWatch log group naming)
      */
     public void launch(Instance instance, String dockerImage, String publicKey, String region) {
+        launch(instance, ResolvedAmiImage.minimal(dockerImage), publicKey, region, Set.of());
+    }
+
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region) {
+        launch(instance, image, publicKey, region, Set.of());
+    }
+
+    /**
+     * @param appPorts TCP ports opened by the instance's security groups to publish on the host
+     *                 via socat sidecars once the container is running (empty for none)
+     */
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region, Set<Integer> appPorts) {
         instance.setState(InstanceState.pending());
 
         executor.submit(() -> {
             try {
                 String instanceId = instance.getInstanceId();
-                String containerName = "floci-ec2-" + instanceId;
+                String containerName = ContainerStorageHelper.resourceName(config, "ec2", null, instanceId);
 
                 // Allocate SSH host port
                 int sshHostPort = portAllocator.allocate(
@@ -118,9 +138,9 @@ public class Ec2ContainerManager {
                 String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
                 String serviceEndpoint = "http://" + flociHost + ":4566";
 
-                // Build container spec — use tail -f /dev/null to keep container alive
-                // regardless of the base image's default CMD.
-                ContainerSpec spec = containerBuilder.newContainer(dockerImage)
+                // Build container spec — minimal images keep the historic tail
+                // command, while cloud-image AMI guests can boot their init.
+                ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image.dockerImage())
                         .withName(containerName)
                         .withEmbeddedDns()
                         .withDockerNetwork(Optional.empty())
@@ -133,8 +153,15 @@ public class Ec2ContainerManager {
                         // needs network administration privileges in the local
                         // container to attach that link-local address.
                         .withPrivileged(true)
-                        .withCmd(List.of("tail", "-f", "/dev/null"))
-                        .build();
+                        .withCmd(image.systemd() ? List.of("/sbin/init") : List.of("tail", "-f", "/dev/null"));
+                if (image.systemd()) {
+                    specBuilder
+                            .withCgroupnsMode("host")
+                            .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
+                            .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
+                            .withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+                }
+                ContainerSpec spec = specBuilder.build();
 
                 // Create container without starting it
                 String containerId = lifecycleManager.create(spec);
@@ -185,6 +212,11 @@ public class Ec2ContainerManager {
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
                         instanceId, containerId, String.valueOf(sshHostPort));
 
+                // Publish security-group TCP ingress ports on the host via socat sidecars.
+                if (appPorts != null && !appPorts.isEmpty()) {
+                    portForwardManager.reconcile(instance, appPorts);
+                }
+
                 // Inject SSH public key
                 if (publicKey != null && !publicKey.isBlank()) {
                     injectSshKey(containerId, publicKey);
@@ -208,6 +240,27 @@ public class Ec2ContainerManager {
     }
 
     /**
+     * Synchronous stop for emulator shutdown: tears down the port-forward sidecars and
+     * stops the container with a short timeout so N instances cannot exhaust the SIGTERM
+     * grace window. Unlike {@link #stop}, runs on the caller's thread (the async executor
+     * would be abandoned mid-flight during shutdown) and leaves state handling to the caller.
+     */
+    public void stopForShutdown(Instance instance) {
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null) {
+            return;
+        }
+        portForwardManager.unpublishAll(instance);
+        try {
+            dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+        } catch (NotFoundException e) {
+            // already gone
+        } catch (Exception e) {
+            LOG.warnv("Error stopping EC2 container {0} on shutdown: {1}", containerId, e.getMessage());
+        }
+    }
+
+    /**
      * Gracefully stops a running container (30 second timeout then SIGKILL).
      * Updates instance state through stopping → stopped.
      */
@@ -219,6 +272,9 @@ public class Ec2ContainerManager {
         }
         instance.setState(InstanceState.stopping());
         executor.submit(() -> {
+            // Sidecars forward to the container's current IP, which Docker reassigns on the
+            // next start; tear them down so no forward is left pointing at a stale address.
+            portForwardManager.unpublishAll(instance);
             try {
                 dockerClient.stopContainerCmd(containerId).withTimeout(30).exec();
             } catch (NotFoundException e) {
@@ -327,6 +383,7 @@ public class Ec2ContainerManager {
         int sshHostPort = instance.getSshHostPort();
         instance.setState(InstanceState.shuttingDown());
         executor.submit(() -> {
+            portForwardManager.unpublishAll(instance);
             if (containerId != null) {
                 try {
                     dockerClient.removeContainerCmd(containerId).withForce(true).exec();
@@ -417,21 +474,31 @@ public class Ec2ContainerManager {
 
     private void executeUserData(String containerId, String instanceId, String userData, String region) {
         try {
+            String logGroup = "/aws/ec2/" + instanceId;
+            String logStream = logStreamer.generateLogStreamName("user-data");
+
             List<String> shellScripts = userDataShellScripts(userData);
             if (shellScripts.isEmpty()) {
                 LOG.infov("UserData for EC2 instance {0} did not contain executable shellscript parts", instanceId);
                 return;
             }
 
+            // Execute the script and stream output to CloudWatch
             for (int i = 0; i < shellScripts.size(); i++) {
-                executeUserDataShellScript(containerId, instanceId, shellScripts.get(i), i + 1, shellScripts.size());
+                executeUserDataShellScript(
+                    containerId, instanceId, shellScripts.get(i), i + 1, shellScripts.size(),
+                    logGroup, logStream, region
+                );
             }
         } catch (Exception e) {
             LOG.warnv("UserData execution failed for EC2 instance {0}: {1}", instanceId, e.getMessage());
         }
     }
 
-    private void executeUserDataShellScript(String containerId, String instanceId, String scriptContent, int partNumber, int partCount) throws Exception {
+    private void executeUserDataShellScript(
+        String containerId, String instanceId, String scriptContent, int partNumber, int partCount,
+        String logGroup, String logStream, String region
+    ) throws Exception {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
         byte[] tar = buildSingleFileTar("user-data.sh", script, 0755);
         dockerClient.copyArchiveToContainerCmd(containerId)
@@ -453,8 +520,12 @@ public class Ec2ContainerManager {
         dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
-                if (frame.getPayload() != null) {
-                    try { output.write(frame.getPayload()); } catch (IOException ignored) {}
+                byte[] payload = frame.getPayload();
+                if (payload == null) return;
+                try { output.write(payload); } catch (IOException ignored) {}
+                String line = new String(payload, StandardCharsets.UTF_8).stripTrailing();
+                if (!line.isEmpty()) {
+                    logStreamer.streamToCloudWatchLogs(logGroup, logStream, region, line);
                 }
             }
             @Override

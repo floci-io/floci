@@ -37,6 +37,9 @@ public class StepFunctionsJsonHandler {
             case "DescribeStateMachine" -> handleDescribeStateMachine(request);
             case "ListStateMachines" -> handleListStateMachines(request, region);
             case "DeleteStateMachine" -> handleDeleteStateMachine(request);
+            case "PublishStateMachineVersion" -> handlePublishStateMachineVersion(request);
+            case "ListStateMachineVersions" -> handleListStateMachineVersions(request);
+            case "DeleteStateMachineVersion" -> handleDeleteStateMachineVersion(request);
             case "ValidateStateMachineDefinition" -> handleValidateStateMachineDefinition(request);
             case "StartExecution" -> handleStartExecution(request, region);
             case "StartSyncExecution" -> handleStartSyncExecution(request, region);
@@ -73,7 +76,37 @@ public class StepFunctionsJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("stateMachineArn", sm.getStateMachineArn());
         response.put("creationDate", sm.getCreationDate());
+        // Publishing a version on create is opt-in (publish=true).
+        if (request.path("publish").asBoolean(false)) {
+            var version = service.publishStateMachineVersion(sm.getStateMachineArn());
+            response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
+        }
         return Response.ok(response).build();
+    }
+
+    private Response handlePublishStateMachineVersion(JsonNode request) {
+        var version = service.publishStateMachineVersion(request.path("stateMachineArn").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
+        response.put("creationDate", version.getCreationDate());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListStateMachineVersions(JsonNode request) {
+        var versions = service.listStateMachineVersions(request.path("stateMachineArn").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("stateMachineVersions");
+        for (var v : versions) {
+            ObjectNode item = array.addObject();
+            item.put("stateMachineVersionArn", v.getStateMachineVersionArn());
+            item.put("creationDate", v.getCreationDate());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteStateMachineVersion(JsonNode request) {
+        service.deleteStateMachineVersion(request.path("stateMachineVersionArn").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleDescribeStateMachine(JsonNode request) {
@@ -212,7 +245,10 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleGetExecutionHistory(JsonNode request) {
-        List<HistoryEvent> events = service.getExecutionHistory(request.path("executionArn").asText());
+        var arn = request.path("executionArn").asText();
+        var includeExecutionData = request.path("includeExecutionData").asBoolean(true);
+
+        List<HistoryEvent> events = service.getExecutionHistory(arn);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("events");
         for (HistoryEvent e : events) {
@@ -221,11 +257,21 @@ public class StepFunctionsJsonHandler {
             item.put("timestamp", e.getTimestamp());
             item.put("type", e.getType());
             if (e.getPreviousEventId() != null) item.put("previousEventId", e.getPreviousEventId());
-            if (e.getDetails() != null) {
-                item.set(e.getType() + "EventDetails", objectMapper.valueToTree(e.getDetails()));
+            if (includeExecutionData && e.getDetails() != null) {
+                item.set(historyEventDetailsField(e.getType()), objectMapper.valueToTree(e.getDetails()));
             }
         }
         return Response.ok(response).build();
+    }
+
+    static String historyEventDetailsField(String type) {
+        if (type.endsWith("StateEntered")) {
+            return "stateEnteredEventDetails";
+        }
+        if (type.endsWith("StateExited")) {
+            return "stateExitedEventDetails";
+        }
+        return Character.toLowerCase(type.charAt(0)) + type.substring(1) + "EventDetails";
     }
 
     private Response handleSendTaskSuccess(JsonNode request) {

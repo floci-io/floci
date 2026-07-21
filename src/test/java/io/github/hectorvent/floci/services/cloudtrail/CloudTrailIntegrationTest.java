@@ -1,21 +1,38 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.util.UUID;
+import java.util.zip.GZIPInputStream;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
-import static org.hamcrest.Matchers.notNullValue;
-import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * End-to-end smoke test for the CloudTrail control plane + S3 hook + log
+ * writer pipeline. Sets up a trail, exercises the five hooked S3 ops, forces
+ * a flush, and verifies that a gzipped CloudTrail log file lands in the
+ * destination bucket with the right record shape.
+ */
 @QuarkusTest
 class CloudTrailIntegrationTest {
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String TARGET_PREFIX = "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.";
+
+    private static final String CT_TARGET = "CloudTrail_20131101.";
+    private static final String JSON11 = "application/x-amz-json-1.1";
+
+    @Inject
+    CloudTrailLogWriter writer;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -23,394 +40,304 @@ class CloudTrailIntegrationTest {
     }
 
     @Test
-    void trailLifecycleRoundTripsThroughJsonHandler() {
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "DescribeTrails")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "trailNameList": ["sample-audit"]
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("trailList", hasSize(0));
+    void s3DataEventsLandAsGzippedLogFilesInDestinationBucket() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "audit-source-" + suffix;
+        String destBucket = "audit-logs-" + suffix;
+        String trailName = "audit-trail-" + suffix;
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "CreateTrail")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "sample-audit",
-                            "S3BucketName": "sample-audit-bucket",
-                            "IncludeGlobalServiceEvents": true,
-                            "IsMultiRegionTrail": true,
-                            "IsOrganizationTrail": false,
-                            "TagsList": [
-                                {"Key": "example:component", "Value": "audit"}
-                            ]
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("Name", equalTo("sample-audit"))
-                .body("TrailARN", startsWith("arn:aws:cloudtrail:"))
-                .body("S3BucketName", equalTo("sample-audit-bucket"));
+        // 1. Buckets
+        createBucket(sourceBucket);
+        createBucket(destBucket);
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "PutEventSelectors")
-                .contentType(CONTENT_TYPE)
-                .body("""
+        // 2. CreateTrail
+        invokeCloudTrail("CreateTrail", String.format("""
+                {
+                  "Name": "%s",
+                  "S3BucketName": "%s",
+                  "IsMultiRegionTrail": true,
+                  "IncludeGlobalServiceEvents": true,
+                  "EnableLogFileValidation": true
+                }
+                """, trailName, destBucket))
+            .then()
+                .statusCode(200)
+                .body(containsString("\"TrailARN\""));
+
+        // 3. PutEventSelectors — match all S3 objects in the source bucket
+        invokeCloudTrail("PutEventSelectors", String.format("""
+                {
+                  "TrailName": "%s",
+                  "EventSelectors": [
+                    {
+                      "ReadWriteType": "All",
+                      "IncludeManagementEvents": false,
+                      "DataResources": [
                         {
-                            "TrailName": "sample-audit",
-                            "AdvancedEventSelectors": []
+                          "Type": "AWS::S3::Object",
+                          "Values": ["arn:aws:s3:::%s/"]
                         }
-                        """)
-        .when()
-                .post("/")
-        .then()
+                      ]
+                    }
+                  ]
+                }
+                """, trailName, sourceBucket))
+            .then()
+                .statusCode(200)
+                .body(containsString("\"EventSelectors\""));
+
+        // 4. StartLogging
+        invokeCloudTrail("StartLogging",
+                String.format("{\"Name\":\"%s\"}", trailName))
+            .then()
                 .statusCode(200);
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "StartLogging")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "sample-audit"
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
+        // 5. Drive S3 traffic against the source bucket — covers all five
+        //    hooked ops plus a denial path (NoSuchKey on a missing GetObject).
+        putObject(sourceBucket, "documents/hello.txt", "hello-world");
+        getObject(sourceBucket, "documents/hello.txt", 200);
+        headObject(sourceBucket, "documents/hello.txt", 200);
+        listObjects(sourceBucket);
+        getObject(sourceBucket, "documents/missing.txt", 404);
+        deleteObject(sourceBucket, "documents/hello.txt");
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "GetTrailStatus")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "sample-audit"
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("IsLogging", equalTo(true))
-                .body("LatestDeliveryTime", notNullValue());
+        // 6. Force the writer to flush — bypasses the scheduled cadence.
+        writer.flushNow();
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "UpdateTrail")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "sample-audit",
-                            "S3BucketName": "sample-audit-bucket-2"
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("S3BucketName", equalTo("sample-audit-bucket-2"))
-                .body("IncludeGlobalServiceEvents", equalTo(true))
-                .body("IsMultiRegionTrail", equalTo(true));
+        // 7. List the destination bucket and find the log file.
+        String listingXml = given()
+            .when().get("/" + destBucket + "?list-type=2")
+            .then().statusCode(200)
+            .extract().asString();
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "DescribeTrails")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "trailNameList": ["sample-audit"]
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("trailList", hasSize(1))
-                .body("trailList[0].Name", equalTo("sample-audit"))
-                .body("trailList[0].S3BucketName", equalTo("sample-audit-bucket-2"))
-                .body("trailList[0].IncludeGlobalServiceEvents", equalTo(true))
-                .body("trailList[0].IsMultiRegionTrail", equalTo(true));
+        // Expect AWS-shaped key: AWSLogs/<account>/CloudTrail/<region>/yyyy/MM/dd/<file>.json.gz
+        assertTrue(listingXml.contains("AWSLogs/"),
+                "Destination bucket missing AWSLogs prefix; got:\n" + listingXml);
+        assertTrue(listingXml.contains("/CloudTrail/"),
+                "Destination bucket missing CloudTrail segment; got:\n" + listingXml);
+        assertTrue(listingXml.contains(".json.gz"),
+                "Destination bucket missing .json.gz file; got:\n" + listingXml);
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "StopLogging")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "sample-audit"
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
+        String logKey = extractFirstKey(listingXml);
+        assertNotNull(logKey, "Could not parse first <Key> from listing:\n" + listingXml);
 
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "DeleteTrail")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "sample-audit"
-                        }
-                        """)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
+        // 8. Download the log file and decompress.
+        byte[] gz = given()
+            .when().get("/" + destBucket + "/" + logKey)
+            .then().statusCode(200)
+            .extract().asByteArray();
+
+        byte[] json;
+        try (GZIPInputStream gzin = new GZIPInputStream(new ByteArrayInputStream(gz))) {
+            json = gzin.readAllBytes();
+        }
+
+        // 9. Verify record shape.
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode envelope = mapper.readTree(json);
+        JsonNode records = envelope.get("Records");
+        assertNotNull(records, "Missing Records[] in log file:\n" + new String(json));
+        assertTrue(records.isArray(), "Records is not an array");
+        assertTrue(records.size() >= 5,
+                "Expected at least 5 records (Put/Get/Head/List/Delete + denial), got " + records.size()
+                        + ":\n" + new String(json));
+
+        boolean sawPut = false, sawGet = false, sawDelete = false, sawNoSuchKey = false;
+        for (JsonNode rec : records) {
+            assertEquals("1.11", rec.path("eventVersion").asText(),
+                    "Bad eventVersion: " + rec);
+            assertEquals("s3.amazonaws.com", rec.path("eventSource").asText(),
+                    "Bad eventSource: " + rec);
+            assertEquals("Data", rec.path("eventCategory").asText(),
+                    "Bad eventCategory: " + rec);
+            assertEquals("AwsApiCall", rec.path("eventType").asText(),
+                    "Bad eventType: " + rec);
+            assertNotNull(rec.path("eventID").asText(null), "Missing eventID");
+            assertNotNull(rec.path("requestID").asText(null), "Missing requestID");
+            assertEquals("IAMUser", rec.path("userIdentity").path("type").asText(),
+                    "Bad userIdentity.type: " + rec);
+
+            String name = rec.path("eventName").asText();
+            if ("PutObject".equals(name)) sawPut = true;
+            if ("GetObject".equals(name) && rec.path("errorCode").isMissingNode()) sawGet = true;
+            if ("DeleteObject".equals(name)) sawDelete = true;
+            if ("NoSuchKey".equals(rec.path("errorCode").asText(null))) sawNoSuchKey = true;
+        }
+        assertTrue(sawPut, "Expected a PutObject record");
+        assertTrue(sawGet, "Expected a successful GetObject record");
+        assertTrue(sawDelete, "Expected a DeleteObject record");
+        assertTrue(sawNoSuchKey, "Expected a GetObject NoSuchKey record");
     }
 
     @Test
-    void trailProvisioningLifecycleWorksWithBucketNotificationsAndQueuePolicy() {
-        String bucket = "cloudtrail-audit-feed-bucket";
-        String bucket2 = "cloudtrail-audit-feed-bucket-2";
-        String queueName = "cloudtrail-audit-feed-events";
-        String queueUrl = createQueue(queueName);
-        String queueArn = getQueueArn(queueUrl);
-        String bucketArn = "arn:aws:s3:::" + bucket;
-        String trailName = "cloudtrail-audit-feed";
-
-        createBucket(bucket);
-        putBucketPolicy(bucket, trailName);
-        putBucketNotification(bucket, queueArn);
-        setQueuePolicy(queueUrl, bucketArn, queueArn);
-
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "CreateTrail")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "%s",
-                            "S3BucketName": "%s",
-                            "IncludeGlobalServiceEvents": true,
-                            "IsMultiRegionTrail": false,
-                            "IsOrganizationTrail": false,
-                            "TagsList": [
-                                {"Key": "example:component", "Value": "cloudAudit"}
-                            ]
-                        }
-                        """.formatted(trailName, bucket))
-        .when()
-                .post("/")
+    void lookupEventsReturnsEmptyEventPage() {
+        invokeCloudTrail("LookupEvents", """
+                {
+                    "LookupAttributes": [
+                        {"AttributeKey": "EventName", "AttributeValue": "CreateBucket"}
+                    ],
+                    "MaxResults": 10
+                }
+                """)
         .then()
-                .statusCode(200)
-                .body("Name", equalTo(trailName))
-                .body("TrailARN", startsWith("arn:aws:cloudtrail:"))
-                .body("S3BucketName", equalTo(bucket));
-
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "PutEventSelectors")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "TrailName": "%s",
-                            "AdvancedEventSelectors": [
-                                {
-                                    "Name": "Management events",
-                                    "FieldSelectors": [
-                                        {"Field": "eventCategory", "Equals": ["Management"]}
-                                    ]
-                                }
-                            ]
-                        }
-                        """.formatted(trailName))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
-
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "StartLogging")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "%s"
-                        }
-                        """.formatted(trailName))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
-
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "GetTrailStatus")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "%s"
-                        }
-                        """.formatted(trailName))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("IsLogging", equalTo(true));
-
-        given()
-        .when()
-                .get("/" + bucket + "?notification")
-        .then()
-                .statusCode(200)
-                .body(containsString("<Queue>" + queueArn + "</Queue>"))
-                .body(containsString("<Event>s3:ObjectCreated:*</Event>"));
-
-        getQueuePolicy(queueUrl)
-                .statusCode(200)
-                .body(containsString(bucketArn));
-
-        createBucket(bucket2);
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "UpdateTrail")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "%s",
-                            "S3BucketName": "%s",
-                            "IncludeGlobalServiceEvents": true,
-                            "IsMultiRegionTrail": false
-                        }
-                        """.formatted(trailName, bucket2))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("S3BucketName", equalTo(bucket2));
-
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "DescribeTrails")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "trailNameList": ["%s"]
-                        }
-                        """.formatted(trailName))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("trailList", hasSize(1))
-                .body("trailList[0].S3BucketName", equalTo(bucket2));
-
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "StopLogging")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "%s"
-                        }
-                        """.formatted(trailName))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
-
-        given()
-                .header("X-Amz-Target", TARGET_PREFIX + "DeleteTrail")
-                .contentType(CONTENT_TYPE)
-                .body("""
-                        {
-                            "Name": "%s"
-                        }
-                        """.formatted(trailName))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
+            .statusCode(200)
+            .body("Events", hasSize(0));
     }
 
-    private static void createBucket(String bucket) {
-        given()
-        .when()
-                .put("/" + bucket)
-        .then()
-                .statusCode(200);
+    @Test
+    void describeTrailsRoundTripsCreatedTrail() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "rt-" + suffix;
+        String destBucket = "rt-logs-" + suffix;
+
+        createBucket(destBucket);
+        invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, destBucket))
+            .then().statusCode(200);
+
+        invokeCloudTrail("DescribeTrails",
+                String.format("{\"trailNameList\":[\"%s\"]}", trailName))
+            .then()
+                .statusCode(200)
+                .body(containsString("\"" + trailName + "\""))
+                .body(containsString(destBucket));
     }
 
-    private static String createQueue(String queueName) {
+    @Test
+    void getTrailStatusReflectsStartStopLogging() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "ss-" + suffix;
+        String destBucket = "ss-logs-" + suffix;
+
+        createBucket(destBucket);
+        invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, destBucket))
+            .then().statusCode(200);
+
+        invokeCloudTrail("GetTrailStatus",
+                String.format("{\"Name\":\"%s\"}", trailName))
+            .then().statusCode(200).body(containsString("\"IsLogging\":false"));
+
+        invokeCloudTrail("StartLogging",
+                String.format("{\"Name\":\"%s\"}", trailName))
+            .then().statusCode(200);
+
+        invokeCloudTrail("GetTrailStatus",
+                String.format("{\"Name\":\"%s\"}", trailName))
+            .then().statusCode(200).body(containsString("\"IsLogging\":true"));
+
+        invokeCloudTrail("StopLogging",
+                String.format("{\"Name\":\"%s\"}", trailName))
+            .then().statusCode(200);
+
+        invokeCloudTrail("GetTrailStatus",
+                String.format("{\"Name\":\"%s\"}", trailName))
+            .then().statusCode(200).body(containsString("\"IsLogging\":false"));
+    }
+
+    @Test
+    void deleteTrailRemovesItFromDescribeTrails() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "del-" + suffix;
+        String destBucket = "del-logs-" + suffix;
+
+        createBucket(destBucket);
+        invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, destBucket))
+            .then().statusCode(200);
+
+        invokeCloudTrail("DescribeTrails",
+                String.format("{\"trailNameList\":[\"%s\"]}", trailName))
+            .then().statusCode(200).body(containsString(trailName));
+
+        invokeCloudTrail("DeleteTrail",
+                String.format("{\"Name\":\"%s\"}", trailName))
+            .then().statusCode(200);
+
+        // After deletion, DescribeTrails with the same name yields an empty list
+        String body = invokeCloudTrail("DescribeTrails",
+                String.format("{\"trailNameList\":[\"%s\"]}", trailName))
+            .then().statusCode(200).extract().asString();
+        assertTrue(body.contains("\"trailList\":[]"),
+                "Expected empty trailList after delete, got: " + body);
+    }
+
+    @Test
+    void updateTrailReplacesS3BucketName() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "upd-" + suffix;
+        String oldBucket = "upd-old-" + suffix;
+        String newBucket = "upd-new-" + suffix;
+
+        createBucket(oldBucket);
+        createBucket(newBucket);
+        invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, oldBucket))
+            .then().statusCode(200);
+
+        invokeCloudTrail("UpdateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s","IsMultiRegionTrail":true}
+                """, trailName, newBucket))
+            .then().statusCode(200)
+                .body(containsString("\"S3BucketName\":\"" + newBucket + "\""))
+                .body(containsString("\"IsMultiRegionTrail\":true"));
+
+        invokeCloudTrail("DescribeTrails",
+                String.format("{\"trailNameList\":[\"%s\"]}", trailName))
+            .then().statusCode(200)
+                .body(containsString(newBucket));
+    }
+
+    // --- Helpers ---
+
+    private static io.restassured.response.Response invokeCloudTrail(String action, String body) {
         return given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateQueue")
-                .formParam("QueueName", queueName)
-                .formParam("Attribute.1.Name", "VisibilityTimeout")
-                .formParam("Attribute.1.Value", "30")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+            .header("X-Amz-Target", CT_TARGET + action)
+            .contentType(JSON11)
+            .body(body)
+        .when().post("/");
     }
 
-    private static String getQueueArn(String queueUrl) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "GetQueueAttributes")
-                .formParam("QueueUrl", queueUrl)
-                .formParam("AttributeName.1", "QueueArn")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().xmlPath().getString("GetQueueAttributesResponse.GetQueueAttributesResult.Attribute.Value");
+    private static void createBucket(String name) {
+        given().when().put("/" + name).then().statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse getQueuePolicy(String queueUrl) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "GetQueueAttributes")
-                .formParam("QueueUrl", queueUrl)
-                .formParam("AttributeName.1", "Policy")
-        .when()
-                .post("/")
-        .then();
+    private static void putObject(String bucket, String key, String body) {
+        given().body(body)
+            .when().put("/" + bucket + "/" + key)
+            .then().statusCode(200);
     }
 
-    private static void setQueuePolicy(String queueUrl, String bucketArn, String queueArn) {
-        given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "SetQueueAttributes")
-                .formParam("QueueUrl", queueUrl)
-                .formParam("Attribute.1.Name", "Policy")
-                .formParam("Attribute.1.Value", """
-                        {"Version":"2012-10-17","Statement":[{"Sid":"AllowS3Notifications","Effect":"Allow","Principal":{"Service":"s3.amazonaws.com"},"Action":"sqs:SendMessage","Resource":"%s","Condition":{"ArnEquals":{"aws:SourceArn":"%s"}}}]}
-                        """.formatted(queueArn, bucketArn))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
+    private static void getObject(String bucket, String key, int expectedStatus) {
+        given().when().get("/" + bucket + "/" + key)
+            .then().statusCode(expectedStatus);
     }
 
-    private static void putBucketPolicy(String bucket, String trailName) {
-        given()
-                .contentType("application/json")
-                .body("""
-                        {"Version":"2012-10-17","Statement":[{"Sid":"AllowCloudTrail","Effect":"Allow","Principal":{"Service":"cloudtrail.amazonaws.com"},"Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/AWSLogs/*","Condition":{"StringEquals":{"aws:SourceArn":"arn:aws:cloudtrail:us-east-1:000000000000:trail/%s"}}}]}
-                        """.formatted(bucket, trailName))
-        .when()
-                .put("/" + bucket + "?policy")
-        .then()
-                .statusCode(200);
+    private static void headObject(String bucket, String key, int expectedStatus) {
+        given().when().head("/" + bucket + "/" + key)
+            .then().statusCode(expectedStatus);
     }
 
-    private static void putBucketNotification(String bucket, String queueArn) {
-        given()
-                .contentType("application/xml")
-                .body("""
-                        <NotificationConfiguration>
-                            <QueueConfiguration>
-                                <Id>cloudtrail-to-sqs</Id>
-                                <Queue>%s</Queue>
-                                <Event>s3:ObjectCreated:*</Event>
-                            </QueueConfiguration>
-                        </NotificationConfiguration>
-                        """.formatted(queueArn))
-        .when()
-                .put("/" + bucket + "?notification")
-        .then()
-                .statusCode(200);
+    private static void listObjects(String bucket) {
+        given().when().get("/" + bucket + "?list-type=2")
+            .then().statusCode(200);
+    }
+
+    private static void deleteObject(String bucket, String key) {
+        given().when().delete("/" + bucket + "/" + key)
+            .then().statusCode(204);
+    }
+
+    /** Extract the first <Key>...</Key> from an S3 ListObjectsV2 XML response. */
+    private static String extractFirstKey(String xml) {
+        int open = xml.indexOf("<Key>");
+        if (open < 0) return null;
+        int close = xml.indexOf("</Key>", open);
+        if (close < 0) return null;
+        return xml.substring(open + "<Key>".length(), close);
     }
 }

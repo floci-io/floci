@@ -31,7 +31,7 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `UpdateAccountSendingEnabled`       | Enable or disable account-wide sending                    |
 | `ListVerifiedEmailAddresses`        | List verified email identities                            |
 | `DeleteVerifiedEmailAddress`        | Delete a verified email identity                          |
-| `SetIdentityNotificationTopic`      | Store SNS notification topic ARNs for an identity         |
+| `SetIdentityNotificationTopic`      | Set the SNS topic for an identity's bounce/complaint/delivery notifications |
 | `GetIdentityNotificationAttributes` | Read stored notification topic settings                   |
 | `SetIdentityFeedbackForwardingEnabled`     | Toggle feedback forwarding for an identity        |
 | `SetIdentityHeadersInNotificationsEnabled` | Toggle headers-in-notifications per notification type |
@@ -46,6 +46,11 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `UpdateConfigurationSetEventDestination` | Update an existing event destination on a configuration set |
 | `DeleteConfigurationSetEventDestination` | Remove an event destination from a configuration set      |
 | `UpdateConfigurationSetSendingEnabled`   | Enable or disable email sending through a configuration set |
+| `CreateConfigurationSetTrackingOptions`  | Set the custom open/click tracking redirect domain |
+| `UpdateConfigurationSetTrackingOptions`  | Change the custom tracking redirect domain |
+| `DeleteConfigurationSetTrackingOptions`  | Remove the custom tracking redirect domain |
+| `UpdateConfigurationSetReputationMetricsEnabled` | Enable or disable reputation metrics for a configuration set |
+| `PutConfigurationSetDeliveryOptions` | Set the TLS policy (delivery options) for a configuration set |
 
 ## Configuration
 
@@ -150,8 +155,7 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 
 - Identity verification succeeds immediately; no real DNS or inbox verification flow is required.
 - `SendEmail` stores the text body or the HTML body as the captured message body.
-- `SetIdentityNotificationTopic` stores SNS topic ARNs and returns them via `GetIdentityNotificationAttributes`.
-- Notification topics are configuration metadata only; SES delivery, bounce, or complaint events are not emitted automatically.
+- `SetIdentityNotificationTopic` publishes to the configured topic on a Bounce/Complaint/Delivery event (triggered via the mailbox simulator addresses or the suppression list), independent of any configuration set. The payload uses the legacy format (`notificationType`, no `mail.tags`, headers only when `SetIdentityHeadersInNotificationsEnabled` is on).
 - For the REST JSON API see [SES v2](#v2) below.
 
 ## SES v2 (REST JSON) {#v2}
@@ -172,6 +176,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `PUT` | `/v2/email/identities/{emailIdentity}/dkim` | `PutEmailIdentityDkimAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/feedback` | `PutEmailIdentityFeedbackAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/mail-from` | `PutEmailIdentityMailFromAttributes` |
+| `PUT` | `/v2/email/identities/{emailIdentity}/configuration-set` | `PutEmailIdentityConfigurationSetAttributes` |
 | `POST` | `/v2/email/outbound-emails` | `SendEmail` (simple / raw / templated) |
 | `POST` | `/v2/email/outbound-bulk-emails` | `SendBulkEmail` (templated, multiple destinations) |
 | `GET` | `/v2/email/account` | `GetAccount` |
@@ -193,6 +198,25 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `DELETE` | `/v2/email/configuration-sets/{name}/event-destinations/{eventDestinationName}` | `DeleteConfigurationSetEventDestination` |
 | `PUT` | `/v2/email/configuration-sets/{name}/suppression-options` | `PutConfigurationSetSuppressionOptions` |
 | `PUT` | `/v2/email/configuration-sets/{name}/sending` | `PutConfigurationSetSendingOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/reputation-options` | `PutConfigurationSetReputationOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/tracking-options` | `PutConfigurationSetTrackingOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/delivery-options` | `PutConfigurationSetDeliveryOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/archiving-options` | `PutConfigurationSetArchivingOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/vdm-options` | `PutConfigurationSetVdmOptions` |
+| `POST` | `/v2/email/dedicated-ip-pools` | `CreateDedicatedIpPool` |
+| `GET` | `/v2/email/dedicated-ip-pools` | `ListDedicatedIpPools` |
+| `GET` | `/v2/email/dedicated-ip-pools/{PoolName}` | `GetDedicatedIpPool` |
+| `DELETE` | `/v2/email/dedicated-ip-pools/{PoolName}` | `DeleteDedicatedIpPool` |
+| `POST` | `/v2/email/contact-lists` | `CreateContactList` |
+| `GET` | `/v2/email/contact-lists` | `ListContactLists` |
+| `GET` | `/v2/email/contact-lists/{ContactListName}` | `GetContactList` |
+| `PUT` | `/v2/email/contact-lists/{ContactListName}` | `UpdateContactList` |
+| `DELETE` | `/v2/email/contact-lists/{ContactListName}` | `DeleteContactList` |
+| `POST` | `/v2/email/contact-lists/{ContactListName}/contacts` | `CreateContact` |
+| `POST` | `/v2/email/contact-lists/{ContactListName}/contacts/list` | `ListContacts` |
+| `GET` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `GetContact` |
+| `PUT` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `UpdateContact` |
+| `DELETE` | `/v2/email/contact-lists/{ContactListName}/contacts/{EmailAddress}` | `DeleteContact` |
 | `PUT` | `/v2/email/suppression/addresses` | `PutSuppressedDestination` |
 | `GET` | `/v2/email/suppression/addresses/{EmailAddress}` | `GetSuppressedDestination` |
 | `DELETE` | `/v2/email/suppression/addresses/{EmailAddress}` | `DeleteSuppressedDestination` |

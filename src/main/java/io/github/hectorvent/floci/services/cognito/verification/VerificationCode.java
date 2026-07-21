@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognito.verification;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 
@@ -10,8 +11,10 @@ import java.time.Instant;
  * password reset, MFA SMS, attribute verification). The actual code is hashed
  * with a per-code salt so dumps and storage snapshots cannot reveal valid codes.
  */
+@RegisterForReflection
 public final class VerificationCode {
 
+    @RegisterForReflection
     public enum Purpose {
         SIGNUP_CONFIRMATION,
         PASSWORD_RESET,

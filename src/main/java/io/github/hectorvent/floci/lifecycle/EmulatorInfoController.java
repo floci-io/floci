@@ -9,6 +9,11 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.common.Resettable;
+import jakarta.enterprise.inject.Instance;
+import jakarta.ws.rs.POST;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -20,10 +25,18 @@ public class EmulatorInfoController {
     private final InitLifecycleState initLifecycleState;
     private final String version;
 
+    private final StorageFactory storageFactory;
+    private final Instance<Resettable> resettables;
+
     @Inject
-    public EmulatorInfoController(ServiceRegistry serviceRegistry, InitLifecycleState initLifecycleState) {
+    public EmulatorInfoController(ServiceRegistry serviceRegistry,
+                                  InitLifecycleState initLifecycleState,
+                                  StorageFactory storageFactory,
+                                  Instance<Resettable> resettables) {
         this.serviceRegistry = serviceRegistry;
         this.initLifecycleState = initLifecycleState;
+        this.storageFactory = storageFactory;
+        this.resettables = resettables;
         this.version = resolveVersion();
     }
 
@@ -75,6 +88,26 @@ public class EmulatorInfoController {
     @Path("/config")
     public Response config() {
         return Response.ok(Map.of()).build();
+    }
+
+    @POST
+    @Path("/state/reset")
+    public Response reset() {
+        performReset();
+        return Response.ok(Map.of("status", "OK")).build();
+    }
+
+    @POST
+    @Path("/state/nuke")
+    public Response nuke() {
+        return reset();
+    }
+
+    private void performReset() {
+        for (Resettable r : resettables) {
+            r.clear();
+        }
+        storageFactory.clearAll();
     }
 
     static String resolveVersion() {

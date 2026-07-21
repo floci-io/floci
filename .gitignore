@@ -2,6 +2,7 @@ target/
 data/
 *.class
 *.jar
+!vendor/maven/**/*.jar
 *.war
 .idea/
 *.iml
@@ -31,3 +32,7 @@ test-results.xml
 test-results
 
 scripts/node_modules/
+
+# Python tooling caches
+__pycache__/
+*.pyc

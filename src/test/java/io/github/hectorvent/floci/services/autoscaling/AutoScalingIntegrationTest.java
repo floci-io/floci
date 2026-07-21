@@ -16,10 +16,16 @@ class AutoScalingIntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260501/us-east-1/autoscaling/aws4_request";
+    private static final String EC2_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260501/us-east-1/ec2/aws4_request";
 
     private static String policyArn;
     private static String instanceRefreshId;
     private static String pagedInstanceRefreshId;
+    private static String launchTemplateId;
+    private static String refreshLaunchTemplateId;
+    private static String mixedLaunchTemplateId;
+    private static String replacementLaunchTemplateId;
 
     // ── Launch Configurations ─────────────────────────────────────────────────
 
@@ -433,10 +439,12 @@ class AutoScalingIntegrationTest {
     @Test
     @Order(23)
     void createAutoScalingGroupWithLaunchTemplateId() {
+        launchTemplateId = createLaunchTemplate("asg-integration-lt");
+
         given()
                 .formParam("Action", "CreateAutoScalingGroup")
                 .formParam("AutoScalingGroupName", "my-lt-asg")
-                .formParam("LaunchTemplate.LaunchTemplateId", "lt-0123456789abcdef0")
+                .formParam("LaunchTemplate.LaunchTemplateId", launchTemplateId)
                 .formParam("LaunchTemplate.Version", "$Latest")
                 .formParam("MinSize", "0")
                 .formParam("MaxSize", "1")
@@ -457,6 +465,11 @@ class AutoScalingIntegrationTest {
                 .formParam("Tags.member.1.Key", "owner")
                 .formParam("Tags.member.1.Value", "sample-app")
                 .formParam("Tags.member.1.PropagateAtLaunch", "true")
+                .formParam("Tags.member.2.ResourceId", "my-lt-asg")
+                .formParam("Tags.member.2.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.2.Key", "control-plane-only")
+                .formParam("Tags.member.2.Value", "true")
+                .formParam("Tags.member.2.PropagateAtLaunch", "false")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -477,11 +490,14 @@ class AutoScalingIntegrationTest {
             .then()
                 .statusCode(200)
                 .body(containsString("my-lt-asg"))
-                .body(containsString("<LaunchTemplateId>lt-0123456789abcdef0</LaunchTemplateId>"))
+                .body(containsString("<LaunchTemplateId>" + launchTemplateId + "</LaunchTemplateId>"))
                 .body(containsString("<Version>$Latest</Version>"))
                 .body(containsString("<VPCZoneIdentifier>subnet-12345678,subnet-87654321</VPCZoneIdentifier>"))
                 .body(containsString("owner"))
-                .body(containsString("sample-app"));
+                .body(containsString("sample-app"))
+                .body(containsString("<PropagateAtLaunch>true</PropagateAtLaunch>"))
+                .body(containsString("control-plane-only"))
+                .body(containsString("<PropagateAtLaunch>false</PropagateAtLaunch>"));
 
         given()
                 .formParam("Action", "DeleteTags")
@@ -509,11 +525,14 @@ class AutoScalingIntegrationTest {
     @Test
     @Order(25)
     void startInstanceRefresh() {
+        refreshLaunchTemplateId = createLaunchTemplate("asg-integration-refresh-lt");
+        createLaunchTemplateVersion(refreshLaunchTemplateId, "t3.small");
+
         instanceRefreshId = given()
                 .formParam("Action", "StartInstanceRefresh")
                 .formParam("AutoScalingGroupName", "my-lt-asg")
                 .formParam("Strategy", "Rolling")
-                .formParam("DesiredConfiguration.LaunchTemplate.LaunchTemplateId", "lt-0fedcba9876543210")
+                .formParam("DesiredConfiguration.LaunchTemplate.LaunchTemplateId", refreshLaunchTemplateId)
                 .formParam("DesiredConfiguration.LaunchTemplate.Version", "2")
                 .formParam("Preferences.MinHealthyPercentage", "90")
                 .formParam("Preferences.MaxHealthyPercentage", "120")
@@ -556,7 +575,7 @@ class AutoScalingIntegrationTest {
         assertThat(body, containsString("<PercentageComplete>100</PercentageComplete>"));
         assertThat(body, containsString("<InstancesToUpdate>0</InstancesToUpdate>"));
         assertThat(body, containsString("<Strategy>Rolling</Strategy>"));
-        assertThat(body, containsString("<LaunchTemplateId>lt-0fedcba9876543210</LaunchTemplateId>"));
+        assertThat(body, containsString("<LaunchTemplateId>" + refreshLaunchTemplateId + "</LaunchTemplateId>"));
         assertThat(body, containsString("<Version>2</Version>"));
         assertThat(body, containsString("<MinHealthyPercentage>90</MinHealthyPercentage>"));
         assertThat(body, containsString("<MaxHealthyPercentage>120</MaxHealthyPercentage>"));
@@ -573,7 +592,7 @@ class AutoScalingIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
-                .body(containsString("<LaunchTemplateId>lt-0fedcba9876543210</LaunchTemplateId>"))
+                .body(containsString("<LaunchTemplateId>" + refreshLaunchTemplateId + "</LaunchTemplateId>"))
                 .body(containsString("<Version>2</Version>"));
     }
 
@@ -624,11 +643,15 @@ class AutoScalingIntegrationTest {
     @Test
     @Order(28)
     void createAutoScalingGroupWithMixedInstancesPolicy() {
+        mixedLaunchTemplateId = createLaunchTemplate("asg-integration-mixed-lt");
+        createLaunchTemplateVersion(mixedLaunchTemplateId, "t3.small");
+        createLaunchTemplateVersion(mixedLaunchTemplateId, "t3.medium");
+
         given()
                 .formParam("Action", "CreateAutoScalingGroup")
                 .formParam("AutoScalingGroupName", "my-mixed-asg")
                 .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
-                        "lt-mixed")
+                        mixedLaunchTemplateId)
                 .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "3")
                 .formParam("MixedInstancesPolicy.LaunchTemplate.Overrides.member.1.InstanceType", "t4g.medium")
                 .formParam("MixedInstancesPolicy.LaunchTemplate.Overrides.member.2.InstanceType", "m7g.large")
@@ -656,7 +679,7 @@ class AutoScalingIntegrationTest {
                 .statusCode(200)
                 .body(containsString("<MixedInstancesPolicy>"))
                 .body(containsString("<LaunchTemplateSpecification>"))
-                .body(containsString("<LaunchTemplateId>lt-mixed</LaunchTemplateId>"))
+                .body(containsString("<LaunchTemplateId>" + mixedLaunchTemplateId + "</LaunchTemplateId>"))
                 .body(containsString("<Version>3</Version>"))
                 .body(containsString("<InstanceType>t4g.medium</InstanceType>"))
                 .body(containsString("<InstanceType>m7g.large</InstanceType>"))
@@ -668,11 +691,16 @@ class AutoScalingIntegrationTest {
     @Test
     @Order(29)
     void updateAutoScalingGroupFromLaunchTemplateToMixedInstancesPolicy() {
+        replacementLaunchTemplateId = createLaunchTemplate("asg-integration-replacement-lt");
+        createLaunchTemplateVersion(replacementLaunchTemplateId, "t3.small");
+        createLaunchTemplateVersion(replacementLaunchTemplateId, "t3.medium");
+        createLaunchTemplateVersion(replacementLaunchTemplateId, "t3.large");
+
         given()
                 .formParam("Action", "UpdateAutoScalingGroup")
                 .formParam("AutoScalingGroupName", "my-lt-asg")
                 .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
-                        "lt-replacement")
+                        replacementLaunchTemplateId)
                 .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "4")
                 .formParam("MixedInstancesPolicy.LaunchTemplate.Overrides.member.1.InstanceType", "c7g.large")
                 .formParam("MixedInstancesPolicy.InstancesDistribution.OnDemandBaseCapacity", "0")
@@ -694,7 +722,7 @@ class AutoScalingIntegrationTest {
             .then()
                 .statusCode(200)
                 .body(containsString("<MixedInstancesPolicy>"))
-                .body(containsString("<LaunchTemplateId>lt-replacement</LaunchTemplateId>"))
+                .body(containsString("<LaunchTemplateId>" + replacementLaunchTemplateId + "</LaunchTemplateId>"))
                 .body(containsString("<Version>4</Version>"))
                 .body(containsString("<InstanceType>c7g.large</InstanceType>"))
                 .body(containsString("<OnDemandBaseCapacity>0</OnDemandBaseCapacity>"))
@@ -705,11 +733,14 @@ class AutoScalingIntegrationTest {
     @Test
     @Order(30)
     void updateMixedInstancesPolicyOverridesAndDistribution() {
+        createLaunchTemplateVersion(mixedLaunchTemplateId, "t3.large");
+        createLaunchTemplateVersion(mixedLaunchTemplateId, "t3.xlarge");
+
         given()
                 .formParam("Action", "UpdateAutoScalingGroup")
                 .formParam("AutoScalingGroupName", "my-mixed-asg")
                 .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
-                        "lt-mixed")
+                        mixedLaunchTemplateId)
                 .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "5")
                 .formParam("MixedInstancesPolicy.LaunchTemplate.Overrides.member.1.InstanceType", "r7g.large")
                 .formParam("MixedInstancesPolicy.InstancesDistribution.OnDemandBaseCapacity", "2")
@@ -722,7 +753,7 @@ class AutoScalingIntegrationTest {
                 .statusCode(200)
                 .body(containsString("UpdateAutoScalingGroupResponse"));
 
-        given()
+        String describeBody = given()
                 .formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", "my-mixed-asg")
                 .header("Authorization", AUTH)
@@ -732,10 +763,17 @@ class AutoScalingIntegrationTest {
                 .statusCode(200)
                 .body(containsString("<Version>5</Version>"))
                 .body(containsString("<InstanceType>r7g.large</InstanceType>"))
-                .body(not(containsString("<InstanceType>t4g.medium</InstanceType>")))
                 .body(containsString("<OnDemandBaseCapacity>2</OnDemandBaseCapacity>"))
                 .body(containsString("<OnDemandPercentageAboveBaseCapacity>50</OnDemandPercentageAboveBaseCapacity>"))
-                .body(containsString("<SpotAllocationStrategy>price-capacity-optimized</SpotAllocationStrategy>"));
+                .body(containsString("<SpotAllocationStrategy>price-capacity-optimized</SpotAllocationStrategy>"))
+                .extract().asString();
+
+        // Scope the negative check to the policy overrides: a previously launched
+        // instance keeps its original instance type after a policy update (matching
+        // AWS), so t4g.medium may still appear under <Instances>.
+        String overrides = describeBody.substring(
+                describeBody.indexOf("<Overrides>"), describeBody.indexOf("</Overrides>"));
+        assertThat(overrides, not(containsString("<InstanceType>t4g.medium</InstanceType>")));
     }
 
     @Test
@@ -811,5 +849,32 @@ class AutoScalingIntegrationTest {
             .then()
                 .statusCode(200)
                 .body(not(containsString("my-asg")));
+    }
+
+    private static String createLaunchTemplate(String name) {
+        return given()
+                .formParam("Action", "CreateLaunchTemplate")
+                .formParam("LaunchTemplateName", name)
+                .formParam("LaunchTemplateData.ImageId", "ami-12345678")
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+    }
+
+    private static void createLaunchTemplateVersion(String id, String instanceType) {
+        given()
+                .formParam("Action", "CreateLaunchTemplateVersion")
+                .formParam("LaunchTemplateId", id)
+                .formParam("LaunchTemplateData.ImageId", "ami-12345678")
+                .formParam("LaunchTemplateData.InstanceType", instanceType)
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
     }
 }

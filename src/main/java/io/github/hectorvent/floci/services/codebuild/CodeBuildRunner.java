@@ -5,6 +5,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -54,7 +55,7 @@ import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 @ApplicationScoped
-public class CodeBuildRunner {
+public class CodeBuildRunner implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildRunner.class);
 
@@ -93,6 +94,25 @@ public class CodeBuildRunner {
         this.config = config;
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
+    }
+
+    /**
+     * Stops the containers of all in-flight builds on emulator shutdown; without this
+     * they outlive the process as orphans. Build state is transient, so there is no
+     * persisted status to update.
+     */
+    @Override
+    public void stopManagedContainers() {
+        for (Map.Entry<String, String> entry : new LinkedHashMap<>(runningContainers).entrySet()) {
+            if (runningContainers.remove(entry.getKey(), entry.getValue())) {
+                try {
+                    lifecycleManager.stopAndRemove(entry.getValue(), null);
+                } catch (Exception e) {
+                    LOG.warnv("Failed to stop CodeBuild container for build {0} on shutdown: {1}",
+                            entry.getKey(), e.getMessage());
+                }
+            }
+        }
     }
 
     public void startBuild(String region, Build build, Project project, String buildspecOverride) {
@@ -190,12 +210,10 @@ public class CodeBuildRunner {
 
             List<String> envList = buildEnvList(region, build, project, buildspec, logStream);
 
-            // Create the working directory inside the container as part of startup,
-            // then keep the container alive. No bind mount needed — source and
-            // artifacts are transferred with docker cp.
+            // Keep the container alive so each phase can be run with docker exec.
+            // No bind mount needed — source and artifacts are transferred with docker cp.
             ContainerSpec spec = containerBuilder.newContainer(image)
-                    .withCmd(List.of("sh", "-c",
-                            "mkdir -p /codebuild/output/src/src && tail -f /dev/null"))
+                    .withCmd(List.of("sh", "-c", "tail -f /dev/null"))
                     .withEnv(envList)
                     .withDockerNetwork(config.services().codebuild().dockerNetwork())
                     .withEmbeddedDns()
@@ -210,12 +228,25 @@ public class CodeBuildRunner {
 
             logHandle = logStreamer.attach(containerId, logGroup, logStream, region, "codebuild:" + buildId);
 
-            // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
-            copySourceToContainer(containerId, workspace, "/codebuild/output/src/src");
-
             String containerSrcDir = "/codebuild/output/src/src";
             int timeoutMinutes = build.getTimeoutInMinutes() != null ? build.getTimeoutInMinutes() : 60;
             boolean buildFailed = false;
+
+            // createAndStart returns as soon as the container's entrypoint process is
+            // running, which can be before any startup command would finish. Create the
+            // working directory with an explicit, awaited exec (run from "/", which always
+            // exists) so the source copy, the phase execs that chdir into it, and the final
+            // artifact copy can never race against container startup.
+            PhaseResult workDirResult = runPhase(containerId, "/", envList,
+                    List.of("mkdir -p " + containerSrcDir), timeoutMinutes, stopFlag);
+            if (workDirResult.stopped()) { finishStopped(build); return; }
+            if (workDirResult.failed()) {
+                throw new IllegalStateException("Could not create build working directory "
+                        + containerSrcDir + ": " + workDirResult.errorMessage());
+            }
+
+            // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
+            copySourceToContainer(containerId, workspace, containerSrcDir);
 
             // INSTALL
             if (stopFlag.get()) { finishStopped(build); return; }
@@ -338,11 +369,10 @@ public class CodeBuildRunner {
             }
         } finally {
             stopFlags.remove(buildId);
-            if (containerId != null) {
-                runningContainers.remove(buildId);
-                if (logHandle != null) {
-                    try { logHandle.close(); } catch (Exception ignored) {}
-                }
+            if (logHandle != null) {
+                try { logHandle.close(); } catch (Exception ignored) {}
+            }
+            if (containerId != null && runningContainers.remove(buildId, containerId)) {
                 lifecycleManager.stopAndRemove(containerId, null);
             }
             if (workspace != null) {

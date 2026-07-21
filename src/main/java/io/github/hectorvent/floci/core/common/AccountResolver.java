@@ -62,11 +62,22 @@ public class AccountResolver {
         if (credentialValue == null || credentialValue.isEmpty()) {
             return defaultAccountId;
         }
-        String[] parts = credentialValue.split("/");
-        String akid = parts[0];
-        if (akid.matches("\\d{12}")) {
+        String akid = extractPresignedAccessKeyId(credentialValue);
+        if (akid != null && akid.matches("\\d{12}")) {
             return akid;
         }
         return defaultAccountId;
+    }
+
+    /**
+     * Extracts the access key ID from an X-Amz-Credential value
+     * ({@code accessKeyID/date/region/service/aws4_request}), or returns null when
+     * the value is absent or empty.
+     */
+    public String extractPresignedAccessKeyId(String credentialValue) {
+        if (credentialValue == null || credentialValue.isEmpty()) {
+            return null;
+        }
+        return credentialValue.split("/", 2)[0];
     }
 }

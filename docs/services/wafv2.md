@@ -8,17 +8,14 @@ Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern s
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateWebACL` | Creates a web ACL |
 | `GetWebACL` | Returns a web ACL by name/id/scope |
 | `UpdateWebACL` | Updates a web ACL (requires the current `LockToken`) |
 | `DeleteWebACL` | Deletes a web ACL |
 | `ListWebACLs` | Lists web ACLs for a scope |
-| `GetWebACLForResource` | Returns the web ACL associated with a resource |
-| `AssociateWebACL` | Associates a web ACL with a resource |
-| `DisassociateWebACL` | Removes a web ACL association from a resource |
-| `ListResourcesForWebACL` | Lists resources associated with a web ACL |
 | `CreateIPSet` | Creates an IP set |
 | `GetIPSet` | Returns an IP set |
 | `UpdateIPSet` | Updates an IP set |
@@ -35,6 +32,10 @@ Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern s
 | `DeleteRuleGroup` | Deletes a rule group |
 | `ListRuleGroups` | Lists rule groups for a scope |
 | `CheckCapacity` | Returns the WCU capacity required for a set of rules |
+| `AssociateWebACL` | Associates a web ACL with a resource |
+| `DisassociateWebACL` | Removes a web ACL association from a resource |
+| `GetWebACLForResource` | Returns the web ACL associated with a resource |
+| `ListResourcesForWebACL` | Lists resources associated with a web ACL |
 | `PutLoggingConfiguration` | Sets the logging configuration for a web ACL |
 | `GetLoggingConfiguration` | Returns the logging configuration for a web ACL |
 | `DeleteLoggingConfiguration` | Removes a logging configuration |
@@ -45,6 +46,7 @@ Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern s
 | `TagResource` | Adds tags to a WAF resource |
 | `UntagResource` | Removes tags from a WAF resource |
 | `ListTagsForResource` | Lists tags for a WAF resource |
+<!-- floci:actions:end -->
 
 ## Scope
 

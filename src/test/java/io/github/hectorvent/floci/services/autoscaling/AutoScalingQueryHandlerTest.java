@@ -37,7 +37,7 @@ class AutoScalingQueryHandlerTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of());
 
         AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
         MultivaluedHashMap<String, String> startParams = new MultivaluedHashMap<>();
@@ -81,6 +81,62 @@ class AutoScalingQueryHandlerTest {
     }
 
     @Test
+    void updateAutoScalingGroupRejectsDesiredConfigurationChangeDuringActiveInstanceRefresh() {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.createAutoScalingGroup(REGION,
+                "query-asg",
+                null,
+                "lt-original",
+                null,
+                "1",
+                null,
+                0,
+                3,
+                1,
+                300,
+                List.of("us-east-1a"),
+                List.of(),
+                List.of(),
+                List.of(),
+                "EC2",
+                0,
+                List.of("Default"),
+                java.util.Map.of(),
+                java.util.Map.of());
+        AsgInstance instance = new AsgInstance();
+        instance.setInstanceId("i-original");
+        instance.setAvailabilityZone("us-east-1a");
+        instance.setLifecycleState("InService");
+        instance.setHealthStatus("Healthy");
+        instance.setLaunchTemplateId("lt-original");
+        instance.setLaunchTemplateVersion("1");
+        service.describeAutoScalingGroups(REGION, List.of("query-asg"))
+                .getFirst()
+                .getInstances()
+                .add(instance);
+
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> startParams = new MultivaluedHashMap<>();
+        startParams.add("AutoScalingGroupName", "query-asg");
+        startParams.add("DesiredConfiguration.LaunchTemplate.LaunchTemplateId", "lt-refresh");
+        startParams.add("DesiredConfiguration.LaunchTemplate.Version", "2");
+        assertEquals(200, handler.handle("StartInstanceRefresh", startParams, REGION).getStatus());
+
+        MultivaluedHashMap<String, String> updateParams = new MultivaluedHashMap<>();
+        updateParams.add("AutoScalingGroupName", "query-asg");
+        updateParams.add("LaunchTemplate.LaunchTemplateId", "lt-next");
+        updateParams.add("LaunchTemplate.Version", "3");
+
+        Response response = handler.handle("UpdateAutoScalingGroup", updateParams, REGION);
+
+        assertEquals(400, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<Code>ValidationError</Code>"));
+        assertTrue(xml.contains(AutoScalingService.ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE));
+    }
+
+    @Test
     void describeAutoScalingGroupsIncludesInstanceLaunchTemplateMetadata() {
         AutoScalingService service = new AutoScalingService();
         service.regionResolver = new RegionResolver(REGION, "000000000000");
@@ -102,7 +158,7 @@ class AutoScalingQueryHandlerTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-current");
         instance.setAvailabilityZone("us-east-1a");
@@ -151,7 +207,7 @@ class AutoScalingQueryHandlerTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of());
 
         AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
         MultivaluedHashMap<String, String> putParams = new MultivaluedHashMap<>();

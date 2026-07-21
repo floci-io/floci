@@ -4,7 +4,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 public class DbCluster {
@@ -21,10 +23,16 @@ public class DbCluster {
     private boolean iamDatabaseAuthenticationEnabled;
     private List<String> dbClusterMembers = new ArrayList<>();
     private String parameterGroupName;
+    private String dbSubnetGroupName;
+    private String vpcId;
+    private String availabilityZone;
+    private boolean multiAz;
+    private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private String dbClusterResourceId;
     private String dbClusterArn;
     private Instant createdAt;
     private int proxyPort;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     private String dockerVolumeName;
     private String volumeId;
@@ -95,6 +103,25 @@ public class DbCluster {
     public String getParameterGroupName() { return parameterGroupName; }
     public void setParameterGroupName(String parameterGroupName) { this.parameterGroupName = parameterGroupName; }
 
+    public String getDbSubnetGroupName() { return dbSubnetGroupName; }
+    public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
+
+    public String getVpcId() { return vpcId; }
+    public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public String getAvailabilityZone() { return availabilityZone; }
+    public void setAvailabilityZone(String availabilityZone) { this.availabilityZone = availabilityZone; }
+
+    public boolean isMultiAz() { return multiAz; }
+    public void setMultiAz(boolean multiAz) { this.multiAz = multiAz; }
+
+    public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
+    public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {
+        this.subnetAvailabilityZones = subnetAvailabilityZones != null
+                ? new LinkedHashMap<>(subnetAvailabilityZones)
+                : new LinkedHashMap<>();
+    }
+
     public String getDbClusterResourceId() { return dbClusterResourceId; }
     public void setDbClusterResourceId(String dbClusterResourceId) { this.dbClusterResourceId = dbClusterResourceId; }
 
@@ -106,6 +133,9 @@ public class DbCluster {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }
 
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }

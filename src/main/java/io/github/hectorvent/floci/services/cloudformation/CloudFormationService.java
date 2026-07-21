@@ -4,7 +4,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ManagedContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -27,6 +30,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -108,6 +112,17 @@ public class CloudFormationService {
         stackBackend.deleteForAccount(storageAccount, key(stackName, region));
     }
 
+    /**
+     * Sets a stack's termination protection (CloudFormation {@code UpdateTerminationProtection}).
+     * Returns the stack so the caller can echo its {@code StackId}.
+     */
+    public Stack updateTerminationProtection(String stackName, boolean enabled, String region) {
+        Stack stack = getStackOrThrow(stackName, region);
+        stack.setEnableTerminationProtection(enabled);
+        persistStack(stack);
+        return stack;
+    }
+
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
     public List<Stack> describeStacks(String stackName, String region) {
@@ -186,6 +201,18 @@ public class CloudFormationService {
     // ── ExecuteChangeSet ──────────────────────────────────────────────────────
 
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region) {
+        return executeChangeSet(stackName, changeSetName, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Executes a change set, provisioning its resources into {@code accountId}'s namespace.
+     *
+     * <p>Provisioning runs on a background executor thread that has no inherited request scope, so
+     * the downstream service calls would otherwise fall back to the default account. The resources
+     * are materialized under a synthetic request scope bound to {@code accountId} so a single-stack
+     * deployment lands in the caller's account, and a StackSet instance lands in its target account.
+     */
+    public Future<?> executeChangeSet(String stackName, String changeSetName, String region, String accountId) {
         Stack stack = getStackOrThrow(stackName, region);
         ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(changeSetName));
         if (cs == null) {
@@ -205,8 +232,38 @@ public class CloudFormationService {
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
-        String accountId = regionResolver.getAccountId();
-        return executor.submit(() -> executeTemplate(stack, templateBody, params, isCreate, region, accountId));
+        return executor.submit(() -> runUnderAccount(accountId,
+                () -> executeTemplate(stack, templateBody, params, isCreate, region, accountId)));
+    }
+
+    /**
+     * Runs {@code body} under a synthetic CDI request scope whose account is {@code accountId}, so
+     * that account-aware storage in the downstream services namespaces provisioned resources under
+     * the intended account. Mirrors the pattern used by other background workers.
+     */
+    private void runUnderAccount(String accountId, Runnable body) {
+        ManagedContext requestContext = Arc.container().requestContext();
+        boolean alreadyActive = requestContext.isActive();
+        if (!alreadyActive) {
+            requestContext.activate();
+        }
+        // Background workers normally have no active scope, so a fresh one is activated and
+        // terminated below. But if we ran inside an already-active scope, restore its previous
+        // account afterwards so we never leave the overridden account ID behind on a reused thread.
+        RequestContext ctx = Arc.container().instance(RequestContext.class).get();
+        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
+        try {
+            if (accountId != null) {
+                ctx.setAccountId(accountId);
+            }
+            body.run();
+        } finally {
+            if (!alreadyActive) {
+                requestContext.terminate();
+            } else {
+                ctx.setAccountId(previousAccountId);
+            }
+        }
     }
 
     // ── DeleteChangeSet ───────────────────────────────────────────────────────
@@ -226,16 +283,35 @@ public class CloudFormationService {
     // ── DeleteStack ───────────────────────────────────────────────────────────
 
     public void deleteStack(String stackName, String region) {
+        deleteStack(stackName, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Deletes a stack, removing its resources from {@code accountId}'s namespace. The account must
+     * match the one the resources were provisioned into (the caller's account for a single-stack
+     * deployment, or the target account for a StackSet instance).
+     *
+     * @return a future that completes when the resources have been removed; already-gone stacks
+     *         complete immediately. Callers that need synchronous deletion (e.g. StackSet instance
+     *         removal) can await it.
+     */
+    public Future<?> deleteStack(String stackName, String region, String accountId) {
         purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region);
         if (stack == null) {
-            return; // Already gone — no-op
+            return CompletableFuture.completedFuture(null); // Already gone — no-op
+        }
+        if (stack.isEnableTerminationProtection()) {
+            // Real AWS rejects deletion of a protected stack and leaves it unchanged.
+            throw new AwsException("ValidationError",
+                    "Stack [" + stack.getStackId()
+                            + "] cannot be deleted while TerminationProtection is enabled", 400);
         }
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
-        executor.submit(() -> deleteStackResources(stack, region));
+        return executor.submit(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
     }
 
     // ── GetTemplate ───────────────────────────────────────────────────────────
@@ -549,15 +625,47 @@ public class CloudFormationService {
             List<StackResource> resources = new ArrayList<>(stack.getResources().values());
             Collections.reverse(resources); // Delete in reverse order
 
+            List<String> failedResources = new ArrayList<>();
             for (StackResource resource : resources) {
-                if (resource.getPhysicalId() != null && "CREATE_COMPLETE".equals(resource.getStatus())) {
-                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                            resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+                // CREATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous delete left the
+                // resource behind (e.g. the bucket was non-empty); AWS re-attempts it on retry.
+                boolean deletable = "CREATE_COMPLETE".equals(resource.getStatus())
+                        || "DELETE_FAILED".equals(resource.getStatus());
+                if (resource.getPhysicalId() == null || !deletable) {
+                    continue;
+                }
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+                try {
                     provisioner.delete(resource, region);
                     resource.setStatus("DELETE_COMPLETE");
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE", null);
+                } catch (Exception e) {
+                    // AWS leaves the stack in DELETE_FAILED when a managed resource cannot be
+                    // deleted (e.g. a non-empty S3 bucket raises BucketNotEmpty). The stack must
+                    // not be reported as a successful deletion while the resource still exists.
+                    // Remaining resources are still attempted, matching AWS.
+                    failedResources.add(resource.getLogicalId());
+                    resource.setStatus("DELETE_FAILED");
+                    resource.setStatusReason(e.getMessage());
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "DELETE_FAILED", e.getMessage());
+                    LOG.warnv("Failed to delete {0} ({1}) in stack {2}: {3}",
+                            resource.getResourceType(), resource.getPhysicalId(),
+                            stack.getStackName(), e.getMessage());
                 }
+            }
+
+            if (!failedResources.isEmpty()) {
+                String reason = "The following resource(s) failed to delete: ["
+                        + String.join(", ", failedResources) + "].";
+                stack.setStatus("DELETE_FAILED");
+                stack.setStatusReason(reason);
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "DELETE_FAILED", reason);
+                LOG.errorv("Stack {0} delete failed: {1}", stack.getStackName(), reason);
+                return;
             }
 
             stack.setStatus("DELETE_COMPLETE");
@@ -672,6 +780,18 @@ public class CloudFormationService {
             return fetchTemplateFromS3(templateUrl);
         }
         return "{}";
+    }
+
+    /**
+     * Resolves a template body from an inline body or a TemplateURL (fetched from S3), for callers
+     * outside this service such as the StackSets handler. Returns {@code null} when neither is given.
+     */
+    public String resolveTemplateBody(String templateBody, String templateUrl) {
+        if ((templateBody == null || templateBody.isBlank())
+                && (templateUrl == null || templateUrl.isBlank())) {
+            return null;
+        }
+        return resolveTemplate(templateBody, templateUrl);
     }
 
     private String fetchTemplateFromS3(String url) {

@@ -1,13 +1,16 @@
 package io.github.hectorvent.floci.lifecycle;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
+import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
+import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -18,7 +21,10 @@ import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
+import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.Quarkus;
@@ -62,9 +68,12 @@ public class EmulatorLifecycle {
     private final ElastiCacheProxyManager elastiCacheProxyManager;
     private final RdsContainerManager rdsContainerManager;
     private final RdsProxyManager rdsProxyManager;
+    private final MemoryDbContainerManager memoryDbContainerManager;
+    private final MemoryDbProxyManager memoryDbProxyManager;
     private final DocDbContainerManager docDbContainerManager;
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
+    private final RabbitMqManager rabbitMqManager;
     private final RdsService rdsService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
@@ -75,6 +84,9 @@ public class EmulatorLifecycle {
     private final EcrRegistryManager ecrRegistryManager;
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
+    private final SchemaCreationWorker schemaCreationWorker;
+    private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
+    private final PersistentPathValidator persistentPathValidator;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -84,9 +96,12 @@ public class EmulatorLifecycle {
                              ElastiCacheProxyManager elastiCacheProxyManager,
                              RdsContainerManager rdsContainerManager,
                              RdsProxyManager rdsProxyManager,
+                             MemoryDbContainerManager memoryDbContainerManager,
+                             MemoryDbProxyManager memoryDbProxyManager,
                              DocDbContainerManager docDbContainerManager,
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
+                             RabbitMqManager rabbitMqManager,
                              RdsService rdsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
@@ -96,7 +111,10 @@ public class EmulatorLifecycle {
                              Ec2MetadataServer ec2MetadataServer,
                              EcrRegistryManager ecrRegistryManager,
                              FlociUiManager flociUiManager,
-                             InitLifecycleState initLifecycleState) {
+                             InitLifecycleState initLifecycleState,
+                             SchemaCreationWorker schemaCreationWorker,
+                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
+                             PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -105,9 +123,12 @@ public class EmulatorLifecycle {
         this.elastiCacheProxyManager = elastiCacheProxyManager;
         this.rdsContainerManager = rdsContainerManager;
         this.rdsProxyManager = rdsProxyManager;
+        this.memoryDbContainerManager = memoryDbContainerManager;
+        this.memoryDbProxyManager = memoryDbProxyManager;
         this.docDbContainerManager = docDbContainerManager;
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
+        this.rabbitMqManager = rabbitMqManager;
         this.rdsService = rdsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
@@ -118,6 +139,9 @@ public class EmulatorLifecycle {
         this.ecrRegistryManager = ecrRegistryManager;
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
+        this.schemaCreationWorker = schemaCreationWorker;
+        this.containerTeardowns = containerTeardowns;
+        this.persistentPathValidator = persistentPathValidator;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -138,8 +162,11 @@ public class EmulatorLifecycle {
         }
         initLifecycleState.markBootCompleted();
 
+        persistentPathValidator.validateAtBoot();
+
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        schemaCreationWorker.recoverOrphans();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
@@ -225,19 +252,39 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
+        // Flush persisted state to disk FIRST, before the slow proxy/container teardown below.
+        // Stopping Docker sidecars (RDS/ElastiCache/etc.) can block long enough to exhaust the
+        // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
+        // in-memory (hybrid) data would be lost on an otherwise-graceful shutdown. shutdownAll()
+        // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
+        storageFactory.flushAll();
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.stop();
         }
         elastiCacheProxyManager.stopAll();
         rdsProxyManager.stopAll();
+        memoryDbProxyManager.stopAll();
         neptuneProxyManager.stopAll();
         elastiCacheContainerManager.stopAll();
         elastiCacheMemcachedContainerManager.stopAll();
         rdsContainerManager.stopAll();
+        memoryDbContainerManager.stopAll();
         docDbContainerManager.stopAll();
         neptuneContainerManager.stopAll();
+        rabbitMqManager.stopAll();
         ecrRegistryManager.shutdown();
         flociUiManager.shutdown();
+        // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
+        // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
+        // state written while stopping is captured by the final flush.
+        for (ContainerTeardown teardown : containerTeardowns) {
+            try {
+                teardown.stopManagedContainers();
+            } catch (Exception e) {
+                LOG.warnv("Container teardown failed for {0}: {1}",
+                        teardown.getClass().getSimpleName(), e.getMessage());
+            }
+        }
         storageFactory.shutdownAll();
 
         LOG.info("=== AWS Local Emulator Stopped ===");

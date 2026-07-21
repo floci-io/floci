@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
+import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
+import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -522,6 +525,59 @@ class KmsServiceTest {
     }
 
     @Test
+    void resolveKeyByAliasCreatedWithArn() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/by-arn", key.getArn(), REGION);
+
+        KmsKey resolved = kmsService.describeKey("alias/by-arn", REGION);
+        assertEquals(key.getKeyId(), resolved.getKeyId());
+    }
+
+    @Test
+    void listAliasesFilteredByKeyId() {
+        KmsKey key1 = kmsService.createKey(null, REGION);
+        KmsKey key2 = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/key1-a", key1.getKeyId(), REGION);
+        kmsService.createAlias("alias/key1-b", key1.getKeyId(), REGION);
+        kmsService.createAlias("alias/key2-a", key2.getKeyId(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key1.getKeyId(), REGION);
+        assertEquals(2, filtered.size());
+        assertTrue(filtered.stream().allMatch(a -> key1.getKeyId().equals(a.getTargetKeyId())));
+    }
+
+    @Test
+    void listAliasesFilteredByKeyIdWithArn() {
+        KmsKey key1 = kmsService.createKey(null, REGION);
+        KmsKey key2 = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/key1-a", key1.getKeyId(), REGION);
+        kmsService.createAlias("alias/key2-a", key2.getKeyId(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key1.getArn(), REGION);
+        assertEquals(1, filtered.size());
+        assertEquals("alias/key1-a", filtered.getFirst().getAliasName());
+    }
+
+    @Test
+    void listAliasesFilteredByKeyIdReturnsEmptyWhenNoAliases() {
+        KmsKey key1 = kmsService.createKey(null, REGION);
+        KmsKey key2 = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/key2-a", key2.getKeyId(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key1.getKeyId(), REGION);
+        assertTrue(filtered.isEmpty());
+    }
+
+    @Test
+    void listAliasesFilteredByKeyIdWithAliasCreatedByArn() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/by-arn", key.getArn(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key.getKeyId(), REGION);
+        assertEquals(1, filtered.size());
+    }
+
+    @Test
     void encryptAndDecryptWithId() {
         KmsKey key = kmsService.createKey(null, REGION);
         byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);
@@ -789,11 +845,11 @@ class KmsServiceTest {
         byte[] digest = MessageDigest.getInstance("SHA-512").digest(message);
 
         byte[] sig = kmsService.sign(key.getKeyId(), digest,
-                "RSASSA_PKCS1_V1_5_SHA_512", "DIGEST", REGION);
+                "RSASSA_PKCS1_V1_5_SHA_512", KmsMessageType.DIGEST, REGION);
 
         // floci's own Verify round-trips.
         assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
-                "RSASSA_PKCS1_V1_5_SHA_512", "DIGEST", REGION));
+                "RSASSA_PKCS1_V1_5_SHA_512", KmsMessageType.DIGEST, REGION));
 
         // External verifier (standard JCA, standing in for openssl/python) reconstructs
         // DigestInfo from the message hash and must validate the DIGEST signature (#1345).
@@ -819,9 +875,9 @@ class KmsServiceTest {
         // PKCS#1 v1.5 is deterministic, so signing the digest (DIGEST) and signing the
         // message (RAW) with the same algorithm must produce identical signatures.
         byte[] digestSig = kmsService.sign(key.getKeyId(), digest,
-                "RSASSA_PKCS1_V1_5_SHA_256", "DIGEST", REGION);
+                "RSASSA_PKCS1_V1_5_SHA_256", KmsMessageType.DIGEST, REGION);
         byte[] rawSig = kmsService.sign(key.getKeyId(), message,
-                "RSASSA_PKCS1_V1_5_SHA_256", "RAW", REGION);
+                "RSASSA_PKCS1_V1_5_SHA_256", KmsMessageType.RAW, REGION);
         assertArrayEquals(rawSig, digestSig);
     }
 
@@ -942,7 +998,7 @@ class KmsServiceTest {
                 () -> kmsService.createKey("bad", null, Map.of(ReservedTags.OVERRIDE_ID_KEY, "   "), REGION)
         );
 
-        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("TagException", exception.getErrorCode());
     }
 
     @Test
@@ -1030,8 +1086,8 @@ class KmsServiceTest {
     @Test
     void enableKeyRotationOnAsymmetricKeyThrows() {
         KmsKey key = kmsService.createKey(null, REGION);
-        key.setCustomerMasterKeySpec("RSA_2048");
-        key.setKeyUsage("SIGN_VERIFY");
+        key.setKeySpec(KmsKeySpec.RSA_2048);
+        key.setKeyUsage(KmsKeyUsage.SIGN_VERIFY);
         assertThrows(AwsException.class, () ->
                 kmsService.enableKeyRotation(key.getKeyId(), REGION));
     }
@@ -1039,16 +1095,16 @@ class KmsServiceTest {
     @Test
     void getKeyRotationStatusOnAsymmetricKeyReturnsFalse() {
         KmsKey key = kmsService.createKey(null, REGION);
-        key.setCustomerMasterKeySpec("ECC_NIST_P256");
-        key.setKeyUsage("SIGN_VERIFY");
+        key.setKeySpec(KmsKeySpec.ECC_NIST_P256);
+        key.setKeyUsage(KmsKeyUsage.SIGN_VERIFY);
         assertFalse(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
     }
 
     @Test
     void getKeyRotationStatusOnHmacKeyReturnsFalse() {
         KmsKey key = kmsService.createKey(null, REGION);
-        key.setCustomerMasterKeySpec("HMAC_256");
-        key.setKeyUsage("GENERATE_VERIFY_MAC");
+        key.setKeySpec(KmsKeySpec.HMAC_256);
+        key.setKeyUsage(KmsKeyUsage.GENERATE_VERIFY_MAC);
         assertFalse(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
     }
 
@@ -1105,8 +1161,8 @@ class KmsServiceTest {
     void createHmacKey_allSpecs(String spec) {
         KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", spec, null, Map.of(), REGION);
 
-        assertEquals(spec, key.getCustomerMasterKeySpec());
-        assertEquals("GENERATE_VERIFY_MAC", key.getKeyUsage());
+        assertEquals(KmsKeySpec.valueOf(spec), key.getKeySpec());
+        assertEquals("GENERATE_VERIFY_MAC", key.getKeyUsage().name());
         assertNotNull(key.getPrivateKeyEncoded());
 
         int expectedBytes = switch (spec) {
@@ -1119,7 +1175,7 @@ class KmsServiceTest {
         assertEquals(expectedBytes, Base64.getDecoder().decode(key.getPrivateKeyEncoded()).length);
 
         KmsKey found = kmsService.describeKey(key.getKeyId(), REGION);
-        assertEquals(spec, found.getCustomerMasterKeySpec());
+        assertEquals(KmsKeySpec.valueOf(spec), found.getKeySpec());
     }
 
     @ParameterizedTest
@@ -1128,7 +1184,7 @@ class KmsServiceTest {
         KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", spec, null, Map.of(), REGION);
         byte[] message = "floci-mac-probe".getBytes(StandardCharsets.UTF_8);
 
-        byte[] mac = kmsService.generateMac(key.getKeyId(), message, KmsService.macAlgorithmFor(spec), REGION);
+        byte[] mac = kmsService.generateMac(key.getKeyId(), message, KmsKeySpec.valueOf(spec).getAlgorithm().getFirst().getAlgName(), REGION);
 
         assertEquals(expectedMacByteLength(spec), mac.length);
     }
@@ -1244,5 +1300,57 @@ class KmsServiceTest {
             case "HMAC_512" -> 64;
             default -> -1;
         };
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"RSA_2048", "RSA_3072", "RSA_4096"})
+    void signAndVerifyWithAllRsaSpecs(String keySpec) {
+        KmsKey key = kmsService.createKey("rsa key", "SIGN_VERIFY", keySpec, null, Map.of(), REGION);
+        byte[] message = "sign me with rsa".getBytes(StandardCharsets.UTF_8);
+
+        String algo = "RSASSA_PKCS1_V1_5_SHA_256";
+        byte[] sig = kmsService.sign(key.getKeyId(), message, algo, REGION);
+        assertNotNull(sig);
+        assertTrue(kmsService.verify(key.getKeyId(), message, sig, algo, REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521", "ECC_SECG_P256K1",
+            "RSA_2048", "RSA_3072", "RSA_4096"
+    })
+    void signAndVerifyWithDigestAllSpecs(String keySpec) throws Exception {
+        KmsKey key = kmsService.createKey("digest key", "SIGN_VERIFY", keySpec, null, Map.of(), REGION);
+        byte[] message = "floci kms digest test".getBytes(StandardCharsets.UTF_8);
+
+        KmsKeySpec.Algorithm algorithm = KmsKeySpec.valueOf(keySpec).getAlgorithm().getFirst();
+        String digestAlgo = algorithm.getJavaName().substring(0, 6);
+        byte[] digest = MessageDigest.getInstance(digestAlgo).digest(message);
+
+        byte[] sig = kmsService.sign(key.getKeyId(), digest, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION);
+        assertNotNull(sig);
+        assertTrue(kmsService.verify(key.getKeyId(), digest, sig, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION));
+    }
+
+    @Test
+    void signFailsForSymmetricKey() {
+        KmsKey key = kmsService.createKey("symmetric", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT", null, Map.of(), REGION);
+        byte[] message = "hello".getBytes(StandardCharsets.UTF_8);
+
+        String keyId = key.getKeyId();
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.sign(keyId, message, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
+        assertEquals("UnsupportedOperationException", ex.getErrorCode());
+    }
+
+    @Test
+    void generateMacFailsForAsymmetricKey() {
+        KmsKey key = kmsService.createKey("asymmetric", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        byte[] message = "hello".getBytes(StandardCharsets.UTF_8);
+
+        String keyId = key.getKeyId();
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.generateMac(keyId, message, "HMAC_SHA_256", REGION));
+        assertEquals("InvalidKeyUsageException", ex.getErrorCode());
     }
 }

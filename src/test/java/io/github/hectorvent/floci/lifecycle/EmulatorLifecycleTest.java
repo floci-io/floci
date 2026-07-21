@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.lifecycle;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
+import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.InitLifecycleState;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
@@ -39,6 +40,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
@@ -60,9 +62,12 @@ class EmulatorLifecycleTest {
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
     @Mock private RdsContainerManager rdsContainerManager;
     @Mock private RdsProxyManager rdsProxyManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager memoryDbContainerManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager memoryDbProxyManager;
     @Mock private DocDbContainerManager docDbContainerManager;
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
+    @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
     @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -73,7 +78,10 @@ class EmulatorLifecycleTest {
     @Mock private EcrRegistryManager ecrRegistryManager;
     @Mock private io.github.hectorvent.floci.services.floci.ui.FlociUiManager flociUiManager;
     @Mock private InitLifecycleState initLifecycleState;
+    @Mock private PersistentPathValidator persistentPathValidator;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
+    @Mock private io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker schemaCreationWorker;
+    @Mock private jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.core.common.ContainerTeardown> containerTeardowns;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -89,9 +97,14 @@ class EmulatorLifecycleTest {
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
-                docDbContainerManager, neptuneContainerManager, neptuneProxyManager, rdsService,
+                memoryDbContainerManager, memoryDbProxyManager,
+                docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
+                rabbitMqManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState);
+                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
+                schemaCreationWorker, containerTeardowns, persistentPathValidator);
+        Mockito.lenient().when(containerTeardowns.iterator())
+                .thenReturn(java.util.Collections.emptyIterator());
     }
 
     private void stubStorageConfig() {
@@ -114,6 +127,33 @@ class EmulatorLifecycleTest {
         inOrder.verify(initLifecycleState).markBootCompleted();
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(rdsService).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should validate the persistent path after BOOT hooks and before loading storage")
+    void shouldValidatePersistentPathBeforeStorageLoad() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(initLifecycleState, persistentPathValidator, storageFactory);
+        inOrder.verify(initLifecycleState).markBootCompleted();
+        inOrder.verify(persistentPathValidator).validateAtBoot();
+        inOrder.verify(storageFactory).loadAll();
+    }
+
+    @Test
+    @DisplayName("Should abort startup when the persistent path validation fails")
+    void shouldAbortStartupWhenPersistentPathValidationFails() {
+        stubStorageConfig();
+        doThrow(new IllegalStateException("Persistent storage path '/app/data' is not writable"))
+                .when(persistentPathValidator).validateAtBoot();
+
+        assertThrows(IllegalStateException.class,
+                () -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+        Mockito.verify(storageFactory, Mockito.never()).loadAll();
     }
 
     @Test
@@ -260,6 +300,22 @@ class EmulatorLifecycleTest {
         verify(storageFactory).shutdownAll();
         // Hooks are handled by onPreShutdown, never from ShutdownEvent.
         verify(initializationHooksRunner, never()).run(InitializationHook.STOP);
+    }
+
+    @Test
+    @DisplayName("onStop flushes storage BEFORE the slow container teardown, and shuts it down last")
+    void shouldFlushStorageBeforeContainerTeardown() {
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        // The disk flush must run before the blocking Docker container teardown so a graceful
+        // shutdown can't be cut off by the SIGTERM grace window before data is persisted
+        // (regression guard for issue #1521). shutdownAll() still runs last to stop the flush
+        // schedulers and capture any shutdown-time writes.
+        var inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
+        inOrder.verify(storageFactory).flushAll();
+        inOrder.verify(elastiCacheContainerManager).stopAll();
+        inOrder.verify(rdsContainerManager).stopAll();
+        inOrder.verify(storageFactory).shutdownAll();
     }
 
     @Test

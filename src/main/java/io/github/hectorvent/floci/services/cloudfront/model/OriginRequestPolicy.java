@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.cloudfront.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.Map;
 
+@RegisterForReflection
 public class OriginRequestPolicy {
 
     private String id;

@@ -115,6 +115,10 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         String firstLabel = hostname.substring(0, firstDot);
         String remainder  = hostname.substring(firstDot + 1);
 
+        if (isS3ServiceEndpointHost(firstLabel, remainder, baseHostname)) {
+            return null;
+        }
+
         // Primary: remainder must match the configured base hostname,
         // either directly or in the AWS region-qualified s3.<region>.<host> form.
         if (baseHostname != null && matchesEndpointHost(remainder, baseHostname)) {
@@ -127,6 +131,19 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         }
 
         return null;
+    }
+
+    private static boolean isS3ServiceEndpointHost(String firstLabel, String remainder, String baseHostname) {
+        if (!"s3".equalsIgnoreCase(firstLabel)) {
+            return false;
+        }
+        if (baseHostname != null && matchesEndpointHost(remainder, baseHostname)) {
+            return true;
+        }
+        String lowerRemainder = remainder.toLowerCase();
+        return "localhost".equals(lowerRemainder)
+                || "localhost.localstack.cloud".equals(lowerRemainder)
+                || "localhost.floci.io".equals(lowerRemainder);
     }
 
     /**
@@ -204,6 +221,10 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Floci public wildcard DNS: bucket.s3.localhost.floci.io and bucket.localhost.floci.io → 127.0.0.1
         if (remainder.endsWith(".localhost.floci.io") || "localhost.floci.io".equals(remainder)) {
             return remainder.startsWith("s3.") || "localhost.floci.io".equals(remainder);
+        }
+        // S3 website endpoints: bucket.s3-website-<region>.amazonaws.com, bucket.s3-website-<region>.localhost, etc.
+        if (remainder.startsWith("s3-website")) {
+            return true;
         }
         return false;
     }

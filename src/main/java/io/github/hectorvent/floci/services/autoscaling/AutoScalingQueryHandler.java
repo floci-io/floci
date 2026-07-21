@@ -95,6 +95,7 @@ public class AutoScalingQueryHandler {
     private Response handleCreateLaunchConfiguration(MultivaluedMap<String, String> p, String region) {
         service.createLaunchConfiguration(region,
                 p.getFirst("LaunchConfigurationName"),
+                p.getFirst("InstanceId"),
                 p.getFirst("ImageId"),
                 p.getFirst("InstanceType"),
                 p.getFirst("KeyName"),
@@ -121,10 +122,10 @@ public class AutoScalingQueryHandler {
             xml.start("member")
                .elem("LaunchConfigurationName", lc.getLaunchConfigurationName())
                .elem("LaunchConfigurationARN", lc.getLaunchConfigurationArn())
-               .elem("ImageId", lc.getImageId() != null ? lc.getImageId() : "")
-               .elem("InstanceType", lc.getInstanceType() != null ? lc.getInstanceType() : "t3.micro")
                .elem("CreatedTime", ISO_FMT.format(lc.getCreatedTime()))
                .elem("AssociatePublicIpAddress", String.valueOf(lc.isAssociatePublicIpAddress()));
+            if (lc.getImageId() != null) { xml.elem("ImageId", lc.getImageId()); }
+            if (lc.getInstanceType() != null) { xml.elem("InstanceType", lc.getInstanceType()); }
             if (lc.getKeyName() != null) { xml.elem("KeyName", lc.getKeyName()); }
             if (lc.getUserData() != null) { xml.elem("UserData", lc.getUserData()); }
             if (lc.getIamInstanceProfile() != null) { xml.elem("IamInstanceProfile", lc.getIamInstanceProfile()); }
@@ -150,7 +151,8 @@ public class AutoScalingQueryHandler {
     // ── Auto Scaling Group ────────────────────────────────────────────────────
 
     private Response handleCreateAutoScalingGroup(MultivaluedMap<String, String> p, String region) {
-        service.createAutoScalingGroup(region,
+        ParsedTags parsedTags = parseTags(p);
+        AutoScalingGroup asg = service.createAutoScalingGroup(region,
                 p.getFirst("AutoScalingGroupName"),
                 p.getFirst("LaunchConfigurationName"),
                 p.getFirst("LaunchTemplate.LaunchTemplateId"),
@@ -168,7 +170,8 @@ public class AutoScalingQueryHandler {
                 p.getFirst("HealthCheckType"),
                 intParam(p, "HealthCheckGracePeriod", 0),
                 memberList(p, "TerminationPolicies"),
-                parseTags(p));
+                parsedTags.tags(),
+                parsedTags.propagateAtLaunch());
         return ok(new XmlBuilder()
                 .start("CreateAutoScalingGroupResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -303,7 +306,7 @@ public class AutoScalingQueryHandler {
                .elem("Value", tag.getValue())
                .elem("ResourceId", asg.getAutoScalingGroupName())
                .elem("ResourceType", "auto-scaling-group")
-               .elem("PropagateAtLaunch", "false")
+               .elem("PropagateAtLaunch", String.valueOf(asg.getTagPropagateAtLaunch().getOrDefault(tag.getKey(), false)))
                .end("member");
         }
         xml.end("Tags");
@@ -412,7 +415,12 @@ public class AutoScalingQueryHandler {
 
     private Response handleCreateOrUpdateTags(MultivaluedMap<String, String> p, String region) {
         for (TagRequest tag : parseTagRequests(p)) {
-            service.createOrUpdateTags(region, tag.resourceId(), tag.resourceType(), Map.of(tag.key(), tag.value()));
+            service.createOrUpdateTags(
+                    region,
+                    tag.resourceId(),
+                    tag.resourceType(),
+                    Map.of(tag.key(), tag.value()),
+                    Map.of(tag.key(), tag.propagateAtLaunch()));
         }
         return ok(new XmlBuilder()
                 .start("CreateOrUpdateTagsResponse", NS)
@@ -1035,15 +1043,18 @@ public class AutoScalingQueryHandler {
         return result;
     }
 
-    private Map<String, String> parseTags(MultivaluedMap<String, String> p) {
-        Map<String, String> result = new LinkedHashMap<>();
+    private ParsedTags parseTags(MultivaluedMap<String, String> p) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        Map<String, Boolean> propagateAtLaunch = new LinkedHashMap<>();
         for (int i = 1; ; i++) {
             String key = p.getFirst("Tags.member." + i + ".Key");
             if (key == null) { break; }
             String value = p.getFirst("Tags.member." + i + ".Value");
-            result.put(key, value != null ? value : "");
+            tags.put(key, value != null ? value : "");
+            propagateAtLaunch.put(key,
+                    Boolean.parseBoolean(p.getFirst("Tags.member." + i + ".PropagateAtLaunch")));
         }
-        return result;
+        return new ParsedTags(tags, propagateAtLaunch);
     }
 
     private List<TagRequest> parseTagRequests(MultivaluedMap<String, String> p) {
@@ -1054,12 +1065,15 @@ public class AutoScalingQueryHandler {
             String resourceId = p.getFirst("Tags.member." + i + ".ResourceId");
             String resourceType = p.getFirst("Tags.member." + i + ".ResourceType");
             String value = p.getFirst("Tags.member." + i + ".Value");
-            result.add(new TagRequest(resourceId, resourceType, key, value != null ? value : ""));
+            boolean propagateAtLaunch = Boolean.parseBoolean(p.getFirst("Tags.member." + i + ".PropagateAtLaunch"));
+            result.add(new TagRequest(resourceId, resourceType, key, value != null ? value : "", propagateAtLaunch));
         }
         return result;
     }
 
-    private record TagRequest(String resourceId, String resourceType, String key, String value) {}
+    private record TagRequest(String resourceId, String resourceType, String key, String value, boolean propagateAtLaunch) {}
+
+    private record ParsedTags(Map<String, String> tags, Map<String, Boolean> propagateAtLaunch) {}
 
     private InstanceRefresh parseInstanceRefresh(MultivaluedMap<String, String> p) {
         InstanceRefresh refresh = new InstanceRefresh();

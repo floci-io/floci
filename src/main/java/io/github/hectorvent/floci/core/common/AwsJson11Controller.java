@@ -6,15 +6,18 @@ import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployJsonHandler;
+import io.github.hectorvent.floci.services.codepipeline.CodePipelineJsonHandler;
 import io.github.hectorvent.floci.services.ecr.EcrJsonHandler;
 import io.github.hectorvent.floci.services.transfer.TransferHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.firehose.FirehoseJsonHandler;
 import io.github.hectorvent.floci.services.glue.GlueJsonHandler;
+import io.github.hectorvent.floci.services.lightsail.LightsailJsonHandler;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingJsonHandler;
 import io.github.hectorvent.floci.services.bcmdataexports.BcmDataExportsJsonHandler;
 import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailJsonHandler;
+import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
@@ -26,6 +29,7 @@ import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapHandler;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.emr.EmrHandler;
+import io.github.hectorvent.floci.services.memorydb.MemoryDbHandler;
 import io.github.hectorvent.floci.services.wafv2.WafV2Handler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
@@ -51,6 +55,7 @@ import org.jboss.logging.Logger;
 @Path("/")
 public class AwsJson11Controller {
 
+    public static final String CONTENT_TYPE_AWS_JSON_1_1 = "application/x-amz-json-1.1";
     private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
 
     private final ObjectMapper objectMapper;
@@ -60,6 +65,7 @@ public class AwsJson11Controller {
     private final EventBridgeHandler eventBridgeHandler;
     private final CloudMapHandler cloudMapHandler;
     private final EmrHandler emrHandler;
+    private final MemoryDbHandler memoryDbHandler;
     private final WafV2Handler wafV2Handler;
     private final CloudWatchLogsHandler cloudWatchLogsHandler;
     private final SecretsManagerJsonHandler secretsManagerJsonHandler;
@@ -76,6 +82,7 @@ public class AwsJson11Controller {
     private final ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler;
     private final CodeBuildJsonHandler codeBuildJsonHandler;
     private final CodeDeployJsonHandler codeDeployJsonHandler;
+    private final CodePipelineJsonHandler codePipelineJsonHandler;
     private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
     private final TransferHandler transferHandler;
     private final TextractJsonHandler textractJsonHandler;
@@ -86,6 +93,8 @@ public class AwsJson11Controller {
     private final BcmDataExportsJsonHandler bcmDataExportsJsonHandler;
     private final ConfigServiceJsonHandler configServiceJsonHandler;
     private final CloudTrailJsonHandler cloudTrailJsonHandler;
+    private final LightsailJsonHandler lightsailJsonHandler;
+    private final CloudControlJsonHandler cloudControlJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -93,6 +102,7 @@ public class AwsJson11Controller {
                                SsmJsonHandler ssmJsonHandler, EventBridgeHandler eventBridgeHandler,
                                CloudMapHandler cloudMapHandler,
                                EmrHandler emrHandler,
+                               MemoryDbHandler memoryDbHandler,
                                WafV2Handler wafV2Handler,
                                CloudWatchLogsHandler cloudWatchLogsHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
@@ -106,6 +116,7 @@ public class AwsJson11Controller {
                                ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler,
                                CodeBuildJsonHandler codeBuildJsonHandler,
                                CodeDeployJsonHandler codeDeployJsonHandler,
+                               CodePipelineJsonHandler codePipelineJsonHandler,
                                Ec2MessagesJsonHandler ec2MessagesJsonHandler,
                                TransferHandler transferHandler,
                                TextractJsonHandler textractJsonHandler,
@@ -115,7 +126,9 @@ public class AwsJson11Controller {
                                CurJsonHandler curJsonHandler,
                                BcmDataExportsJsonHandler bcmDataExportsJsonHandler,
                                ConfigServiceJsonHandler configServiceJsonHandler,
-                               CloudTrailJsonHandler cloudTrailJsonHandler) {
+                               CloudTrailJsonHandler cloudTrailJsonHandler,
+                               LightsailJsonHandler lightsailJsonHandler,
+                               CloudControlJsonHandler cloudControlJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -123,6 +136,7 @@ public class AwsJson11Controller {
         this.eventBridgeHandler = eventBridgeHandler;
         this.cloudMapHandler = cloudMapHandler;
         this.emrHandler = emrHandler;
+        this.memoryDbHandler = memoryDbHandler;
         this.wafV2Handler = wafV2Handler;
         this.cloudWatchLogsHandler = cloudWatchLogsHandler;
         this.secretsManagerJsonHandler = secretsManagerJsonHandler;
@@ -139,6 +153,7 @@ public class AwsJson11Controller {
         this.resourceGroupsTaggingJsonHandler = resourceGroupsTaggingJsonHandler;
         this.codeBuildJsonHandler = codeBuildJsonHandler;
         this.codeDeployJsonHandler = codeDeployJsonHandler;
+        this.codePipelineJsonHandler = codePipelineJsonHandler;
         this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
         this.transferHandler = transferHandler;
         this.textractJsonHandler = textractJsonHandler;
@@ -149,11 +164,13 @@ public class AwsJson11Controller {
         this.bcmDataExportsJsonHandler = bcmDataExportsJsonHandler;
         this.configServiceJsonHandler = configServiceJsonHandler;
         this.cloudTrailJsonHandler = cloudTrailJsonHandler;
+        this.lightsailJsonHandler = lightsailJsonHandler;
+        this.cloudControlJsonHandler = cloudControlJsonHandler;
     }
 
     @POST
-    @Consumes("application/x-amz-json-1.1")
-    @Produces("application/x-amz-json-1.1")
+    @Consumes(CONTENT_TYPE_AWS_JSON_1_1)
+    @Produces(CONTENT_TYPE_AWS_JSON_1_1)
     public Response handle(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,
@@ -182,6 +199,7 @@ public class AwsJson11Controller {
                 case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
                 case "elasticmapreduce" -> emrHandler.handle(action, request, region);
                 case "wafv2" -> wafV2Handler.handle(action, request, region);
+                case "memorydb" -> memoryDbHandler.handle(action, request, region);
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
@@ -197,6 +215,8 @@ public class AwsJson11Controller {
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
                 case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
                 case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
+                case "codepipeline" -> codePipelineJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
                 case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
                 case "transfer" -> transferHandler.handle(action, request, region);
                 case "textract" -> textractJsonHandler.handle(action, request, region);
@@ -207,6 +227,8 @@ public class AwsJson11Controller {
                 case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
                 case "config" -> configServiceJsonHandler.handle(action, request, region);
                 case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
+                case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
+                case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

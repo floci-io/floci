@@ -50,6 +50,12 @@ class SamTransformProcessor {
         ObjectNode expanded = template.deepCopy();
         expanded.remove("Transform");
 
+        // Globals is a SAM-only top-level section: capture it for merging into resources, then strip
+        // it from the emitted CloudFormation template up front so it is removed on every return path
+        // (including the early return below when Resources is absent or not an object).
+        JsonNode globals = expanded.path("Globals");
+        expanded.remove("Globals");
+
         JsonNode resources = expanded.path("Resources");
         if (!resources.isObject()) {
             return expanded;
@@ -74,11 +80,11 @@ class SamTransformProcessor {
 
             switch (type) {
                 case "AWS::Serverless::Function" ->
-                        expandServerlessFunction(logicalId, properties, expandedResources);
+                        expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties), expandedResources);
                 case "AWS::Serverless::SimpleTable" ->
-                        expandServerlessSimpleTable(logicalId, properties, expandedResources);
+                        expandServerlessSimpleTable(logicalId, mergeGlobals(globals, "SimpleTable", properties), expandedResources);
                 case "AWS::Serverless::Api" ->
-                        expandServerlessApi(logicalId, properties, expandedResources);
+                        expandServerlessApi(logicalId, mergeGlobals(globals, "Api", properties), expandedResources);
                 default -> LOG.debugv("Unsupported SAM resource type: {0} ({1})", type, logicalId);
             }
         }
@@ -300,6 +306,46 @@ class SamTransformProcessor {
         return id;
     }
 
+    /**
+     * Merges the matching {@code Globals.<section>} block into a resource's own {@code Properties},
+     * with the resource's own values taking precedence (per the SAM Globals specification). Returns
+     * {@code properties} unchanged when there is no matching globals block.
+     *
+     * <p>Nested objects (e.g. {@code Environment.Variables}, {@code Tags}) are merged key-wise, so a
+     * resource only overrides the individual keys it sets and global entries are preserved — matching
+     * SAM's map-merge behavior. Scalar and array-valued properties (e.g. {@code Policies},
+     * {@code Layers}) are overridden wholesale; SAM's additive list-append for those is not implemented.
+     */
+    private JsonNode mergeGlobals(JsonNode globals, String section, JsonNode properties) {
+        JsonNode sectionGlobals = globals.path(section);
+        if (!sectionGlobals.isObject()) {
+            return properties;
+        }
+        if (!properties.isObject()) {
+            return sectionGlobals.deepCopy();
+        }
+        return deepMerge((ObjectNode) sectionGlobals.deepCopy(), (ObjectNode) properties);
+    }
+
+    /**
+     * Recursively merges {@code override} into {@code base}: when both sides hold an object for the
+     * same key, the objects are merged key-wise; otherwise the override value replaces the base value.
+     * {@code base} is mutated and returned.
+     */
+    private ObjectNode deepMerge(ObjectNode base, ObjectNode override) {
+        override.fields().forEachRemaining(entry -> {
+            String key = entry.getKey();
+            JsonNode overrideValue = entry.getValue();
+            JsonNode baseValue = base.get(key);
+            if (baseValue != null && baseValue.isObject() && overrideValue.isObject()) {
+                base.set(key, deepMerge((ObjectNode) baseValue, (ObjectNode) overrideValue));
+            } else {
+                base.set(key, overrideValue.deepCopy());
+            }
+        });
+        return base;
+    }
+
     private void expandServerlessFunction(String logicalId, JsonNode properties, ObjectNode resources) {
         resources.remove(logicalId);
 
@@ -371,8 +417,10 @@ class SamTransformProcessor {
         ObjectNode lambdaProps = objectMapper.createObjectNode();
 
         copyIfPresent(properties, "FunctionName", lambdaProps);
+        copyIfPresent(properties, "PackageType", lambdaProps);
         copyIfPresent(properties, "Handler", lambdaProps);
         copyIfPresent(properties, "Runtime", lambdaProps);
+        copyIfPresent(properties, "ImageConfig", lambdaProps);
 
         lambdaProps.set("Code", buildLambdaCode(properties));
 

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -24,6 +25,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,6 +40,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class ElbV2ServiceTest {
@@ -121,6 +124,19 @@ class ElbV2ServiceTest {
     }
 
     @Test
+    void createLoadBalancerUsesConfiguredHostnameForDnsSuffix() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.hostname()).thenReturn(Optional.of("floci"));
+        service.config = config;
+
+        String dnsName = service.createLoadBalancer(
+                REGION, "sample-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getDnsName();
+
+        assertTrue(dnsName.endsWith(".elb.floci"));
+    }
+
+    @Test
     void initializeStorageReloadsPersistedResourcesAndRebuildsIndexes() {
         SharedStorageFactory storageFactory = new SharedStorageFactory();
         ElbV2DataPlane firstDataPlane = mock(ElbV2DataPlane.class);
@@ -193,6 +209,20 @@ class ElbV2ServiceTest {
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
         verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
+    }
+
+    @Test
+    void describeTargetHealthReturnsUnusedForExplicitUnregisteredTarget() {
+        String tgArn = createTargetGroup("sample-tg");
+        TargetDescription target = new TargetDescription();
+        target.setId("i-1234567890abcdef0");
+        target.setPort(9999);
+
+        var health = service.describeTargetHealth(REGION, tgArn, List.of(target)).getFirst();
+
+        assertEquals("unused", health.getState());
+        assertEquals("Target.NotRegistered", health.getReason());
+        assertEquals("Target is not registered to the target group", health.getDescription());
     }
 
     private String createTargetGroup(String name) {

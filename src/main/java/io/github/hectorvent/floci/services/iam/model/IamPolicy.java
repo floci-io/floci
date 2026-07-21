@@ -4,9 +4,10 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -21,9 +22,9 @@ public class IamPolicy {
     private int attachmentCount = 0;
     private Instant createDate;
     private Instant updateDate;
-    private Map<String, String> tags = new HashMap<>();
+    private Map<String, String> tags = new ConcurrentHashMap<>();
     // versionId -> PolicyVersion (ordered for consistent listing)
-    private Map<String, PolicyVersion> versions = new LinkedHashMap<>();
+    private Map<String, PolicyVersion> versions = Collections.synchronizedMap(new LinkedHashMap<>());
 
     public IamPolicy() {}
 
@@ -73,8 +74,12 @@ public class IamPolicy {
     public void setUpdateDate(Instant updateDate) { this.updateDate = updateDate; }
 
     public Map<String, String> getTags() { return tags; }
-    public void setTags(Map<String, String> tags) { this.tags = tags; }
+    public void setTags(Map<String, String> tags) {
+        this.tags = new ConcurrentHashMap<>(tags);
+    }
 
     public Map<String, PolicyVersion> getVersions() { return versions; }
-    public void setVersions(Map<String, PolicyVersion> versions) { this.versions = versions; }
+    public void setVersions(Map<String, PolicyVersion> versions) {
+        this.versions = Collections.synchronizedMap(new LinkedHashMap<>(versions));
+    }
 }

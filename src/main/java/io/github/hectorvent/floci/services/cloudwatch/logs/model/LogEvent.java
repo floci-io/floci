@@ -11,6 +11,12 @@ public class LogEvent {
     private long timestamp;
     private String message;
     private long ingestionTime;
+    /**
+     * Monotonically increasing ingestion sequence number, used to preserve ingestion
+     * order as a tie-breaker when multiple events share the same millisecond timestamp.
+     * Matches CloudWatch Logs, which returns same-timestamp events in ingestion order.
+     */
+    private long sequence;
 
     public LogEvent() {}
 
@@ -25,4 +31,7 @@ public class LogEvent {
 
     public long getIngestionTime() { return ingestionTime; }
     public void setIngestionTime(long ingestionTime) { this.ingestionTime = ingestionTime; }
+
+    public long getSequence() { return sequence; }
+    public void setSequence(long sequence) { this.sequence = sequence; }
 }

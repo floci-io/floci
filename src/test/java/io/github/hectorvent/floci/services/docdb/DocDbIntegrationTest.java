@@ -259,6 +259,20 @@ class DocDbIntegrationTest {
     }
 
     @Test
+    @Order(15)
+    void describeClusterSnapshotsReturnsEmptyList() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType(FORM)
+            .formParam("Action", "DescribeDBClusterSnapshots")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("DescribeDBClusterSnapshotsResult"))
+            .body(containsString("DBClusterSnapshots"));
+    }
+
+    @Test
     @Order(16)
     void unsupportedAction() {
         given()

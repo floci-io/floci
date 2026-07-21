@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineVersion;
+import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,7 +31,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class StepFunctionsService {
+public class StepFunctionsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsService.class);
 
@@ -47,6 +49,11 @@ public class StepFunctionsService {
     // creating a JSONata state machine with any of these fields returns SCHEMA_VALIDATION_FAILED.
     private static final Set<String> JSONPATH_ONLY_FIELDS = Set.of(
             "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath");
+    private static final Set<String> ITEM_READER_RESOURCES = Set.of(
+            "arn:aws:states:::s3:getObject",
+            "arn:aws:states:::s3:listObjectsV2");
+    private static final Set<String> ITEM_READER_INPUT_TYPES = Set.of(
+            "MANIFEST", "JSON", "CSV", "JSONL", "PARQUET");
 
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -60,6 +67,13 @@ public class StepFunctionsService {
         this.regionResolver = regionResolver;
         this.aslExecutor = aslExecutor;
         this.objectMapper = objectMapper;
+    }
+
+    public void clear() {
+        historyCache.clear();
+        activityQueues.clear();
+        pendingTaskTokens.values().forEach(f -> f.completeExceptionally(new RuntimeException("StepFunctionsService cleared")));
+        pendingTaskTokens.clear();
     }
 
     // ──────────────────────────── State Machines ────────────────────────────
@@ -97,6 +111,51 @@ public class StepFunctionsService {
     public List<StateMachine> listStateMachines(String region) {
         String prefix = "arn:aws:states:" + region + ":";
         return stateMachineStore.scan(k -> k.startsWith(prefix));
+    }
+
+    // ── State machine versions ──────────────────────────────────────────────
+
+    public StateMachineVersion publishStateMachineVersion(String stateMachineArn) {
+        StateMachine sm = describeStateMachine(stateMachineArn);
+        int next = sm.getVersionCounter() + 1;
+        sm.setVersionCounter(next);
+        StateMachineVersion version = new StateMachineVersion(
+                stateMachineArn + ":" + next, next, System.currentTimeMillis() / 1000.0);
+        sm.getVersions().add(version);
+        stateMachineStore.put(stateMachineArn, sm);
+        return version;
+    }
+
+    public List<StateMachineVersion> listStateMachineVersions(String stateMachineArn) {
+        // AWS returns InvalidArn for a non-existent state machine here — StateMachineDoesNotExist is
+        // not one of ListStateMachineVersions' declared errors (Publish, which does declare it, keeps
+        // using describeStateMachine).
+        StateMachine sm = stateMachineStore.get(stateMachineArn)
+                .orElseThrow(() -> new AwsException("InvalidArn",
+                        "Invalid Arn: '" + stateMachineArn + "'", 400));
+        // AWS lists versions newest first (descending by creationDate). creationDate is only
+        // second-resolution, so tie-break on the version number (also descending) to keep the order
+        // correct when several versions are published within the same second — otherwise the
+        // Terraform provider can latch onto the wrong version ARN.
+        List<StateMachineVersion> versions = new ArrayList<>(sm.getVersions());
+        versions.sort(Comparator
+                .comparingDouble(StateMachineVersion::getCreationDate)
+                .thenComparingInt(StateMachineVersion::getVersion)
+                .reversed());
+        // Defensive copy so callers can't mutate (or trip over concurrent mutation of) the stored list.
+        return List.copyOf(versions);
+    }
+
+    public void deleteStateMachineVersion(String stateMachineVersionArn) {
+        int lastColon = stateMachineVersionArn.lastIndexOf(':');
+        if (lastColon < 0) {
+            return;
+        }
+        String baseArn = stateMachineVersionArn.substring(0, lastColon);
+        stateMachineStore.get(baseArn).ifPresent(sm -> {
+            sm.getVersions().removeIf(v -> stateMachineVersionArn.equals(v.getStateMachineVersionArn()));
+            stateMachineStore.put(baseArn, sm);
+        });
     }
 
     public void deleteStateMachine(String arn) {
@@ -363,10 +422,10 @@ public class StepFunctionsService {
     private static final int MAX_DEFINITION_LENGTH = 1_048_576;
     private static final String PARSE_ERROR_MARKER = "INVALID_JSON_DESCRIPTION:";
 
-    // Parse the structured location out of the validator's flat error strings,
-    // which currently encode it as "...field 'X' is only supported... at /States/Y".
+    // Parse the structured location out of validator flat error strings,
+    // which currently encode it as "...field 'X' ... at /States/Y".
     // AWS's published Diagnostic.location format is "/States/<StateName>/<FieldName>".
-    private static final Pattern FIELD_PATTERN = Pattern.compile("field '([^']+)' is only supported");
+    private static final Pattern FIELD_PATTERN = Pattern.compile("field '([^']+)'");
     private static final Pattern LOCATION_SUFFIX_PATTERN = Pattern.compile(" at (/States/\\S+)$");
 
     /**
@@ -438,7 +497,11 @@ public class StepFunctionsService {
             if (locM.find() && fieldM.find()) {
                 // Build the structured location and strip the redundant suffix
                 // from the message, matching AWS's wire format.
-                location = locM.group(1) + "/" + fieldM.group(1);
+                location = locM.group(1);
+                String field = fieldM.group(1);
+                if (!location.endsWith("/" + field)) {
+                    location = location + "/" + field;
+                }
                 message = message.substring(0, locM.start()).trim();
             }
         }
@@ -497,6 +560,27 @@ public class StepFunctionsService {
                             + "' is only supported for the 'JSONPath' QueryLanguage at /States/" + stateName);
                 }
             }
+        }
+
+        if ("Map".equals(stateDef.path("Type").asText()) && stateDef.has("ItemReader")) {
+            validateItemReader(stateName, stateDef, errors);
+        }
+    }
+
+    private void validateItemReader(String stateName, JsonNode stateDef, List<String> errors) {
+        JsonNode itemReader = stateDef.get("ItemReader");
+        String resource = itemReader.path("Resource").asText(null);
+        if (resource != null && !ITEM_READER_RESOURCES.contains(resource)) {
+            errors.add("The field 'Resource' does not match any of the allowed values. Examples: "
+                    + "[arn:<partition>:states:::s3:getObject, arn:<partition>:states:::s3:listObjectsV2]"
+                    + " at /States/" + stateName + "/ItemReader/Resource");
+        }
+
+        String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
+        if (inputType != null && !ITEM_READER_INPUT_TYPES.contains(inputType)) {
+            errors.add("The field 'InputType' should have one of these values: "
+                    + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
+                    + " at /States/" + stateName + "/ItemReader/ReaderConfig/InputType");
         }
     }
 }
