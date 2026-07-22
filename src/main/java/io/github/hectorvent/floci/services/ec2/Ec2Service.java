@@ -2825,14 +2825,14 @@ public class Ec2Service {
                     "Volume '" + volumeId + "' is not attached with device '" + device + "'", 400);
         }
         Instance inst = getRequiredInstance(region, target.getInstanceId());
+        if (!inst.getState().getName().equals("stopped") && target.getDevice().equals(inst.getRootDeviceName())) {
+            throw new AwsException("OperationNotPermitted",
+                    "The root volume of an instance cannot be detached while the instance is running", 400);
+        }
         if (!force && target.getDevice().equals(inst.getRootDeviceName())) {
             throw new AwsException("InvalidParameterCombination",
                     "Device " + inst.getRootDeviceName() + " has the root partition on it. Detaching it will damage the " +
                             "filesystem/partition tables. To force detachment, use the force parameter", 400);
-        }
-        if (!inst.getState().getName().equals("stopped") && target.getDevice().equals(inst.getRootDeviceName())) {
-            throw new AwsException("OperationNotPermitted",
-                    "The root volume of an instance cannot be detached while the instance is running", 400);
         }
         target.setState("detached");
         volume.getAttachments().clear();
