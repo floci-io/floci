@@ -899,6 +899,54 @@ class RdsServiceTest {
                 eq("admin"), eq("secret"), eq("app"), any());
     }
 
+    @Test
+    void restorePersistedRuntimePreservesAuroraEngineType() {
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        StorageBackend<String, DbParameterGroup> parameterGroups = new InMemoryStorage<>();
+        StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups = new InMemoryStorage<>();
+
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("initial-cluster-container", "cluster1", "localhost", 5432));
+
+        RdsService initialService = newService(containerManager, proxyManager,
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>());
+        DbCluster cluster = initialService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null, null, null, false);
+        DbInstance member = initialService.createDbInstance("member1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", "db.t3.medium",
+                20, false, null, null, "cluster1", null, false);
+
+        assertEquals(DatabaseEngine.AURORA_POSTGRESQL, cluster.getEngine());
+        assertEquals(DatabaseEngine.AURORA_POSTGRESQL, member.getEngine());
+
+        RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
+        RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
+        when(restoredContainerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("restored-cluster-container", "cluster1", "127.0.0.1", 15432));
+
+        RdsService restoredService = newService(restoredContainerManager, restoredProxyManager,
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>());
+        restoredService.restorePersistedRuntime();
+
+        DbCluster restoredCluster = restoredService.getDbCluster("cluster1");
+        DbInstance restoredMember = restoredService.getDbInstance("member1");
+
+        assertEquals(DatabaseEngine.AURORA_POSTGRESQL, restoredCluster.getEngine());
+        assertEquals(DatabaseEngine.AURORA_POSTGRESQL, restoredMember.getEngine());
+        assertEquals("aurora-postgresql", restoredCluster.getEngine().apiName());
+
+        // still uses the base postgres image/protocol handling, even though the engine type is Aurora-specific
+        verify(restoredContainerManager).start(eq("cluster1"), eq(cluster.getVolumeId()),
+                eq(DatabaseEngine.AURORA_POSTGRESQL), eq("postgres:16.3-alpine"), eq("admin"), eq("secret"), eq("app"));
+        verify(restoredProxyManager).startProxy(eq("cluster1"), eq(DatabaseEngine.AURORA_POSTGRESQL),
+                eq(false), eq(cluster.getProxyPort()), eq("127.0.0.1"), eq(15432),
+                eq("admin"), eq("secret"), eq("app"), any());
+        verify(restoredProxyManager).startProxy(eq("member1"), eq(DatabaseEngine.AURORA_POSTGRESQL),
+                eq(false), eq(member.getProxyPort()), eq("127.0.0.1"), eq(15432),
+                eq("admin"), eq("secret"), eq("app"), any());
+    }
+
     private RdsService newService(RdsContainerManager containerManager,
                                   RdsProxyManager proxyManager,
                                   StorageBackend<String, DbInstance> instances,

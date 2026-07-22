@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -980,7 +981,7 @@ public class RdsService implements Resettable {
         if (engineParam == null) {
             return DatabaseEngine.POSTGRES;
         }
-        return switch (engineParam.toLowerCase()) {
+        return switch (engineParam.toLowerCase(Locale.ROOT)) {
             case "postgres" -> DatabaseEngine.POSTGRES;
             case "aurora-postgresql" -> DatabaseEngine.AURORA_POSTGRESQL;
             case "mysql" -> DatabaseEngine.MYSQL;

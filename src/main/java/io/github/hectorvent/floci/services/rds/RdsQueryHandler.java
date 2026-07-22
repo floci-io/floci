@@ -22,6 +22,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -721,7 +722,7 @@ public class RdsQueryHandler {
         }
 
         String engine = instance.getEngine() != null
-                ? instance.getEngine().name().toLowerCase()
+                ? instance.getEngine().apiName()
                 : "unknown";
         return "default." + engine + dbEngineMajorVersion(instance);
     }
@@ -729,7 +730,7 @@ public class RdsQueryHandler {
     private static String dbEngineMajorVersion(DbInstance instance) {
         String engineVersion = instance.getEngineVersion();
         if ((engineVersion == null || engineVersion.isBlank()) && instance.getEngine() != null) {
-            engineVersion = defaultEngineVersion(instance.getEngine().name());
+            engineVersion = defaultEngineVersion(instance.getEngine().apiName());
         }
         if (engineVersion == null || engineVersion.isBlank()) {
             return "";
@@ -985,7 +986,7 @@ public class RdsQueryHandler {
         if (engine == null) {
             return "16.3";
         }
-        return switch (engine.toLowerCase()) {
+        return switch (engine.toLowerCase(Locale.ROOT)) {
             case "postgres", "aurora-postgresql" -> "16.3";
             case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
             case "mariadb" -> "11.2";

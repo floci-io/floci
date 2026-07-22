@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.rds.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Locale;
+
 @RegisterForReflection
 public enum DatabaseEngine {
     POSTGRES, AURORA_POSTGRESQL, MYSQL, AURORA_MYSQL, MARIADB;
@@ -14,6 +16,6 @@ public enum DatabaseEngine {
     }
 
     public String apiName() {
-        return this.name().toLowerCase().replace("_", "-");
+        return this.name().toLowerCase(Locale.ROOT).replace("_", "-");
     }
 }
