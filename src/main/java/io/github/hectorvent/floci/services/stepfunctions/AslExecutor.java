@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
@@ -23,18 +24,27 @@ import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import io.vertx.core.http.HttpMethod;
+import io.vertx.core.impl.NoStackTraceTimeoutException;
+import io.vertx.mutiny.core.MultiMap;
+import io.vertx.mutiny.core.buffer.Buffer;
+import io.vertx.mutiny.core.Vertx;
+import io.vertx.mutiny.ext.web.client.HttpRequest;
+import io.vertx.mutiny.ext.web.client.HttpResponse;
+import io.vertx.mutiny.ext.web.client.WebClient;
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ArcContainer;
 import io.quarkus.arc.ManagedContext;
@@ -45,17 +55,21 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -63,6 +77,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AslExecutor {
@@ -86,6 +101,41 @@ public class AslExecutor {
     private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
 
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
+    private static final Set<String> HTTP_ALLOWED_METHODS = Set.of(
+            "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD");
+    private static final Set<String> HTTP_FORBIDDEN_HEADERS = Set.of(
+            "a-im",
+            "accept-charset",
+            "accept-datetime",
+            "accept-encoding",
+            "authorization",
+            "cache-control",
+            "connection",
+            "content-encoding",
+            "content-md5",
+            "date",
+            "expect",
+            "forwarded",
+            "from",
+            "host",
+            "http2-settings",
+            "if-match",
+            "if-modified-since",
+            "if-none-match",
+            "if-range",
+            "if-unmodified-since",
+            "max-forwards",
+            "origin",
+            "pragma",
+            "proxy-authorization",
+            "referer",
+            "server",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "via",
+            "warning");
 
     private final LambdaExecutorService lambdaExecutor;
     private final LambdaFunctionStore functionStore;
@@ -100,6 +150,8 @@ public class AslExecutor {
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
+    private final WebClient webClient;
+    private final EmulatorConfig config;
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
         t.setDaemon(true);
@@ -113,7 +165,7 @@ public class AslExecutor {
                        Ec2Service ec2Service, S3Service s3Service,
                        EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
-                       Instance<StepFunctionsService> sfnService) {
+                       Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx) {
         this.lambdaExecutor = lambdaExecutor;
         this.functionStore = functionStore;
         this.dynamoDbService = dynamoDbService;
@@ -127,6 +179,14 @@ public class AslExecutor {
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
+        this.config = config;
+        if (vertx != null) {
+            // This can be optimized further
+            // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
+            this.webClient = WebClient.wrap(vertx.createHttpClient());
+        } else {
+            webClient = null;
+        }
     }
 
     /**
@@ -503,6 +563,12 @@ public class AslExecutor {
         if (resource.equals("arn:aws:states:::sqs:sendMessage")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeOptimizedSqsSendMessage(input, region);
+        }
+
+        // HTTP optimized integration
+        if (resource.equals("arn:aws:states:::http:invoke")) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeHttp(input, region);
         }
 
         // AWS SDK service integration: SQS SendMessage
@@ -2052,6 +2118,292 @@ public class AslExecutor {
         }
         return true;
     }
+
+    /**
+     * Implements the Step Functions HTTP Task request flow for direct task-provided
+     * fields. EventBridge connection lookup and connection-level header, query
+     * parameter, and body merging are intentionally not implemented yet.
+     *
+     * TODO: Resolve Authentication/InvocationConfig ConnectionArn through the
+     * EventBridge connection store and merge connection credentials/parameters.
+     *
+     * TODO: Add HTTP retry support. This can be done via Mutiny's retry mechanism
+     * but most likely better to be done at a higher level to support other tasks.
+     *
+     * TODO: Add HTTP Task coverage for unsupported binary/media response content types.
+     */
+    private JsonNode invokeHttp(JsonNode input, String region) {
+        var rawUri = input.path("ApiEndpoint").asText(null);
+        var method = input.path("Method").asText(null);
+        var timeoutMillis = input.path("TimeoutSeconds").asLong(60) * 1_000;
+        var headers = input.path("Headers");
+        var queryParameters = input.path("QueryParameters");
+        var requestBody = input.path("RequestBody");
+        var requestBodyEncoding = input.path("Transform").path("RequestBodyEncoding").asText("NONE");
+
+        if (rawUri == null || rawUri.isBlank()) {
+            throw new FailStateException("States.Runtime", "ApiEndpoint is required for HTTP task");
+        }
+        var uri = URI.create(rawUri);
+        var isHttps = "https".equalsIgnoreCase(uri.getScheme());
+        var allowPlainHttp = config.services().stepfunctions().allowPlaintextHttp();
+        if (!allowPlainHttp && !isHttps) {
+            throw new FailStateException("States.Runtime", "The value for the 'ApiEndpoint' field must have the scheme 'https'. " +
+                                                           "You can enable plaintext http via 'floci.services.stepfunctions.allow-plaintext-http=true'.");
+        }
+
+        validateHttpMethod(method);
+        validateConnectionArn(input);
+        validateHttpHeaders(headers);
+
+        var requestPayload = requestPayload(requestBody, requestBodyEncoding);
+        var requestHeaders = requestHeaders(headers, requestPayload.contentType());
+        var requestQueryParameters = queryParameters(queryParameters);
+
+        try {
+            var request = webClient.requestAbs(HttpMethod.valueOf(method), rawUri)
+                .timeout(timeoutMillis)
+                .putHeaders(requestHeaders);
+            request.queryParams().addAll(requestQueryParameters);
+
+            LOG.infov("Step Functions HTTP task sending request: method={0}, uri={1}", method, uri);
+            var response = sendHttpRequest(request, requestPayload);
+            validateHttpStatus(response);
+            validateHttpResponse(response);
+            return httpResultJson(response);
+        } catch (FailStateException e) {
+            throw e;
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof NoStackTraceTimeoutException) {
+                throw new FailStateException("States.Http.Socket", e.getCause().getMessage());
+            } else {
+                throw new FailStateException("States.TaskFailed", e.getCause().getMessage());
+            }
+        } catch (Exception e) {
+            throw new FailStateException("States.TaskFailed", e.getMessage());
+        }
+    }
+
+    private HttpResponse<Buffer> sendHttpRequest(HttpRequest<Buffer> request, HttpRequestPayload payload) throws NoStackTraceTimeoutException {
+        if (payload.form() != null) {
+            return request.sendFormAndAwait(payload.form());
+        }
+        if (payload.body() != null) {
+            return request.sendBufferAndAwait(payload.body());
+        }
+        return request.sendAndAwait();
+    }
+
+    private void validateHttpStatus(HttpResponse<Buffer> response) {
+        int statusCode = response.statusCode();
+        if (statusCode < 200 || statusCode >= 300) {
+            throw new FailStateException("States.Http.StatusCode." + statusCode, response.bodyAsString());
+        }
+    }
+
+    private void validateHttpResponse(HttpResponse<Buffer> response) {
+        // TODO: Add HTTP Task coverage for unsupported binary/media response content types.
+        String contentType = response.getHeader("Content-Type");
+        if (contentType == null) {
+            return;
+        }
+
+        String normalized = contentType.toLowerCase(Locale.ROOT);
+        if (normalized.contains("application/octet-stream")
+                || normalized.startsWith("image/")
+                || normalized.startsWith("video/")
+                || normalized.startsWith("audio/")) {
+            throw new FailStateException("States.Runtime",
+                    "HTTP task response contains unsupported content type: " + contentType);
+        }
+
+        try {
+            response.bodyAsString();
+        } catch (Exception e) {
+            throw new FailStateException("States.Runtime", "HTTP task response cannot be read as a string");
+        }
+    }
+
+    private JsonNode httpResultJson(HttpResponse<Buffer> response) {
+       var stepHttpResponse = new HttpTaskResponse(
+            response.statusCode(),
+            response.statusMessage(),
+            httpResponseHeaders(response),
+            httpResponseBody(response));
+        return objectMapper.valueToTree(stepHttpResponse);
+    }
+
+    private Map<String, List<String>> httpResponseHeaders(HttpResponse<Buffer> response) {
+        return response.headers().names().stream()
+                .collect(Collectors.toMap(
+                        name -> name,
+                        name -> List.copyOf(response.headers().getAll(name)),
+                        (first, ignored) -> first,
+                        LinkedHashMap::new));
+    }
+
+    private JsonNode httpResponseBody(HttpResponse<Buffer> response) {
+        String body = response.bodyAsString();
+        if (body == null || body.isBlank()) {
+            return NullNode.getInstance();
+        }
+        if (!isJsonResponse(response)) {
+            return objectMapper.getNodeFactory().textNode(body);
+        }
+        try {
+            return objectMapper.readTree(body);
+        } catch (Exception ignored) {
+            return objectMapper.getNodeFactory().textNode(body);
+        }
+    }
+
+    private boolean isJsonResponse(HttpResponse<Buffer> response) {
+        String contentType = response.getHeader("Content-Type");
+        return contentType != null && contentType.toLowerCase(Locale.ROOT).contains("application/json");
+    }
+
+    private MultiMap requestHeaders(JsonNode headers, String defaultContentType) {
+        MultiMap requestHeaders = MultiMap.caseInsensitiveMultiMap();
+        if (headers.isObject()) {
+            headers.fields().forEachRemaining(entry -> addHeaderValues(requestHeaders, entry.getKey(), entry.getValue()));
+        }
+        if (defaultContentType != null && headerValue(headers, "Content-Type") == null) {
+            requestHeaders.add("Content-Type", defaultContentType);
+        }
+        return requestHeaders;
+    }
+
+    private void addHeaderValues(MultiMap headers, String name, JsonNode value) {
+        if (value.isArray()) {
+            value.forEach(headerValue -> headers.add(name, headerValue.asText()));
+        } else if (!value.isNull()) {
+            headers.add(name, value.asText());
+        }
+    }
+
+    private HttpRequestPayload requestPayload(JsonNode requestBody, String requestBodyEncoding) {
+        if ("URL_ENCODED".equalsIgnoreCase(requestBodyEncoding)) {
+            // TODO: Implement Transform.RequestBodyEncoding URL_ENCODED with AWS-compatible array formats.
+            throw new FailStateException("States.TaskFailed", "URL-encoded request bodies are not supported yet");
+        } else if ("NONE".equalsIgnoreCase(requestBodyEncoding)) {
+            try {
+                if (requestBody.isMissingNode() || requestBody.isNull()) {
+                    return new HttpRequestPayload(null, null, null);
+                }
+
+                return new HttpRequestPayload(
+                    Buffer.buffer(objectMapper.writeValueAsString(requestBody)),
+                    null,
+                    "application/json");
+            } catch (Exception e) {
+                throw new FailStateException("States.TaskFailed",
+                    "Failed to serialize HTTP request body to JSON: " + e.getMessage());
+            }
+        } else {
+            throw new FailStateException("States.TaskFailed",
+                "Unsupported body transformer: " + requestBodyEncoding);
+        }
+    }
+
+    private record HttpRequestPayload(Buffer body, MultiMap form, String contentType) {
+    }
+
+    private record HttpTaskResponse(
+            @JsonProperty("StatusCode") int statusCode,
+            @JsonProperty("StatusText") String statusText,
+            @JsonProperty("Headers") Map<String, List<String>> headers,
+            @JsonProperty("ResponseBody") JsonNode responseBody) {
+    }
+
+    private void validateHttpMethod(String method) {
+        if (method == null || method.isBlank()) {
+            throw new FailStateException("States.Runtime", "Method is required for HTTP task");
+        }
+
+        // TODO Uppercase methods to avoid user errros?
+        if (!HTTP_ALLOWED_METHODS.contains(method)) {
+            throw new FailStateException("States.Runtime", "Unsupported HTTP method for HTTP task: " + method);
+        }
+    }
+
+    private void validateConnectionArn(JsonNode input) {
+        String connectionArn = input.path("InvocationConfig").path("ConnectionArn").asText(null);
+        if (connectionArn == null || connectionArn.isBlank()) {
+            connectionArn = input.path("Authentication").path("ConnectionArn").asText(null);
+        }
+        if (connectionArn == null || connectionArn.isBlank()) {
+            throw new FailStateException("States.Runtime",
+                    "ConnectionArn is required for HTTP task Authentication or InvocationConfig");
+        }
+    }
+
+    /**
+     * Stepfunction should reject certain headers as per <a href="https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html#connect-http-task-fields">docs</a>
+     */
+    private void validateHttpHeaders(JsonNode headers) {
+        if (headers.isMissingNode() || headers.isNull()) {
+            return;
+        }
+        if (!headers.isObject()) {
+            throw new FailStateException("States.Runtime", "Headers must be a JSON object for HTTP task");
+        }
+
+        Iterator<String> names = headers.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            String normalized = name.toLowerCase(Locale.ROOT);
+            if (HTTP_FORBIDDEN_HEADERS.contains(normalized)
+                    || normalized.startsWith("x-forwarded-")
+                    || normalized.startsWith("x-amz-")
+                    || normalized.startsWith("x-amzn-")) {
+                throw new FailStateException("States.Runtime",
+                        "Header is not allowed in HTTP task definition: " + name);
+            }
+        }
+    }
+
+    private MultiMap queryParameters(JsonNode queryParameters) {
+        MultiMap params = MultiMap.caseInsensitiveMultiMap();
+        if (queryParameters.isMissingNode() || queryParameters.isNull()) {
+            return params;
+        }
+        if (!queryParameters.isObject()) {
+            throw new FailStateException("States.Runtime", "QueryParameters must be a JSON object for HTTP task");
+        }
+
+        queryParameters.properties().forEach(entry -> addQueryParameterValues(params, entry.getKey(), entry.getValue()));
+        return params;
+    }
+
+    private void addQueryParameterValues(MultiMap params, String name, JsonNode value) {
+        if (value.isArray()) {
+            value.forEach(queryValue -> {
+                if (!queryValue.isNull()) {
+                    params.add(name, queryValue.asText());
+                }
+            });
+        } else if (!value.isNull()) {
+            params.add(name, value.asText());
+        }
+    }
+
+    private String headerValue(JsonNode headers, String name) {
+        if (!headers.isObject()) {
+            return null;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = headers.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (entry.getKey().equalsIgnoreCase(name)) {
+                return entry.getValue().isArray() && !entry.getValue().isEmpty()
+                    ? entry.getValue().get(0).asText()
+                    : entry.getValue().asText();
+            }
+        }
+        return null;
+    }
+
 
     /**
      * Evaluate a JSONPath-mode intrinsic function (States.*).
