@@ -104,4 +104,19 @@ class SesEmailIdentityConfigurationSetTest {
                         .build()))
                 .isInstanceOf(NotFoundException.class);
     }
+
+    @Test
+    @Order(4)
+    void createEmailIdentity_withConfigurationSet_readsBack() {
+        String id = "sdk-cs-oncreate-" + TestFixtures.uniqueName() + "@example.com";
+        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
+                .emailIdentity(id).configurationSetName(configSet).build());
+        try {
+            assertThat(sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                    .emailIdentity(id).build()).configurationSetName())
+                    .isEqualTo(configSet);
+        } finally {
+            sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(id).build());
+        }
+    }
 }

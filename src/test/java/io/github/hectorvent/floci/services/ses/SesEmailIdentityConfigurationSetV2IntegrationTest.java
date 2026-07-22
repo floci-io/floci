@@ -301,6 +301,81 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
                 .body("message", equalTo("Configuration set <" + cs + "> does not exist."));
     }
 
+    @Test
+    @Order(11)
+    void createEmailIdentity_withConfigurationSet_surfacesInGet() {
+        String cs = "cs-attr-oncreate-cs";
+        String id = "cs-attr-oncreate@floci.test";
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"ConfigurationSetName\":\"" + cs + "\"}")
+        .when().post("/v2/email/configuration-sets").then().statusCode(200);
+
+        // CreateEmailIdentity accepts a ConfigurationSetName and sets it as the identity default.
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"" + cs + "\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/" + id)
+        .then().statusCode(200).body("ConfigurationSetName", equalTo(cs));
+    }
+
+    @Test
+    @Order(12)
+    void createEmailIdentity_withMissingConfigurationSet_returns404AndDoesNotCreate() {
+        String id = "cs-attr-oncreate-missing@floci.test";
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"cs-attr-ghost-oncreate\"}")
+        .when().post("/v2/email/identities").then().statusCode(404)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Configuration set <cs-attr-ghost-oncreate> does not exist."));
+
+        // The identity must not have been created (AWS is atomic on the config-set validation).
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/" + id).then().statusCode(404);
+    }
+
+    @Test
+    @Order(13)
+    void createEmailIdentity_withNonStringConfigurationSet_returns400() {
+        // ConfigurationSetName is a string; a non-string must be rejected, not coerced.
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"cs-attr-badtype@floci.test\",\"ConfigurationSetName\":123}")
+        .when().post("/v2/email/identities").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/cs-attr-badtype@floci.test").then().statusCode(404);
+    }
+
+    @Test
+    @Order(14)
+    void createEmailIdentity_withEmptyConfigurationSet_createsWithoutDefault() {
+        // Only the empty string means "no default configuration set" (consistent with the
+        // PutEmailIdentityConfigurationSetAttributes path); AWS stores it verbatim.
+        String id = "cs-attr-emptycs@floci.test";
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/" + id).then().statusCode(200)
+                .body("$", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasKey("ConfigurationSetName")));
+    }
+
+    @Test
+    @Order(15)
+    void createEmailIdentity_withWhitespaceConfigurationSet_returns400AndDoesNotCreate() {
+        // A whitespace-only name is not "absent": it flows through name validation and is rejected
+        // as invalid input (the same 400 the Put path yields), rather than being silently ignored.
+        String id = "cs-attr-wscs@floci.test";
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"   \"}")
+        .when().post("/v2/email/identities").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("ConfigurationSetName is required."));
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/" + id).then().statusCode(404);
+    }
+
     private void drainQueue() {
         for (int i = 0; i < 5; i++) {
             Response r = given().contentType(JSON_10).header("Authorization", SQS_AUTH)

@@ -90,15 +90,39 @@ public class SesController {
             if (emailIdentity == null || emailIdentity.isBlank()) {
                 throw new AwsException("BadRequestException", "EmailIdentity is required.", 400);
             }
+            // ConfigurationSetName is a String; AWS rejects a non-string with a 400 (empty body).
+            // Don't coerce via asText (which would turn 123 into "123").
+            JsonNode configSetNode = request.path("ConfigurationSetName");
+            String configurationSetName = null;
+            if (!configSetNode.isMissingNode() && !configSetNode.isNull()) {
+                if (!configSetNode.isTextual()) {
+                    throw new AwsException("SerializationException", null, 400);
+                }
+                configurationSetName = configSetNode.textValue();
+            }
 
             if (sesService.getIdentityVerificationAttributes(emailIdentity, region) != null) {
                 throw new AwsException("AlreadyExistsException",
                         "Email identity " + emailIdentity + " already exist.", 400);
             }
 
+            // Verified against AWS: a non-existent ConfigurationSetName fails the whole call
+            // (NotFoundException) without creating the identity, so validate it before creating.
+            // Only the empty string means "no default configuration set" (consistent with the
+            // PutEmailIdentityConfigurationSetAttributes path); a whitespace-only name flows through
+            // name validation and is rejected as invalid input, rather than being silently ignored.
+            boolean hasConfigSet = configurationSetName != null && !configurationSetName.isEmpty();
+            if (hasConfigSet) {
+                sesService.getConfigurationSet(configurationSetName, region);
+            }
+
             Identity identity = emailIdentity.contains("@")
                     ? sesService.verifyEmailIdentity(emailIdentity, region)
                     : sesService.verifyDomainIdentity(emailIdentity, region);
+
+            if (hasConfigSet) {
+                sesService.setEmailIdentityConfigurationSet(emailIdentity, configurationSetName, region);
+            }
 
             List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
             if (parsedTags != null) {
