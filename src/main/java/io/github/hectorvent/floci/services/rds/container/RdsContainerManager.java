@@ -312,7 +312,12 @@ public class RdsContainerManager {
                 if (result.exitCode() != 2) { // 2 = connection error, 3 = script error
                     break;
                 }
-                Thread.sleep(1000);
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted while restoring postgres snapshot", ie);
+                }
             }
             
             if (result == null || result.exitCode() != 0) {
