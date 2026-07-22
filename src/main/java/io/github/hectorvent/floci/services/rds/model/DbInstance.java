@@ -41,6 +41,7 @@ public class DbInstance {
 
     private String dockerVolumeName;
     private String volumeId;
+    private String containerStorageResourceId;
 
     private transient String containerId;
     private transient String containerHost;
@@ -165,6 +166,11 @@ public class DbInstance {
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
+
+    public String getContainerStorageResourceId() { return containerStorageResourceId; }
+    public void setContainerStorageResourceId(String containerStorageResourceId) {
+        this.containerStorageResourceId = containerStorageResourceId;
+    }
 
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }

@@ -38,7 +38,15 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBClusterParameterGroup` | - |
 | `DescribeDBClusterParameters` | - |
 | `DescribeDBSnapshots` | - |
-| `DescribeDBProxies` | - |
+| `DescribeDBProxies` | List DB proxies |
+| `CreateDBProxy` | Create a DB proxy |
+| `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
+| `DeleteDBProxy` | Delete a DB proxy |
+| `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
+| `DeregisterDBProxyTargets` | Remove a cluster or instance from a proxy target group |
+| `DescribeDBProxyTargetGroups` | List a proxy's target groups |
+| `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
+| `DescribeDBProxyTargets` | List a proxy target group's registered targets |
 | `DescribeDBClusterSnapshots` | - |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
@@ -51,7 +59,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 |---|---|---|
 | `FLOCI_SERVICES_RDS_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_RDS_MOCK` | `false` | `true` = metadata only (no Docker container or auth proxy) |
-| `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7000` | First host port in the RDS proxy range |
+| `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
@@ -95,6 +103,24 @@ services:
     best-effort, as with the other mock-capable services: resources created in real mode and
     deleted under mock leave their containers and volumes behind, and resources created in mock
     mode are restored with fresh, empty containers when loaded in real mode.
+
+!!! warning "DB proxy endpoint routing"
+
+    DB proxy control-plane resources and target registration are modeled, but Floci's current
+    single-host TCP relay cannot expose multiple same-engine DB proxies as distinct AWS-style bare
+    hostnames on the same engine-default port. The standard Docker Compose mapping also exposes
+    only the `7001-7099` instance/cluster proxy range, not `1433`, `3306`, or `5432`. Use mock mode
+    for DB proxy provisioning workflows until a dedicated endpoint-routing design is implemented.
+
+!!! note "DB proxy control-plane settings"
+
+    Proxy and target-group settings are persisted and round-trip through the RDS Query API and
+    CloudFormation. Pool sizing, borrow timeout, idle timeout, TLS, init-query, and session-pinning
+    settings are currently control-plane metadata; the TCP relay does not yet implement those data-plane
+    behaviors. `DefaultAuthScheme=IAM_AUTH` is supported for control-plane workflows, but a real-mode
+    proxy using that scheme cannot register a target until backend IAM authentication is implemented.
+    DB proxies currently support `IPV4` for both endpoint and target connections; `IPV6` and `DUAL`
+    endpoint networking require additional listener and Docker-network support.
 
 ## Examples
 

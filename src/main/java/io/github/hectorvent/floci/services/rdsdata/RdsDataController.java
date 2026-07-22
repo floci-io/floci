@@ -64,13 +64,15 @@ public class RdsDataController {
     @POST
     @Path("/CommitTransaction")
     public Response commitTransaction(@Context HttpHeaders headers, String body) {
-        return handle(headers, body, (request, region) -> Response.ok(service.commitTransaction(request)).build());
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.commitTransaction(request, region)).build());
     }
 
     @POST
     @Path("/RollbackTransaction")
     public Response rollbackTransaction(@Context HttpHeaders headers, String body) {
-        return handle(headers, body, (request, region) -> Response.ok(service.rollbackTransaction(request)).build());
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.rollbackTransaction(request, region)).build());
     }
 
     private Response handle(HttpHeaders headers, String body, Handler handler) {

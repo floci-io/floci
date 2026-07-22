@@ -49,7 +49,14 @@ public class ContainerLogStreamer {
      */
     public Closeable attach(String containerId, String logGroup, String logStream,
                             String region, String logPrefix) {
-        ensureLogGroupAndStream(logGroup, logStream, region);
+        return attachForAccount(
+                null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    public Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix) {
+        ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
         try {
             return dockerClient.logContainerCmd(containerId)
@@ -63,7 +70,8 @@ public class ContainerLogStreamer {
                             String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
                             if (!line.isEmpty()) {
                                 LOG.infov("[{0}] {1}", logPrefix, line);
-                                forwardToCloudWatchLogs(logGroup, logStream, region, line);
+                                forwardToCloudWatchLogs(
+                                        accountId, logGroup, logStream, region, line);
                             }
                         }
                     });
@@ -77,8 +85,14 @@ public class ContainerLogStreamer {
      * Creates a CloudWatch log group and stream if they don't already exist.
      */
     public void ensureLogGroupAndStream(String logGroup, String logStream, String region) {
+        ensureLogGroupAndStreamForAccount(null, logGroup, logStream, region);
+    }
+
+    public void ensureLogGroupAndStreamForAccount(
+            String accountId, String logGroup, String logStream, String region) {
         try {
-            cloudWatchLogsService.createLogGroup(logGroup, null, null, region);
+            cloudWatchLogsService.createLogGroupForAccount(
+                    accountId, logGroup, null, null, region);
         } catch (AwsException ignored) {
             // Already exists
         } catch (Exception e) {
@@ -86,7 +100,8 @@ public class ContainerLogStreamer {
         }
 
         try {
-            cloudWatchLogsService.createLogStream(logGroup, logStream, region);
+            cloudWatchLogsService.createLogStreamForAccount(
+                    accountId, logGroup, logStream, region);
         } catch (AwsException ignored) {
             // Already exists
         } catch (Exception e) {
@@ -105,15 +120,17 @@ public class ContainerLogStreamer {
     }
 
     public void streamToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
-        forwardToCloudWatchLogs(logGroup, logStream, region, line);
+        forwardToCloudWatchLogs(null, logGroup, logStream, region, line);
     }
 
-    private void forwardToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
+    private void forwardToCloudWatchLogs(
+            String accountId, String logGroup, String logStream, String region, String line) {
         try {
             Map<String, Object> event = new HashMap<>();
             event.put("timestamp", System.currentTimeMillis());
             event.put("message", line);
-            cloudWatchLogsService.putLogEvents(logGroup, logStream, List.of(event), region);
+            cloudWatchLogsService.putLogEventsForAccount(
+                    accountId, logGroup, logStream, List.of(event), region);
         } catch (Exception e) {
             LOG.debugv("Could not forward log line to CloudWatch Logs: {0}", e.getMessage());
         }

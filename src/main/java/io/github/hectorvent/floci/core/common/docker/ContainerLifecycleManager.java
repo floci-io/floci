@@ -195,6 +195,50 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Stops and removes a container, failing when Docker cannot confirm removal.
+     *
+     * <p>Most emulator shutdown paths intentionally use best-effort cleanup through
+     * {@link #stopAndRemove(String, Closeable)}. Resource-deletion paths that must retain their
+     * persisted record for a retry use this stricter variant instead.
+     */
+    public void stopAndRemoveStrict(String containerId, Closeable logStream) {
+        LOG.infov("Stopping container {0}", containerId);
+
+        if (logStream != null) {
+            try {
+                logStream.close();
+            } catch (Exception e) {
+                LOG.debugv("Error closing log stream: {0}", e.getMessage());
+            }
+        }
+
+        Exception stopFailure = null;
+        try {
+            dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} not found (already removed)", containerId);
+            return;
+        } catch (Exception e) {
+            stopFailure = e;
+            LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
+        }
+
+        try {
+            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            LOG.debugv("Removed container {0}", containerId);
+        } catch (NotFoundException e) {
+            // Already gone, so cleanup succeeded.
+        } catch (Exception e) {
+            IllegalStateException cleanupFailure = new IllegalStateException(
+                    "Failed to remove container " + containerId, e);
+            if (stopFailure != null) {
+                cleanupFailure.addSuppressed(stopFailure);
+            }
+            throw cleanupFailure;
+        }
+    }
+
+    /**
      * Creates a named volume if it does not already exist. Idempotent — safe to call on every
      * container start. Labels the volume {@code floci=true} so
      * {@code docker volume prune --filter label=floci} works.
@@ -324,6 +368,18 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /** Removes a named Docker volume and propagates failures so callers can retry safely. */
+    public void removeVolumeStrict(String volumeName) {
+        try {
+            dockerClient.removeVolumeCmd(volumeName).exec();
+            LOG.debugv("Removed volume {0}", volumeName);
+        } catch (NotFoundException e) {
+            // Already gone — nothing to do.
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to remove volume " + volumeName, e);
+        }
+    }
+
     /**
      * Finds an existing container by name.
      *
@@ -421,6 +477,25 @@ public class ContainerLifecycleManager {
             // Not found - normal case
         } catch (Exception e) {
             LOG.debugv("Could not remove container {0}: {1}", name, e.getMessage());
+        }
+    }
+
+    /**
+     * Removes a container by name, failing when Docker cannot confirm removal.
+     *
+     * <p>Callers that are about to reuse a fixed container name must use this variant so a
+     * daemon failure cannot be mistaken for successful stale-container cleanup.
+     *
+     * @param name the container name to remove
+     */
+    public void removeIfExistsStrict(String name) {
+        try {
+            dockerClient.removeContainerCmd(name).withForce(true).exec();
+            LOG.infov("Removed stale container {0}", name);
+        } catch (NotFoundException e) {
+            // Not found means the fixed name is available.
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to remove stale container " + name, e);
         }
     }
 
