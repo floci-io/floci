@@ -2039,6 +2039,117 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(208)
+    void listObjectsV2PreservesPlusCharacter() {
+        String bucket = "plus-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            // Put object with '+' in key (urlencoded to %2B in PUT request)
+            given()
+                .urlEncodingEnabled(false)
+                .body("data")
+            .when()
+                .put("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log")
+            .then()
+                .statusCode(200);
+
+            // 1. GET/HEAD object using %2B should succeed
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log")
+            .then()
+                .statusCode(200)
+                .body(equalTo("data"));
+
+            // 2. list-objects-v2 without encoding-type should return key with literal '+'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>run_id=2026-06-26T00:00:00+00:00/f.log</Key>"));
+
+            // 3. list-objects-v2 with encoding-type=url should return key with '%2B'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2Ff.log</Key>"));
+
+            // 4. list-objects-v2 with encoding-type=url and prefix/delimiter with '+' should return encoded fields
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url&prefix=run_id=2026-06-26T00:00:00%2B00:00/&delimiter=%2B")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Prefix>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2F</Prefix>"))
+                .body(containsString("<Delimiter>%2B</Delimiter>"))
+                .body(containsString("<Key>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2Ff.log</Key>"));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
+    @Order(209)
+    void listObjectsV2DoesNotDoubleDecodePercentEscapes() {
+        String bucket = "double-decode-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            // Put object with literal '%20' in key (urlencoded to %2520 in PUT request)
+            given()
+                .urlEncodingEnabled(false)
+                .body("data")
+            .when()
+                .put("/" + bucket + "/percent%2520test/f.log")
+            .then()
+                .statusCode(200);
+
+            // 1. GET/HEAD object using %2520 should succeed
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "/percent%2520test/f.log")
+            .then()
+                .statusCode(200)
+                .body(equalTo("data"));
+
+            // 2. list-objects-v2 without encoding-type should return key with literal '%20'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>percent%20test/f.log</Key>"));
+
+            // 3. list-objects-v2 with encoding-type=url should return key with '%2520'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>percent%2520test%2Ff.log</Key>"));
+
+            // 4. list-objects-v2 with prefix with '%20' should return correct fields without double-decoding
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url&prefix=percent%2520test/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Prefix>percent%2520test%2F</Prefix>"))
+                .body(containsString("<Key>percent%2520test%2Ff.log</Key>"));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/percent%2520test/f.log");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(104)
     void cleanupPaginationBucket() {
         given().when().delete("/pag-test-bucket/a.txt");
