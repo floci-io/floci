@@ -1,20 +1,32 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-/**
- * Verifies {@link ApiGatewayExecuteController#extractV2PathParams(String, String)}
- * captures path parameters correctly for both greedy ({proxy+}) and non-greedy
- * ({proxy}) route templates, and that repeated invocations against the same
- * route key reuse the cached compiled Pattern (correctness check; the cache
- * itself is an internal implementation detail).
- */
+/** Unit coverage for API Gateway request-event construction and HTTP API v2 route matching. */
 class ApiGatewayExecuteControllerTest {
+
+    private static ApiGatewayExecuteController controller(ObjectMapper objectMapper) {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        return new ApiGatewayExecuteController(
+                null, null, null,
+                regionResolver, objectMapper, null,
+                null, null, null, null);
+    }
 
     @Test
     void capturesGreedyProxyMultiSegment() {
@@ -75,5 +87,26 @@ class ApiGatewayExecuteControllerTest {
                     routeKey, "/payments/spei/" + i);
             assertEquals("spei/" + i, p.get("proxy"));
         }
+    }
+
+    @Test
+    void duplicateRequestHeaderUsesLastSingleValueAndPreservesAllMultiValues() {
+        MultivaluedMap<String, String> requestHeaders = new MultivaluedHashMap<>();
+        requestHeaders.add("X-Dup", "first");
+        requestHeaders.add("X-Dup", "second");
+        requestHeaders.add("X-Dup", "third");
+        HttpHeaders headers = mock(HttpHeaders.class);
+        when(headers.getRequestHeaders()).thenReturn(requestHeaders);
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectNode event = objectMapper.createObjectNode();
+        ApiGatewayExecuteController controller = controller(objectMapper);
+        controller.putSingleValueHeaders(event, headers);
+        controller.putMultiValueHeaders(event, headers);
+
+        assertEquals("third", event.path("headers").path("X-Dup").asText());
+        assertEquals(
+                objectMapper.valueToTree(List.of("first", "second", "third")),
+                event.path("multiValueHeaders").path("X-Dup"));
     }
 }
