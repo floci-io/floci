@@ -1925,21 +1925,13 @@ public class S3Controller {
                                       String contentType, HttpHeaders httpHeaders) {
         // copySource format: /bucket/key or bucket/key, where key is URL-encoded
         String source = copySource.startsWith("/") ? copySource.substring(1) : copySource;
-        
-        // URL decode the entire source first, then split
-        String decodedSource;
-        try {
-            decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
-        }
-        int slashIndex = decodedSource.indexOf('/');
+
+        int slashIndex = source.indexOf('/');
         if (slashIndex <= 0) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
-        String sourceBucket = decodedSource.substring(0, slashIndex);
-        String pathAfterBucket = decodedSource.substring(slashIndex + 1);
-        ParsedCopySource sourceObject = parseCopySourceObject(pathAfterBucket);
+        String sourceBucket = decodeCopySourceComponent(source.substring(0, slashIndex), copySource);
+        ParsedCopySource sourceObject = parseCopySourceObject(source.substring(slashIndex + 1), copySource);
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -1993,20 +1985,12 @@ public class S3Controller {
         // copySource format: /bucket/key or bucket/key, where key is URL-encoded
         String source = copySource.startsWith("/") ? copySource.substring(1) : copySource;
 
-        // URL decode the entire source first, then split.
-        String decodedSource;
-        try {
-            decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
-        }
-        int slashIndex = decodedSource.indexOf('/');
+        int slashIndex = source.indexOf('/');
         if (slashIndex <= 0) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
-        String sourceBucket = decodedSource.substring(0, slashIndex);
-        String pathAfterBucket = decodedSource.substring(slashIndex + 1);
-        ParsedCopySource sourceObject = parseCopySourceObject(pathAfterBucket);
+        String sourceBucket = decodeCopySourceComponent(source.substring(0, slashIndex), copySource);
+        ParsedCopySource sourceObject = parseCopySourceObject(source.substring(slashIndex + 1), copySource);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -2893,42 +2877,66 @@ public class S3Controller {
     }
 
     /**
-     * Splits the {@code CopyObject}/{@code UploadPartCopy} copy-source remainder into S3 object key and
-     * optional source {@code versionId}.
+     * Splits the raw {@code CopyObject}/{@code UploadPartCopy} copy-source remainder into decoded S3 object
+     * key and optional source {@code versionId}.
      * <ul>
-     *   <li><b>Input:</b> decoded {@code x-amz-copy-source} with bucket already removed (substring after
+     *   <li><b>Input:</b> raw {@code x-amz-copy-source} with bucket already removed (substring after
      *   the {@code '/'} that follows the bucket). Both {@code handleCopyObject} and
      *   {@code handleUploadPartCopy} compute this as {@code pathAfterBucket}.</li>
-     *   <li><b>Key:</b> substring before the first {@code '?'} if any; keys may contain more {@code '/'}
-     *   segments.</li>
-     *   <li><b>{@code versionId}:</b> first {@code versionId} query pair, when present (raw value after
-     *   {@code '='}). Other query pairs are ignored.</li>
+     *   <li><b>Key:</b> the decoded full path unless a trailing query string contains {@code versionId=}.
+     *   Literal {@code '?'} characters in the key (encoded as {@code %3F} or raw) are preserved because the
+     *   split happens before decoding.</li>
+     *   <li><b>{@code versionId}:</b> first decoded {@code versionId} query pair, when present. Other query
+     *   pairs are ignored and do not cause the key to be truncated.</li>
      * </ul>
      *
-     * @param pathAfterBucket object key alone, or key with query (for example {@code dir/k.txt?versionId=uuid})
+     * @param pathAfterBucket    raw object key alone, or key with query (for example {@code dir/k.txt?versionId=uuid})
+     * @param originalCopySource original header value, used for error messages on malformed encoding
      * @return key without trailing query plus {@code versionId} value, or {@code null} version when absent
      */
-    private ParsedCopySource parseCopySourceObject(String pathAfterBucket) {
+    private ParsedCopySource parseCopySourceObject(String pathAfterBucket, String originalCopySource) {
         int queryStart = pathAfterBucket.indexOf('?');
         if (queryStart < 0) {
-            return new ParsedCopySource(pathAfterBucket, null);
+            return new ParsedCopySource(decodeCopySourceComponent(pathAfterBucket, originalCopySource), null);
         }
-        String objectKey = pathAfterBucket.substring(0, queryStart);
+
         String query = pathAfterBucket.substring(queryStart + 1);
+        String versionId = extractVersionId(query, originalCopySource);
+        if (versionId == null) {
+            return new ParsedCopySource(decodeCopySourceComponent(pathAfterBucket, originalCopySource), null);
+        }
+
+        String objectKey = decodeCopySourceComponent(pathAfterBucket.substring(0, queryStart), originalCopySource);
+        return new ParsedCopySource(objectKey, versionId);
+    }
+
+    private String extractVersionId(String query, String originalCopySource) {
+        if (!query.contains("versionId=")) {
+            return null;
+        }
+
         String versionId = null;
         for (String pair : query.split("&")) {
             int eq = pair.indexOf('=');
             if (eq <= 0) {
                 continue;
             }
-            String name = pair.substring(0, eq);
-            String value = pair.substring(eq + 1);
+            String name = decodeCopySourceComponent(pair.substring(0, eq), originalCopySource);
+            String value = decodeCopySourceComponent(pair.substring(eq + 1), originalCopySource);
             if ("versionId".equals(name)) {
                 versionId = value;
                 break;
             }
         }
-        return new ParsedCopySource(objectKey, versionId);
+        return versionId;
+    }
+
+    private String decodeCopySourceComponent(String value, String originalCopySource) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidArgument", "Invalid copy source: " + originalCopySource, 400);
+        }
     }
 
     private record ParsedCopySource(String objectKey, String versionId) {
