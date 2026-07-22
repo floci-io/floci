@@ -408,7 +408,12 @@ public class KinesisJsonHandler {
 
     private Response handlePutRecord(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        byte[] data = Base64.getDecoder().decode(request.path("Data").asText());
+        byte[] data;
+        try {
+            data = Base64.getDecoder().decode(request.path("Data").asText());
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("SerializationException", "Data is not valid base64.", 400);
+        }
         String partitionKey = request.path("PartitionKey").asText();
 
         KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);

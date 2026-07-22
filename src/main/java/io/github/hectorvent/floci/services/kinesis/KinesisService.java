@@ -390,17 +390,39 @@ public class KinesisService {
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
-    public Map<String, Object> getRecords(String shardIterator, Integer limit, String region) {
-        byte[] decoded = Base64.getDecoder().decode(shardIterator);
+    // A shard iterator is an opaque token we mint; a client that replays a garbage one gets
+    // InvalidArgumentException, not a 500 from an unguarded base64 decode or Integer.parse.
+    private String[] decodeShardIterator(String shardIterator) {
+        byte[] decoded;
+        try {
+            decoded = Base64.getDecoder().decode(shardIterator);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        }
         // Use limit=-1 so trailing empty slots round-trip and old 5-part iterators still work.
         String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), -1);
-        if (parts.length < 5) throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        if (parts.length < 5) {
+            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        }
+        return parts;
+    }
+
+    private int parseIteratorIndex(String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        }
+    }
+
+    public Map<String, Object> getRecords(String shardIterator, Integer limit, String region) {
+        String[] parts = decodeShardIterator(shardIterator);
 
         String streamName = parts[0];
         String shardId = parts[1];
         String type = parts[2];
         String startSeq = parts[3];
-        int lastIndex = Integer.parseInt(parts[4]);
+        int lastIndex = parseIteratorIndex(parts[4]);
         Long timestampMillis = null;
         if (parts.length >= 6 && !parts[5].isEmpty()) {
             try {
@@ -518,16 +540,12 @@ public class KinesisService {
 
     public Map<String, Object> getRecordsForAccount(String accountId, String shardIterator,
                                                     Integer limit, String region) {
-        byte[] decoded = Base64.getDecoder().decode(shardIterator);
-        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), -1);
-        if (parts.length < 5) {
-            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
-        }
+        String[] parts = decodeShardIterator(shardIterator);
         String streamName = parts[0];
         String shardId = parts[1];
         String type = parts[2];
         String startSeq = parts[3];
-        int lastIndex = Integer.parseInt(parts[4]);
+        int lastIndex = parseIteratorIndex(parts[4]);
 
         KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
         KinesisShard shard = stream.getShards().stream()

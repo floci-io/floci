@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -531,6 +532,7 @@ public class EventBridgeService {
 
         try {
             if (policyJson != null && !policyJson.isBlank()) {
+                parseClientJson(policyJson, "Policy");
                 bus.setPolicy(policyJson);
             } else {
                 String currentPolicy = bus.getPolicy();
@@ -558,7 +560,7 @@ public class EventBridgeService {
                 statement.put("Action", action != null ? action : "events:PutEvents");
                 statement.put("Resource", bus.getArn());
                 if (conditionJson != null && !conditionJson.isBlank()) {
-                    statement.set("Condition", objectMapper.readTree(conditionJson));
+                    statement.set("Condition", parseClientJson(conditionJson, "Condition"));
                 }
                 statements.add(statement);
                 bus.setPolicy(objectMapper.writeValueAsString(policy));
@@ -571,6 +573,18 @@ public class EventBridgeService {
 
         busStore.put(key, bus);
         LOG.infov("Put permission on bus {0}, statement {1}", effectiveBus, statementId);
+    }
+
+    /**
+     * Parses client-supplied JSON (PutPermission Policy/Condition). Malformed input is a
+     * client error; without this it fell into the catch-all and surfaced as a 500.
+     */
+    private JsonNode parseClientJson(String json, String field) {
+        try {
+            return objectMapper.readTree(json);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("ValidationException", field + " is not valid JSON.", 400);
+        }
     }
 
     public void removePermission(String busName, String statementId, boolean removeAll, String region) {

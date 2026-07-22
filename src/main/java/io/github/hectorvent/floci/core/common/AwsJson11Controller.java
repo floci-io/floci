@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
@@ -189,8 +190,14 @@ public class AwsJson11Controller {
         String action = targetMatch.action();
         LOG.infov("AwsJson11Controller {0} action: {1}", serviceKey, action);
 
+        JsonNode request;
         try {
-            JsonNode request = objectMapper.readTree(body);
+            request = objectMapper.readTree(body);
+        } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+
+        try {
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {

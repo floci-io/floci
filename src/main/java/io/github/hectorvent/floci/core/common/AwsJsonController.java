@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
@@ -84,9 +85,15 @@ public class AwsJsonController {
         String action = targetMatch.action();
         LOG.debugv("{0} JSON action: {1}", serviceKey, action);
 
+        JsonNode request;
+        try {
+            request = objectMapper.readTree(body);
+        } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+
         Response response;
         try {
-            JsonNode request = objectMapper.readTree(body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
             response = switch (serviceKey) {

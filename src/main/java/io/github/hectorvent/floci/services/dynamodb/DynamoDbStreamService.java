@@ -255,7 +255,12 @@ public class DynamoDbStreamService {
     public GetRecordsResult getRecords(String shardIterator, Integer limit) {
         String[] parts = decodeIterator(shardIterator);
         String streamArn = parts[0];
-        int position = Integer.parseInt(parts[1]);
+        int position;
+        try {
+            position = Integer.parseInt(parts[1]);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationException", "Invalid shard iterator", 400);
+        }
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
         List<DynamoDbStreamRecord> snapshot = deque != null ? new ArrayList<>(deque) : List.of();
