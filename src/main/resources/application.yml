@@ -309,6 +309,8 @@ floci:
       default-image: "floci/floci-duck:latest"
     glue:
       enabled: true
+    lakeformation:
+      enabled: true
     ses:
       enabled: true
       # smtp-host: mailpit          # SMTP server for email relay (empty = store only)
