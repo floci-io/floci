@@ -54,6 +54,24 @@ class EventBridgeUpdateEventBusIntegrationTest {
     }
 
     @Test
+    void emptyDescriptionClearsIt() {
+        String bus = "update-test-bus-clear-description";
+        createBus(bus);
+
+        given().contentType(CT).header("X-Amz-Target", UPDATE)
+                .body("{\"Name\":\"" + bus + "\",\"Description\":\"set\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Description", equalTo("set"));
+
+        given().contentType(CT).header("X-Amz-Target", UPDATE)
+                .body("{\"Name\":\"" + bus + "\",\"Description\":\"\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Description", equalTo(""));
+    }
+
+    @Test
     void updateDefaultBus_nameOmitted() {
         given().contentType(CT).header("X-Amz-Target", UPDATE)
                 .body("{\"Description\":\"default updated 1\"}")

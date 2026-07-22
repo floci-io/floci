@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResour
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
+import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -109,8 +110,12 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_CODE_IDENTITY_ATTR = "FlociLambdaCodeIdentity";
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
+    private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
+    private static final String EVENT_BUS_NAME_MODE_ATTR = "FlociEventBusNameMode";
     private static final String LAMBDA_NAME_MODE_EXPLICIT = "explicit";
     private static final String LAMBDA_NAME_MODE_GENERATED = "generated";
+    private static final String EVENT_BUS_NAME_MODE_EXPLICIT = "explicit";
+    private static final String EVENT_BUS_NAME_MODE_GENERATED = "generated";
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
@@ -285,6 +290,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Route53::HostedZone" -> provisionRoute53HostedZone(resource, properties, engine);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
+                case "AWS::Events::EventBus" -> provisionEventBridgeEventBus(resource, properties, engine, region, stackName);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
                 case "AWS::ApiGateway::Authorizer" -> provisionApiGatewayAuthorizer(resource, properties, engine, region);
@@ -403,6 +409,18 @@ public class CloudFormationResourceProvisioner {
             }
             return;
         }
+        // A Rule on a custom bus is keyed by that bus; the physical id is only the rule name, so the
+        // type/physicalId path resolves to the "default" bus and never finds it — leaving the rule (and
+        // then its bus) undeletable. Pass the bus name captured at provision time.
+        if ("AWS::Events::Rule".equals(resourceType)) {
+            deleteEventBridgeRuleSafe(resource.getPhysicalId(),
+                    resource.getAttributes().get("EventBusName"), region);
+            return;
+        }
+        if ("AWS::Events::EventBus".equals(resourceType)) {
+            deleteEventBusSafe(resource, region);
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
@@ -434,7 +452,9 @@ public class CloudFormationResourceProvisioner {
             } // KMS keys can't be immediately deleted; skip
             case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
             case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
-            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
+            // No bus context on the type/physicalId path (e.g. CREATE-rollback); targets the default bus.
+            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
+            case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
             case "AWS::ECR::Repository" ->
@@ -2091,6 +2111,11 @@ public class CloudFormationResourceProvisioner {
                 state, description, roleArn, Map.of(), region);
         r.setPhysicalId(ruleName);
         r.getAttributes().put("Arn", rule.getArn());
+        // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
+        // the right bus (the physical id is only the rule name, which resolves to the default bus).
+        if (busName != null && !busName.isBlank()) {
+            r.getAttributes().put("EventBusName", busName);
+        }
 
         // Provision inline targets
         if (props != null && props.has("Targets")) {
@@ -2135,18 +2160,120 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    private void deleteEventBridgeRuleSafe(String ruleName, String region) {
+    /**
+     * Provisions an {@code AWS::Events::EventBus} (a custom EventBridge event bus). Without this the
+     * resource would fall through to the generic stub, which assigns a physical id but never registers
+     * the bus with the EventBridge service — so any {@code AWS::Events::Rule} (or PutEvents) targeting
+     * the bus fails "EventBus not found". Per the AWS spec, {@code Ref} returns the bus <em>name</em>
+     * (not the ARN), so the physical id is the name; {@code Fn::GetAtt "Arn"} exposes the ARN.
+     */
+    private void provisionEventBridgeEventBus(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                              String region, String stackName) {
+        String existingBusName = r.getPhysicalId();
+        String requestedBusName = resolveOptional(props, "Name", engine);
+        boolean explicitName = requestedBusName != null && !requestedBusName.isBlank();
+        String existingNameMode = r.getAttributes().get(EVENT_BUS_NAME_MODE_ATTR);
+        if (existingBusName != null
+                && EVENT_BUS_NAME_MODE_EXPLICIT.equals(existingNameMode)
+                && !explicitName) {
+            throw new AwsException("ValidationError",
+                    "Removing EventBus Name requires resource replacement, which is not supported.", 400);
+        }
+        if (existingBusName != null
+                && EVENT_BUS_NAME_MODE_GENERATED.equals(existingNameMode)
+                && explicitName) {
+            throw new AwsException("ValidationError",
+                    "Adding EventBus Name requires resource replacement, which is not supported.", 400);
+        }
+
+        String busName = requestedBusName;
+        if (!explicitName) {
+            busName = existingBusName != null && !existingBusName.isBlank()
+                    ? existingBusName
+                    : generatePhysicalName(stackName, r.getLogicalId(), 256, false);
+        }
+        if (existingBusName != null && !existingBusName.equals(busName)) {
+            throw new AwsException("ValidationError",
+                    "Updating EventBus Name requires resource replacement, which is not supported.", 400);
+        }
+        String description = resolveOptional(props, "Description", engine);
+
+        EventBus bus;
         try {
-            // Remove all targets before deleting the rule
-            var targets = eventBridgeService.listTargetsByRule(ruleName, null, region);
+            bus = eventBridgeService.createEventBus(busName, description, Map.of(), region);
+        } catch (AwsException e) {
+            boolean stackAlreadyOwnsBus = existingBusName != null && existingBusName.equals(busName);
+            if (!stackAlreadyOwnsBus || !"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            bus = eventBridgeService.describeEventBus(busName, region);
+            String existingCreatedTime = r.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
+            String actualCreatedTime = eventBusCreatedTime(bus);
+            if (existingCreatedTime == null || !existingCreatedTime.equals(actualCreatedTime)) {
+                throw e;
+            }
+            bus = eventBridgeService.updateEventBus(
+                    busName, description != null ? description : "", null, null, null, region);
+        }
+        r.setPhysicalId(busName);              // Ref → EventBus name (AWS-faithful)
+        r.getAttributes().put("Arn", bus.getArn());
+        r.getAttributes().put("Name", busName);
+        r.getAttributes().put(EVENT_BUS_CREATED_TIME_ATTR, eventBusCreatedTime(bus));
+        r.getAttributes().put(EVENT_BUS_NAME_MODE_ATTR,
+                explicitName ? EVENT_BUS_NAME_MODE_EXPLICIT : EVENT_BUS_NAME_MODE_GENERATED);
+    }
+
+    private String eventBusCreatedTime(EventBus bus) {
+        return bus.getCreatedTime() != null ? bus.getCreatedTime().toString() : "";
+    }
+
+    private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
+        try {
+            // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
+            var targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {
                 List<String> targetIds = targets.stream().map(Target::getId).toList();
-                eventBridgeService.removeTargets(ruleName, null, targetIds, region);
+                eventBridgeService.removeTargets(ruleName, busName, targetIds, region);
             }
-            eventBridgeService.deleteRule(ruleName, null, region);
-        } catch (Exception e) {
-            LOG.debugv("Could not delete EventBridge rule {0}: {1}", ruleName, e.getMessage());
+            eventBridgeService.deleteRule(ruleName, busName, region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
         }
+    }
+
+    private void deleteEventBusSafe(String busName, String region) {
+        try {
+            eventBridgeService.deleteEventBus(busName, region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
+        }
+    }
+
+    private void deleteEventBusSafe(StackResource resource, String region) {
+        String busName = resource.getPhysicalId();
+        EventBus bus;
+        try {
+            bus = eventBridgeService.describeEventBus(busName, region);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
+                return;
+            }
+            throw e;
+        }
+
+        String expectedCreatedTime = resource.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
+        if (expectedCreatedTime == null || !expectedCreatedTime.equals(eventBusCreatedTime(bus))) {
+            throw new AwsException("ValidationError",
+                    "EventBus ownership changed; refusing to delete: " + busName, 400);
+        }
+        deleteEventBusSafe(busName, region);
     }
 
     // ── Batch ────────────────────────────────────────────────────────────────

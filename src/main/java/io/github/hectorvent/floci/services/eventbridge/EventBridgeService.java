@@ -206,11 +206,10 @@ public class EventBridgeService {
                         .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                                 "EventBus not found: " + effectiveName, 404));
 
-        // Only mark dirty when a field is both non-blank AND different from
-        // the value currently on the bus — re-sending the same value is a no-op.
+        // Description accepts an explicit empty string so callers can clear it. A null value means
+        // the field was omitted and must remain unchanged.
         boolean dirty = false;
-        if (description != null && !description.isBlank()
-                && !description.equals(bus.getDescription())) {
+        if (description != null && !description.equals(bus.getDescription())) {
             bus.setDescription(description);
             dirty = true;
         }
