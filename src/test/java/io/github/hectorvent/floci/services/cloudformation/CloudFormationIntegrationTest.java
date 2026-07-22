@@ -17,6 +17,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import static io.restassured.RestAssured.given;
@@ -170,6 +171,204 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackName>test-stack</StackName>"))
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+    }
+
+    @Test
+    void createStacks_withSameIamInlinePolicyName() {
+        String policyName = "IamTaskRoleDefaultPolicy54CEC625";
+
+        for (String suffix : List.of("a", "b")) {
+            String stackName = "cfn-inline-policy-stack-" + suffix;
+            String roleName = "cfn-inline-policy-role-" + suffix;
+            String template = """
+                {
+                  "Resources": {
+                    "TaskRole": {
+                      "Type": "AWS::IAM::Role",
+                      "Properties": {
+                        "RoleName": "%s",
+                        "AssumeRolePolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": []
+                        }
+                      }
+                    },
+                    "TaskRoleDefaultPolicy": {
+                      "Type": "AWS::IAM::Policy",
+                      "Properties": {
+                        "PolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{
+                            "Effect": "Allow",
+                            "Action": "logs:CreateLogStream",
+                            "Resource": "*"
+                          }]
+                        },
+                        "Roles": [{ "Ref": "TaskRole" }]
+                      }
+                    }
+                  }
+                }
+                """.formatted(roleName, policyName);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackId>"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetRolePolicy")
+                .formParam("RoleName", roleName)
+                .formParam("PolicyName", policyName)
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<PolicyName>" + policyName + "</PolicyName>"));
+        }
+
+        String movedPolicyTemplate = """
+            {
+              "Resources": {
+                "TaskRole": {
+                  "Type": "AWS::IAM::Role",
+                  "Properties": {
+                    "RoleName": "cfn-inline-policy-role-a",
+                    "AssumeRolePolicyDocument": {
+                      "Version": "2012-10-17",
+                      "Statement": []
+                    }
+                  }
+                },
+                "TaskRoleDefaultPolicy": {
+                  "Type": "AWS::IAM::Policy",
+                  "Properties": {
+                    "PolicyName": "%s",
+                    "PolicyDocument": {
+                      "Version": "2012-10-17",
+                      "Statement": []
+                    },
+                    "Roles": ["cfn-inline-policy-role-b"]
+                  }
+                }
+              }
+            }
+            """.formatted(policyName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", "cfn-inline-policy-stack-a")
+            .formParam("TemplateBody", movedPolicyTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-inline-policy-stack-a")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", "cfn-inline-policy-role-a")
+            .formParam("PolicyName", policyName)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", "cfn-inline-policy-role-b")
+            .formParam("PolicyName", policyName)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PolicyName>" + policyName + "</PolicyName>"));
+
+        String invalidPolicyTemplate = """
+            {
+              "Resources": {
+                "TaskRoleDefaultPolicy": {
+                  "Type": "AWS::IAM::Policy",
+                  "Properties": {
+                    "PolicyName": "%s",
+                    "PolicyDocument": {
+                      "Version": "2012-10-17",
+                      "Statement": []
+                    },
+                    "Roles": ["cfn-inline-policy-role-a", "missing-inline-policy-role"]
+                  }
+                }
+              }
+            }
+            """.formatted(policyName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-inline-policy-failing-stack")
+            .formParam("TemplateBody", invalidPolicyTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-inline-policy-failing-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", "cfn-inline-policy-role-a")
+            .formParam("PolicyName", policyName)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
     }
 
     @Test
