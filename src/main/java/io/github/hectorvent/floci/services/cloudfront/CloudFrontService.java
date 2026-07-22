@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionProfile;
 import io.github.hectorvent.floci.services.cloudfront.model.Invalidation;
@@ -155,6 +156,17 @@ public class CloudFrontService {
         tagStore.delete("distribution/" + id);
     }
 
+    /**
+     * Removes a distribution and its associated invalidations/tags without the disable/If-Match guards
+     * enforced by {@link #deleteDistribution(String, String)}. Used by CloudFormation stack deletion,
+     * which owns the resource lifecycle at the stack level.
+     */
+    public synchronized void removeDistribution(String id) {
+        distStore.delete(id);
+        invalidationStore.delete(id);
+        tagStore.delete("distribution/" + id);
+    }
+
     public List<Distribution> listDistributions(String marker, int maxItems) {
         List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
@@ -190,6 +202,44 @@ public class CloudFrontService {
         }
         dist.setEtag(UUID.randomUUID().toString());
         distStore.put(targetDistributionId, dist);
+    }
+
+    /**
+     * Finds the distribution whose data-plane requests should be served for the given {@code Host}
+     * header. A distribution matches when the host equals its assigned CloudFront domain name
+     * ({@code <id>.cloudfront.net}) or one of its alternate domain names (CNAME aliases). Any port
+     * suffix is ignored and matching is case-insensitive. Returns {@code null} when nothing matches.
+     */
+    public Distribution findByHost(String host) {
+        if (host == null || host.isBlank()) {
+            return null;
+        }
+        String hostname = stripPort(host);
+        for (Distribution dist : distStore.scan(k -> true)) {
+            if (hostname.equalsIgnoreCase(dist.getDomainName())) {
+                return dist;
+            }
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg != null && cfg.getAliases() != null) {
+                for (String alias : cfg.getAliases()) {
+                    if (hostname.equalsIgnoreCase(alias)) {
+                        return dist;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String stripPort(String host) {
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) {
+            String maybePort = host.substring(colon + 1);
+            if (!maybePort.isEmpty() && maybePort.chars().allMatch(Character::isDigit)) {
+                return host.substring(0, colon);
+            }
+        }
+        return host;
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
@@ -728,6 +778,29 @@ public class CloudFrontService {
         List<PublicKey> all = new ArrayList<>(publicKeyStore.scan(k -> true));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
         return paginate(all, marker, maxItems, PublicKey::getId);
+    }
+
+    /**
+     * Resolves the PEM public key for a {@code Key-Pair-Id} used to sign a request, but only when that
+     * public key is a member of one of the supplied key groups. Returns {@code null} when the key is
+     * unknown or is not a member of any of those groups — i.e. it is not a trusted signer.
+     */
+    public String trustedPublicKeyPem(String keyPairId, List<String> keyGroupIds) {
+        if (keyPairId == null || keyGroupIds == null || keyGroupIds.isEmpty()) {
+            return null;
+        }
+        boolean trusted = false;
+        for (String keyGroupId : keyGroupIds) {
+            KeyGroup group = keyGroupStore.get(keyGroupId).orElse(null);
+            if (group != null && group.getItems() != null && group.getItems().contains(keyPairId)) {
+                trusted = true;
+                break;
+            }
+        }
+        if (!trusted) {
+            return null;
+        }
+        return publicKeyStore.get(keyPairId).map(PublicKey::getEncodedKey).orElse(null);
     }
 
     // ── Key Groups ────────────────────────────────────────────────────────────

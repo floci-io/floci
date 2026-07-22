@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.*;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
@@ -22,6 +23,8 @@ import java.util.Map;
 
 @Path("/2020-05-31")
 public class CloudFrontController {
+
+    private static final Logger LOG = Logger.getLogger(CloudFrontController.class);
 
     private static final String NS = AwsNamespaces.CLOUDFRONT;
     private static final String XML = "application/xml";
@@ -1765,7 +1768,30 @@ public class CloudFrontController {
         }
         xml.end("CacheBehaviors");
 
-        xml.start("CustomErrorResponses").elem("Quantity", 0).end("CustomErrorResponses");
+        List<Map<String, Object>> customErrors = cfg.getCustomErrorResponses();
+        int cerCount = customErrors != null ? customErrors.size() : 0;
+        xml.start("CustomErrorResponses").elem("Quantity", cerCount);
+        if (cerCount > 0) {
+            xml.start("Items");
+            for (Map<String, Object> cer : customErrors) {
+                xml.start("CustomErrorResponse").elem("ErrorCode", str(cer.get("ErrorCode")));
+                // ResponsePagePath and ResponseCode are optional; CloudFront omits them when unset
+                // rather than returning empty elements.
+                String pagePath = str(cer.get("ResponsePagePath"));
+                if (!pagePath.isEmpty()) {
+                    xml.elem("ResponsePagePath", pagePath);
+                }
+                String responseCode = str(cer.get("ResponseCode"));
+                if (!responseCode.isEmpty()) {
+                    xml.elem("ResponseCode", responseCode);
+                }
+                xml.elem("ErrorCachingMinTTL", cer.get("ErrorCachingMinTTL") != null
+                                ? str(cer.get("ErrorCachingMinTTL")) : "0")
+                        .end("CustomErrorResponse");
+            }
+            xml.end("Items");
+        }
+        xml.end("CustomErrorResponses");
 
         List<String> aliases = cfg.getAliases();
         int aliasCount = aliases != null ? aliases.size() : 0;
@@ -2059,6 +2085,11 @@ public class CloudFrontController {
                 .build();
     }
 
+    /** Renders a possibly-null value as a string, using the empty string for {@code null}. */
+    private static String str(Object value) {
+        return value != null ? value.toString() : "";
+    }
+
     private String xmlQuantityItems(String wrapper, String itemTag, int count, List<String> items) {
         XmlBuilder xml = new XmlBuilder().start(wrapper).elem("Quantity", count);
         if (count > 0 && items != null && !items.isEmpty()) {
@@ -2106,8 +2137,69 @@ public class CloudFrontController {
         cfg.setCacheBehaviors(parseCacheBehaviors(body));
         cfg.setAliases(parseAliases(body));
         cfg.setViewerCertificate(parseViewerCertificate(body));
+        cfg.setCustomErrorResponses(parseCustomErrorResponses(body));
 
         return cfg;
+    }
+
+    /**
+     * Parses the {@code CustomErrorResponses} block into a list of maps keyed by
+     * {@code ErrorCode}, {@code ResponsePagePath}, {@code ResponseCode} and {@code ErrorCachingMinTTL}
+     * (values kept as strings). CloudFront uses these to override an origin error with a custom
+     * page/status — most notably the SPA fallback that turns a 403/404 into 200 {@code /index.html}.
+     */
+    private List<Map<String, Object>> parseCustomErrorResponses(String body) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (body == null || body.isEmpty()) {
+            return result;
+        }
+        try {
+            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            boolean inBlock = false;
+            boolean inItem = false;
+            Map<String, Object> current = null;
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String local = r.getLocalName();
+                    switch (local) {
+                        case "CustomErrorResponses" -> inBlock = true;
+                        case "CustomErrorResponse" -> {
+                            if (inBlock) {
+                                inItem = true;
+                                current = new LinkedHashMap<>();
+                            }
+                        }
+                        case "ErrorCode", "ResponsePagePath", "ResponseCode", "ErrorCachingMinTTL" -> {
+                            if (inItem && current != null) {
+                                current.put(local, r.getElementText());
+                            }
+                        }
+                        default -> {
+                        }
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    switch (r.getLocalName()) {
+                        case "CustomErrorResponse" -> {
+                            if (inItem && current != null) {
+                                result.add(current);
+                            }
+                            inItem = false;
+                            current = null;
+                        }
+                        case "CustomErrorResponses" -> inBlock = false;
+                        default -> {
+                        }
+                    }
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+            // A malformed CustomErrorResponses block yields the entries parsed so far rather than
+            // failing the whole distribution create/update; log it so the cause is diagnosable.
+            LOG.debugv("Ignoring malformed CustomErrorResponses during parse: {0}", e.getMessage());
+        }
+        return result;
     }
 
     private List<Origin> parseOrigins(String body) {
@@ -2252,7 +2344,9 @@ public class CloudFrontController {
             XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
             boolean inDcb = false;
             boolean inAllowedMethods = false;
+            boolean inTrustedKeyGroups = false;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> trustedKeyGroups = new ArrayList<>();
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2260,6 +2354,12 @@ public class CloudFrontController {
                     String local = r.getLocalName();
                     switch (local) {
                         case "DefaultCacheBehavior" -> inDcb = true;
+                        case "TrustedKeyGroups" -> {
+                            if (inDcb) inTrustedKeyGroups = true;
+                        }
+                        case "KeyGroup" -> {
+                            if (inTrustedKeyGroups) trustedKeyGroups.add(r.getElementText());
+                        }
                         case "AllowedMethods" -> {
                             if (inDcb) inAllowedMethods = true;
                         }
@@ -2296,6 +2396,7 @@ public class CloudFrontController {
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "DefaultCacheBehavior" -> inDcb = false;
                         default -> {
                         }
@@ -2306,7 +2407,13 @@ public class CloudFrontController {
             if (!allowedMethods.isEmpty()) {
                 dcb.setAllowedMethods(allowedMethods);
             }
-        } catch (Exception ignored) {
+            if (!trustedKeyGroups.isEmpty()) {
+                dcb.setTrustedKeyGroups(trustedKeyGroups);
+            }
+        } catch (Exception e) {
+            LOG.debugv("Invalid DefaultCacheBehavior XML: {0}", e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument", "The DefaultCacheBehavior configuration is invalid.", 400);
         }
         return dcb;
     }
@@ -2321,8 +2428,10 @@ public class CloudFrontController {
             boolean inCacheBehaviors = false;
             boolean inCacheBehavior = false;
             boolean inAllowedMethods = false;
+            boolean inTrustedKeyGroups = false;
             CacheBehavior current = null;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> trustedKeyGroups = new ArrayList<>();
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2335,7 +2444,14 @@ public class CloudFrontController {
                                 inCacheBehavior = true;
                                 current = new CacheBehavior();
                                 allowedMethods = new ArrayList<>();
+                                trustedKeyGroups = new ArrayList<>();
                             }
+                        }
+                        case "TrustedKeyGroups" -> {
+                            if (inCacheBehavior) inTrustedKeyGroups = true;
+                        }
+                        case "KeyGroup" -> {
+                            if (inTrustedKeyGroups) trustedKeyGroups.add(r.getElementText());
                         }
                         case "AllowedMethods" -> {
                             if (inCacheBehavior) inAllowedMethods = true;
@@ -2374,10 +2490,14 @@ public class CloudFrontController {
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "CacheBehavior" -> {
                             if (inCacheBehavior && current != null) {
                                 if (!allowedMethods.isEmpty()) {
                                     current.setAllowedMethods(allowedMethods);
+                                }
+                                if (!trustedKeyGroups.isEmpty()) {
+                                    current.setTrustedKeyGroups(trustedKeyGroups);
                                 }
                                 result.add(current);
                             }
@@ -2391,7 +2511,10 @@ public class CloudFrontController {
                 }
             }
             r.close();
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOG.debugv("Invalid CacheBehaviors XML: {0}", e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument", "The CacheBehaviors configuration is invalid.", 400);
         }
         return result;
     }

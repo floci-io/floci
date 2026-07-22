@@ -4,12 +4,16 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
@@ -62,5 +66,27 @@ class CloudFrontServiceTest {
 
         assertTrue(sd.getDomainName().endsWith(".cloudfront.local"),
                 "Expected configured suffix, got: " + sd.getDomainName());
+    }
+
+    @Test
+    void findByHostMatchesDomainNameAndAliasIgnoringPort() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setAliases(List.of("console.example.test"));
+        Distribution dist = new Distribution();
+        dist.setConfig(cfg);
+        dist = service.createDistribution(dist, Map.of());
+
+        // Matches the assigned CloudFront domain name, with or without a port.
+        assertEquals(dist.getId(), service.findByHost(dist.getDomainName()).getId());
+        assertEquals(dist.getId(), service.findByHost(dist.getDomainName() + ":4566").getId());
+        // Matches a configured alias, case-insensitively and ignoring the port.
+        assertEquals(dist.getId(), service.findByHost("console.example.test").getId());
+        assertEquals(dist.getId(), service.findByHost("CONSOLE.EXAMPLE.TEST:8443").getId());
+        // No match for an unrelated host.
+        assertNull(service.findByHost("unrelated.example.test"));
+        assertNull(service.findByHost(null));
     }
 }

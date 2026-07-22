@@ -64,6 +64,13 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return;
         }
 
+        // A higher-priority CloudFront distribution filter may have already routed this request to
+        // the distribution serving controller (e.g. an alias like console.localhost that also looks
+        // like an S3 virtual host); don't re-hijack it as an S3 bucket request.
+        if (path.startsWith("/_cloudfront/")) {
+            return;
+        }
+
         // Rewrite path from /key to /bucket/key
         String newPath = "/" + bucket + (path.startsWith("/") ? "" : "/") + path;
 
