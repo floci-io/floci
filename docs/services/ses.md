@@ -38,6 +38,10 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `SetIdentityMailFromDomain`         | Set or clear the MAIL FROM domain for an identity         |
 | `GetIdentityMailFromDomainAttributes` | Read MAIL FROM domain settings                          |
 | `GetIdentityDkimAttributes`         | Return DKIM status for identities                         |
+| `PutIdentityPolicy`                 | Create or replace a sending-authorization policy on an identity |
+| `GetIdentityPolicies`               | Return the requested policies for an identity             |
+| `ListIdentityPolicies`              | List an identity's policy names                           |
+| `DeleteIdentityPolicy`              | Delete a policy from an identity                          |
 | `CreateConfigurationSet`            | Create a configuration set                                |
 | `DescribeConfigurationSet`          | Read a configuration set                                  |
 | `ListConfigurationSets`             | List configuration sets                                   |
@@ -156,6 +160,7 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 - Identity verification succeeds immediately; no real DNS or inbox verification flow is required.
 - `SendEmail` stores the text body or the HTML body as the captured message body.
 - `SetIdentityNotificationTopic` publishes to the configured topic on a Bounce/Complaint/Delivery event (triggered via the mailbox simulator addresses or the suppression list), independent of any configuration set. The payload uses the legacy format (`notificationType`, no `mail.tags`, headers only when `SetIdentityHeadersInNotificationsEnabled` is on).
+- Identity (sending authorization) policies are stored and returned as metadata: the policy document, the per-identity limit of 20, and the create/update/delete error shapes match AWS, but Floci does not evaluate policy authorization (Principal-account existence, Resource-ARN match) or gate sending on it.
 - For the REST JSON API see [SES v2](#v2) below.
 
 ## SES v2 (REST JSON) {#v2}
@@ -177,6 +182,10 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `PUT` | `/v2/email/identities/{emailIdentity}/feedback` | `PutEmailIdentityFeedbackAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/mail-from` | `PutEmailIdentityMailFromAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/configuration-set` | `PutEmailIdentityConfigurationSetAttributes` |
+| `POST` | `/v2/email/identities/{emailIdentity}/policies/{policyName}` | `CreateEmailIdentityPolicy` |
+| `GET` | `/v2/email/identities/{emailIdentity}/policies` | `GetEmailIdentityPolicies` |
+| `PUT` | `/v2/email/identities/{emailIdentity}/policies/{policyName}` | `UpdateEmailIdentityPolicy` |
+| `DELETE` | `/v2/email/identities/{emailIdentity}/policies/{policyName}` | `DeleteEmailIdentityPolicy` |
 | `POST` | `/v2/email/outbound-emails` | `SendEmail` (simple / raw / templated) |
 | `POST` | `/v2/email/outbound-bulk-emails` | `SendBulkEmail` (templated, multiple destinations) |
 | `GET` | `/v2/email/account` | `GetAccount` |
@@ -246,4 +255,4 @@ Suppressed recipients are filtered out of the SMTP relay step (non-suppressed re
 
 Tag operations support these ARN forms: `arn:aws:ses:<region>:<account>:configuration-set/<name>`, `arn:aws:ses:<region>:<account>:template/<name>`, and `arn:aws:ses:<region>:<account>:identity/<email-or-domain>`. Tags supplied to `CreateConfigurationSet`, `CreateEmailTemplate`, and `CreateEmailIdentity` are reachable through `ListTagsForResource`; `UpdateEmailTemplate` does not modify tags. Other resource types return `NotFoundException`.
 
-Identity, template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.
+Identity, identity-policy, template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a policy written with `PutIdentityPolicy` (v1) is returned by `GetEmailIdentityPolicies` (v2), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.
