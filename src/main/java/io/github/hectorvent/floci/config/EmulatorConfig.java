@@ -1015,6 +1015,10 @@ public interface EmulatorConfig {
     interface StepFunctionsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
+        @WithDefault("true")
+        boolean allowPlaintextHttp();
     }
 
     interface CloudFormationServiceConfig {
