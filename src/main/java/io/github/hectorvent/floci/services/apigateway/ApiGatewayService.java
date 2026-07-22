@@ -1177,7 +1177,11 @@ public class ApiGatewayService {
         if (identitySource != null && identitySource.isEmpty()) {
             identitySource = null;
         }
-        if (identitySource == null && scheme.getName() != null && scheme.getIn() != null
+        boolean derivesIdentityFromScheme = authorizerType == null
+                || "token".equalsIgnoreCase(authorizerType)
+                || "cognito_user_pools".equalsIgnoreCase(authorizerType);
+        if (identitySource == null && derivesIdentityFromScheme
+                && scheme.getName() != null && scheme.getIn() != null
                 && "header".equalsIgnoreCase(scheme.getIn().toString())) {
             identitySource = "method.request.header." + scheme.getName();
         }

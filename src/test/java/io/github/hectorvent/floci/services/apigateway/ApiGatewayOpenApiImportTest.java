@@ -1686,7 +1686,8 @@ class ApiGatewayOpenApiImportTest {
                         "type": "apiKey", "name": "X-Auth", "in": "header",
                         "x-amazon-apigateway-authorizer": {
                           "type": "request",
-                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:headerAuth/invocations"
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:headerAuth/invocations",
+                          "identitySource": "method.request.header.X-Auth"
                         }
                       }
                     }
@@ -1737,7 +1738,7 @@ class ApiGatewayOpenApiImportTest {
                   "components": {
                     "securitySchemes": {
                       "RequestAuth": {
-                        "type": "http", "scheme": "bearer",
+                        "type": "apiKey", "name": "Authorization", "in": "header",
                         "x-amazon-apigateway-authorizer": {
                           "type": "request",
                           "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:requestAuth/invocations"%s
