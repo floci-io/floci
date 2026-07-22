@@ -537,6 +537,27 @@ class S3AuthEnforcementIntegrationTest {
             .body(equalTo("versioned body"));
     }
 
+    @Test
+    @Order(22)
+    void presignedRequestWithTamperedSignatureIsRejected() {
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+        String signature = presignedSignature("GET", path, "test", "test", "3600");
+        String tampered = signature.substring(0, signature.length() - 1)
+                + (signature.endsWith("0") ? "1" : "0");
+        given()
+            .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "3600")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Signature", tampered)
+        .when()
+            .get(path)
+        .then()
+            .statusCode(403)
+            .body(containsString("SignatureDoesNotMatch"));
+    }
+
     private static String publicReadPolicy(String bucket) {
         return """
                 {
