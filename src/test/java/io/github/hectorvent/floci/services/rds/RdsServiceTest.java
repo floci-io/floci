@@ -583,14 +583,26 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.4",
                 "admin", "password", "coredb", false, "default.aurora-postgresql16");
         assertEquals("aurora-cluster", cluster.getDbClusterIdentifier());
-        // The default group is materialised on reference, its family derived from the name.
         assertEquals("aurora-postgresql16",
                 rdsService.getDbClusterParameterGroup("default.aurora-postgresql16").getDbParameterGroupFamily());
     }
 
     @Test
-    void listDbClusterParameterGroupsMaterializesAwsDefaultByName() {
-        assertTrue(rdsService.listDbClusterParameterGroups(null).isEmpty());
+    void createDbClusterRejectsUnsupportedAwsDefaultClusterParameterGroup() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.4",
+                        "admin", "password", "coredb", false,
+                        "default.aurora-postgresql999"));
+
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+    }
+
+    @Test
+    void listDbClusterParameterGroupsAlwaysIncludesStableManagedDefaults() {
+        List<String> before = rdsService.listDbClusterParameterGroups(null).stream()
+                .map(group -> group.getDbClusterParameterGroupName()
+                        + ":" + group.getDbParameterGroupFamily())
+                .toList();
 
         Collection<DbClusterParameterGroup> groups =
                 rdsService.listDbClusterParameterGroups("default.aurora-postgresql16");
@@ -600,7 +612,39 @@ class RdsServiceTest {
         assertEquals("default.aurora-postgresql16", group.getDbClusterParameterGroupName());
         assertEquals("aurora-postgresql16", group.getDbParameterGroupFamily());
         assertEquals("Default cluster parameter group", group.getDescription());
-        assertEquals(1, rdsService.listDbClusterParameterGroups(null).size());
+        List<String> after = rdsService.listDbClusterParameterGroups(null).stream()
+                .map(item -> item.getDbClusterParameterGroupName()
+                        + ":" + item.getDbParameterGroupFamily())
+                .toList();
+        assertEquals(List.of("default.aurora-postgresql16:aurora-postgresql16"), before);
+        assertEquals(before, after);
+    }
+
+    @Test
+    void unsupportedManagedDefaultNamesAreNotFabricatedByReads() {
+        List<String> before = rdsService.listDbClusterParameterGroups(null).stream()
+                .map(DbClusterParameterGroup::getDbClusterParameterGroupName)
+                .toList();
+
+        for (String name : List.of("default.", "default.not-a-real-family",
+                "default.aurora-postgresql999")) {
+            AwsException exception = assertThrows(
+                    AwsException.class, () -> rdsService.getDbClusterParameterGroup(name));
+            assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        }
+
+        assertEquals(before, rdsService.listDbClusterParameterGroups(null).stream()
+                .map(DbClusterParameterGroup::getDbClusterParameterGroupName)
+                .toList());
+    }
+
+    @Test
+    void namedClusterParameterGroupListingUsesAwsNotFoundCode() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listDbClusterParameterGroups("default.not-a-real-family"));
+
+        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals(404, exception.getHttpStatus());
     }
 
     @Test
@@ -627,7 +671,32 @@ class RdsServiceTest {
         assertEquals("cpg1", fetched.getDbClusterParameterGroupName());
 
         Collection<DbClusterParameterGroup> listed = rdsService.listDbClusterParameterGroups(null);
+        assertEquals(List.of("default.aurora-postgresql16", "cpg1"), listed.stream()
+                .map(DbClusterParameterGroup::getDbClusterParameterGroupName)
+                .toList());
+    }
+
+    @Test
+    void createDbClusterParameterGroupRejectsManagedDefaultName() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbClusterParameterGroup(
+                        "default.aurora-postgresql16", "aurora-postgresql16", "shadow"));
+
+        assertEquals("DBParameterGroupAlreadyExists", exception.getErrorCode());
+    }
+
+    @Test
+    void persistedManagedDefaultOverridesCatalogWithoutDuplication() {
+        StorageBackend<String, DbClusterParameterGroup> clusterGroups = new InMemoryStorage<>();
+        clusterGroups.put("default.aurora-postgresql16", new DbClusterParameterGroup(
+                "default.aurora-postgresql16", "aurora-postgresql16", "persisted default"));
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                clusterGroups, new InMemoryStorage<>());
+
+        List<DbClusterParameterGroup> listed = List.copyOf(service.listDbClusterParameterGroups(null));
         assertEquals(1, listed.size());
+        assertEquals("persisted default", listed.getFirst().getDescription());
     }
 
     @Test

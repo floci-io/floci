@@ -36,6 +36,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,11 @@ public class RdsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
+            new ManagedClusterParameterGroup(
+                    "default.aurora-postgresql16",
+                    "aurora-postgresql16",
+                    "Default cluster parameter group"));
 
     private final StorageBackend<String, DbInstance> instances;
     private final StorageBackend<String, DbCluster> clusters;
@@ -910,7 +916,7 @@ public class RdsService implements Resettable {
     // ── Cluster Parameter Groups ──────────────────────────────────────────────
 
     public DbClusterParameterGroup createDbClusterParameterGroup(String name, String family, String description) {
-        if (clusterParameterGroups.get(name).isPresent()) {
+        if (managedClusterParameterGroup(name) != null || clusterParameterGroups.get(name).isPresent()) {
             throw new AwsException("DBParameterGroupAlreadyExists",
                     "DB cluster parameter group " + name + " already exists.", 400);
         }
@@ -920,28 +926,57 @@ public class RdsService implements Resettable {
     }
 
     public DbClusterParameterGroup getDbClusterParameterGroup(String name) {
-        return clusterParameterGroups.get(name).orElseGet(() -> {
-            // AWS ships a managed default DB cluster parameter group per engine family that always
-            // exists (e.g. default.aurora-postgresql16), so a cluster that uses the engine default —
-            // and a DescribeDBClusterParameterGroups that looks one up — should resolve it rather than
-            // 404. Materialize the default group on first reference; the family is the segment after
-            // "default." (e.g. aurora-postgresql16).
-            if (name != null && name.startsWith("default.")) {
-                DbClusterParameterGroup dflt = new DbClusterParameterGroup(
-                        name, name.substring("default.".length()), "Default cluster parameter group");
-                clusterParameterGroups.put(name, dflt);
-                return dflt;
+        if (name != null) {
+            DbClusterParameterGroup persisted = clusterParameterGroups.get(name).orElse(null);
+            if (persisted != null) {
+                return persisted;
             }
-            throw new AwsException("DBClusterParameterGroupNotFound",
-                    "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
-        });
+            ManagedClusterParameterGroup managed = managedClusterParameterGroup(name);
+            if (managed != null) {
+                return managed.toModel();
+            }
+        }
+        throw new AwsException("DBClusterParameterGroupNotFound",
+                "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
     }
 
     public Collection<DbClusterParameterGroup> listDbClusterParameterGroups(String filterName) {
         if (filterName != null && !filterName.isBlank()) {
-            return List.of(getDbClusterParameterGroup(filterName));
+            try {
+                return List.of(getDbClusterParameterGroup(filterName));
+            } catch (AwsException e) {
+                if ("DBClusterParameterGroupNotFound".equals(e.getErrorCode())) {
+                    throw new AwsException("DBParameterGroupNotFound",
+                            "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404);
+                }
+                throw e;
+            }
         }
-        return clusterParameterGroups.scan(k -> true);
+        Map<String, DbClusterParameterGroup> groups = new LinkedHashMap<>();
+        for (ManagedClusterParameterGroup managed : MANAGED_CLUSTER_PARAMETER_GROUPS) {
+            groups.put(managed.name(), managed.toModel());
+        }
+        clusterParameterGroups.scan(k -> true).stream()
+                .sorted(Comparator.comparing(
+                        DbClusterParameterGroup::getDbClusterParameterGroupName,
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .forEach(group -> groups.put(group.getDbClusterParameterGroupName(), group));
+        return List.copyOf(groups.values());
+    }
+
+    private static ManagedClusterParameterGroup managedClusterParameterGroup(String name) {
+        for (ManagedClusterParameterGroup group : MANAGED_CLUSTER_PARAMETER_GROUPS) {
+            if (group.name().equals(name)) {
+                return group;
+            }
+        }
+        return null;
+    }
+
+    private record ManagedClusterParameterGroup(String name, String family, String description) {
+        private DbClusterParameterGroup toModel() {
+            return new DbClusterParameterGroup(name, family, description);
+        }
     }
 
     public void deleteDbClusterParameterGroup(String name) {
