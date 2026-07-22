@@ -236,7 +236,7 @@ public class RdsContainerManager {
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
                 ContainerExecResult result = execInContainer(containerId, cmd, 5);
-                lastOutput = result.output();
+                lastOutput = result.output() + (result.stderr().isEmpty() ? "" : "\n" + result.stderr());
                 if (result.exitCode() == 0) {
                     LOG.infov("Initialized PostgreSQL IAM role in RDS container {0}", containerName);
                     return;
@@ -264,7 +264,7 @@ public class RdsContainerManager {
         try {
             ContainerExecResult result = execInContainer(containerId, cmd, 120);
             if (result.exitCode() != 0) {
-                throw new RuntimeException("pg_dump failed with exit code " + result.exitCode() + ": " + result.output());
+                throw new RuntimeException("pg_dump failed with exit code " + result.exitCode() + ": " + result.stderr());
             }
             return result.output();
         } catch (Exception e) {
@@ -321,7 +321,8 @@ public class RdsContainerManager {
             }
             
             if (result == null || result.exitCode() != 0) {
-                throw new RuntimeException("psql restore failed with exit code " + (result != null ? result.exitCode() : -1) + ": " + (result != null ? result.output() : ""));
+                String errMsg = result != null ? (result.stderr().isEmpty() ? result.output() : result.stderr()) : "";
+                throw new RuntimeException("psql restore failed with exit code " + (result != null ? result.exitCode() : -1) + ": " + errMsg);
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to restore postgres snapshot", e);
@@ -338,12 +339,17 @@ public class RdsContainerManager {
 
         CountDownLatch latch = new CountDownLatch(1);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
         Closeable callback = lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
                 if (frame.getPayload() != null) {
                     try {
-                        output.write(frame.getPayload());
+                        if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDOUT) {
+                            output.write(frame.getPayload());
+                        } else if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDERR) {
+                            stderr.write(frame.getPayload());
+                        }
                     } catch (IOException ignored) {
                     }
                 }
@@ -368,13 +374,14 @@ public class RdsContainerManager {
             Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
             return new ContainerExecResult(
                     exitCode != null ? exitCode : -1,
-                    output.toString(StandardCharsets.UTF_8));
+                    output.toString(StandardCharsets.UTF_8),
+                    stderr.toString(StandardCharsets.UTF_8));
         } finally {
             callback.close();
         }
     }
 
-    record ContainerExecResult(long exitCode, String output) {}
+    record ContainerExecResult(long exitCode, String output, String stderr) {}
 
     public void removeVolume(String instanceId, String volumeId) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
