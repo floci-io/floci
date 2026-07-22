@@ -41,8 +41,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -224,6 +227,18 @@ public class ApiGatewayExecuteController {
                                 @PathParam("proxy") String proxy,
                                 byte[] body) {
         return dispatch("PATCH", apiId, stageName, proxy, headers, uriInfo, body);
+    }
+
+    @OPTIONS
+    @Blocking
+    @Path("/{proxy: .*}")
+    public Response handleOptions(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                  @PathParam("apiId") String apiId,
+                                  @PathParam("stageName") String stageName,
+                                  @PathParam("proxy") String proxy) {
+        // Route OPTIONS to the API's own method (e.g. a CORS-preflight MOCK integration)
+        // instead of letting the JAX-RS runtime answer with a default Allow-header response.
+        return dispatch("OPTIONS", apiId, stageName, proxy, headers, uriInfo, null);
     }
 
     // ──────────────────────────── Core dispatch ────────────────────────────
@@ -1136,42 +1151,71 @@ public class ApiGatewayExecuteController {
         String template = ir.responseTemplates() != null
                 ? ir.responseTemplates().getOrDefault("application/json", "") : "";
 
-        if (template.isEmpty()) {
-            return Response.status(Integer.parseInt(ir.statusCode()))
-                    .type(MediaType.APPLICATION_JSON)
-                    .build();
+        int status = Integer.parseInt(ir.statusCode());
+        String responseBody = null;
+        Map<String, String> vtlHeaderOverrides = new HashMap<>();
+
+        if (!template.isEmpty()) {
+            // Evaluate the response template through VTL (supports $context.responseOverride etc.)
+            String requestId = UUID.randomUUID().toString();
+            String bodyStr = body != null && body.length > 0 ? new String(body) : null;
+
+            Map<String, String> headerMap = new HashMap<>();
+            for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+                if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
+            }
+            Map<String, String> queryMap = new HashMap<>();
+            for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+                if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
+            }
+            Map<String, String> pathMap = new HashMap<>(extractPathParams(resource.getPath(), path));
+
+            VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
+                    bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
+                    resource.getPath(), requestId, regionResolver.getAccountId(), null);
+
+            VtlTemplateEngine.EvaluateResult result = vtlEngine.evaluate(template, vtlCtx);
+            if (result.statusOverride() != null) status = result.statusOverride();
+            responseBody = result.body();
+            vtlHeaderOverrides = result.headerOverrides();
         }
 
-        // Evaluate the response template through VTL (supports $context.responseOverride etc.)
-        String requestId = UUID.randomUUID().toString();
-        String bodyStr = body != null && body.length > 0 ? new String(body) : null;
-
-        Map<String, String> headerMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
-            if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
+        Response.ResponseBuilder rb = Response.status(status).type(MediaType.APPLICATION_JSON);
+        if (responseBody != null) {
+            rb.entity(responseBody);
         }
-        Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
-            if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
-        }
-        Map<String, String> pathMap = new HashMap<>(extractPathParams(resource.getPath(), path));
 
-        VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
-                bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                resource.getPath(), requestId, regionResolver.getAccountId(), null);
-
-        VtlTemplateEngine.EvaluateResult result = vtlEngine.evaluate(template, vtlCtx);
-
-        int status = result.statusOverride() != null
-                ? result.statusOverride()
-                : Integer.parseInt(ir.statusCode());
-
-        Response.ResponseBuilder rb = Response.status(status)
-                .entity(result.body())
-                .type(MediaType.APPLICATION_JSON);
-
-        for (Map.Entry<String, String> hdr : result.headerOverrides().entrySet()) {
+        // $context.responseOverride header assignments (VTL) take precedence.
+        for (Map.Entry<String, String> hdr : vtlHeaderOverrides.entrySet()) {
             rb.header(hdr.getKey(), hdr.getValue());
+        }
+        // Header names a VTL $context.responseOverride already set (HTTP header names are
+        // case-insensitive); these win, so skip a responseParameters entry for the same header
+        // rather than adding a second value for it.
+        Set<String> vtlOverriddenHeaders = new HashSet<>();
+        for (String name : vtlHeaderOverrides.keySet()) {
+            vtlOverriddenHeaders.add(name.toLowerCase(Locale.ROOT));
+        }
+
+        // Apply static header mappings from the integration response's responseParameters.
+        // This is what makes MOCK-integration CORS work (e.g. OPTIONS preflight returning
+        // Access-Control-Allow-Origin/-Methods/-Headers). A MOCK has no backend, so only
+        // static ('literal') and response-body-JSONPath sources resolve; header sources
+        // (integration.response.header.*) yield null and are skipped.
+        if (ir.responseParameters() != null) {
+            for (Map.Entry<String, String> param : ir.responseParameters().entrySet()) {
+                String dest = param.getKey();   // method.response.header.X-Foo
+                if (!dest.startsWith("method.response.header.")) continue;
+                String headerName = dest.substring("method.response.header.".length());
+                if (vtlOverriddenHeaders.contains(headerName.toLowerCase(Locale.ROOT))) {
+                    continue;   // a VTL $context.responseOverride for this header takes precedence
+                }
+                String headerValue = resolveResponseParameter(param.getValue(),
+                        new HashMap<>(), responseBody != null ? responseBody : "{}");
+                if (headerValue != null) {
+                    rb.header(headerName, headerValue);
+                }
+            }
         }
 
         return rb.build();
