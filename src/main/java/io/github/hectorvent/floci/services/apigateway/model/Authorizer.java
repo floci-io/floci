@@ -3,15 +3,18 @@ package io.github.hectorvent.floci.services.apigateway.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.List;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Authorizer {
     private String id;
     private String name;
-    private String type; // TOKEN, REQUEST
+    private String type; // TOKEN, REQUEST, COGNITO_USER_POOLS
     private String authorizerUri;
     private String identitySource;
     private String authorizerResultTtlInSeconds;
+    private List<String> providerARNs; // COGNITO_USER_POOLS
 
     public Authorizer() {}
 
@@ -32,4 +35,7 @@ public class Authorizer {
 
     public String getAuthorizerResultTtlInSeconds() { return authorizerResultTtlInSeconds; }
     public void setAuthorizerResultTtlInSeconds(String ttl) { this.authorizerResultTtlInSeconds = ttl; }
+
+    public List<String> getProviderARNs() { return providerARNs; }
+    public void setProviderARNs(List<String> providerARNs) { this.providerARNs = providerARNs; }
 }
