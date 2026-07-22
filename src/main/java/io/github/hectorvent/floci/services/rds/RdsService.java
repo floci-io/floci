@@ -424,7 +424,16 @@ public class RdsService implements Resettable {
                 null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds);
 
         if (!config.services().rds().mock()) {
-            containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
+            try {
+                containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
+            } catch (Exception e) {
+                try {
+                    deleteDbInstance(instanceId);
+                } catch (Exception cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+                throw e;
+            }
         }
 
         return instance;
