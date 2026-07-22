@@ -1192,7 +1192,7 @@ public class ApiGatewayExecuteController {
         }
 
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
-            Response authError = enforceJwtAuthorizer(region, apiId, route, headers);
+            Response authError = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
             if (authError != null) return authError;
         }
 
@@ -1421,7 +1421,8 @@ public class ApiGatewayExecuteController {
     /** Extracts parameter names from a route template; the pattern itself is constant. */
     private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
 
-    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers) {
+    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
+                                          UriInfo uriInfo) {
         Authorizer authorizer;
         try {
             authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
@@ -1431,7 +1432,7 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
-        String token = extractToken(authorizer, headers);
+        String token = extractToken(authorizer, headers, uriInfo);
         if (token == null) {
             return Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
@@ -1743,7 +1744,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private String extractToken(Authorizer authorizer, HttpHeaders headers) {
+    private String extractToken(Authorizer authorizer, HttpHeaders headers, UriInfo uriInfo) {
         List<String> sources = authorizer.getIdentitySource();
         if (sources == null || sources.isEmpty()) {
             // Default: Authorization header
@@ -1754,6 +1755,10 @@ public class ApiGatewayExecuteController {
             if (source.startsWith("$request.header.")) {
                 String headerName = source.substring("$request.header.".length());
                 String value = headers.getHeaderString(headerName);
+                if (value != null) return stripBearer(value);
+            } else if (source.startsWith("$request.querystring.")) {
+                String paramName = source.substring("$request.querystring.".length());
+                String value = uriInfo.getQueryParameters().getFirst(paramName);
                 if (value != null) return stripBearer(value);
             }
         }
