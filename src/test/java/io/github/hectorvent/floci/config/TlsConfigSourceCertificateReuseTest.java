@@ -175,8 +175,50 @@ class TlsConfigSourceCertificateReuseTest {
 
         assertEquals(initialModifiedTime, newModifiedTime, 
             "Certificate should be reused (same timestamp)");
-        assertEquals(initialMetadata, newMetadata, 
+        assertEquals(initialMetadata, newMetadata,
             "Metadata should be unchanged");
+    }
+
+    /**
+     * Regression: TlsConfigSource is a MicroProfile ConfigSource, so it runs before CDI and before
+     * the security provider is registered — BouncyCastle is NOT yet available. Previously
+     * parseCertificate then failed with "no such provider: BC", isSelfSigned returned false, and the
+     * persisted certificate was regenerated on every restart. The constructor now registers
+     * BouncyCastle up front, so an existing certificate is reused even when BC was not pre-registered.
+     */
+    @Test
+    void testCertificateReusedWhenBouncyCastleNotPreRegistered() throws Exception {
+        System.setProperty("floci.hostname", "floci");
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", tempDir.toString());
+
+        // First boot: generate the certificate.
+        new TlsConfigSource();
+        Path certFile = tempDir.resolve("tls").resolve("floci-selfsigned.crt");
+        assertTrue(Files.exists(certFile), "Initial certificate should be generated");
+        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
+        String initialCert = Files.readString(certFile);
+
+        // Ensure a regeneration would be detectable via timestamp.
+        Thread.sleep(100);
+
+        // Second boot with BouncyCastle NOT registered — mirrors the real ConfigSource-before-CDI
+        // ordering. The constructor must register it and REUSE the existing cert (not regenerate).
+        boolean wasRegistered = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) != null;
+        Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME);
+        try {
+            new TlsConfigSource();
+        } finally {
+            if (wasRegistered && Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+                Security.addProvider(new BouncyCastleProvider());
+            }
+        }
+
+        assertEquals(initialModifiedTime, Files.getLastModifiedTime(certFile).toMillis(),
+            "Certificate should be reused (same timestamp) even when BouncyCastle was not pre-registered");
+        assertEquals(initialCert, Files.readString(certFile),
+            "Certificate content should be unchanged (reused, not regenerated)");
     }
 
     /**
