@@ -267,6 +267,7 @@ public interface EmulatorConfig {
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
+        RumStorageConfig rum();
     }
 
     interface SsmStorageConfig {
@@ -475,6 +476,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface RumStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -572,6 +580,7 @@ public interface EmulatorConfig {
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
+        RumServiceConfig rum();
     }
 
     interface IotServiceConfig {
@@ -596,6 +605,11 @@ public interface EmulatorConfig {
     }
 
     interface IotDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RumServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

@@ -61,6 +61,8 @@ floci:
       cloudfront:
       appsync:
         flush-interval-ms: 60000
+      rum:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
@@ -283,4 +285,6 @@ floci:
         host: 127.0.0.1
         port: 1883
     iotdata:
+      enabled: true
+    rum:
       enabled: true
