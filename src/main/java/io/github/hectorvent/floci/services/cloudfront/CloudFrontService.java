@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionProfile;
 import io.github.hectorvent.floci.services.cloudfront.model.Invalidation;
@@ -103,6 +104,7 @@ public class CloudFrontService {
     // ── Distributions ─────────────────────────────────────────────────────────
 
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
+        ensureAliasesAvailable(dist.getConfig(), null);
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
@@ -129,6 +131,7 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        ensureAliasesAvailable(updated.getConfig(), id);
         updated.setId(id);
         updated.setArn(existing.getArn());
         updated.setDomainName(existing.getDomainName());
@@ -155,6 +158,17 @@ public class CloudFrontService {
         tagStore.delete("distribution/" + id);
     }
 
+    /**
+     * Removes a distribution and its associated invalidations/tags without the disable/If-Match guards
+     * enforced by {@link #deleteDistribution(String, String)}. Used by CloudFormation stack deletion,
+     * which owns the resource lifecycle at the stack level.
+     */
+    public synchronized void removeDistribution(String id) {
+        distStore.delete(id);
+        invalidationStore.delete(id);
+        tagStore.delete("distribution/" + id);
+    }
+
     public List<Distribution> listDistributions(String marker, int maxItems) {
         List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
@@ -175,21 +189,129 @@ public class CloudFrontService {
     }
 
     public synchronized void associateAlias(String targetDistributionId, String alias) {
+        if (alias == null || alias.isBlank()) {
+            throw new AwsException("InvalidArgument", "The alias must not be empty.", 400);
+        }
         Distribution dist = getDistribution(targetDistributionId);
-        List<String> aliases = dist.getConfig() != null ? dist.getConfig().getAliases() : null;
+        if (dist.getConfig() == null) {
+            throw new AwsException("InvalidArgument", "The target distribution has no configuration.", 400);
+        }
+        for (Distribution candidate : distStore.scan(k -> true)) {
+            if (targetDistributionId.equals(candidate.getId()) || candidate.getConfig() == null
+                    || candidate.getConfig().getAliases() == null) {
+                continue;
+            }
+            List<String> previousAliases = candidate.getConfig().getAliases();
+            List<String> remaining = new ArrayList<>(previousAliases);
+            remaining.removeIf(existing -> alias.equalsIgnoreCase(existing));
+            if (remaining.size() != previousAliases.size()) {
+                candidate.getConfig().setAliases(remaining);
+                candidate.setEtag(UUID.randomUUID().toString());
+                candidate.setLastModifiedTime(Instant.now());
+                distStore.put(candidate.getId(), candidate);
+            }
+        }
+
+        List<String> aliases = dist.getConfig().getAliases();
         if (aliases == null) {
             aliases = new ArrayList<>();
         } else {
             aliases = new ArrayList<>(aliases);
         }
-        if (!aliases.contains(alias)) {
-            aliases.add(alias);
-        }
-        if (dist.getConfig() != null) {
-            dist.getConfig().setAliases(aliases);
-        }
+        aliases.removeIf(existing -> alias.equalsIgnoreCase(existing));
+        aliases.add(alias);
+        dist.getConfig().setAliases(aliases);
         dist.setEtag(UUID.randomUUID().toString());
+        dist.setLastModifiedTime(Instant.now());
         distStore.put(targetDistributionId, dist);
+    }
+
+    /**
+     * Finds the distribution whose data-plane requests should be served for the given {@code Host}
+     * header. A distribution matches when the host equals its assigned CloudFront domain name
+     * ({@code <id>.cloudfront.net}) or one of its alternate domain names (CNAME aliases). Any port
+     * suffix is ignored and matching is case-insensitive. Returns {@code null} when nothing matches.
+     */
+    public Distribution findByHost(String host) {
+        if (host == null || host.isBlank()) {
+            return null;
+        }
+        String hostname = stripPort(host);
+        List<Distribution> distributions = new ArrayList<>(distStore.scan(k -> true));
+        for (Distribution dist : distributions) {
+            if (hostname.equalsIgnoreCase(dist.getDomainName())) {
+                return dist;
+            }
+        }
+        for (Distribution dist : distributions) {
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg != null && cfg.getAliases() != null) {
+                for (String alias : cfg.getAliases()) {
+                    if (hostname.equalsIgnoreCase(alias)) {
+                        return dist;
+                    }
+                }
+            }
+        }
+        Distribution best = null;
+        int bestSpecificity = -1;
+        for (Distribution dist : distributions) {
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg == null || cfg.getAliases() == null) {
+                continue;
+            }
+            for (String alias : cfg.getAliases()) {
+                if (wildcardAliasMatches(alias, hostname) && alias.length() > bestSpecificity) {
+                    best = dist;
+                    bestSpecificity = alias.length();
+                }
+            }
+        }
+        return best;
+    }
+
+    private void ensureAliasesAvailable(DistributionConfig config, String currentDistributionId) {
+        if (config == null || config.getAliases() == null) {
+            return;
+        }
+        for (String requested : config.getAliases()) {
+            if (requested == null || requested.isBlank()) {
+                continue;
+            }
+            for (Distribution existing : distStore.scan(k -> true)) {
+                if (existing.getId().equals(currentDistributionId) || existing.getConfig() == null
+                        || existing.getConfig().getAliases() == null) {
+                    continue;
+                }
+                for (String assigned : existing.getConfig().getAliases()) {
+                    if (requested.equalsIgnoreCase(assigned)) {
+                        throw new AwsException("CNAMEAlreadyExists",
+                                "The CNAME you provided is already associated with a different resource.", 409);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean wildcardAliasMatches(String alias, String hostname) {
+        if (alias == null || !alias.startsWith("*.") || hostname == null) {
+            return false;
+        }
+        String suffix = alias.substring(1);
+        return hostname.length() > suffix.length()
+                && hostname.regionMatches(true, hostname.length() - suffix.length(),
+                        suffix, 0, suffix.length());
+    }
+
+    private static String stripPort(String host) {
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) {
+            String maybePort = host.substring(colon + 1);
+            if (!maybePort.isEmpty() && maybePort.chars().allMatch(Character::isDigit)) {
+                return host.substring(0, colon);
+            }
+        }
+        return host;
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
@@ -599,14 +721,14 @@ public class CloudFrontService {
         functionStore.delete(name);
     }
 
-    public List<CloudFrontFunction> listFunctions(String stage) {
+    public List<CloudFrontFunction> listFunctions(String stage, String marker, int maxItems) {
         List<CloudFrontFunction> all = new ArrayList<>(functionStore.scan(k -> true));
         if (stage != null && !stage.isEmpty()) {
             all = all.stream().filter(f -> stage.equals(f.getStage())).toList();
             all = new ArrayList<>(all);
         }
         all.sort((a, b) -> a.getName().compareTo(b.getName()));
-        return all;
+        return paginate(all, marker, maxItems, CloudFrontFunction::getName);
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────

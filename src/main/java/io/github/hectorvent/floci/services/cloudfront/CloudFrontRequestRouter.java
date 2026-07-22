@@ -1,0 +1,255 @@
+package io.github.hectorvent.floci.services.cloudfront;
+
+import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
+
+/**
+ * Pure request-routing logic for CloudFront distribution serving, implemented to the AWS data-plane
+ * spec (verified against the CloudFront Developer Guide):
+ *
+ * <ul>
+ *   <li>The requested path is normalized per RFC 3986 (collapse {@code //}, resolve {@code .}/{@code ..})
+ *       before behavior matching; the raw path is what gets forwarded to the origin.</li>
+ *   <li>Cache behaviors are evaluated in the order listed; the <em>default</em> behavior is always
+ *       processed <em>last</em>. The first matching path pattern wins.</li>
+ *   <li>Path patterns use {@code *} (0+ chars) and {@code ?} (exactly 1 char), are case-sensitive, and a
+ *       leading {@code /} is optional (ignored).</li>
+ *   <li>The default root object is returned <em>only</em> for the distribution root ({@code /}); it is
+ *       never appended for subdirectory requests (this differs from S3 website index documents).</li>
+ *   <li>The origin path is prepended to the request URI when forwarding to the origin.</li>
+ * </ul>
+ *
+ * This class holds no distribution state and does no I/O. It keeps only a bounded compiled-pattern
+ * cache so the routing rules remain cheap and can be unit-tested in isolation.
+ */
+public final class CloudFrontRequestRouter {
+
+    private static final int PATTERN_CACHE_CAPACITY = 256;
+    private static final String REGION_PATTERN = "[a-z0-9-]+-[0-9]+";
+    private static final Pattern AWS_S3_ENDPOINT = Pattern.compile(
+            "(?:s3|s3\\.(?:dualstack\\.)?" + REGION_PATTERN
+                    + "|s3-" + REGION_PATTERN
+                    + "|s3-website[.-]" + REGION_PATTERN
+                    + "|s3-accelerate(?:\\.dualstack)?)\\.amazonaws\\.com(?:\\.cn)?");
+    private static final Pattern LOCAL_S3_ENDPOINT = Pattern.compile(
+            "(?:s3(?:\\." + REGION_PATTERN + ")?"
+                    + "|s3-website[.-]" + REGION_PATTERN
+                    + ")\\.localhost(?:\\.(?:floci\\.io|localstack\\.cloud))?");
+    private static final Map<String, Pattern> PATTERN_CACHE =
+            new LinkedHashMap<>(PATTERN_CACHE_CAPACITY, 0.75f, true);
+
+    private CloudFrontRequestRouter() {
+    }
+
+    /**
+     * Normalizes a viewer request path per RFC 3986 the way CloudFront does before behavior matching:
+     * resolves {@code .} / {@code ..} segments and collapses repeated slashes. Always returns a path
+     * beginning with {@code /}.
+     */
+    public static String normalizePath(String rawPath) {
+        String path = (rawPath == null || rawPath.isEmpty()) ? "/" : rawPath;
+        if (!path.startsWith("/")) {
+            path = "/" + path;
+        }
+        boolean trailingSlash = path.length() > 1
+                && (path.endsWith("/") || path.endsWith("/.") || path.endsWith("/.."));
+        Deque<String> out = new ArrayDeque<>();
+        for (String seg : path.split("/")) {
+            if (seg.isEmpty() || seg.equals(".")) {
+                continue;   // collapses "//" and drops "."
+            }
+            if (seg.equals("..")) {
+                if (!out.isEmpty()) {
+                    out.removeLast();
+                }
+                continue;
+            }
+            out.addLast(seg);
+        }
+        if (out.isEmpty()) {
+            return "/";
+        }
+        String joined = "/" + String.join("/", out);
+        return trailingSlash ? joined + "/" : joined;
+    }
+
+    /** True when {@code path} is the distribution root. */
+    public static boolean isRoot(String normalizedPath) {
+        return normalizedPath == null || normalizedPath.isEmpty() || normalizedPath.equals("/");
+    }
+
+    /**
+     * Returns the {@code targetOriginId} for a normalized path by evaluating the ordered cache
+     * behaviors first (first match wins) and falling back to the default behavior last.
+     */
+    public static String matchTargetOriginId(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return behavior.getTargetOriginId();
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        return dflt != null ? dflt.getTargetOriginId() : null;
+    }
+
+    /**
+     * Matches a CloudFront path pattern against a normalized path. A leading {@code /} on either side is
+     * ignored, {@code *} matches zero or more characters, {@code ?} matches exactly one, and matching is
+     * case-sensitive. A {@code null}/blank or {@code *} pattern matches everything (the default behavior).
+     */
+    public static boolean pathPatternMatches(String pattern, String path) {
+        if (pattern == null || pattern.isEmpty() || pattern.equals("*") || pattern.equals("/*")) {
+            return true;
+        }
+        String p = pattern.startsWith("/") ? pattern.substring(1) : pattern;
+        String candidate = path.startsWith("/") ? path.substring(1) : path;
+        return compiledPattern(p).matcher(candidate).matches();
+    }
+
+    private static Pattern compiledPattern(String pattern) {
+        synchronized (PATTERN_CACHE) {
+            Pattern compiled = PATTERN_CACHE.get(pattern);
+            if (compiled != null) {
+                return compiled;
+            }
+            if (PATTERN_CACHE.size() >= PATTERN_CACHE_CAPACITY) {
+                String eldest = PATTERN_CACHE.keySet().iterator().next();
+                PATTERN_CACHE.remove(eldest);
+            }
+            compiled = Pattern.compile(wildcardToRegex(pattern));
+            PATTERN_CACHE.put(pattern, compiled);
+            return compiled;
+        }
+    }
+
+    static int patternCacheSize() {
+        synchronized (PATTERN_CACHE) {
+            return PATTERN_CACHE.size();
+        }
+    }
+
+    static void clearPatternCache() {
+        synchronized (PATTERN_CACHE) {
+            PATTERN_CACHE.clear();
+        }
+    }
+
+    private static String wildcardToRegex(String pattern) {
+        StringBuilder regex = new StringBuilder(pattern.length() + 8);
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            switch (c) {
+                case '*' -> regex.append(".*");
+                case '?' -> regex.append('.');
+                // Escape every other regex metacharacter so patterns match literally.
+                case '.', '\\', '+', '(', ')', '[', ']', '{', '}', '^', '$', '|' -> regex.append('\\').append(c);
+                default -> regex.append(c);
+            }
+        }
+        return regex.toString();
+    }
+
+    /**
+     * Computes the origin object key for a request: the default root object is used only for the root
+     * request; the origin path is prepended; the result never begins with {@code /} (S3-object form).
+     */
+    public static String resolveOriginKey(String originPath, String normalizedPath, String defaultRootObject) {
+        String combined = resolveForwardUri(originPath, normalizedPath, defaultRootObject);
+        return combined.startsWith("/") ? combined.substring(1) : combined;
+    }
+
+    /**
+     * Computes the URI to forward to the origin: the default root object replaces the path only for the
+     * root request (applies to custom origins as well as S3), then the origin path is prepended. The
+     * result keeps its leading {@code /} (custom-origin URI form).
+     */
+    public static String resolveForwardUri(String originPath, String normalizedPath, String defaultRootObject) {
+        String object;
+        if (isRoot(normalizedPath) && defaultRootObject != null && !defaultRootObject.isBlank()) {
+            object = defaultRootObject;
+        } else {
+            object = normalizedPath;
+        }
+        return joinPath(originPath, object);
+    }
+
+    /** Joins an optional origin path with the object path, normalizing the slash between them. */
+    public static String joinPath(String originPath, String object) {
+        String base = (originPath == null) ? "" : originPath.trim();
+        if (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        String obj = (object == null) ? "" : object;
+        if (!obj.startsWith("/")) {
+            obj = "/" + obj;
+        }
+        return base + obj;
+    }
+
+    /** Finds the origin with the given id, or {@code null}. */
+    public static Origin findOrigin(DistributionConfig config, String originId) {
+        if (config.getOrigins() == null || originId == null) {
+            return null;
+        }
+        for (Origin origin : config.getOrigins()) {
+            if (originId.equals(origin.getId())) {
+                return origin;
+            }
+        }
+        return null;
+    }
+
+    /** True when the origin is an S3 (non-website) origin — modeled by the presence of {@code S3OriginConfig}. */
+    public static boolean isS3Origin(Origin origin) {
+        return origin != null && origin.getS3OriginConfig() != null && origin.getCustomOriginConfig() == null;
+    }
+
+    /**
+     * Extracts the bucket name from an S3 origin domain name. Handles the regional/global REST endpoints
+     * ({@code bucket.s3.us-east-1.amazonaws.com}, {@code bucket.s3.amazonaws.com}) and the website
+     * endpoint ({@code bucket.s3-website-us-east-1.amazonaws.com}) — the bucket is the leading label(s)
+     * before the {@code .s3} / {@code .s3-website} marker.
+     */
+    public static String bucketFromS3Domain(String domainName) {
+        if (domainName == null || domainName.isBlank()) {
+            return null;
+        }
+        String host = domainName;
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) {
+            String port = host.substring(colon + 1);
+            if (port.isEmpty() || !port.chars().allMatch(Character::isDigit)) {
+                return null;
+            }
+            host = host.substring(0, colon);
+        }
+        String lowerHost = host.toLowerCase(java.util.Locale.ROOT);
+        int endpointMarker = -1;
+        for (String marker : new String[] {".s3-website-", ".s3-website.", ".s3.", ".s3-"}) {
+            endpointMarker = Math.max(endpointMarker, lowerHost.lastIndexOf(marker));
+        }
+        if (endpointMarker > 0 && supportedS3Endpoint(lowerHost.substring(endpointMarker + 1))) {
+            return host.substring(0, endpointMarker);
+        }
+        // A bare bucket name is accepted for local configuration. An unrecognized dotted host is
+        // not an S3 endpoint and must not be truncated into a different local bucket name.
+        return host.indexOf('.') < 0 ? host : null;
+    }
+
+    private static boolean supportedS3Endpoint(String endpoint) {
+        return AWS_S3_ENDPOINT.matcher(endpoint).matches()
+                || LOCAL_S3_ENDPOINT.matcher(endpoint).matches();
+    }
+}

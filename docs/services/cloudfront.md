@@ -1,6 +1,6 @@
 # CloudFront
 
-CloudFront management-plane emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, CloudFront Functions, invalidations, and tagging. Actual content delivery is not emulated — this is a management-plane-only implementation.
+CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, CloudFront Functions, invalidations, tagging, and GET/HEAD delivery from S3 or custom origins.
 
 **Protocol:** REST XML  
 **API version:** `2020-05-31`  
@@ -115,9 +115,19 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current `ETag`. A missing or incorrect `ETag` returns `InvalidIfMatchVersion` (400).
 - All `GET` and `POST` (create) responses include an `ETag` response header.
-- All list-type sub-elements in XML follow CloudFront's `<Quantity>N</Quantity><Items>...</Items>` wrapper pattern.
+- List operations emit the payload root declared by the CloudFront REST XML model (for example,
+  `ListDistributions` returns `<DistributionList>`), with list contents represented by
+  `<Quantity>N</Quantity><Items>...</Items>`.
 - OAI `CallerReference` uniqueness is enforced — duplicate `CallerReference` values return `CloudFrontOriginAccessIdentityAlreadyExists` (409).
-- `AssociateAlias` attaches a CNAME alias to the target distribution's config.
+- CNAME aliases are globally unique. `AssociateAlias` atomically transfers an alias from its current
+  owner to the target distribution. Exact aliases take precedence over the most-specific matching
+  wildcard alias.
+- Viewer GET/HEAD requests addressed to an enabled distribution's generated domain or alias are
+  routed to the matching S3 or custom origin. Origin forwarding preserves the raw path and query
+  string; custom-origin redirects are not followed.
+- S3-origin reads honor S3 anonymous-read authorization, including bucket policies when strict S3
+  authentication is enabled.
+- Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
 
 ## Configuration
 
@@ -125,6 +135,7 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 |---|---|---|---|
 | `floci.services.cloudfront.enabled` | `FLOCI_SERVICES_CLOUDFRONT_ENABLED` | `true` | Enable or disable the service |
 | `floci.services.cloudfront.domain-suffix` | `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX` | `cloudfront.net` | Domain suffix for generated distribution domain names |
+| `floci.services.cloudfront.allowed-private-origin-hosts` | `FLOCI_SERVICES_CLOUDFRONT_ALLOWED_PRIVATE_ORIGIN_HOSTS` | `[]` | Exact custom-origin hosts permitted to resolve to private/non-routable addresses (comma-separated in the environment variable) |
 
 ## CLI Examples
 
