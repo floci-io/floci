@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.rum.model.AppMonitor;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -14,6 +15,9 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -35,11 +39,13 @@ public class RumController {
 
     private final RumService service;
     private final ObjectMapper objectMapper;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public RumController(RumService service, ObjectMapper objectMapper) {
+    public RumController(RumService service, ObjectMapper objectMapper, RegionResolver regionResolver) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.regionResolver = regionResolver;
     }
 
     private JsonNode parse(String body) {
@@ -47,7 +53,13 @@ public class RumController {
             return objectMapper.createObjectNode();
         }
         try {
-            return objectMapper.readTree(body);
+            JsonNode request = objectMapper.readTree(body);
+            if (request == null || !request.isObject()) {
+                throw new AwsException("ValidationException", "Request body must be a JSON object.", 400);
+            }
+            return request;
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             throw new AwsException("ValidationException", "Request body is not valid JSON.", 400);
         }
@@ -55,10 +67,9 @@ public class RumController {
 
     @POST
     @Path("/appmonitor")
-    public Response createAppMonitor(String body) {
+    public Response createAppMonitor(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
-        AppMonitor monitor = service.createAppMonitor(
-                request.path("Name").asText(null), request.path("Domain").asText(null));
+        AppMonitor monitor = service.createAppMonitor(regionResolver.resolveRegion(headers), request);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Id", monitor.getId());
         return Response.ok(response).build();
@@ -66,8 +77,8 @@ public class RumController {
 
     @GET
     @Path("/appmonitor/{name}")
-    public Response getAppMonitor(@PathParam("name") String name) {
-        AppMonitor monitor = service.getAppMonitor(name);
+    public Response getAppMonitor(@Context HttpHeaders headers, @PathParam("name") String name) {
+        AppMonitor monitor = service.getAppMonitor(regionResolver.resolveRegion(headers), name);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("AppMonitor", objectMapper.valueToTree(monitor));
         return Response.ok(response).build();
@@ -75,26 +86,43 @@ public class RumController {
 
     @PATCH
     @Path("/appmonitor/{name}")
-    public Response updateAppMonitor(@PathParam("name") String name, String body) {
+    public Response updateAppMonitor(
+            @Context HttpHeaders headers, @PathParam("name") String name, String body) {
         JsonNode request = parse(body);
-        service.updateAppMonitor(name, request.path("Domain").asText(null));
-        return Response.ok(objectMapper.createObjectNode()).build();
+        service.updateAppMonitor(regionResolver.resolveRegion(headers), name, request);
+        return Response.ok().build();
     }
 
     @DELETE
     @Path("/appmonitor/{name}")
-    public Response deleteAppMonitor(@PathParam("name") String name) {
-        service.deleteAppMonitor(name);
-        return Response.ok(objectMapper.createObjectNode()).build();
+    public Response deleteAppMonitor(@Context HttpHeaders headers, @PathParam("name") String name) {
+        service.deleteAppMonitor(regionResolver.resolveRegion(headers), name);
+        return Response.ok().build();
     }
 
     @POST
     @Path("/appmonitors")
-    public Response listAppMonitors(String body) {
+    @Consumes(MediaType.WILDCARD)
+    public Response listAppMonitors(
+            @Context HttpHeaders headers,
+            @QueryParam("maxResults") String maxResults,
+            @QueryParam("nextToken") String nextToken) {
+        RumService.Page page = service.listAppMonitors(
+                regionResolver.resolveRegion(headers), maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         var summaries = response.putArray("AppMonitorSummaries");
-        for (AppMonitor monitor : service.listAppMonitors()) {
-            summaries.addPOJO(monitor);
+        for (AppMonitor monitor : page.monitors()) {
+            ObjectNode summary = objectMapper.createObjectNode();
+            summary.put("Created", monitor.getCreated());
+            summary.put("Id", monitor.getId());
+            summary.put("LastModified", monitor.getLastModified());
+            summary.put("Name", monitor.getName());
+            summary.put("Platform", monitor.getPlatform());
+            summary.put("State", monitor.getState());
+            summaries.add(summary);
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }

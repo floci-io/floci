@@ -61,6 +61,8 @@ floci:
       cloudfront:
       appsync:
         flush-interval-ms: 60000
+      rum:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false

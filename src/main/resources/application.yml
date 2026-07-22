@@ -136,6 +136,8 @@ floci:
         # mode: memory
       appsync:
         flush-interval-ms: 5000
+      rum:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.

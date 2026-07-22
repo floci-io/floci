@@ -379,7 +379,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class)),
                 descriptor("rum", "rum", config.services().rum().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.REST_JSON,
+                        "rum", storageMode(config.storage().services().rum().mode(), config.storage().mode()),
+                        config.storage().services().rum().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("rum"), Set.of(), Set.of(RumController.class))
         ));
