@@ -26,6 +26,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -185,13 +186,14 @@ public class CloudFrontServingController {
             // Origin custom headers: CloudFront adds these to every request it forwards to the origin
             // (overriding any same-named viewer header), which is how a distribution restricts an origin
             // to CloudFront-only traffic via a shared secret header.
+            Map<String, String> originHeaders = new LinkedHashMap<>();
             List<Map<String, String>> customHeaders = origin.getCustomHeaders();
             if (customHeaders != null) {
                 for (Map<String, String> header : customHeaders) {
                     String name = header.get("HeaderName");
                     String value = header.get("HeaderValue");
                     if (name != null && value != null) {
-                        rb.header(name, value);
+                        originHeaders.put(name, value);
                     }
                 }
             }
@@ -200,7 +202,8 @@ public class CloudFrontServingController {
             } else {
                 rb.method("HEAD", HttpRequest.BodyPublishers.noBody());
             }
-            HttpResponse<byte[]> resp = httpClient.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> resp = httpClient.send(
+                    rb.build(), originHeaders, HttpResponse.BodyHandlers.ofByteArray());
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             byte[] body = resp.body() != null ? resp.body() : new byte[0];
             long contentLength = includeBody ? body.length : responseContentLength(resp);

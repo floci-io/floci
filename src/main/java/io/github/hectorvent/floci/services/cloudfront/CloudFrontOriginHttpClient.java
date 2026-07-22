@@ -112,6 +112,12 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
 
     HttpResponse<byte[]> send(HttpRequest request, HttpResponse.BodyHandler<byte[]> bodyHandler)
             throws IOException, InterruptedException {
+        return send(request, Map.of(), bodyHandler);
+    }
+
+    HttpResponse<byte[]> send(HttpRequest request, Map<String, String> originHeaders,
+                              HttpResponse.BodyHandler<byte[]> bodyHandler)
+            throws IOException, InterruptedException {
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedException("CloudFront origin request interrupted");
         }
@@ -124,6 +130,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 .setVersion(HttpVersion.HTTP_1_1);
         request.headers().map().forEach((name, values) ->
                 values.forEach(value -> builder.addHeader(name, value)));
+        originHeaders.forEach(builder::addHeader);
 
         HttpClientContext context = HttpClientContext.create();
         Duration responseTimeout = request.timeout().orElse(RESPONSE_TIMEOUT);
