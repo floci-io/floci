@@ -36,6 +36,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,26 @@ public class RdsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
+            managedDefault("aurora-mysql5.7"),
+            managedDefault("aurora-mysql8.0"),
+            managedDefault("aurora-mysql8.4"),
+            managedDefault("aurora-postgresql11"),
+            managedDefault("aurora-postgresql12"),
+            managedDefault("aurora-postgresql13"),
+            managedDefault("aurora-postgresql14"),
+            managedDefault("aurora-postgresql15"),
+            managedDefault("aurora-postgresql16"),
+            managedDefault("aurora-postgresql17"),
+            managedDefault("aurora-postgresql18"),
+            managedDefault("mysql8.0"),
+            managedDefault("mysql8.4"),
+            managedDefault("postgres13"),
+            managedDefault("postgres14"),
+            managedDefault("postgres15"),
+            managedDefault("postgres16"),
+            managedDefault("postgres17"),
+            managedDefault("postgres18"));
 
     private final StorageBackend<String, DbInstance> instances;
     private final StorageBackend<String, DbCluster> clusters;
@@ -910,7 +931,7 @@ public class RdsService implements Resettable {
     // ── Cluster Parameter Groups ──────────────────────────────────────────────
 
     public DbClusterParameterGroup createDbClusterParameterGroup(String name, String family, String description) {
-        if (clusterParameterGroups.get(name).isPresent()) {
+        if (managedClusterParameterGroup(name) != null || clusterParameterGroups.get(name).isPresent()) {
             throw new AwsException("DBParameterGroupAlreadyExists",
                     "DB cluster parameter group " + name + " already exists.", 400);
         }
@@ -920,19 +941,71 @@ public class RdsService implements Resettable {
     }
 
     public DbClusterParameterGroup getDbClusterParameterGroup(String name) {
-        return clusterParameterGroups.get(name).orElseThrow(() ->
-                new AwsException("DBClusterParameterGroupNotFound",
-                        "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404));
+        if (name != null) {
+            DbClusterParameterGroup persisted = clusterParameterGroups.get(name).orElse(null);
+            if (persisted != null) {
+                return persisted;
+            }
+            ManagedClusterParameterGroup managed = managedClusterParameterGroup(name);
+            if (managed != null) {
+                return managed.toModel();
+            }
+        }
+        throw new AwsException("DBClusterParameterGroupNotFound",
+                "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
     }
 
     public Collection<DbClusterParameterGroup> listDbClusterParameterGroups(String filterName) {
         if (filterName != null && !filterName.isBlank()) {
-            return clusterParameterGroups.get(filterName).map(List::of).orElse(List.of());
+            try {
+                return List.of(getDbClusterParameterGroup(filterName));
+            } catch (AwsException e) {
+                if ("DBClusterParameterGroupNotFound".equals(e.getErrorCode())) {
+                    throw new AwsException("DBParameterGroupNotFound",
+                            "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404);
+                }
+                throw e;
+            }
         }
-        return clusterParameterGroups.scan(k -> true);
+        Map<String, DbClusterParameterGroup> groups = new LinkedHashMap<>();
+        for (ManagedClusterParameterGroup managed : MANAGED_CLUSTER_PARAMETER_GROUPS) {
+            groups.put(managed.name(), managed.toModel());
+        }
+        clusterParameterGroups.scan(k -> true).stream()
+                .sorted(Comparator.comparing(
+                        DbClusterParameterGroup::getDbClusterParameterGroupName,
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .forEach(group -> groups.put(group.getDbClusterParameterGroupName(), group));
+        return List.copyOf(groups.values());
+    }
+
+    private static ManagedClusterParameterGroup managedClusterParameterGroup(String name) {
+        for (ManagedClusterParameterGroup group : MANAGED_CLUSTER_PARAMETER_GROUPS) {
+            if (group.name().equals(name)) {
+                return group;
+            }
+        }
+        return null;
+    }
+
+    private static ManagedClusterParameterGroup managedDefault(String family) {
+        return new ManagedClusterParameterGroup(
+                "default." + family,
+                family,
+                "Default cluster parameter group");
+    }
+
+    private record ManagedClusterParameterGroup(String name, String family, String description) {
+        private DbClusterParameterGroup toModel() {
+            return new DbClusterParameterGroup(name, family, description);
+        }
     }
 
     public void deleteDbClusterParameterGroup(String name) {
+        if (managedClusterParameterGroup(name) != null) {
+            throw new AwsException("InvalidDBParameterGroupState",
+                    "The default DB cluster parameter group cannot be deleted.", 400);
+        }
         if (clusterParameterGroups.get(name).isEmpty()) {
             throw new AwsException("DBClusterParameterGroupNotFound",
                     "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
@@ -942,6 +1015,10 @@ public class RdsService implements Resettable {
 
     public DbClusterParameterGroup modifyDbClusterParameterGroup(String name,
                                                                   java.util.Map<String, String> parameters) {
+        if (managedClusterParameterGroup(name) != null) {
+            throw new AwsException("InvalidDBParameterGroupState",
+                    "The default DB cluster parameter group cannot be modified.", 400);
+        }
         DbClusterParameterGroup group = getDbClusterParameterGroup(name);
         if (parameters != null) {
             group.getParameters().putAll(parameters);
@@ -1010,7 +1087,41 @@ public class RdsService implements Resettable {
             return;
         }
         DbClusterParameterGroup group = getDbClusterParameterGroup(paramGroupName);
-        validateParameterGroupFamily(paramGroupName, group.getDbParameterGroupFamily(), engineParam, engineVersion);
+        String family = group.getDbParameterGroupFamily();
+        String expectedFamily = expectedClusterParameterGroupFamily(engineParam, engineVersion);
+        if (family == null || !family.equalsIgnoreCase(expectedFamily)) {
+            throw new AwsException("InvalidParameterCombination", invalidParameterCombinationMessage(), 400);
+        }
+    }
+
+    private String expectedClusterParameterGroupFamily(String engineParam, String engineVersion) {
+        String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
+        String effectiveVersion = engineVersion;
+        if (effectiveVersion == null || effectiveVersion.isBlank()) {
+            effectiveVersion = switch (normalizedEngine) {
+                case "postgres", "aurora-postgresql" -> "16.3";
+                case "mysql", "aurora", "aurora-mysql" -> "8.0.36";
+                case "mariadb" -> "11.2";
+                default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+            };
+        }
+
+        Matcher matcher = IMAGE_TAG_VERSION_PATTERN.matcher(effectiveVersion.trim());
+        if (!matcher.matches()) {
+            throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        }
+        String[] versionParts = matcher.group(1).split("\\.");
+        String familyVersion = switch (normalizedEngine) {
+            case "postgres", "aurora-postgresql" -> versionParts[0];
+            case "mysql", "aurora", "aurora-mysql", "mariadb" -> {
+                if (versionParts.length < 2) {
+                    throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+                }
+                yield versionParts[0] + "." + versionParts[1];
+            }
+            default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        };
+        return expectedFamilyPrefix(normalizedEngine) + familyVersion;
     }
 
     private void validateParameterGroupFamily(String groupName, String family, String engineParam, String engineVersion) {
