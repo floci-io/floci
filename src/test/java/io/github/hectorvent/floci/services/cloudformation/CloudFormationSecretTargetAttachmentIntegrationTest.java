@@ -119,6 +119,64 @@ class CloudFormationSecretTargetAttachmentIntegrationTest {
     }
 
     @Test
+    void deletionTreatsBinaryOverwriteAsAlreadyDetached() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String secretName = "sta-binary-secret-" + suffix;
+        String databaseId = "sta-binary-database-" + suffix;
+        String stackName = "sta-binary-stack-" + suffix;
+        createSecret(secretName);
+        boolean stackCreated = false;
+
+        try {
+            String template = """
+                    {
+                      "Resources": {
+                        "Database": {
+                          "Type": "AWS::RDS::DBInstance",
+                          "Properties": {
+                            "DBInstanceIdentifier": "%s",
+                            "Engine": "postgres",
+                            "MasterUsername": "dbadmin",
+                            "MasterUserPassword": "database-password"
+                          }
+                        },
+                        "Attachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        }
+                      }
+                    }
+                    """.formatted(databaseId, secretName);
+
+            createStack(stackName, template);
+            stackCreated = true;
+            String describeXml = describeStack(stackName);
+            assertTrue(describeXml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
+                    "stack should be CREATE_COMPLETE: " + describeXml);
+
+            putBinarySecret(secretName, "AQID");
+
+            deleteStack(stackName);
+            awaitStackDeleted(stackName);
+            stackCreated = false;
+
+            JsonNode value = getSecretValue(secretName);
+            assertEquals("AQID", value.path("SecretBinary").asText());
+            assertFalse(value.has("SecretString"));
+        } finally {
+            if (stackCreated) {
+                deleteStack(stackName);
+                awaitStackDeleted(stackName);
+            }
+            forceDeleteSecret(secretName);
+        }
+    }
+
+    @Test
     void createRollbackDetachesConnectionDataFromAnExternalSecret() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String secretName = "sta-rollback-secret-" + suffix;
@@ -203,12 +261,28 @@ class CloudFormationSecretTargetAttachmentIntegrationTest {
     }
 
     private static JsonNode getSecretJson(String secretName) throws Exception {
+        return MAPPER.readTree(getSecretValue(secretName).path("SecretString").asText());
+    }
+
+    private static JsonNode getSecretValue(String secretName) throws Exception {
         String response = given()
             .header("X-Amz-Target", "secretsmanager.GetSecretValue")
             .contentType(SM_CONTENT_TYPE)
             .body("{\"SecretId\":\"" + secretName + "\"}")
         .when().post("/").then().statusCode(200).extract().asString();
-        return MAPPER.readTree(MAPPER.readTree(response).path("SecretString").asText());
+        return MAPPER.readTree(response);
+    }
+
+    private static void putBinarySecret(String secretName, String value) {
+        String request = MAPPER.createObjectNode()
+                .put("SecretId", secretName)
+                .put("SecretBinary", value)
+                .toString();
+        given()
+            .header("X-Amz-Target", "secretsmanager.PutSecretValue")
+            .contentType(SM_CONTENT_TYPE)
+            .body(request)
+        .when().post("/").then().statusCode(200);
     }
 
     private static void forceDeleteSecret(String secretName) {

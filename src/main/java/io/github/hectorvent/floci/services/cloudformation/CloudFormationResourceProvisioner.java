@@ -2084,20 +2084,25 @@ public class CloudFormationResourceProvisioner {
     }
 
     private ObjectNode readSecretJsonObject(String secretId, String region) {
+        return tryReadSecretJsonObject(secretId, region)
+                .orElseThrow(CloudFormationResourceProvisioner::invalidSecretTargetValue);
+    }
+
+    private Optional<ObjectNode> tryReadSecretJsonObject(String secretId, String region) {
         String secretString = secretsManagerService
                 .getSecretValue(secretId, null, null, region)
                 .getSecretString();
         if (secretString == null) {
-            throw invalidSecretTargetValue();
+            return Optional.empty();
         }
         try {
             JsonNode parsed = objectMapper.readTree(secretString);
             if (parsed == null || !parsed.isObject()) {
-                throw invalidSecretTargetValue();
+                return Optional.empty();
             }
-            return ((ObjectNode) parsed).deepCopy();
+            return Optional.of(((ObjectNode) parsed).deepCopy());
         } catch (JsonProcessingException e) {
-            throw invalidSecretTargetValue();
+            return Optional.empty();
         }
     }
 
@@ -2209,7 +2214,13 @@ public class CloudFormationResourceProvisioner {
                                                            String managedKeysAttribute,
                                                            String region) {
         try {
-            ObjectNode currentSecretJson = readSecretJsonObject(secretId, region);
+            Optional<ObjectNode> parsedSecret = tryReadSecretJsonObject(secretId, region);
+            if (parsedSecret.isEmpty()) {
+                LOG.debugv("SecretTargetAttachment current secret value is no longer a JSON object;"
+                        + " treating as already detached: {0}", secretId);
+                return null;
+            }
+            ObjectNode currentSecretJson = parsedSecret.get();
             ObjectNode detachedSecretJson = currentSecretJson.deepCopy();
             List<String> managedKeys = managedSecretTargetKeys(managedKeysAttribute);
             managedKeys.forEach(detachedSecretJson::remove);

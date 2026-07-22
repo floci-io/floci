@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -264,7 +265,7 @@ class SecretTargetAttachmentCfnProvisionerTest {
     }
 
     @Test
-    void invalidOldSecretPreventsAReplacementFromPartiallyMutatingTheNewSecret() {
+    void invalidOldSecretIsTreatedAsDetachedDuringReplacement() {
         String oldArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:old-a1b2c3";
         String newArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:new-d4e5f6";
         ObjectNode properties = instanceProperties();
@@ -280,10 +281,12 @@ class SecretTargetAttachmentCfnProvisionerTest {
         StackResource resource = provision(properties, oldArn,
                 Map.of("__FlociSecretTargetManagedKeys", "engine,host,port"));
 
-        assertEquals("CREATE_FAILED", resource.getStatus());
-        assertTrue(resource.getStatusReason().contains("must be a JSON object"));
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        assertEquals(newArn, resource.getPhysicalId());
+        verify(secretsManagerService).putSecretValue(
+                eq(newArn), any(), isNull(), isNull(), eq(REGION), isNull());
         verify(secretsManagerService, never()).putSecretValue(
-                any(), any(), any(), any(), any(), any());
+                eq(oldArn), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -307,6 +310,45 @@ class SecretTargetAttachmentCfnProvisionerTest {
                 any(), any(), any(), any(), any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"not-json", "\"plain-text\"", "[]"})
+    void detachTreatsMalformedOrNonObjectSecretAsAlreadyDetached(String secretString) {
+        when(secretsManagerService.getSecretValue(SECRET_ARN, null, null, REGION))
+                .thenReturn(secretVersion(secretString));
+
+        assertDoesNotThrow(() -> provisioner.delete(attachmentResource(), REGION));
+
+        verify(secretsManagerService, never()).putSecretValue(
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void detachTreatsBinarySecretAsAlreadyDetached() {
+        SecretVersion binary = new SecretVersion();
+        binary.setSecretBinary("AQID");
+        when(secretsManagerService.getSecretValue(SECRET_ARN, null, null, REGION))
+                .thenReturn(binary);
+
+        assertDoesNotThrow(() -> provisioner.delete(attachmentResource(), REGION));
+
+        verify(secretsManagerService, never()).putSecretValue(
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void detachStillPropagatesSecretReadFailures() {
+        AwsException denied = new AwsException("AccessDeniedException", "denied", 403);
+        when(secretsManagerService.getSecretValue(SECRET_ARN, null, null, REGION))
+                .thenThrow(denied);
+
+        AwsException thrown = assertThrows(
+                AwsException.class, () -> provisioner.delete(attachmentResource(), REGION));
+
+        assertSame(denied, thrown);
+        verify(secretsManagerService, never()).putSecretValue(
+                any(), any(), any(), any(), any(), any());
+    }
+
     @Test
     void physicalIdOnlyDeleteRefusesToGuessWhichSecretFieldsWereManaged() {
         AwsException exception = assertThrows(AwsException.class, () -> provisioner.delete(
@@ -322,6 +364,23 @@ class SecretTargetAttachmentCfnProvisionerTest {
     void secretValueMustBeAJsonObject(String secretString) {
         stubSecretValues(secretString);
         when(rdsService.getDbInstance("database")).thenReturn(dbInstance());
+
+        StackResource resource = provision(instanceProperties());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains("must be a JSON object"));
+        verify(secretsManagerService, never()).putSecretValue(
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void binarySecretStillFailsProvisioning() {
+        SecretVersion binary = new SecretVersion();
+        binary.setSecretBinary("AQID");
+        when(rdsService.getDbInstance("database")).thenReturn(dbInstance());
+        when(secretsManagerService.describeSecret(SECRET_ID, REGION)).thenReturn(secret(SECRET_ARN));
+        when(secretsManagerService.getSecretValue(SECRET_ARN, null, null, REGION))
+                .thenReturn(binary);
 
         StackResource resource = provision(instanceProperties());
 
