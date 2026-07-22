@@ -58,6 +58,60 @@ image: floci/floci:nightly
 
 All images are published as multi-arch manifests supporting `linux/amd64` and `linux/arm64`. Docker selects the correct variant automatically.
 
+## Reusable Image Publishing
+
+The `Build Floci Images` reusable workflow publishes native and compat images
+for an exact branch, tag, or commit. A calling repository owns the trigger,
+destination registry, credentials, and package permissions; the shared workflow
+owns the native amd64 and arm64 builds, multi-architecture manifests, image
+labels, and provenance output.
+
+For example, a fork can keep this small manual caller on its default branch:
+
+```yaml title=".github/workflows/publish-images.yml"
+name: Publish Floci Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-ref:
+        description: Floci branch, tag, or commit to publish
+        required: true
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    uses: floci-io/floci/.github/workflows/build-images.yml@main
+    with:
+      source-ref: ${{ inputs.source-ref }}
+      image: ghcr.io/${{ github.repository_owner }}/floci
+```
+
+Pin the reusable workflow to a trusted tag or full commit SHA when the caller
+requires a stable build contract. The caller's `GITHUB_TOKEN` publishes a GHCR
+image only below the caller's repository owner. Calls targeting another OCI
+registry must pass `REGISTRY_USERNAME` and `REGISTRY_TOKEN` through the reusable
+workflow's declared secrets.
+
+The workflow publishes commit-derived convenience tags:
+
+- `<commit-sha-12>` for the standard native image
+- `<commit-sha-12>-compat` for the compat image
+
+A rerun for the same commit can replace either tag. The workflow therefore
+returns digest-qualified native and compat references and uploads them in a
+provenance JSON artifact. Downstream tests should use a digest-qualified
+reference when they require an immutable image:
+
+```text
+ghcr.io/example/floci@sha256:...
+```
+
 ## What's in the Compat Image
 
 The compat image installs the following on top of the standard image:
