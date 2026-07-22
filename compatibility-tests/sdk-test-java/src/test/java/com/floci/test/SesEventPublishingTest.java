@@ -56,6 +56,7 @@ import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
 import software.amazon.awssdk.services.firehose.FirehoseClient;
+import software.amazon.awssdk.services.firehose.model.BufferingHints;
 import software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest;
 import software.amazon.awssdk.services.firehose.model.DeleteDeliveryStreamRequest;
 import software.amazon.awssdk.services.firehose.model.S3DestinationConfiguration;
@@ -198,6 +199,13 @@ class SesEventPublishingTest {
                         .s3DestinationConfiguration(S3DestinationConfiguration.builder()
                                 .bucketARN("arn:aws:s3:::" + firehoseBucket)
                                 .roleARN("arn:aws:iam::000000000000:role/sdk-evt-fh-role")
+                                // 1s buffering so tests see delivery quickly, matching
+                                // AWS BufferingHints semantics (records are no longer
+                                // auto-flushed at a fixed record count).
+                                .bufferingHints(BufferingHints.builder()
+                                        .sizeInMBs(1)
+                                        .intervalInSeconds(1)
+                                        .build())
                                 .build())
                         .build())
                 .deliveryStreamARN();
@@ -477,8 +485,8 @@ class SesEventPublishingTest {
 
     @Test
     @Order(5)
-    @DisplayName("Firehose destination: 5 sends trigger auto-flush to S3 as NDJSON")
-    void firehoseDestination_fiveSends_triggerAutoFlushToS3() throws Exception {
+    @DisplayName("Firehose destination: 5 sends are delivered to S3 as NDJSON within the buffering interval")
+    void firehoseDestination_fiveSends_deliveredToS3() throws Exception {
         for (int i = 0; i < 5; i++) {
             ses.sendEmail(SendEmailRequest.builder()
                     .fromEmailAddress(identity)
@@ -497,12 +505,19 @@ class SesEventPublishingTest {
                     .build());
         }
 
-        ListObjectsV2Response listed = s3.listObjectsV2(ListObjectsV2Request.builder()
-                .bucket(firehoseBucket)
-                .prefix(firehoseStreamName + "/")
-                .build());
+        // Delivery follows the stream's 1s BufferingHints interval; poll briefly.
+        ListObjectsV2Response listed = null;
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            listed = s3.listObjectsV2(ListObjectsV2Request.builder()
+                    .bucket(firehoseBucket)
+                    .prefix(firehoseStreamName + "/")
+                    .build());
+            if (!listed.contents().isEmpty()) break;
+            Thread.sleep(250);
+        }
         assertThat(listed.contents())
-                .as("Firehose should have flushed exactly one S3 object after 5 records")
+                .as("Firehose should have delivered one S3 object with the 5 buffered records")
                 .hasSize(1);
 
         S3Object obj = listed.contents().get(0);
