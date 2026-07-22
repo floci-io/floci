@@ -96,6 +96,201 @@ setup() {
     assert_output --partial "floci-compat"
 }
 
+@test "Terraform: ECR repository created" {
+    run aws_cmd ecr describe-repositories --repository-names floci-compat-app
+    assert_success
+    assert_output --partial "floci-compat-app"
+}
+
+@test "Terraform: ECS cluster created" {
+    run aws_cmd ecs describe-clusters --clusters floci-compat-cluster
+    assert_success
+    assert_output --partial "floci-compat-cluster"
+    assert_output --partial "ACTIVE"
+}
+
+@test "Terraform: KMS key created" {
+    run aws_cmd kms list-keys
+    assert_success
+    [ "$(aws_cmd kms list-keys --query 'length(Keys)' --output text)" -gt 0 ]
+}
+
+@test "Terraform: Kinesis stream created" {
+    run aws_cmd kinesis describe-stream-summary --stream-name floci-compat-events
+    assert_success
+    assert_output --partial "ACTIVE"
+}
+
+@test "Terraform: CloudWatch log group created" {
+    run aws_cmd logs describe-log-groups --log-group-name-prefix /floci/compat/app
+    assert_success
+    assert_output --partial "/floci/compat/app"
+}
+
+@test "Terraform: EventBridge event bus created" {
+    run aws_cmd events describe-event-bus --name floci-compat-bus
+    assert_success
+    assert_output --partial "floci-compat-bus"
+}
+
+@test "Terraform: Step Functions state machine created" {
+    run aws_cmd stepfunctions list-state-machines
+    assert_success
+    assert_output --partial "floci-compat-state-machine"
+}
+
+@test "Terraform: CloudFormation stack created" {
+    run aws_cmd cloudformation describe-stacks --stack-name floci-compat-stack
+    assert_success
+    assert_output --partial "floci-compat-stack"
+}
+
+@test "Terraform: EKS cluster created" {
+    run aws_cmd eks describe-cluster --name floci-compat-eks
+    assert_success
+    assert_output --partial "floci-compat-eks"
+    assert_output --partial "ACTIVE"
+}
+
+@test "Terraform: CodeBuild project created" {
+    run aws_cmd codebuild batch-get-projects --names floci-compat-codebuild
+    assert_success
+    assert_output --partial "floci-compat-codebuild"
+}
+
+@test "Terraform: API Gateway v1 REST API created" {
+    run aws_cmd apigateway get-rest-apis
+    assert_success
+    assert_output --partial "floci-compat-api"
+}
+
+@test "Terraform: API Gateway v2 HTTP API created" {
+    run aws_cmd apigatewayv2 get-apis
+    assert_success
+    assert_output --partial "floci-compat-http-api"
+}
+
+@test "Terraform: AppConfig application created" {
+    run aws_cmd appconfig list-applications
+    assert_success
+    assert_output --partial "floci-compat-appconfig"
+}
+
+@test "Terraform: Athena workgroup created" {
+    run aws_cmd athena get-work-group --work-group floci-compat-workgroup
+    assert_success
+    assert_output --partial "floci-compat-workgroup"
+}
+
+@test "Terraform: Backup vault created" {
+    run aws_cmd backup describe-backup-vault --backup-vault-name floci-compat-vault
+    assert_success
+    assert_output --partial "floci-compat-vault"
+}
+
+@test "Terraform: Cloud Map namespace created" {
+    run aws_cmd servicediscovery list-namespaces
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "Terraform: CodeDeploy application created" {
+    run aws_cmd deploy get-application --application-name floci-compat-codedeploy
+    assert_success
+    assert_output --partial "floci-compat-codedeploy"
+}
+
+@test "Terraform: ACM certificate created" {
+    run aws_cmd acm list-certificates
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "Terraform: SES identity created" {
+    run aws_cmd ses get-identity-verification-attributes \
+        --identities terraform@floci-compat.internal
+    assert_success
+    assert_output --partial "terraform@floci-compat.internal"
+}
+
+@test "Terraform: EventBridge schedule created" {
+    run aws_cmd scheduler get-schedule --name floci-compat-schedule
+    assert_success
+    assert_output --partial "floci-compat-schedule"
+}
+
+@test "Terraform: Transfer server created" {
+    run aws_cmd transfer list-servers
+    assert_success
+    assert_output --partial "ServerId"
+}
+
+@test "Terraform: WAFv2 web ACL created" {
+    run aws_cmd wafv2 list-web-acls --scope REGIONAL
+    assert_success
+    assert_output --partial "floci-compat-waf"
+}
+
+@test "Terraform: CloudTrail trail created" {
+    run aws_cmd cloudtrail describe-trails
+    assert_success
+    assert_output --partial "floci-compat-trail"
+}
+
+@test "Terraform: Cost and Usage Report created" {
+    run aws_cmd cur describe-report-definitions
+    assert_success
+    assert_output --partial "floci-compat-report"
+}
+
+@test "Terraform: AppSync GraphQL API created" {
+    run aws_cmd appsync list-graphql-apis
+    assert_success
+    assert_output --partial "floci-compat-graphql"
+}
+
+@test "Terraform: Glue catalog database created" {
+    run aws_cmd glue get-databases
+    assert_success
+    assert_output --partial "floci_compat_db"
+}
+
+@test "Terraform: ElastiCache cluster created" {
+    run aws_cmd elasticache describe-cache-clusters --cache-cluster-id floci-compat-cache
+    assert_success
+    assert_output --partial "floci-compat-cache"
+}
+
+@test "Terraform: Firehose delivery stream created" {
+    run aws_cmd firehose list-delivery-streams
+    assert_success
+    assert_output --partial "floci-compat-firehose"
+}
+
+@test "Terraform: EventBridge pipe created" {
+    run aws_cmd pipes list-pipes
+    assert_success
+    assert_output --partial "floci-compat-pipe"
+}
+
+@test "Terraform: Batch compute environment created" {
+    run aws_cmd batch describe-compute-environments
+    assert_success
+    assert_output --partial "floci-compat-batch"
+}
+
+@test "Terraform: Neptune cluster created" {
+    run aws_cmd neptune describe-db-clusters --db-cluster-identifier floci-compat-neptune
+    assert_success
+    assert_output --partial "floci-compat-neptune"
+}
+
+@test "Terraform: OpenSearch domain created" {
+    run aws_cmd opensearch describe-domain --domain-name floci-compat-search
+    assert_success
+    assert_output --partial "floci-compat-search"
+}
+
 @test "Terraform: RDS DB instance created and available" {
     run aws_cmd rds describe-db-instances --db-instance-identifier floci-compat-db
     assert_success

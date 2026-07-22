@@ -141,6 +141,8 @@ Lambda, RDS, Neptune, ElastiCache, MSK, ECS, EC2, EKS, OpenSearch, and CodeBuild
 
 Point standard AWS clients at `http://localhost:4566`. Existing credentials, regions, SDKs, CLI commands, and IaC workflows stay familiar.
 
+Terraform can provision AWS-shaped resources locally through Floci using the standard HashiCorp AWS provider. See the [Terraform with Floci guide](docs/getting-started/terraform.md) for provider configuration, resource examples, and optional emulated S3 state.
+
 </details>
 
 <details>
@@ -678,11 +680,11 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 | `sdk-test-python` | Python 3 | boto3 | 311 |
 | `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 157 |
 | `sdk-test-awscli` | Bash | AWS CLI v2 | 205 |
-| `compat-terraform` | Terraform | v1.10+ | 22 |
-| `compat-opentofu` | OpenTofu | v1.9+ | 16 |
+| `compat-terraform` | Terraform | v1.10+ | 54 |
+| `compat-opentofu` | OpenTofu | v1.9+ | 48 |
 | `compat-cdk` | AWS CDK | v2+ | 20 |
 
-**2,506 automated compatibility tests across 5 SDKs and 3 IaC tools.**
+**2,570 automated compatibility tests across 5 SDKs and 3 IaC tools.**
 
 ## Migrating from LocalStack
 
