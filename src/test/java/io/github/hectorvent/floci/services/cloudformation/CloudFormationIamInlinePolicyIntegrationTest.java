@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Regression for GH-1531: two CloudFormation stacks in the same account each declare an
@@ -168,6 +170,58 @@ class CloudFormationIamInlinePolicyIntegrationTest {
     }
 
     @Test
+    void roleWithMissingManagedPolicyFailsAndRollsBack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-iam-role-missing-policy-" + suffix;
+        String missingArn = "arn:aws:iam::aws:policy/DefinitelyMissing-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Role": {
+                      "Type": "AWS::IAM::Role",
+                      "Properties": {
+                        "RoleName": "missing-policy-role-%s",
+                        "ManagedPolicyArns": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(suffix, missingArn);
+
+        createStack(stackName, template);
+
+        assertFailedResource(stackName, "Role", missingArn, "does not exist");
+    }
+
+    @Test
+    void managedPolicyWithMissingRoleFailsAndRollsBack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-iam-policy-missing-role-" + suffix;
+        String missingRole = "missing-role-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "ManagedPolicy": {
+                      "Type": "AWS::IAM::ManagedPolicy",
+                      "Properties": {
+                        "ManagedPolicyName": "missing-role-policy-%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+                        },
+                        "Roles": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(suffix, missingRole);
+
+        createStack(stackName, template);
+
+        assertFailedResource(stackName, "ManagedPolicy", missingRole, "cannot be found");
+    }
+
+    @Test
     void deletingStackDetachesInlinePolicyFromSurvivingRole() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String roleName = "ext-role-" + suffix;
@@ -259,5 +313,38 @@ class CloudFormationIamInlinePolicyIntegrationTest {
             }
             Thread.sleep(50);
         }
+        throw new AssertionError("Timed out waiting for inline policy " + policyName
+                + " to be detached from role " + roleName);
+    }
+
+    private static void assertFailedResource(String stackName, String logicalId,
+                                             String expectedSubject, String expectedReason) {
+        String stack = describeStack(stackName, "DescribeStacks");
+        assertTrue(
+                stack.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),
+                "stack should roll back after the attachment failure: " + stack);
+        assertFalse(
+                stack.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
+                "stack must not report false success: " + stack);
+
+        String resources = describeStack(stackName, "DescribeStackResources");
+        assertTrue(
+                resources.contains("<LogicalResourceId>" + logicalId + "</LogicalResourceId>")
+                        && resources.contains("<ResourceStatus>CREATE_FAILED</ResourceStatus>"),
+                "failed resource status should be visible: " + resources);
+
+        String events = describeStack(stackName, "DescribeStackEvents");
+        assertTrue(
+                events.contains(expectedSubject) && events.contains(expectedReason),
+                "failure reason should identify the missing attachment target: " + events);
+    }
+
+    private static String describeStack(String stackName, String action) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", action)
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200).extract().asString();
     }
 }

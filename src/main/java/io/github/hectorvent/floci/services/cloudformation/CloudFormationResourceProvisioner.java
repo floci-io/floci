@@ -1894,10 +1894,7 @@ public class CloudFormationResourceProvisioner {
         // Attach managed policies if specified
         if (props != null && props.has("ManagedPolicyArns")) {
             for (JsonNode policyArn : props.get("ManagedPolicyArns")) {
-                try {
-                    iamService.attachRolePolicy(roleName, engine.resolve(policyArn));
-                } catch (Exception ignored) {
-                }
+                iamService.attachRolePolicy(roleName, engine.resolve(policyArn));
             }
         }
     }
@@ -1984,10 +1981,7 @@ public class CloudFormationResourceProvisioner {
         // Attach to roles if specified
         if (props != null && props.has("Roles")) {
             for (JsonNode role : props.get("Roles")) {
-                try {
-                    iamService.attachRolePolicy(engine.resolve(role), policy.getArn());
-                } catch (Exception ignored) {
-                }
+                iamService.attachRolePolicy(engine.resolve(role), policy.getArn());
             }
         }
     }
