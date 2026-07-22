@@ -1,16 +1,19 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Verifies the IAM ListEntitiesForPolicy query action returns the roles, users and groups a managed
@@ -55,8 +58,7 @@ class IamListEntitiesForPolicyIntegrationTest {
                 "PolicyName", policyName,
                 "PolicyDocument",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}");
-        Matcher m = Pattern.compile("<Arn>([^<]+)</Arn>").matcher(createPolicy);
-        String policyArn = m.find() ? m.group(1) : null;
+        String policyArn = XmlParser.extractFirst(createPolicy, "Arn", null);
         assertNotNull(policyArn, "CreatePolicy should return an ARN");
 
         iam("CreateRole", "RoleName", roleName, "AssumeRolePolicyDocument",
@@ -78,16 +80,14 @@ class IamListEntitiesForPolicyIntegrationTest {
         iam("AttachUserPolicy", "UserName", userName, "PolicyArn", policyArn);
         iam("AttachGroupPolicy", "GroupName", groupName, "PolicyArn", policyArn);
 
-        // Now each principal appears under the correct element.
+        // Now the response exposes all three entity groups with SDK-readable names and ids.
         String entities = listEntities(policyArn);
-        assertContainsInSection(entities, "PolicyRoles", "RoleName", roleName);
-        assertContainsInSection(entities, "PolicyUsers", "UserName", userName);
-        assertContainsInSection(entities, "PolicyGroups", "GroupName", groupName);
-
-        // AWS returns the entity id alongside each name; SDK callers read groupId()/userId()/roleId().
-        org.junit.jupiter.api.Assertions.assertTrue(
-                entities.contains("<RoleId>") && entities.contains("<UserId>") && entities.contains("<GroupId>"),
-                "each member should carry its entity id, was: " + entities);
+        assertEquals(List.of("PolicyGroups", "PolicyUsers", "PolicyRoles", "IsTruncated"),
+                XmlParser.childElementNames(entities, "ListEntitiesForPolicyResult"));
+        List<Map<String, String>> members = XmlParser.extractGroups(entities, "member");
+        assertMember(members, "RoleName", roleName, "RoleId");
+        assertMember(members, "UserName", userName, "UserId");
+        assertMember(members, "GroupName", groupName, "GroupId");
     }
 
     @Test
@@ -103,11 +103,10 @@ class IamListEntitiesForPolicyIntegrationTest {
             .body(containsString("NoSuchEntity"));
     }
 
-    private static void assertContainsInSection(String xml, String section, String elem, String value) {
-        Matcher m = Pattern.compile("<" + section + ">(.*?)</" + section + ">", Pattern.DOTALL).matcher(xml);
-        String body = m.find() ? m.group(1) : "";
-        org.junit.jupiter.api.Assertions.assertTrue(
-                body.contains("<" + elem + ">" + value + "</" + elem + ">"),
-                value + " should appear under " + section + " as <" + elem + ">; section was: " + body);
+    private static void assertMember(List<Map<String, String>> members, String nameElement,
+                                     String expectedName, String idElement) {
+        assertTrue(members.stream().anyMatch(member -> expectedName.equals(member.get(nameElement))
+                        && member.get(idElement) != null && !member.get(idElement).isBlank()),
+                () -> expectedName + " should have a non-blank " + idElement + "; members were: " + members);
     }
 }
