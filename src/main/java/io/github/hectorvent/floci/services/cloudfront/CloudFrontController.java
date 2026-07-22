@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.*;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
@@ -22,6 +23,8 @@ import java.util.Map;
 
 @Path("/2020-05-31")
 public class CloudFrontController {
+
+    private static final Logger LOG = Logger.getLogger(CloudFrontController.class);
 
     private static final String NS = AwsNamespaces.CLOUDFRONT;
     private static final String XML = "application/xml";
@@ -509,12 +512,12 @@ public class CloudFrontController {
     public Response getResponseHeadersPolicyConfig(@PathParam("Id") String id) {
         try {
             ResponseHeadersPolicy policy = service.getResponseHeadersPolicy(id);
-            String xml = new XmlBuilder()
+            XmlBuilder builder = new XmlBuilder()
                     .start("ResponseHeadersPolicyConfig", NS)
                     .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("ResponseHeadersPolicyConfig")
-                    .build();
+                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+            ResponseHeadersPolicyConfigCodec.serialize(builder, policy.getConfig());
+            String xml = builder.end("ResponseHeadersPolicyConfig").build();
             return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -562,24 +565,35 @@ public class CloudFrontController {
                                                 @QueryParam("MaxItems") @DefaultValue("100") int maxItems,
                                                 @QueryParam("Type") String type) {
         try {
-            List<ResponseHeadersPolicy> policies = service.listResponseHeadersPolicies(marker, maxItems);
-            boolean truncated = policies.size() == maxItems;
+            if (maxItems < 1 || maxItems > 100) {
+                throw new AwsException("InvalidArgument",
+                        "MaxItems must be between 1 and 100.", 400);
+            }
+            List<ResponseHeadersPolicy> policies =
+                    service.listResponseHeadersPolicies(marker, maxItems + 1, type);
+            boolean truncated = policies.size() > maxItems;
+            if (truncated) {
+                policies = new ArrayList<>(policies.subList(0, maxItems));
+            }
+            String nextMarker = truncated ? policies.get(policies.size() - 1).getId() : null;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListResponseHeadersPoliciesResult", NS)
-                    .start("ResponseHeadersPolicyList")
-                    .elem("Marker", marker != null ? marker : "")
-                    .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", policies.size())
+                    .start("ResponseHeadersPolicyList", NS)
                     .start("Items");
             for (ResponseHeadersPolicy p : policies) {
                 xml.start("ResponseHeadersPolicySummary")
-                        .elem("Type", "custom")
+                        .elem("Type", CloudFrontService.isManagedResponseHeadersPolicy(p.getId())
+                                ? "managed" : "custom")
                         .raw(xmlResponseHeadersPolicyResponse(p))
                         .end("ResponseHeadersPolicySummary");
             }
-            xml.end("Items").end("ResponseHeadersPolicyList").end("ListResponseHeadersPoliciesResult");
+            xml.end("Items")
+                    .elem("MaxItems", maxItems);
+            if (nextMarker != null) {
+                xml.elem("NextMarker", nextMarker);
+            }
+            xml.elem("Quantity", policies.size())
+                    .end("ResponseHeadersPolicyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1765,7 +1779,30 @@ public class CloudFrontController {
         }
         xml.end("CacheBehaviors");
 
-        xml.start("CustomErrorResponses").elem("Quantity", 0).end("CustomErrorResponses");
+        List<Map<String, Object>> customErrors = cfg.getCustomErrorResponses();
+        int cerCount = customErrors != null ? customErrors.size() : 0;
+        xml.start("CustomErrorResponses").elem("Quantity", cerCount);
+        if (cerCount > 0) {
+            xml.start("Items");
+            for (Map<String, Object> cer : customErrors) {
+                xml.start("CustomErrorResponse").elem("ErrorCode", str(cer.get("ErrorCode")));
+                // ResponsePagePath and ResponseCode are optional; CloudFront omits them when unset
+                // rather than returning empty elements.
+                String pagePath = str(cer.get("ResponsePagePath"));
+                if (!pagePath.isEmpty()) {
+                    xml.elem("ResponsePagePath", pagePath);
+                }
+                String responseCode = str(cer.get("ResponseCode"));
+                if (!responseCode.isEmpty()) {
+                    xml.elem("ResponseCode", responseCode);
+                }
+                xml.elem("ErrorCachingMinTTL", cer.get("ErrorCachingMinTTL") != null
+                                ? str(cer.get("ErrorCachingMinTTL")) : "0")
+                        .end("CustomErrorResponse");
+            }
+            xml.end("Items");
+        }
+        xml.end("CustomErrorResponses");
 
         List<String> aliases = cfg.getAliases();
         int aliasCount = aliases != null ? aliases.size() : 0;
@@ -1982,15 +2019,16 @@ public class CloudFrontController {
     }
 
     private String xmlResponseHeadersPolicyResponse(ResponseHeadersPolicy policy) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("ResponseHeadersPolicy")
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
                 .start("ResponseHeadersPolicyConfig")
                 .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("ResponseHeadersPolicyConfig")
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+        ResponseHeadersPolicyConfigCodec.serialize(xml, policy.getConfig());
+        return xml.end("ResponseHeadersPolicyConfig")
                 .end("ResponseHeadersPolicy")
                 .build();
     }
@@ -2059,6 +2097,11 @@ public class CloudFrontController {
                 .build();
     }
 
+    /** Renders a possibly-null value as a string, using the empty string for {@code null}. */
+    private static String str(Object value) {
+        return value != null ? value.toString() : "";
+    }
+
     private String xmlQuantityItems(String wrapper, String itemTag, int count, List<String> items) {
         XmlBuilder xml = new XmlBuilder().start(wrapper).elem("Quantity", count);
         if (count > 0 && items != null && !items.isEmpty()) {
@@ -2106,8 +2149,69 @@ public class CloudFrontController {
         cfg.setCacheBehaviors(parseCacheBehaviors(body));
         cfg.setAliases(parseAliases(body));
         cfg.setViewerCertificate(parseViewerCertificate(body));
+        cfg.setCustomErrorResponses(parseCustomErrorResponses(body));
 
         return cfg;
+    }
+
+    /**
+     * Parses the {@code CustomErrorResponses} block into a list of maps keyed by
+     * {@code ErrorCode}, {@code ResponsePagePath}, {@code ResponseCode} and {@code ErrorCachingMinTTL}
+     * (values kept as strings). CloudFront uses these to override an origin error with a custom
+     * page/status — most notably the SPA fallback that turns a 403/404 into 200 {@code /index.html}.
+     */
+    private List<Map<String, Object>> parseCustomErrorResponses(String body) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (body == null || body.isEmpty()) {
+            return result;
+        }
+        try {
+            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            boolean inBlock = false;
+            boolean inItem = false;
+            Map<String, Object> current = null;
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String local = r.getLocalName();
+                    switch (local) {
+                        case "CustomErrorResponses" -> inBlock = true;
+                        case "CustomErrorResponse" -> {
+                            if (inBlock) {
+                                inItem = true;
+                                current = new LinkedHashMap<>();
+                            }
+                        }
+                        case "ErrorCode", "ResponsePagePath", "ResponseCode", "ErrorCachingMinTTL" -> {
+                            if (inItem && current != null) {
+                                current.put(local, r.getElementText());
+                            }
+                        }
+                        default -> {
+                        }
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    switch (r.getLocalName()) {
+                        case "CustomErrorResponse" -> {
+                            if (inItem && current != null) {
+                                result.add(current);
+                            }
+                            inItem = false;
+                            current = null;
+                        }
+                        case "CustomErrorResponses" -> inBlock = false;
+                        default -> {
+                        }
+                    }
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+            // A malformed CustomErrorResponses block yields the entries parsed so far rather than
+            // failing the whole distribution create/update; log it so the cause is diagnosable.
+            LOG.debugv("Ignoring malformed CustomErrorResponses during parse: {0}", e.getMessage());
+        }
+        return result;
     }
 
     private List<Origin> parseOrigins(String body) {
@@ -2480,6 +2584,7 @@ public class CloudFrontController {
         ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
         policy.setName(XmlParser.extractFirst(body, "Name", null));
         policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        policy.setConfig(ResponseHeadersPolicyConfigCodec.parse(body));
         return policy;
     }
 

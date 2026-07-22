@@ -95,6 +95,32 @@ class XmlParserTest {
         assertNull(groups.get(0).get("Nested"));
     }
 
+    // --- extractElementTree: scoped structured parsing ---
+
+    @Test
+    void extractElementTreePreservesNestedNamespaceQualifiedBlocks() {
+        var root = XmlParser.extractElementTree("""
+                <Envelope xmlns:cf="https://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <cf:Config>
+                    <cf:First><cf:Value>one</cf:Value></cf:First>
+                    <cf:Second><cf:Value><![CDATA[two]]></cf:Value></cf:Second>
+                  </cf:Config>
+                </Envelope>
+                """, "Config");
+
+        assertNotNull(root);
+        assertEquals("Config", root.name());
+        assertEquals("one", root.child("First").child("Value").text());
+        assertEquals("two", root.child("Second").child("Value").text());
+    }
+
+    @Test
+    void extractElementTreeReturnsNullForMalformedOrMissingElements() {
+        assertNull(XmlParser.extractElementTree("<Root><Target></Root>", "Target"));
+        assertNull(XmlParser.extractElementTree("<Root/>", "Target"));
+        assertNull(XmlParser.extractElementTree(null, "Target"));
+    }
+
     // --- extractPairsPerGroup ---
 
     @Test

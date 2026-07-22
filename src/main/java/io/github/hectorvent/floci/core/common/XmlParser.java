@@ -320,6 +320,64 @@ public final class XmlParser {
     }
 
     /**
+     * Parses the first element with the requested local name into a small immutable element tree.
+     *
+     * <p>This supports structured AWS XML payloads where the same leaf name appears in multiple
+     * nested blocks and the flat extraction helpers would lose that context. Namespace prefixes are
+     * ignored, external entities and DTDs remain disabled by the shared factory, and malformed input
+     * returns {@code null} after a diagnostic log entry.
+     */
+    public static XmlElement extractElementTree(String xml, String elementName) {
+        if (xml == null || xml.isEmpty()) {
+            return null;
+        }
+        try {
+            XMLStreamReader r = FACTORY.createXMLStreamReader(new StringReader(xml));
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT
+                        && elementName.equals(r.getLocalName())) {
+                    XmlElement result = readElementTree(r);
+                    r.close();
+                    return result;
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during structured parse: {0}", e.getMessage());
+        }
+        return null;
+    }
+
+    private static XmlElement readElementTree(XMLStreamReader r) throws XMLStreamException {
+        String name = r.getLocalName();
+        StringBuilder text = new StringBuilder();
+        List<XmlElement> children = new ArrayList<>();
+        while (r.hasNext()) {
+            int event = r.next();
+            if (event == XMLStreamConstants.START_ELEMENT) {
+                children.add(readElementTree(r));
+            } else if (event == XMLStreamConstants.CHARACTERS
+                    || event == XMLStreamConstants.CDATA) {
+                text.append(r.getText());
+            } else if (event == XMLStreamConstants.END_ELEMENT) {
+                return new XmlElement(name, text.toString().trim(), List.copyOf(children));
+            }
+        }
+        throw new XMLStreamException("Unexpected end of XML while reading " + name);
+    }
+
+    /** A namespace-agnostic XML element used by {@link #extractElementTree(String, String)}. */
+    public record XmlElement(String name, String text, List<XmlElement> children) {
+        public XmlElement child(String childName) {
+            return children.stream()
+                    .filter(child -> childName.equals(child.name()))
+                    .findFirst()
+                    .orElse(null);
+        }
+    }
+
+    /**
      * Extracts key/value pairs from a repeating {@code pairElement} nested at any depth
      * inside each {@code parentElement} group, returning one map per group.
      *
