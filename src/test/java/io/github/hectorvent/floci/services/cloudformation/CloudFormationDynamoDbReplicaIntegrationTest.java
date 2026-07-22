@@ -11,6 +11,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -126,6 +127,29 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
                     + "\"ReplicaUpdates\":[{\"Create\":{\"RegionName\":\"\"}}]}")
         .when().post("/").then().statusCode(400)
             .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void updateTableRejectsUnsupportedReplicaUpdateBeforeApplyingOtherChanges() {
+        String tableName = "gt-update-replica-" + Long.toString(System.nanoTime(), 36);
+        createTable(tableName);
+
+        given()
+            .contentType(DDB_CONTENT_TYPE)
+            .header("Authorization", DDB_AUTH)
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .body("{\"TableName\":\"" + tableName + "\","
+                    + "\"DeletionProtectionEnabled\":true,"
+                    + "\"ReplicaUpdates\":[{\"Update\":{\"RegionName\":\"us-west-2\"}}]}")
+        .when().post("/").then().statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", containsString("ReplicaUpdates.Update is not supported"));
+
+        String table = ddb("DescribeTable", "{\"TableName\":\"" + tableName + "\"}");
+        assertTrue(table.contains("\"DeletionProtectionEnabled\":false"),
+                "rejected update must not partially mutate the table: " + table);
+        assertFalse(table.contains("\"Replicas\""),
+                "rejected update must not add replicas: " + table);
     }
 
     /** Mirrors the CDK legacy global-table synth: a table plus a Custom::DynamoDBReplica for a peer region. */

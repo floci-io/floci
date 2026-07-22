@@ -3134,12 +3134,7 @@ public class CloudFormationResourceProvisioner {
         // prior replica region so it is not left dangling in the table metadata (and unreachable
         // by delete once the physical id is overwritten below).
         if (priorRegion != null && !priorRegion.isBlank() && !priorRegion.equals(replicaRegion)) {
-            try {
-                dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(priorRegion), region);
-            } catch (Exception e) {
-                LOG.debugv("Could not remove prior replica {0} from table {1}: {2}",
-                        priorRegion, tableName, e.getMessage());
-            }
+            dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(priorRegion), region);
         }
         r.setPhysicalId(replicaRegion);
         r.getAttributes().put("TableName", tableName);

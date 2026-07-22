@@ -1085,6 +1085,15 @@ public class DynamoDbJsonHandler {
 
     private Response handleUpdateTable(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
+        JsonNode replicaUpdates = request.path("ReplicaUpdates");
+        if (replicaUpdates.isArray()) {
+            for (JsonNode update : replicaUpdates) {
+                if (update.has("Update")) {
+                    throw new AwsException(
+                            "ValidationException", "ReplicaUpdates.Update is not supported", 400);
+                }
+            }
+        }
         Long readCapacity = null;
         Long writeCapacity = null;
         JsonNode pt = request.path("ProvisionedThroughput");
@@ -1193,7 +1202,6 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        JsonNode replicaUpdates = request.path("ReplicaUpdates");
         if (!replicaUpdates.isMissingNode() && replicaUpdates.isArray()) {
             List<String> addRegions = new ArrayList<>();
             List<String> removeRegions = new ArrayList<>();
