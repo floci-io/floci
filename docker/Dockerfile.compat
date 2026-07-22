@@ -1,5 +1,6 @@
 ARG VERSION=latest
-FROM floci/floci:${VERSION}
+ARG BASE_IMAGE=floci/floci:${VERSION}
+FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.title="Floci (compat)" \
       org.opencontainers.image.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
