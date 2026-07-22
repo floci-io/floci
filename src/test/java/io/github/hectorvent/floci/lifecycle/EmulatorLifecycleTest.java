@@ -68,6 +68,7 @@ class EmulatorLifecycleTest {
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
     @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
+    @Mock private io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager flinkContainerManager;
     @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -99,7 +100,7 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, rdsService,
+                rabbitMqManager, flinkContainerManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, containerTeardowns, persistentPathValidator);

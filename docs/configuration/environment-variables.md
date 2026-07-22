@@ -358,6 +358,14 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_MSK_MOCK` | `false` | When `true`, clusters are created instantly without a real Redpanda container |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Docker image for Kafka/Redpanda brokers |
 
+### Managed Service for Apache Flink (Kinesis Analytics V2)
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_KINESIS_ANALYTICS_ENABLED` | `true` | Enable the Managed Flink (Kinesis Analytics V2) service |
+| `FLOCI_SERVICES_KINESIS_ANALYTICS_MOCK` | `false` | When `true`, applications start instantly without a real Flink container |
+| `FLOCI_SERVICES_KINESIS_ANALYTICS_DEFAULT_IMAGE` | _(unset)_ | Optional image override; when unset, the image is chosen from the requested `RuntimeEnvironment` (e.g. `FLINK-1_19` → `apache/flink:1.19`) |
+
 ### ECR (Elastic Container Registry)
 
 | Variable | Default | Description |

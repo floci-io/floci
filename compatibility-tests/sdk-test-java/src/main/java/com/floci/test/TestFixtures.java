@@ -38,6 +38,7 @@ import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.kafka.KafkaClient;
 import software.amazon.awssdk.services.mq.MqClient;
+import software.amazon.awssdk.services.kinesisanalyticsv2.KinesisAnalyticsV2Client;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.GetQueryExecutionRequest;
 import software.amazon.awssdk.services.athena.model.QueryExecutionState;
@@ -390,6 +391,14 @@ public final class TestFixtures {
 
     public static MqClient mqClient() {
         return MqClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static KinesisAnalyticsV2Client kinesisAnalyticsV2Client() {
+        return KinesisAnalyticsV2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

@@ -122,6 +122,9 @@ floci:
     amazonmq:
       enabled: true
       mock: true
+    kinesis-analytics:
+      enabled: true
+      mock: true
     elasticache:
       enabled: true
       proxy-base-port: 6379

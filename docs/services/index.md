@@ -1,6 +1,6 @@
 # Services Overview
 
-Floci emulates 68 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
+Floci emulates 69 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
 
 This page is the canonical reference for supported service and operation counts. Some services expose separate control-plane and data-plane rows below. Other docs (and the README) should link here rather than duplicating the table.
 
@@ -25,6 +25,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 43 |
 | [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 34 |
 | [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 24 |
+| [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 7 |
 | [Secrets Manager](secrets-manager.md) | `POST /` + `X-Amz-Target: secretsmanager.*` | JSON 1.1 | 16 |
 | [Step Functions](step-functions.md) | `POST /` + `X-Amz-Target: AmazonStatesService.*` | JSON 1.1 | 19 |
 | [CloudFormation](cloudformation.md) | `POST /` with `Action=` param | Query | 19 |
