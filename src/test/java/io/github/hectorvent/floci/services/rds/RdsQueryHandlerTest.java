@@ -13,11 +13,14 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -161,6 +164,52 @@ class RdsQueryHandlerTest {
         handler.handle("DescribeDBClusters", p);
 
         verify(service).listDbClusters("mycluster");
+    }
+
+    @Test
+    void describeDbClusters_emitsServerlessV2ScalingConfiguration() {
+        DbCluster cluster = makeCluster("mycluster");
+        cluster.setServerlessV2MinCapacity(0.5);
+        cluster.setServerlessV2MaxCapacity(16.0);
+        when(service.listDbClusters(null)).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ServerlessV2ScalingConfiguration>"), body);
+        assertTrue(body.contains("<MinCapacity>0.5</MinCapacity>"), body);
+        assertTrue(body.contains("<MaxCapacity>16.0</MaxCapacity>"), body);
+    }
+
+    @Test
+    void describeDbClusters_omitsServerlessV2WhenUnset() {
+        when(service.listDbClusters(null)).thenReturn(List.of(makeCluster("mycluster")));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        String body = (String) response.getEntity();
+        assertFalse(body.contains("ServerlessV2ScalingConfiguration"),
+                "a provisioned (non-Serverless-v2) cluster must not emit the scaling block");
+    }
+
+    @Test
+    void createDbCluster_parsesServerlessV2ScalingConfiguration() {
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBClusterIdentifier", "cluster1");
+        p.putSingle("Engine", "aurora-postgresql");
+        p.putSingle("ServerlessV2ScalingConfiguration.MinCapacity", "0.5");
+        p.putSingle("ServerlessV2ScalingConfiguration.MaxCapacity", "16");
+
+        ArgumentCaptor<Double> min = ArgumentCaptor.forClass(Double.class);
+        ArgumentCaptor<Double> max = ArgumentCaptor.forClass(Double.class);
+        when(service.createDbCluster(eq("cluster1"), any(), any(), any(), any(), any(), anyBoolean(),
+                any(), any(), any(), anyBoolean(), any(), min.capture(), max.capture()))
+                .thenReturn(makeCluster("cluster1"));
+
+        handler.handle("CreateDBCluster", p);
+
+        assertEquals(0.5, min.getValue());
+        assertEquals(16.0, max.getValue());
     }
 
     @Test
