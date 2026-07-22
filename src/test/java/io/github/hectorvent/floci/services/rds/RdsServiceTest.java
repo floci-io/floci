@@ -589,6 +589,21 @@ class RdsServiceTest {
     }
 
     @Test
+    void listDbClusterParameterGroupsMaterializesAwsDefaultByName() {
+        assertTrue(rdsService.listDbClusterParameterGroups(null).isEmpty());
+
+        Collection<DbClusterParameterGroup> groups =
+                rdsService.listDbClusterParameterGroups("default.aurora-postgresql16");
+
+        assertEquals(1, groups.size());
+        DbClusterParameterGroup group = groups.iterator().next();
+        assertEquals("default.aurora-postgresql16", group.getDbClusterParameterGroupName());
+        assertEquals("aurora-postgresql16", group.getDbParameterGroupFamily());
+        assertEquals("Default cluster parameter group", group.getDescription());
+        assertEquals(1, rdsService.listDbClusterParameterGroups(null).size());
+    }
+
+    @Test
     void createDbClusterRejectsIncompatibleClusterParameterGroupFamily() {
         rdsService.createDbClusterParameterGroup("cpg1", "aurora-mysql8.0", "test group");
 

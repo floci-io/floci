@@ -939,7 +939,7 @@ public class RdsService implements Resettable {
 
     public Collection<DbClusterParameterGroup> listDbClusterParameterGroups(String filterName) {
         if (filterName != null && !filterName.isBlank()) {
-            return clusterParameterGroups.get(filterName).map(List::of).orElse(List.of());
+            return List.of(getDbClusterParameterGroup(filterName));
         }
         return clusterParameterGroups.scan(k -> true);
     }
