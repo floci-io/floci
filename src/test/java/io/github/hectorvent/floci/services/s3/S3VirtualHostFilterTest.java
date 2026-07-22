@@ -5,10 +5,23 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 
+import java.util.Optional;
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class S3VirtualHostFilterTest {
+
+    /**
+     * Always-on service-host suffix set with no configured extra suffixes. Derived from the
+     * production factory so it stays in sync if a builtin suffix is ever added, rather than
+     * hardcoding a copy of {@code EmbeddedDnsServer.BUILTIN_SUFFIXES}.
+     */
+    private static final Set<String> DEFAULT_SUFFIXES =
+            S3VirtualHostFilter.buildServiceHostSuffixes(Optional.empty());
 
     // --- extractBucket with baseHostname ---
 
@@ -54,7 +67,7 @@ class S3VirtualHostFilterTest {
             "my-bucket.s3.us-east-1.localhost.floci.io, localhost, my-bucket",
     })
     void extractsBucketFromVirtualHostedStyle(String host, String baseHostname, String expectedBucket) {
-        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, baseHostname));
+        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
     }
 
     // --- Path-style: service hostname alone — must NOT extract a bucket ---
@@ -81,7 +94,7 @@ class S3VirtualHostFilterTest {
             "my-bucket.emulator.local,  localhost",
     })
     void returnsNullForPathStyleOrMismatchedRemainder(String host, String baseHostname) {
-        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname));
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
     }
 
     @ParameterizedTest
@@ -92,31 +105,81 @@ class S3VirtualHostFilterTest {
             "10.0.0.1:9000,    localhost",
     })
     void returnsNullForIpAddresses(String host, String baseHostname) {
-        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname));
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
     }
 
     @ParameterizedTest
     @NullSource
     void returnsNullForNullHost(String host) {
-        assertNull(S3VirtualHostFilter.extractBucket(host, "localhost"));
+        assertNull(S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
     }
 
     @Test
     void returnsNullForNullBaseHostname() {
         // path-style bare hostname (no subdomain) — must return null
-        assertNull(S3VirtualHostFilter.extractBucket("localhost:4566", null));
+        assertNull(S3VirtualHostFilter.extractBucket("localhost:4566", null, DEFAULT_SUFFIXES));
         // well-known domains match regardless of baseHostname
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost:4566", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.amazonaws.com", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.localhost.localstack.cloud", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost.localstack.cloud", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.localhost.floci.io", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost.floci.io", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost.floci.io", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost:4566", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.amazonaws.com", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.localhost.localstack.cloud", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost.localstack.cloud", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.localhost.floci.io", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost.floci.io", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost.floci.io", null, DEFAULT_SUFFIXES));
         // Region-qualified vhost against localhost fallback works without baseHostname
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost", null));
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost:4566", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost", null, DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost:4566", null, DEFAULT_SUFFIXES));
+    }
+
+    // --- Service-host classification derives from the configured suffix set ---
+
+    @Test
+    void classifiesServiceHostFromDerivedSuffixSet() {
+        // Always-on builtins: bare s3.<builtin> is the service endpoint, not a bucket named "s3"
+        assertTrue(S3VirtualHostFilter.isS3ServiceEndpointHost("s3", "localhost", "localhost", DEFAULT_SUFFIXES));
+        assertTrue(S3VirtualHostFilter.isS3ServiceEndpointHost("s3", "localhost.localstack.cloud", "localhost", DEFAULT_SUFFIXES));
+        assertTrue(S3VirtualHostFilter.isS3ServiceEndpointHost("s3", "localhost.floci.io", "localhost", DEFAULT_SUFFIXES));
+
+        // A configured extra suffix is newly recognised as a service host...
+        Set<String> withExtra = Set.of(
+                "localhost", "localhost.floci.io", "localhost.localstack.cloud", "emulator.internal");
+        assertTrue(S3VirtualHostFilter.isS3ServiceEndpointHost("s3", "emulator.internal", "localhost", withExtra));
+        // ...but is not, with only the builtins configured (proves it comes from config, not a literal)
+        assertFalse(S3VirtualHostFilter.isS3ServiceEndpointHost("s3", "emulator.internal", "localhost", DEFAULT_SUFFIXES));
+
+        // The configured base hostname still wins regardless of the suffix set
+        assertTrue(S3VirtualHostFilter.isS3ServiceEndpointHost("s3", "floci.internal", "floci.internal", DEFAULT_SUFFIXES));
+
+        // Only the "s3" service label is a service host; any other first label is a bucket
+        assertFalse(S3VirtualHostFilter.isS3ServiceEndpointHost("my-bucket", "localhost", "localhost", DEFAULT_SUFFIXES));
+    }
+
+    // --- Virtual-hosted buckets route on a configured extra suffix (like the builtins) ---
+
+    @Test
+    void routesVirtualHostedBucketsForConfiguredExtraSuffix() {
+        Set<String> withExtra = Set.of(
+                "localhost", "localhost.floci.io", "localhost.localstack.cloud", "localhost.example.internal");
+
+        // All three virtual-hosted forms route to the bucket, exactly as the builtins do
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.localhost.example.internal", "localhost", withExtra));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.localhost.example.internal:4566", "localhost", withExtra));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.s3.localhost.example.internal", "localhost", withExtra));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.s3.us-east-1.localhost.example.internal", "localhost", withExtra));
+
+        // The bare s3.<extra> service host stays bucketless
+        assertNull(S3VirtualHostFilter.extractBucket("s3.localhost.example.internal", "localhost", withExtra));
+
+        // Without the suffix configured, the same forms do NOT route (no accidental match)
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "my-bucket.localhost.example.internal", "localhost", DEFAULT_SUFFIXES));
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "my-bucket.s3.localhost.example.internal", "localhost", DEFAULT_SUFFIXES));
     }
 
     // --- Hostname extraction from URL ---
