@@ -48,7 +48,8 @@ public class StepFunctionsService implements Resettable {
     // Fields that are valid only in JSONPath mode. Validated against real AWS:
     // creating a JSONata state machine with any of these fields returns SCHEMA_VALIDATION_FAILED.
     private static final Set<String> JSONPATH_ONLY_FIELDS = Set.of(
-            "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath");
+            "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath",
+            "MaxConcurrencyPath");
     private static final Set<String> ITEM_READER_RESOURCES = Set.of(
             "arn:aws:states:::s3:getObject",
             "arn:aws:states:::s3:listObjectsV2");
@@ -542,13 +543,14 @@ public class StepFunctionsService implements Resettable {
             var fields = states.fields();
             while (fields.hasNext()) {
                 var entry = fields.next();
-                validateState(entry.getKey(), entry.getValue(), topLevelJsonata, errors);
+                validateState("/States/" + entry.getKey(), entry.getValue(), topLevelJsonata, errors);
             }
         }
         return errors;
     }
 
-    private void validateState(String stateName, JsonNode stateDef, boolean topLevelJsonata, List<String> errors) {
+    private void validateState(String statePath, JsonNode stateDef,
+                               boolean topLevelJsonata, List<String> errors) {
         String stateQL = stateDef.path("QueryLanguage").asText(null);
         boolean stateIsJsonata = stateQL != null ? "JSONata".equals(stateQL) : topLevelJsonata;
 
@@ -557,30 +559,149 @@ public class StepFunctionsService implements Resettable {
             for (String field : JSONPATH_ONLY_FIELDS) {
                 if (stateDef.has(field)) {
                     errors.add("The QueryLanguage is set to 'JSONata', but field '" + field
-                            + "' is only supported for the 'JSONPath' QueryLanguage at /States/" + stateName);
+                            + "' is only supported for the 'JSONPath' QueryLanguage at " + statePath);
                 }
             }
         }
 
-        if ("Map".equals(stateDef.path("Type").asText()) && stateDef.has("ItemReader")) {
-            validateItemReader(stateName, stateDef, errors);
+        if ("Map".equals(stateDef.path("Type").asText())) {
+            validateMapConcurrency(statePath, stateDef, stateIsJsonata, errors);
+            if (stateDef.has("ItemReader")) {
+                validateItemReader(statePath, stateDef, errors);
+            }
+            String processorField = stateDef.has("ItemProcessor") ? "ItemProcessor" : "Iterator";
+            validateNestedStates(stateDef.path(processorField).path("States"),
+                    statePath + "/" + processorField + "/States", topLevelJsonata, errors);
+        } else if ("Parallel".equals(stateDef.path("Type").asText())) {
+            JsonNode branches = stateDef.path("Branches");
+            if (branches.isArray()) {
+                for (int i = 0; i < branches.size(); i++) {
+                    validateNestedStates(branches.path(i).path("States"),
+                            statePath + "/Branches/" + i + "/States", topLevelJsonata, errors);
+                }
+            }
         }
     }
 
-    private void validateItemReader(String stateName, JsonNode stateDef, List<String> errors) {
+    private void validateNestedStates(JsonNode states, String statesPath,
+                                      boolean inheritedJsonata, List<String> errors) {
+        if (!states.isObject()) {
+            return;
+        }
+        states.fields().forEachRemaining(entry -> validateState(
+                statesPath + "/" + entry.getKey(), entry.getValue(), inheritedJsonata, errors));
+    }
+
+    private void validateMapConcurrency(String statePath, JsonNode stateDef,
+                                        boolean jsonata, List<String> errors) {
+        if (stateDef.has("MaxConcurrency") && stateDef.has("MaxConcurrencyPath")) {
+            errors.add("A Map state cannot include both field 'MaxConcurrency' and MaxConcurrencyPath"
+                    + " at " + statePath);
+        }
+
+        if (stateDef.has("MaxConcurrency")) {
+            JsonNode value = stateDef.get("MaxConcurrency");
+            boolean expression = jsonata && value.isTextual()
+                    && JsonataEvaluator.isExpression(value.asText());
+            if (!value.isIntegralNumber() && !expression) {
+                errors.add("The field 'MaxConcurrency' must be a non-negative integer"
+                        + (jsonata ? " or a JSONata expression" : "")
+                        + " at " + statePath);
+            } else if (value.isIntegralNumber() && value.bigIntegerValue().signum() < 0) {
+                errors.add("The field 'MaxConcurrency' must be a non-negative integer"
+                        + " at " + statePath);
+            }
+        }
+
+        if (!jsonata && stateDef.has("MaxConcurrencyPath")) {
+            JsonNode path = stateDef.get("MaxConcurrencyPath");
+            String pathValue = path.isTextual() ? path.asText() : null;
+            if (!isReferencePath(pathValue)) {
+                errors.add("The field 'MaxConcurrencyPath' must be a JSONPath reference path"
+                        + " at " + statePath);
+            }
+        }
+    }
+
+    private static boolean isReferencePath(String path) {
+        if (path == null || path.isEmpty() || path.charAt(0) != '$') {
+            return false;
+        }
+        int index = 1;
+        while (index < path.length()) {
+            if (path.charAt(index) == '.') {
+                index++;
+                if (index < path.length() && path.charAt(index) == '[') {
+                    continue;
+                }
+                if (index >= path.length()
+                        || !(Character.isLetter(path.charAt(index)) || path.charAt(index) == '_')) {
+                    return false;
+                }
+                index++;
+                while (index < path.length()
+                        && (Character.isLetterOrDigit(path.charAt(index)) || path.charAt(index) == '_')) {
+                    index++;
+                }
+                continue;
+            }
+            if (path.charAt(index) != '[') {
+                return false;
+            }
+            index++;
+            if (index >= path.length()) {
+                return false;
+            }
+            char first = path.charAt(index);
+            if (Character.isDigit(first)) {
+                while (index < path.length() && Character.isDigit(path.charAt(index))) {
+                    index++;
+                }
+            } else if (first == '\'' || first == '"') {
+                char quote = first;
+                index++;
+                boolean hasCharacter = false;
+                boolean closed = false;
+                while (index < path.length()) {
+                    char current = path.charAt(index++);
+                    if (current == '\\' && index < path.length()) {
+                        index++;
+                        hasCharacter = true;
+                    } else if (current == quote) {
+                        closed = true;
+                        break;
+                    } else {
+                        hasCharacter = true;
+                    }
+                }
+                if (!closed || !hasCharacter) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+            if (index >= path.length() || path.charAt(index) != ']') {
+                return false;
+            }
+            index++;
+        }
+        return true;
+    }
+
+    private void validateItemReader(String statePath, JsonNode stateDef, List<String> errors) {
         JsonNode itemReader = stateDef.get("ItemReader");
         String resource = itemReader.path("Resource").asText(null);
         if (resource != null && !ITEM_READER_RESOURCES.contains(resource)) {
             errors.add("The field 'Resource' does not match any of the allowed values. Examples: "
                     + "[arn:<partition>:states:::s3:getObject, arn:<partition>:states:::s3:listObjectsV2]"
-                    + " at /States/" + stateName + "/ItemReader/Resource");
+                    + " at " + statePath + "/ItemReader/Resource");
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
         if (inputType != null && !ITEM_READER_INPUT_TYPES.contains(inputType)) {
             errors.add("The field 'InputType' should have one of these values: "
                     + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
-                    + " at /States/" + stateName + "/ItemReader/ReaderConfig/InputType");
+                    + " at " + statePath + "/ItemReader/ReaderConfig/InputType");
         }
     }
 }
