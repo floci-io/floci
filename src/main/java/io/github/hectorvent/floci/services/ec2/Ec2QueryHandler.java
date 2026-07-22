@@ -158,6 +158,8 @@ public class Ec2QueryHandler {
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
                 case "DeleteVolume" -> handleDeleteVolume(params, region);
+                case "AttachVolume" -> handleAttachVolume(params, region);
+                case "DetachVolume" -> handleDetachVolume(params, region);
                 // Spot Instances
                 case "RequestSpotInstances" -> handleRequestSpotInstances(params, region);
                 case "DescribeSpotInstanceRequests" -> handleDescribeSpotInstanceRequests(params, region);
@@ -2585,6 +2587,39 @@ public class Ec2QueryHandler {
     private Response handleDeleteVolume(MultivaluedMap<String, String> p, String region) {
         service.deleteVolume(region, p.getFirst("VolumeId"));
         return booleanResponse("DeleteVolume");
+    }
+
+    private Response handleAttachVolume(MultivaluedMap<String, String> p, String region) {
+        String volumeId = p.getFirst("VolumeId");
+        String instanceId = p.getFirst("InstanceId");
+        String device = p.getFirst("Device");
+        VolumeAttachment attachment = service.attachVolume(region, volumeId, instanceId, device);
+        return volumeAttachmentResponse("AttachVolume", attachment, "attaching");
+    }
+
+    private Response handleDetachVolume(MultivaluedMap<String, String> p, String region) {
+        String volumeId = p.getFirst("VolumeId");
+        String instanceId = p.getFirst("InstanceId");
+        String device = p.getFirst("Device");
+        boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
+        VolumeAttachment attachment = service.detachVolume(region, volumeId, instanceId, device, force);
+        return volumeAttachmentResponse("DetachVolume", attachment, "detaching");
+    }
+
+    private Response volumeAttachmentResponse(String action, VolumeAttachment attachment, String status) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("volumeId", attachment.getVolumeId())
+                .elem("instanceId", attachment.getInstanceId())
+                .elem("device", attachment.getDevice())
+                .elem("status", status)
+                .elem("deleteOnTermination", String.valueOf(attachment.isDeleteOnTermination()));
+        if (attachment.getAttachTime() != null) {
+            xml.elem("attachTime", ISO_FMT.format(attachment.getAttachTime()));
+        }
+        xml.end(action + "Response");
+        return xmlResponse(xml.build());
     }
 
     private String volumeXml(Volume vol) {

@@ -2898,6 +2898,95 @@ public class Ec2Service implements ContainerTeardown {
         volumes.delete(key(region, volumeId));
     }
 
+    public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device) {
+        ensureDefaultResources(region);
+        if (volumeId == null || volumeId.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The parameter VolumeId is missing", 400);
+        }
+        if (instanceId == null || instanceId.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The parameter InstanceId is missing", 400);
+        }
+        if (device == null || device.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The parameter Device is missing", 400);
+        }
+        Volume volume = getRequiredVolume(region, volumeId);
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (!List.of("running", "stopped").contains(inst.getState().getName())) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + inst.getInstanceId() + "' is not in a state from which it can be attached", 400);
+        }
+        if (!inst.getPlacement().getAvailabilityZone().equals(volume.getAvailabilityZone())) {
+            throw new AwsException(
+                    "InvalidParameterValue",
+                    "The volume '" + volume.getVolumeId() +
+                            "' and instance '" + inst.getInstanceId() +
+                            "' must be in the same Availability Zone", 400);
+        }
+        if (!"available".equals(volume.getState())) {
+            throw new AwsException("VolumeInUse",
+                    "Volume '" + volumeId + "' is already attached", 400);
+        }
+
+        VolumeAttachment attachment = new VolumeAttachment();
+        attachment.setVolumeId(volumeId);
+        attachment.setInstanceId(instanceId);
+        attachment.setDevice(device);
+        attachment.setState("attached");
+        attachment.setAttachTime(Instant.now());
+        attachment.setDeleteOnTermination(false); // Default for attached volumes
+
+        volume.getAttachments().add(attachment);
+        volume.setState("in-use");
+        volumes.put(key(region, volumeId), volume);
+        return attachment;
+    }
+
+    public VolumeAttachment detachVolume(String region, String volumeId, String instanceId, String device, boolean force) {
+        if (volumeId == null || volumeId.isEmpty()) {
+            throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
+        }
+        ensureDefaultResources(region);
+        Volume volume = getRequiredVolume(region, volumeId);
+
+        if ("available".equals(volume.getState()) || volume.getAttachments().isEmpty()) {
+            throw new AwsException("InvalidVolume.NotAttached",
+                    "Volume '" + volumeId + "' is not attached", 400);
+        }
+        VolumeAttachment target = volume.getAttachments().getFirst();
+        if (instanceId != null && !target.getInstanceId().equals(instanceId)) {
+            throw new AwsException("InvalidAttachment.NotFound",
+                    "Volume '" + volumeId + "' is not attached to instance '" + instanceId + "'", 400);
+        }
+        if (device != null && !target.getDevice().equals(device)) {
+            throw new AwsException("InvalidAttachment.NotFound",
+                    "Volume '" + volumeId + "' is not attached with device '" + device + "'", 400);
+        }
+        Instance inst = getRequiredInstance(region, target.getInstanceId());
+        if (!inst.getState().getName().equals("stopped") && target.getDevice().equals(inst.getRootDeviceName())) {
+            throw new AwsException("OperationNotPermitted",
+                    "The root volume of an instance cannot be detached while the instance is running", 400);
+        }
+        if (!force && target.getDevice().equals(inst.getRootDeviceName())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Device " + inst.getRootDeviceName() + " has the root partition on it. Detaching it will damage the " +
+                            "filesystem/partition tables. To force detachment, use the force parameter", 400);
+        }
+        target.setState("detached");
+        volume.getAttachments().clear();
+        volume.setState("available");
+        volumes.put(key(region, volumeId), volume);
+        return target;
+    }
+
+    private Volume getRequiredVolume(String region, String volumeId) {
+        return volumes.get(key(region, volumeId)).orElseThrow(() ->
+                new AwsException("InvalidVolume.NotFound", "The volume '" + volumeId + "' does not exist", 400)
+        );
+    }
+
     // ─── Network Interfaces ─────────────────────────────────────────────────────
 
     public NetworkInterfaceListResult describeNetworkInterfaces(String region, List<String> networkInterfaceIds,

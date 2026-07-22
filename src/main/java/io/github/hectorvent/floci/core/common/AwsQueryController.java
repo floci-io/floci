@@ -170,7 +170,7 @@ public class AwsQueryController {
             "ModifyLaunchTemplate", "DeleteLaunchTemplate",
             "DescribeNetworkInterfaces",
             "CreateFlowLogs", "DescribeFlowLogs", "DeleteFlowLogs",
-            "CreateVolume", "DescribeVolumes", "DeleteVolume"
+            "CreateVolume", "DescribeVolumes", "DeleteVolume", "AttachVolume", "DetachVolume"
     );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;
