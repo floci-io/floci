@@ -369,6 +369,73 @@ class CloudFormationIamInlinePolicyIntegrationTest {
     }
 
     @Test
+    void inlinePolicyWithMissingRoleRollsBackSuccessfulAttachment() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-iam-inline-missing-role-" + suffix;
+        String existingRole = "inline-existing-role-" + suffix;
+        String missingRole = "inline-missing-role-" + suffix;
+        String policyName = "inline-missing-role-policy-" + suffix;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", existingRole)
+            .formParam("AssumeRolePolicyDocument",
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .when().post("/").then().statusCode(200);
+
+        String template = """
+                {
+                  "Resources": {
+                    "InlinePolicy": {
+                      "Type": "AWS::IAM::Policy",
+                      "Properties": {
+                        "PolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+                        },
+                        "Roles": ["%s", "%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, existingRole, missingRole);
+
+        createStack(stackName, template);
+
+        String stack = describeStack(stackName, "DescribeStacks");
+        assertTrue(stack.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),
+                "stack should roll back after the inline attachment failure: " + stack);
+
+        String resources = describeStack(stackName, "DescribeStackResources");
+        assertTrue(
+                resources.contains("<LogicalResourceId>InlinePolicy</LogicalResourceId>")
+                        && resources.contains("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>"),
+                "partially attached inline policy should be rolled back: " + resources);
+
+        String events = describeStack(stackName, "DescribeStackEvents");
+        assertTrue(events.contains(missingRole) && events.contains("cannot be found"),
+                "failure reason should identify the missing role: " + events);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", existingRole)
+            .formParam("PolicyName", policyName)
+        .when().post("/").then().statusCode(404).body(containsString("NoSuchEntity"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", existingRole)
+        .when().post("/").then().statusCode(200).body(containsString(existingRole));
+    }
+
+    @Test
     void laterResourceFailureRollsBackCompletedManagedPolicyAttachments() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-iam-later-failure-" + suffix;

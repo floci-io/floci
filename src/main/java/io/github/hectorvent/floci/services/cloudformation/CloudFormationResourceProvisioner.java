@@ -1981,27 +1981,26 @@ public class CloudFormationResourceProvisioner {
         // delete can detach cleanly (the delete path only has the physical id + stashed attributes).
         final String name = policyName;
         final String doc = document;
-        r.getAttributes().put("InlineRoleTargets",
-                putInlinePolicy(props, "Roles", engine,
-                        (principal) -> iamService.putRolePolicy(principal, name, doc)));
-        r.getAttributes().put("InlineUserTargets",
-                putInlinePolicy(props, "Users", engine,
-                        (principal) -> iamService.putUserPolicy(principal, name, doc)));
-        r.getAttributes().put("InlineGroupTargets",
-                putInlinePolicy(props, "Groups", engine,
-                        (principal) -> iamService.putGroupPolicy(principal, name, doc)));
+        putInlinePolicy(r, props, "Roles", "InlineRoleTargets", engine,
+                (principal) -> iamService.putRolePolicy(principal, name, doc));
+        putInlinePolicy(r, props, "Users", "InlineUserTargets", engine,
+                (principal) -> iamService.putUserPolicy(principal, name, doc));
+        putInlinePolicy(r, props, "Groups", "InlineGroupTargets", engine,
+                (principal) -> iamService.putGroupPolicy(principal, name, doc));
     }
 
     /**
-     * Applies {@code op} to each principal name listed under {@code propName}, returning a
-     * newline-joined list of the resolved names for later cleanup. A newline is used because IAM
-     * role/user/group names may contain commas ({@code [\w+=,.@-]+}) but never newlines, so it is an
-     * unambiguous separator.
+     * Applies {@code op} to each principal name listed under {@code propName}, recording each
+     * successful target immediately so a later failure in the same list can be rolled back. A
+     * newline is used because IAM role/user/group names may contain commas ({@code [\w+=,.@-]+}) but
+     * never newlines, so it is an unambiguous separator.
      */
-    private String putInlinePolicy(JsonNode props, String propName,
-                                   CloudFormationTemplateEngine engine, java.util.function.Consumer<String> op) {
+    private void putInlinePolicy(StackResource resource, JsonNode props, String propName,
+                                 String targetAttribute, CloudFormationTemplateEngine engine,
+                                 java.util.function.Consumer<String> op) {
+        resource.getAttributes().put(targetAttribute, "");
         if (props == null || !props.has(propName)) {
-            return "";
+            return;
         }
         List<String> names = new ArrayList<>();
         for (JsonNode entry : props.get(propName)) {
@@ -2009,9 +2008,10 @@ public class CloudFormationResourceProvisioner {
             if (name != null && !name.isBlank()) {
                 op.accept(name);
                 names.add(name);
+                resource.getAttributes().put(targetAttribute, String.join("\n", names));
+                resource.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
             }
         }
-        return String.join("\n", names);
     }
 
     /**
@@ -4046,9 +4046,13 @@ public class CloudFormationResourceProvisioner {
             if (!name.isBlank()) {
                 try {
                     op.accept(name);
-                } catch (Exception e) {
-                    // The principal may already be gone (deleted earlier in the same teardown).
-                    LOG.debugv("Could not detach inline policy from principal {0}: {1}", name, e.getMessage());
+                } catch (AwsException e) {
+                    // The principal may already be gone (deleted earlier in the same teardown),
+                    // but permission and service failures must keep the stack in DELETE_FAILED.
+                    if (!"NoSuchEntity".equals(e.getErrorCode())) {
+                        throw e;
+                    }
+                    LOG.debugv("Inline policy principal already gone, treating as detached: {0}", name);
                 }
             }
         }

@@ -204,6 +204,62 @@ class CloudFormationIamAttachmentProvisionerTest {
     }
 
     @Test
+    void inlinePolicyAttachmentFailurePreservesSuccessfulTargetsForRollback() {
+        String policyName = "test-inline-policy";
+        doThrow(new AwsException("NoSuchEntity", "missing role", 404))
+                .when(iamService).putRolePolicy("missing-role", policyName, policyDocument());
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyName": "%s",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["existing-role", "missing-role"]
+                }
+                """.formatted(policyName));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals("existing-role", result.getAttributes().get("InlineRoleTargets"));
+        assertEquals("true", result.getAttributes().get(
+                CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+
+        provisioner.delete(result, "us-east-1");
+
+        verify(iamService).deleteRolePolicy("existing-role", policyName);
+        verify(iamService, never()).deleteRolePolicy("missing-role", policyName);
+    }
+
+    @Test
+    void inlinePolicyDeletionIgnoresAlreadyMissingPrincipal() {
+        String policyName = "test-inline-policy";
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::IAM::Policy");
+        resource.setPhysicalId(policyName);
+        resource.setAttributes(Map.of("InlineRoleTargets", "missing-role"));
+        doThrow(new AwsException("NoSuchEntity", "already gone", 404))
+                .when(iamService).deleteRolePolicy("missing-role", policyName);
+
+        provisioner.delete(resource, "us-east-1");
+
+        verify(iamService).deleteRolePolicy("missing-role", policyName);
+    }
+
+    @Test
+    void inlinePolicyDeletionPropagatesUnexpectedFailure() {
+        String policyName = "test-inline-policy";
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::IAM::Policy");
+        resource.setPhysicalId(policyName);
+        resource.setAttributes(Map.of("InlineRoleTargets", "role-a"));
+        doThrow(new AwsException("AccessDenied", "denied", 403))
+                .when(iamService).deleteRolePolicy("role-a", policyName);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.delete(resource, "us-east-1"));
+
+        assertEquals("AccessDenied", failure.getErrorCode());
+    }
+
+    @Test
     void managedPolicyDeletionDetachesStoredRolesBeforeDeletingPolicy() {
         String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/test-policy";
         StackResource resource = new StackResource();
