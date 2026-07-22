@@ -109,7 +109,7 @@ public class SesController {
             result.put("IdentityType", toV2IdentityType(identity.getIdentityType()));
             result.put("VerifiedForSendingStatus",
                     "Success".equals(identity.getVerificationStatus()));
-            result.set("DkimAttributes", buildDkimAttributes(identity));
+            result.set("DkimAttributes", buildDkimAttributes(identity, region));
 
             LOG.infov("SES V2 CreateEmailIdentity: {0}", emailIdentity);
             return Response.ok(result).build();
@@ -158,7 +158,7 @@ public class SesController {
             throw new AwsException("NotFoundException",
                     "Identity " + emailIdentity + " does not exist.", 404);
         }
-        return Response.ok(buildFullIdentityResponse(identity)).build();
+        return Response.ok(buildFullIdentityResponse(identity, region)).build();
     }
 
     @DELETE
@@ -193,6 +193,50 @@ public class SesController {
             boolean signingEnabled = signingEnabledNode.booleanValue();
             sesService.setDkimAttributes(emailIdentity, signingEnabled, region);
             return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (Exception e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @PUT
+    @Path("/identities/{emailIdentity}/dkim/signing")
+    public Response putEmailIdentityDkimSigningAttributes(@Context HttpHeaders headers,
+                                                          @PathParam("emailIdentity") String emailIdentity,
+                                                          String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode() : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String origin = request.path("SigningAttributesOrigin").asText(null);
+            if (!"AWS_SES".equals(origin) && !"EXTERNAL".equals(origin)) {
+                throw new AwsException("BadRequestException",
+                        "SigningAttributesOrigin must be AWS_SES or EXTERNAL.", 400);
+            }
+            JsonNode attrs = requireObjectOrAbsent(request, "SigningAttributes");
+            String selector = attrs.path("DomainSigningSelector").asText(null);
+            String nextKeyLength = attrs.path("NextSigningKeyLength").asText(null);
+            if (nextKeyLength != null
+                    && !"RSA_1024_BIT".equals(nextKeyLength) && !"RSA_2048_BIT".equals(nextKeyLength)) {
+                throw new AwsException("BadRequestException",
+                        "NextSigningKeyLength must be RSA_1024_BIT or RSA_2048_BIT.", 400);
+            }
+            String privateKey = attrs.path("DomainSigningPrivateKey").asText(null);
+            if ("EXTERNAL".equals(origin)
+                    && (selector == null || selector.isBlank()
+                        || privateKey == null || privateKey.isBlank())) {
+                throw new AwsException("BadRequestException",
+                        "EXTERNAL origin requires DomainSigningSelector and DomainSigningPrivateKey.", 400);
+            }
+            SesService.DkimSigningResult result = sesService.putDkimSigningAttributes(
+                    emailIdentity, origin, selector, nextKeyLength, region);
+            ObjectNode out = objectMapper.createObjectNode();
+            out.put("DkimStatus", toV2Status(result.dkimStatus()));
+            ArrayNode tokens = out.putArray("DkimTokens");
+            result.dkimTokens().forEach(tokens::add);
+            return Response.ok(out).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
         } catch (Exception e) {
@@ -1768,7 +1812,7 @@ public class SesController {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private ObjectNode buildFullIdentityResponse(Identity identity) {
+    private ObjectNode buildFullIdentityResponse(Identity identity, String region) {
         ObjectNode result = objectMapper.createObjectNode();
         result.put("IdentityType", toV2IdentityType(identity.getIdentityType()));
         result.put("VerifiedForSendingStatus",
@@ -1776,7 +1820,7 @@ public class SesController {
         result.put("VerificationStatus", toV2Status(identity.getVerificationStatus()));
         result.put("FeedbackForwardingStatus", identity.isFeedbackForwardingEnabled());
 
-        result.set("DkimAttributes", buildDkimAttributes(identity));
+        result.set("DkimAttributes", buildDkimAttributes(identity, region));
 
         ObjectNode mailFromAttributes = result.putObject("MailFromAttributes");
         mailFromAttributes.put("BehaviorOnMxFailure", v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
@@ -1824,15 +1868,27 @@ public class SesController {
                         + "constraint: Member must satisfy enum value set: [REJECT_MESSAGE, USE_DEFAULT_VALUE]", 400);
     }
 
-    private ObjectNode buildDkimAttributes(Identity identity) {
+    private ObjectNode buildDkimAttributes(Identity identity, String region) {
+        // An email identity reports its parent domain's DKIM (SigningEnabled / Status / Tokens all
+        // inherit from the domain), matching AWS; a domain reports its own.
+        Identity src = sesService.effectiveDkimSource(identity, region);
         ObjectNode dkim = objectMapper.createObjectNode();
-        dkim.put("SigningEnabled", identity.isDkimEnabled());
-        dkim.put("Status", toV2Status(identity.getDkimVerificationStatus()));
+        dkim.put("SigningEnabled", src.isDkimEnabled());
+        dkim.put("Status", toV2Status(src.getDkimVerificationStatus()));
         ArrayNode tokens = dkim.putArray("Tokens");
-        if (identity.getDkimTokens() != null) {
-            for (String token : identity.getDkimTokens()) {
+        if (src.getDkimTokens() != null) {
+            for (String token : src.getDkimTokens()) {
                 tokens.add(token);
             }
+        }
+        dkim.put("SigningAttributesOrigin", src.getDkimSigningAttributesOrigin());
+        dkim.put("NextSigningKeyLength", src.getDkimNextSigningKeyLength());
+        dkim.put("CurrentSigningKeyLength", src.getDkimCurrentSigningKeyLength());
+        if (src.getDkimLastKeyGenerationTimestamp() != null) {
+            // SES v2 (restJson1) serializes this timestamp as epoch seconds (a number); emitting an
+            // ISO string breaks the SDK's unixTimestamp unmarshaller.
+            dkim.put("LastKeyGenerationTimestamp",
+                    src.getDkimLastKeyGenerationTimestamp().toEpochMilli() / 1000.0);
         }
         return dkim;
     }

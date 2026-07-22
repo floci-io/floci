@@ -68,6 +68,8 @@ public class SesQueryHandler {
                 case "SetIdentityNotificationTopic" -> handleSetIdentityNotificationTopic(params, region);
                 case "GetIdentityNotificationAttributes" -> handleGetIdentityNotificationAttributes(params, region);
                 case "SetIdentityFeedbackForwardingEnabled" -> handleSetIdentityFeedbackForwardingEnabled(params, region);
+                case "SetIdentityDkimEnabled" -> handleSetIdentityDkimEnabled(params, region);
+                case "VerifyDomainDkim" -> handleVerifyDomainDkim(params, region);
                 case "SetIdentityHeadersInNotificationsEnabled" -> handleSetIdentityHeadersInNotificationsEnabled(params, region);
                 case "SetIdentityMailFromDomain" -> handleSetIdentityMailFromDomain(params, region);
                 case "GetIdentityMailFromDomainAttributes" -> handleGetIdentityMailFromDomainAttributes(params, region);
@@ -308,14 +310,16 @@ public class SesQueryHandler {
         var xml = new XmlBuilder().start("DkimAttributes");
         for (String identityValue : identities) {
             Identity identity = sesService.getIdentityVerificationAttributes(identityValue, region);
+            // An email identity reports its parent domain's DKIM state (matching AWS).
+            Identity src = sesService.effectiveDkimSource(identity, region);
             xml.start("entry");
             xml.elem("key", identityValue);
             xml.start("value");
-            xml.elem("DkimEnabled", identity != null ? String.valueOf(identity.isDkimEnabled()) : "false");
-            xml.elem("DkimVerificationStatus", identity != null ? identity.getDkimVerificationStatus() : "NotStarted");
+            xml.elem("DkimEnabled", src != null ? String.valueOf(src.isDkimEnabled()) : "false");
+            xml.elem("DkimVerificationStatus", src != null ? src.getDkimVerificationStatus() : "NotStarted");
             xml.start("DkimTokens");
-            if (identity != null && identity.getDkimTokens() != null) {
-                for (String token : identity.getDkimTokens()) {
+            if (src != null && src.getDkimTokens() != null) {
+                for (String token : src.getDkimTokens()) {
                     xml.elem("member", token);
                 }
             }
@@ -332,6 +336,24 @@ public class SesQueryHandler {
         boolean enabled = parseRequiredBoolean(params, "ForwardingEnabled");
         sesService.setFeedbackForwardingEnabled(identityValue, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityFeedbackForwardingEnabled", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleSetIdentityDkimEnabled(MultivaluedMap<String, String> params, String region) {
+        String identityValue = getParam(params, "Identity");
+        boolean enabled = parseRequiredBoolean(params, "DkimEnabled");
+        sesService.setDkimAttributes(identityValue, enabled, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityDkimEnabled", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleVerifyDomainDkim(MultivaluedMap<String, String> params, String region) {
+        String domain = getParam(params, "Domain");
+        List<String> tokens = sesService.verifyDomainDkim(domain, region);
+        var xml = new XmlBuilder().start("DkimTokens");
+        for (String token : tokens) {
+            xml.elem("member", token);
+        }
+        xml.end("DkimTokens");
+        return Response.ok(AwsQueryResponse.envelope("VerifyDomainDkim", AwsNamespaces.SES, xml.build())).build();
     }
 
     private Response handleSetIdentityHeadersInNotificationsEnabled(MultivaluedMap<String, String> params, String region) {

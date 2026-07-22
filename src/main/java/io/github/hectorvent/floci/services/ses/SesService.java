@@ -207,10 +207,13 @@ public class SesService {
         if (existing != null) return existing;
 
         Identity identity = new Identity(domain, "Domain");
-        identity.setDkimTokens(generateDkimTokens());
+        regenerateDkimTokens(identity);
         identity.setVerificationStatus("Pending");
         identity.setDkimEnabled(true);
-        identity.setDkimVerificationStatus("Pending");
+        // The create response reports DKIM verification as NotStarted (SES hasn't begun tracking the
+        // CNAMEs yet); the first Get/List refresh transitions it to Pending. Matches AWS, where
+        // CreateEmailIdentity returns NOT_STARTED but a subsequent GetEmailIdentity returns PENDING.
+        identity.setDkimVerificationStatus("NotStarted");
         identityStore.put(key, identity);
         LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
         return identity;
@@ -583,27 +586,33 @@ public class SesService {
     }
 
     public void setDkimAttributes(String identityValue, boolean signingEnabled, String region) {
-        String key = identityKey(region, identityValue);
-        Identity identity = identityStore.get(key).orElse(null);
-
-        if (identity == null) {
-            String domain = identityValue != null && identityValue.contains("@")
-                    ? identityValue.substring(identityValue.indexOf('@') + 1)
-                    : identityValue;
-            if (identityValue != null && identityValue.contains("@")
-                    && identityStore.get(identityKey(region, domain)).isPresent()) {
+        if (identityValue == null || identityValue.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "Identity is required.", 400);
+        }
+        // DKIM is a domain concept and an email reports its parent domain's DKIM (via effectiveDkimSource),
+        // so toggling DKIM on an email whose parent domain is a registered identity is a no-op that leaves
+        // the domain untouched — matching real AWS, regardless of whether the email identity itself exists.
+        if (identityValue.contains("@")) {
+            String domain = identityValue.substring(identityValue.indexOf('@') + 1);
+            if (identityStore.get(identityKey(region, domain)).isPresent()) {
                 return;
             }
-            throw new AwsException("BadRequestException",
+        }
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key).orElse(null);
+        if (identity == null) {
+            String domain = identityValue.contains("@")
+                    ? identityValue.substring(identityValue.indexOf('@') + 1)
+                    : identityValue;
+            // v1-native code; the v2 controller remaps InvalidParameterValue -> BadRequestException.
+            throw new AwsException("InvalidParameterValue",
                     "Domain " + domain + " is not verified for DKIM signing.", 400);
         }
 
+        // Only toggle the signing flag. DkimVerificationStatus tracks DNS record detection (via the
+        // Route53 lookup in refreshIdentityState), not the enabled flag — matching real AWS, where
+        // SetIdentityDkimEnabled / PutEmailIdentityDkimAttributes leave the verification status alone.
         identity.setDkimEnabled(signingEnabled);
-        if (signingEnabled) {
-            identity.setDkimVerificationStatus("Success");
-        } else {
-            identity.setDkimVerificationStatus("NotStarted");
-        }
         identityStore.put(key, identity);
         LOG.infov("Updated DKIM attributes for {0}: signingEnabled={1}", identityValue, signingEnabled);
     }
@@ -616,6 +625,127 @@ public class SesService {
         return tokens;
     }
 
+    /**
+     * Generates a fresh Easy DKIM token set and records the key length / generation timestamp. New
+     * tokens mean the previously published CNAMEs no longer match, so the verification status resets
+     * to Pending (re-detected via the Route53 lookup) and the origin returns to AWS_SES. Only meaningful
+     * for domain identities; refreshIdentityState re-upgrades to Success once the new records exist.
+     */
+    private void regenerateDkimTokens(Identity identity) {
+        identity.setDkimTokens(generateDkimTokens());
+        identity.setDkimCurrentSigningKeyLength(identity.getDkimNextSigningKeyLength());
+        identity.setDkimLastKeyGenerationTimestamp(Instant.now(clock));
+        identity.setDkimSigningAttributesOrigin("AWS_SES");
+        // The new tokens' CNAMEs aren't detected yet, so DKIM verification resets to Pending. The
+        // identity's own verification is NOT revoked by a key rotation (matching AWS) — keep Success
+        // when already verified; a not-yet-verified identity stays Pending.
+        identity.setDkimVerificationStatus("Pending");
+        if (!"Success".equals(identity.getVerificationStatus())) {
+            identity.setVerificationStatus("Pending");
+        }
+    }
+
+    /**
+     * v1 VerifyDomainDkim: returns the domain identity's DKIM tokens (3), generating them if needed.
+     * Tokens are stable across calls (AWS does not regenerate them). The domain is registered as a
+     * pending identity if it does not exist yet, matching AWS's lenient behavior (VerifyDomainDkim
+     * starts DKIM setup for any domain).
+     */
+    public List<String> verifyDomainDkim(String domain, String region) {
+        validateIdentityWhitespace(domain, "Domain");
+        if (domain == null || domain.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "Domain is required.", 400);
+        }
+        if (domain.contains("@")) {
+            // Domain-only action: an email-shaped value must not create an email-valued "Domain".
+            throw new AwsException("InvalidParameterValue", "Domain " + domain + " is invalid.", 400);
+        }
+        String key = identityKey(region, domain);
+        Identity identity = identityStore.get(key).orElse(null);
+        if (identity == null) {
+            identity = new Identity(domain, "Domain");
+            identity.setVerificationStatus("Pending");
+            identity.setDkimEnabled(true);
+            identity.setDkimVerificationStatus("Pending");
+        }
+        if (!hasDkimTokens(identity)) {
+            regenerateDkimTokens(identity);
+        }
+        identityStore.put(key, identity);
+        LOG.infov("VerifyDomainDkim: {0} (region {1})", domain, region);
+        return identity.getDkimTokens();
+    }
+
+    /**
+     * v2 PutEmailIdentityDkimSigningAttributes. AWS_SES (Easy DKIM): sets the next signing key length
+     * and regenerates tokens when the length changes. EXTERNAL (BYODKIM): switches the origin and
+     * clears the Easy DKIM tokens (the caller publishes its own selector, which Floci does not use for
+     * signing). Returns the resulting DKIM status and tokens.
+     */
+    public DkimSigningResult putDkimSigningAttributes(String identityValue, String origin,
+                                                      String signingSelector, String nextKeyLength,
+                                                      String region) {
+        // DKIM signing attributes are domain-level; AWS rejects an email-address identity here rather
+        // than mutating state that the email would just inherit back from its parent domain.
+        if (identityValue != null && identityValue.contains("@")) {
+            throw new AwsException("BadRequestException",
+                    "The EmailIdentity value must be a valid domain.", 400);
+        }
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Email identity " + identityValue + " does not exist.", 404));
+        if ("EXTERNAL".equals(origin)) {
+            identity.setDkimSigningAttributesOrigin("EXTERNAL");
+            // Clear the Easy DKIM tokens and reset the status: Floci can't verify a BYODKIM selector,
+            // so leaving a prior Success/Pending with no tokens (and no Route53 detection path) would
+            // be inconsistent.
+            identity.setDkimTokens(new ArrayList<>());
+            identity.setDkimVerificationStatus("Pending");
+            LOG.infov("PutEmailIdentityDkimSigningAttributes(EXTERNAL): {0} selector={1}",
+                    identityValue, signingSelector);
+        } else {
+            identity.setDkimSigningAttributesOrigin("AWS_SES");
+            // DKIM tokens are a domain concept; only (re)generate them for a domain identity.
+            if ("Domain".equals(identity.getIdentityType())) {
+                if (nextKeyLength != null && !nextKeyLength.equals(identity.getDkimCurrentSigningKeyLength())) {
+                    identity.setDkimNextSigningKeyLength(nextKeyLength);
+                    regenerateDkimTokens(identity);
+                } else if (!hasDkimTokens(identity)) {
+                    regenerateDkimTokens(identity);
+                }
+            }
+            LOG.infov("PutEmailIdentityDkimSigningAttributes(AWS_SES): {0} keyLength={1}",
+                    identityValue, nextKeyLength);
+        }
+        identityStore.put(key, refreshIdentityState(identity, region));
+        Identity src = effectiveDkimSource(identity, region);
+        return new DkimSigningResult(src.getDkimVerificationStatus(),
+                src.getDkimTokens() == null ? List.of() : src.getDkimTokens());
+    }
+
+    /** Carrier for the PutEmailIdentityDkimSigningAttributes response ({@code dkimStatus} is v1-native). */
+    public record DkimSigningResult(String dkimStatus, List<String> dkimTokens) {}
+
+    /**
+     * Resolves which identity's DKIM state should be reported for {@code identity}. A domain reports
+     * its own DKIM; an email address reports its parent domain's DKIM (SigningEnabled / Status /
+     * Tokens all inherit from the domain), matching AWS. Falls back to the identity itself when the
+     * parent domain is not a registered identity.
+     */
+    public Identity effectiveDkimSource(Identity identity, String region) {
+        if (identity == null || !"EmailAddress".equals(identity.getIdentityType())) {
+            return identity;
+        }
+        String addr = identity.getIdentity();
+        int at = addr == null ? -1 : addr.indexOf('@');
+        if (at < 0 || at == addr.length() - 1) {
+            return identity;
+        }
+        Identity domainIdentity = identityStore.get(identityKey(region, addr.substring(at + 1))).orElse(null);
+        return domainIdentity == null ? identity : refreshIdentityState(domainIdentity, region);
+    }
+
     private Identity refreshIdentityState(Identity identity, String region) {
         if (identity == null) {
             return null;
@@ -623,19 +753,30 @@ public class SesService {
 
         boolean changed = false;
         if ("Domain".equals(identity.getIdentityType()) && identity.getDkimTokens() == null) {
-            identity.setDkimTokens(generateDkimTokens());
+            regenerateDkimTokens(identity);
             changed = true;
         }
 
         if ("Domain".equals(identity.getIdentityType()) && hasDkimTokens(identity)) {
             changed |= normalizePendingDomainState(identity);
-            if (!"Success".equals(identity.getVerificationStatus())
-                    && hasAllExpectedDkimRecords(identity, region)) {
-                identity.setVerificationStatus("Success");
-                if (identity.isDkimEnabled()) {
-                    identity.setDkimVerificationStatus("Success");
+            // Upgrade identity- and DKIM-verification independently so that, e.g., after a key rotation
+            // (which resets only DkimVerificationStatus while the identity stays verified), the DKIM
+            // status can still return to Success once the new records are detected.
+            // Only look up DNS when a status can still be upgraded — skip the (cached) Route53 check
+            // once both identity- and DKIM-verification are already Success. DKIM verification tracks
+            // DNS detection independently of the signing-enabled flag, so it can reach Success even
+            // when DKIM signing is disabled, and can re-pend/re-upgrade after a key rotation.
+            boolean needsUpgrade = !"Success".equals(identity.getVerificationStatus())
+                    || !"Success".equals(identity.getDkimVerificationStatus());
+            if (needsUpgrade && hasAllExpectedDkimRecords(identity, region)) {
+                if (!"Success".equals(identity.getVerificationStatus())) {
+                    identity.setVerificationStatus("Success");
+                    changed = true;
                 }
-                changed = true;
+                if (!"Success".equals(identity.getDkimVerificationStatus())) {
+                    identity.setDkimVerificationStatus("Success");
+                    changed = true;
+                }
             }
         }
 
@@ -660,8 +801,9 @@ public class SesService {
             identity.setVerificationStatus("Pending");
             changed = true;
         }
-        if (identity.isDkimEnabled()
-                && !"Success".equals(identity.getDkimVerificationStatus())
+        // DKIM verification tracks DNS detection, not the signing-enabled flag, so a domain that has
+        // begun tracking (NotStarted -> Pending) reports Pending on Get even while signing is disabled.
+        if (!"Success".equals(identity.getDkimVerificationStatus())
                 && !"Pending".equals(identity.getDkimVerificationStatus())) {
             identity.setDkimVerificationStatus("Pending");
             changed = true;

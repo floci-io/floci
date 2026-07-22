@@ -71,7 +71,9 @@ class SesServiceLegacyDkimTokensTest {
         assertTrue(refreshed.getDkimTokens().stream().allMatch(token -> token != null && !token.isBlank()));
         assertEquals("Pending", refreshed.getVerificationStatus());
         assertFalse(refreshed.isDkimEnabled());
-        assertEquals("NotStarted", refreshed.getDkimVerificationStatus());
+        // Once tokens are backfilled the domain is pending DNS detection (status tracks detection, not
+        // the signing flag), rather than staying NotStarted.
+        assertEquals("Pending", refreshed.getDkimVerificationStatus());
 
         List<String> persistedTokens = identityStore.get(key).orElseThrow().getDkimTokens();
         assertNotNull(persistedTokens);
