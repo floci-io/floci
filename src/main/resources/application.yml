@@ -437,3 +437,5 @@ floci:
         port: 1883
     iotdata:
       enabled: true
+    rum:
+      enabled: true

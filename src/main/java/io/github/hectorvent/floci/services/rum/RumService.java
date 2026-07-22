@@ -38,10 +38,21 @@ public class RumService implements Resettable {
     }
 
     public void updateAppMonitor(String name, String domain) {
-        AppMonitor monitor = getAppMonitor(name);
-        if (domain != null && !domain.isBlank()) {
-            monitor.setDomain(domain);
-        }
+        monitors.compute(name, (key, current) -> {
+            if (current == null) {
+                throw new AwsException(
+                        "ResourceNotFoundException", "App monitor " + name + " does not exist.", 404);
+            }
+            if (domain == null || domain.isBlank()) {
+                return current;
+            }
+            return new AppMonitor(
+                    current.getId(),
+                    current.getName(),
+                    domain,
+                    current.getState(),
+                    current.getCreated());
+        });
     }
 
     public void deleteAppMonitor(String name) {
