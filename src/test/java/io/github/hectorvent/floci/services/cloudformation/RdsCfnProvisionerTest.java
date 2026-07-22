@@ -9,22 +9,33 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.Parameter;
+import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -36,13 +47,17 @@ class RdsCfnProvisionerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RdsService rdsService;
+    private SecretsManagerService secretsManagerService;
+    private SsmService ssmService;
     private CloudFormationResourceProvisioner provisioner;
 
     @BeforeEach
     void setUp() {
         rdsService = mock(RdsService.class);
+        secretsManagerService = mock(SecretsManagerService.class);
+        ssmService = mock(SsmService.class);
         provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, ssmService, null, secretsManagerService, null,
                 null, null, null, null, null, null,
                 mapper,
                 null, null, null, null, null, null, null,
@@ -156,6 +171,141 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-west-2");
+    }
+
+    @Test
+    void resolvesSecretsManagerDynamicReferenceInMasterPassword() {
+        SecretVersion version = mock(SecretVersion.class);
+        when(version.getSecretString()).thenReturn("{\"password\":\"resolved-secret\"}");
+        when(secretsManagerService.getSecretValue(any(), any(), any(), any())).thenReturn(version);
+
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","EngineVersion":"16.3",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:secretsmanager:my-secret:SecretString:password}}",
+                 "DatabaseName":"appdb"}
+                """, "us-west-2");
+
+        // The {{resolve:secretsmanager:...}} dynamic reference is substituted with the live secret
+        // value (the JSON key extracted) before the password reaches RdsService.
+        verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
+                eq("admin"), eq("resolved-secret"), eq("appdb"), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any());
+        verify(secretsManagerService).getSecretValue("my-secret", null, null, "us-west-2");
+    }
+
+    @Test
+    void resolvesSsmDynamicReferenceInMasterPassword() {
+        Parameter param = mock(Parameter.class);
+        when(param.getValue()).thenReturn("resolved-ssm");
+        when(ssmService.getParameter(eq("/db/password"), any())).thenReturn(param);
+
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","EngineVersion":"16.3",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:ssm:/db/password}}",
+                 "DatabaseName":"appdb"}
+                """);
+
+        // The {{resolve:ssm:<name>}} dynamic reference is substituted with the parameter value.
+        verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
+                eq("admin"), eq("resolved-ssm"), eq("appdb"), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void resolvesPinnedSsmVersionInStackRegion() {
+        ParameterHistory versionOne = new ParameterHistory();
+        versionOne.setVersion(1);
+        versionOne.setValue("first-password");
+        ParameterHistory versionTwo = new ParameterHistory();
+        versionTwo.setVersion(2);
+        versionTwo.setValue("latest-password");
+        when(ssmService.getParameterHistory("/db/password", "us-west-2"))
+                .thenReturn(List.of(versionOne, versionTwo));
+
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any()))
+                .thenReturn(cluster);
+
+        StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:ssm:/db/password:1}}"}
+                """, "us-west-2");
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
+                eq("admin"), eq("first-password"), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), eq("us-west-2"));
+        verify(ssmService, never()).getParameter(any(), any());
+    }
+
+    @Test
+    void missingPinnedSsmVersionFailsResourceWithoutUsingLatestValue() {
+        ParameterHistory versionOne = new ParameterHistory();
+        versionOne.setVersion(1);
+        versionOne.setValue("first-password");
+        when(ssmService.getParameterHistory("/db/password", "us-east-1"))
+                .thenReturn(List.of(versionOne));
+
+        StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:ssm:/db/password:99}}"}
+                """);
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains("Parameter version 99 not found"));
+        verify(ssmService, never()).getParameter(any(), any());
+        verifyNoInteractions(rdsService);
+    }
+
+    @ParameterizedTest(name = "invalid SSM version suffix [{0}]")
+    @ValueSource(strings = {
+            "", "+1", " ", " 1", "1 ", "0", "-1",
+            "9223372036854775808", "not-a-version"
+    })
+    void invalidPinnedSsmVersionFailsWithValidationError(String version) {
+        StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:ssm:/db/password:%s}}"}
+                """.formatted(version));
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains(
+                "SSM parameter version must be a positive integer"));
+        verifyNoInteractions(ssmService, rdsService);
+    }
+
+    @Test
+    void secretsManagerStageAndVersionIdTogetherFailResource() {
+        StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:secretsmanager:my-secret:SecretString:password:AWSCURRENT:version-id}}"}
+                """);
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains("cannot both be specified"));
+        verifyNoInteractions(secretsManagerService, rdsService);
     }
 
     @Test

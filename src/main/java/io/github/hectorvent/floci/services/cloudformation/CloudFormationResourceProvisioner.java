@@ -68,6 +68,7 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
@@ -96,6 +97,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -1000,7 +1003,7 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
                 resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region),
                 resolveOptional(props, "DBName", engine),
                 firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
                 parseIntProp(props, "AllocatedStorage", engine, 20),
@@ -1031,7 +1034,7 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
                 resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region),
                 resolveOptional(props, "DatabaseName", engine),
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                 resolveOptional(props, "DBClusterParameterGroupName", engine),
@@ -3804,6 +3807,109 @@ public class CloudFormationResourceProvisioner {
             return null;
         }
         return engine.resolve(props.get(name));
+    }
+
+    private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.+?)\\}\\}");
+
+    /**
+     * Resolves CloudFormation dynamic references embedded in a string. Supports
+     * {@code {{resolve:secretsmanager:<secret-id-or-arn>:SecretString:<json-key>:<stage>:<version>}}}
+     * and {@code {{resolve:ssm:<name>:<version>}}} / {@code {{resolve:ssm-secure:<name>:<version>}}},
+     * which CloudFormation substitutes with the live value at deploy time (e.g. an RDS
+     * MasterUserPassword sourced from a generated secret). Unsupported services are left verbatim.
+     */
+    private String resolveDynamicReferences(String value, String region) {
+        if (value == null || !value.contains("{{resolve:")) {
+            return value;
+        }
+        Matcher m = DYNAMIC_REF.matcher(value);
+        StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            String replacement = resolveDynamicRef(m.group(1), m.group(2), region);
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String resolveDynamicRef(String service, String body, String region) {
+        if ("secretsmanager".equals(service)) {
+            // body = <secret-id-or-arn>:SecretString:<json-key>:<version-stage>:<version-id>. The
+            // secret id may be an ARN (which itself contains colons), so split on the ":SecretString"
+            // marker rather than on ":".
+            int marker = body.indexOf(":SecretString");
+            String secretId = marker >= 0 ? body.substring(0, marker) : body;
+            String rest = marker >= 0 ? body.substring(marker + ":SecretString".length()) : "";
+            String[] parts = rest.startsWith(":") ? rest.substring(1).split(":", -1) : new String[0];
+            String jsonKey = parts.length > 0 ? parts[0] : "";
+            String versionStage = parts.length > 1 && !parts[1].isBlank() ? parts[1] : null;
+            String versionId = parts.length > 2 && !parts[2].isBlank() ? parts[2] : null;
+            if (versionStage != null && versionId != null) {
+                throw new AwsException("ValidationError",
+                        "version-stage and version-id cannot both be specified", 400);
+            }
+            String secretRegion = secretId.startsWith("arn:") ? secretId.split(":")[3] : region;
+            String secretString = secretsManagerService
+                    .getSecretValue(secretId, versionId, versionStage, secretRegion).getSecretString();
+            if (secretString == null) {
+                // A binary-only secret has no SecretString to substitute, so resource creation fails.
+                throw new IllegalStateException(
+                        "secret " + secretId + " has no SecretString value to resolve");
+            }
+            if (jsonKey.isBlank()) {
+                return secretString;
+            }
+            JsonNode json;
+            try {
+                json = objectMapper.readTree(secretString);
+            } catch (Exception e) {
+                throw new AwsException("ValidationError",
+                        "secret " + secretId + " does not contain valid JSON", 400);
+            }
+            if (!json.has(jsonKey)) {
+                // A missing key would otherwise resolve to "" — silently provisioning e.g. a blank
+                // MasterUserPassword. Fail resource creation instead.
+                throw new IllegalStateException(
+                        "JSON key '" + jsonKey + "' not found in secret " + secretId);
+            }
+            return json.get(jsonKey).asText();
+        }
+        if ("ssm".equals(service) || "ssm-secure".equals(service)) {
+            // body = <parameter-name>[:<version>]. SSM parameter names cannot contain ':', so an
+            // optional trailing ':<version>' selects a specific version (latest when omitted).
+            // ssm-secure resolves the decrypted SecureString value
+            // (values are stored in plaintext regardless of type).
+            String[] segments = body.split(":", 2);
+            String parameterName = segments[0];
+            if (segments.length > 1) {
+                String version = segments[1];
+                if (!version.matches("[0-9]+")) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                long wantedVersion;
+                try {
+                    wantedVersion = Long.parseLong(version);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                if (wantedVersion < 1) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                return ssmService.getParameterHistory(parameterName, region).stream()
+                        .filter(h -> h.getVersion() == wantedVersion)
+                        .findFirst()
+                        .map(ParameterHistory::getValue)
+                        .orElseThrow(() -> new AwsException(
+                                "ParameterVersionNotFound",
+                                "Parameter version " + wantedVersion + " not found.", 400));
+            }
+            return ssmService.getParameter(parameterName, region).getValue();
+        }
+        // Other dynamic-reference services are not resolved here; leave verbatim.
+        return "{{resolve:" + service + ":" + body + "}}";
     }
 
     private String resolveOrDefault(JsonNode props, String name,
