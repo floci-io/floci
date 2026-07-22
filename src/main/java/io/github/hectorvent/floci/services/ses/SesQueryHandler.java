@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDestination;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -80,6 +81,16 @@ public class SesQueryHandler {
                 case "SendTemplatedEmail" -> handleSendTemplatedEmail(params, region);
                 case "SendBulkTemplatedEmail" -> handleSendBulkTemplatedEmail(params, region);
                 case "TestRenderTemplate" -> handleTestRenderTemplate(params, region);
+                case "CreateCustomVerificationEmailTemplate" ->
+                        handleCreateCustomVerificationEmailTemplate(params, region);
+                case "GetCustomVerificationEmailTemplate" ->
+                        handleGetCustomVerificationEmailTemplate(params, region);
+                case "ListCustomVerificationEmailTemplates" ->
+                        handleListCustomVerificationEmailTemplates(region);
+                case "UpdateCustomVerificationEmailTemplate" ->
+                        handleUpdateCustomVerificationEmailTemplate(params, region);
+                case "DeleteCustomVerificationEmailTemplate" ->
+                        handleDeleteCustomVerificationEmailTemplate(params, region);
                 case "CreateConfigurationSet" -> handleCreateConfigurationSet(params, region);
                 case "DescribeConfigurationSet" -> handleDescribeConfigurationSet(params, region);
                 case "ListConfigurationSets" -> handleListConfigurationSets(region);
@@ -497,6 +508,68 @@ public class SesQueryHandler {
         String xmlSafe = SesService.stripXml10InvalidChars(rendered);
         String result = new XmlBuilder().elem("RenderedTemplate", xmlSafe).build();
         return Response.ok(AwsQueryResponse.envelope("TestRenderTemplate", AwsNamespaces.SES, result)).build();
+    }
+
+    // --- Custom verification email templates ---
+
+    private Response handleCreateCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        sesService.createCustomVerificationEmailTemplate(readCvetParams(params), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "CreateCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleUpdateCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        sesService.updateCustomVerificationEmailTemplate(readCvetParams(params), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "UpdateCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleGetCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        CustomVerificationEmailTemplate t = sesService.getCustomVerificationEmailTemplate(
+                requireParam(params, "TemplateName"), region);
+        String xml = new XmlBuilder()
+                .elem("TemplateName", t.getTemplateName())
+                .elem("FromEmailAddress", t.getFromEmailAddress())
+                .elem("TemplateSubject", t.getTemplateSubject())
+                .elem("TemplateContent", t.getTemplateContent())
+                .elem("SuccessRedirectionURL", t.getSuccessRedirectionURL())
+                .elem("FailureRedirectionURL", t.getFailureRedirectionURL())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope(
+                "GetCustomVerificationEmailTemplate", AwsNamespaces.SES, xml)).build();
+    }
+
+    private Response handleListCustomVerificationEmailTemplates(String region) {
+        XmlBuilder xml = new XmlBuilder().start("CustomVerificationEmailTemplates");
+        for (CustomVerificationEmailTemplate t : sesService.listCustomVerificationEmailTemplates(region)) {
+            xml.start("member")
+                    .elem("TemplateName", t.getTemplateName())
+                    .elem("FromEmailAddress", t.getFromEmailAddress())
+                    .elem("TemplateSubject", t.getTemplateSubject())
+                    .elem("SuccessRedirectionURL", t.getSuccessRedirectionURL())
+                    .elem("FailureRedirectionURL", t.getFailureRedirectionURL())
+                    .end("member");
+        }
+        xml.end("CustomVerificationEmailTemplates");
+        return Response.ok(AwsQueryResponse.envelope(
+                "ListCustomVerificationEmailTemplates", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private Response handleDeleteCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        sesService.deleteCustomVerificationEmailTemplate(requireParam(params, "TemplateName"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "DeleteCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
+    }
+
+    private CustomVerificationEmailTemplate readCvetParams(MultivaluedMap<String, String> params) {
+        CustomVerificationEmailTemplate t = new CustomVerificationEmailTemplate();
+        t.setTemplateName(params.getFirst("TemplateName"));
+        t.setFromEmailAddress(params.getFirst("FromEmailAddress"));
+        t.setTemplateSubject(params.getFirst("TemplateSubject"));
+        t.setTemplateContent(params.getFirst("TemplateContent"));
+        t.setSuccessRedirectionURL(params.getFirst("SuccessRedirectionURL"));
+        t.setFailureRedirectionURL(params.getFirst("FailureRedirectionURL"));
+        return t;
     }
 
     private Response handleSendBulkTemplatedEmail(MultivaluedMap<String, String> params, String region) {

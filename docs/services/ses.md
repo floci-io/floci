@@ -25,6 +25,11 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `DeleteTemplate`                    | Remove a stored template                                  |
 | `ListTemplates`                     | List stored templates                                     |
 | `TestRenderTemplate`                | Render a stored template against supplied data, returning the MIME message |
+| `CreateCustomVerificationEmailTemplate` | Create a custom verification email template               |
+| `GetCustomVerificationEmailTemplate`    | Return a custom verification email template               |
+| `ListCustomVerificationEmailTemplates`  | List custom verification email templates (no content)     |
+| `UpdateCustomVerificationEmailTemplate` | Replace a custom verification email template              |
+| `DeleteCustomVerificationEmailTemplate` | Delete a custom verification email template               |
 | `GetSendQuota`                      | Return local send quota counters                          |
 | `GetSendStatistics`                 | Return aggregate delivery stats for sent messages         |
 | `GetAccountSendingEnabled`          | Report whether sending is enabled                         |
@@ -156,6 +161,7 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 - Identity verification succeeds immediately; no real DNS or inbox verification flow is required.
 - `SendEmail` stores the text body or the HTML body as the captured message body.
 - `SetIdentityNotificationTopic` publishes to the configured topic on a Bounce/Complaint/Delivery event (triggered via the mailbox simulator addresses or the suppression list), independent of any configuration set. The payload uses the legacy format (`notificationType`, no `mail.tags`, headers only when `SetIdentityHeadersInNotificationsEnabled` is on).
+- Custom verification email templates are stored and returned; `Create`/`Update` require the `FromEmailAddress` to be a verified identity (or a verified domain) and reject an invalid redirection URL, matching AWS. `SendCustomVerificationEmail` is not yet implemented.
 - For the REST JSON API see [SES v2](#v2) below.
 
 ## SES v2 (REST JSON) {#v2}
@@ -188,6 +194,11 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `PUT` | `/v2/email/templates/{templateName}` | `UpdateEmailTemplate` |
 | `DELETE` | `/v2/email/templates/{templateName}` | `DeleteEmailTemplate` |
 | `POST` | `/v2/email/templates/{templateName}/render` | `TestRenderEmailTemplate` |
+| `POST` | `/v2/email/custom-verification-email-templates` | `CreateCustomVerificationEmailTemplate` |
+| `GET` | `/v2/email/custom-verification-email-templates` | `ListCustomVerificationEmailTemplates` |
+| `GET` | `/v2/email/custom-verification-email-templates/{templateName}` | `GetCustomVerificationEmailTemplate` |
+| `PUT` | `/v2/email/custom-verification-email-templates/{templateName}` | `UpdateCustomVerificationEmailTemplate` |
+| `DELETE` | `/v2/email/custom-verification-email-templates/{templateName}` | `DeleteCustomVerificationEmailTemplate` |
 | `POST` | `/v2/email/configuration-sets` | `CreateConfigurationSet` |
 | `GET` | `/v2/email/configuration-sets` | `ListConfigurationSets` |
 | `GET` | `/v2/email/configuration-sets/{name}` | `GetConfigurationSet` |
@@ -246,4 +257,4 @@ Suppressed recipients are filtered out of the SMTP relay step (non-suppressed re
 
 Tag operations support these ARN forms: `arn:aws:ses:<region>:<account>:configuration-set/<name>`, `arn:aws:ses:<region>:<account>:template/<name>`, and `arn:aws:ses:<region>:<account>:identity/<email-or-domain>`. Tags supplied to `CreateConfigurationSet`, `CreateEmailTemplate`, and `CreateEmailIdentity` are reachable through `ListTagsForResource`; `UpdateEmailTemplate` does not modify tags. Other resource types return `NotFoundException`.
 
-Identity, template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.
+Identity, template, custom-verification-template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a custom verification email template created with `CreateCustomVerificationEmailTemplate` (v1) is returned by `GetCustomVerificationEmailTemplate` (v2), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.
