@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -275,13 +277,17 @@ class RdsCfnProvisionerTest {
         verifyNoInteractions(rdsService);
     }
 
-    @Test
-    void nonNumericPinnedSsmVersionFailsWithValidationError() {
+    @ParameterizedTest(name = "invalid SSM version suffix [{0}]")
+    @ValueSource(strings = {
+            "", "+1", " ", " 1", "1 ", "0", "-1",
+            "9223372036854775808", "not-a-version"
+    })
+    void invalidPinnedSsmVersionFailsWithValidationError(String version) {
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
                  "MasterUsername":"admin",
-                 "MasterUserPassword":"{{resolve:ssm:/db/password:not-a-version}}"}
-                """);
+                 "MasterUserPassword":"{{resolve:ssm:/db/password:%s}}"}
+                """.formatted(version));
 
         assertEquals("CREATE_FAILED", resource.getStatus());
         assertTrue(resource.getStatusReason().contains(

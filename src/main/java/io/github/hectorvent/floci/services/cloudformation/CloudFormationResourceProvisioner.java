@@ -3881,8 +3881,12 @@ public class CloudFormationResourceProvisioner {
             // (values are stored in plaintext regardless of type).
             String[] segments = body.split(":", 2);
             String parameterName = segments[0];
-            if (segments.length > 1 && !segments[1].isBlank()) {
-                String version = segments[1].trim();
+            if (segments.length > 1) {
+                String version = segments[1];
+                if (!version.matches("[0-9]+")) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
                 long wantedVersion;
                 try {
                     wantedVersion = Long.parseLong(version);
