@@ -25,7 +25,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -57,6 +60,8 @@ public class CloudFrontServingController {
 
     private static final Logger LOG = Logger.getLogger(CloudFrontServingController.class);
     private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
+    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME
+            .withZone(ZoneOffset.UTC);
     private static final Set<String> NON_FORWARDED_RESPONSE_HEADERS = Set.of(
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "via",
@@ -152,10 +157,12 @@ public class CloudFrontServingController {
             if (includeBody) {
                 S3Object obj = s3Service.getObject(bucket, key);
                 byte[] data = obj.getData() != null ? obj.getData() : new byte[0];
-                return new OriginResponse(200, contentType(obj), data, data.length, Map.of());
+                return new OriginResponse(
+                        200, contentType(obj), data, data.length, s3ObjectHeaders(obj));
             }
             S3Object meta = s3Service.headObject(bucket, key);
-            return new OriginResponse(200, contentType(meta), null, meta.getSize(), Map.of());
+            return new OriginResponse(
+                    200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
         } catch (AwsException e) {
             return OriginResponse.error(e.getHttpStatus(), e.getMessage());
         }
@@ -425,6 +432,30 @@ public class CloudFrontServingController {
 
     private static String contentType(S3Object obj) {
         return obj.getContentType() != null ? obj.getContentType() : DEFAULT_CONTENT_TYPE;
+    }
+
+    private static Map<String, List<String>> s3ObjectHeaders(S3Object object) {
+        Map<String, List<String>> headers = new LinkedHashMap<>();
+        putHeader(headers, "Accept-Ranges", "bytes");
+        putHeader(headers, "ETag", object.getETag());
+        if (object.getLastModified() != null) {
+            putHeader(headers, "Last-Modified", HTTP_DATE.format(object.getLastModified()));
+        }
+        putHeader(headers, "Cache-Control", object.getCacheControl());
+        putHeader(headers, "Content-Encoding", object.getContentEncoding());
+        putHeader(headers, "Content-Disposition", object.getContentDisposition());
+        putHeader(headers, "x-amz-storage-class", object.getStorageClass());
+        if (object.getMetadata() != null) {
+            object.getMetadata().forEach((name, value) ->
+                    putHeader(headers, "x-amz-meta-" + name, value));
+        }
+        return headers;
+    }
+
+    private static void putHeader(Map<String, List<String>> headers, String name, String value) {
+        if (value != null) {
+            headers.put(name, List.of(value));
+        }
     }
 
     private static String str(Object value) {

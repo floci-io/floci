@@ -7,12 +7,16 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +24,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -122,6 +128,53 @@ class CloudFrontDistributionServingTest {
         // Missing object with no matching CustomErrorResponse → the origin 404 is returned.
         given().header("Host", host).when().get("/missing-object.txt")
                 .then().statusCode(404);
+    }
+
+    @Test
+    void forwardsSafeS3ObjectHeadersWithoutStorageInternals() {
+        String suffix = suffix();
+        String bucket = "cf-object-headers-" + suffix;
+        String body = "S3-OBJECT-HEADERS-" + suffix;
+        createBucket(bucket);
+        S3Object object = s3Service.putObject(
+                bucket, "asset.txt", body.getBytes(StandardCharsets.UTF_8), "text/plain",
+                Map.of("source", "origin"),
+                new PutObjectOptions()
+                        .withStorageClass("STANDARD_IA")
+                        .withContentEncoding("identity")
+                        .withContentDisposition("inline")
+                        .withCacheControl("public, max-age=60")
+                        .withServerSideEncryption("AES256")
+                        .withChecksumAlgorithm("SHA256"));
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        cfg.setDefaultCacheBehavior(defaultBehavior("only-origin"));
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+        String lastModified = DateTimeFormatter.RFC_1123_DATE_TIME
+                .withZone(ZoneOffset.UTC)
+                .format(object.getLastModified());
+
+        given().header("Host", dist.getDomainName()).when().get("/asset.txt")
+                .then().statusCode(200)
+                .header("Content-Type", containsString("text/plain"))
+                .header("Accept-Ranges", equalTo("bytes"))
+                .header("ETag", equalTo(object.getETag()))
+                .header("Last-Modified", equalTo(lastModified))
+                .header("Cache-Control", equalTo("public, max-age=60"))
+                .header("Content-Encoding", equalTo("identity"))
+                .header("Content-Disposition", equalTo("inline"))
+                .header("x-amz-storage-class", equalTo("STANDARD_IA"))
+                .header("x-amz-meta-source", equalTo("origin"))
+                .header("x-amz-server-side-encryption", nullValue())
+                .header("x-amz-checksum-sha256", nullValue())
+                .body(equalTo(body));
+
+        given().header("Host", dist.getDomainName()).when().head("/asset.txt")
+                .then().statusCode(200)
+                .header("ETag", equalTo(object.getETag()))
+                .header("Content-Length", equalTo(Integer.toString(body.getBytes(StandardCharsets.UTF_8).length)));
     }
 
     @Test

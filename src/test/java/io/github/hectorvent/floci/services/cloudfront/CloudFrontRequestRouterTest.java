@@ -50,6 +50,25 @@ class CloudFrontRequestRouterTest {
         assertFalse(CloudFrontRequestRouter.pathPatternMatches("a.jpg", "/axjpg"));
     }
 
+    @Test
+    void compiledPatternCacheReusesEntriesAndRemainsBounded() {
+        CloudFrontRequestRouter.clearPatternCache();
+        try {
+            assertTrue(CloudFrontRequestRouter.pathPatternMatches("assets/*.js", "/assets/app.js"));
+            assertEquals(1, CloudFrontRequestRouter.patternCacheSize());
+
+            assertTrue(CloudFrontRequestRouter.pathPatternMatches("assets/*.js", "/assets/vendor.js"));
+            assertEquals(1, CloudFrontRequestRouter.patternCacheSize());
+
+            for (int i = 0; i < 300; i++) {
+                CloudFrontRequestRouter.pathPatternMatches("tenant-" + i + "/*", "/unmatched");
+            }
+            assertEquals(256, CloudFrontRequestRouter.patternCacheSize());
+        } finally {
+            CloudFrontRequestRouter.clearPatternCache();
+        }
+    }
+
     // ── Behavior selection: first match wins, default behavior evaluated LAST ─────
 
     @Test
