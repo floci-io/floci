@@ -24,14 +24,19 @@ import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class OpenSearchService {
+public class OpenSearchService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchService.class);
 
@@ -362,5 +367,25 @@ public class OpenSearchService {
         } else {
             domainStore.put(domain.getDomainName(), domain);
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Domain domain : listDomainNames(null)) {
+            if (domain.getArn() == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(domain.getArn());
+            resources.add(new ExplorerResource(
+                    domain.getArn(), "es:domain", "es",
+                    parsed.region(), parsed.accountId(),
+                    domain.getCreatedAt() != null ? domain.getCreatedAt() : Instant.now(),
+                    domain.getTags() != null ? domain.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("es:domain", "es", true));
     }
 }

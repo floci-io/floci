@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -51,7 +54,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 @ApplicationScoped
-public class SnsService implements Resettable {
+public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
@@ -844,6 +847,27 @@ public class SnsService implements Resettable {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource does not exist.", 404));
         return new java.util.LinkedHashMap<>(topic.getTags());
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Topic topic : topicStore.scan(k -> true)) {
+            String arn = topic.getTopicArn();
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "sns:topic", "sns",
+                    parsed.region(), parsed.accountId(),
+                    topic.getCreatedAt() != null ? topic.getCreatedAt() : Instant.now(),
+                    topic.getTags() != null ? topic.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("sns:topic", "sns", true));
     }
 
     /**

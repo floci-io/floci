@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.appconfig.AppConfigController;
 import io.github.hectorvent.floci.services.backup.BackupController;
+import io.github.hectorvent.floci.services.resourceexplorer2.ResourceExplorer2Controller;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataController;
 import io.github.hectorvent.floci.services.batch.BatchController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
@@ -317,6 +318,15 @@ public class ResolvedServiceCatalog {
                         config.storage().services().backup().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("backup"), Set.of(), Set.of(BackupController.class)),
+                descriptor("resource-explorer-2", "resourceexplorer2",
+                        config.services().resourceexplorer2().enabled(), true,
+                        "resourceexplorer2",
+                        storageMode(config.storage().services().resourceexplorer2().mode(), config.storage().mode()),
+                        config.storage().services().resourceexplorer2().flushIntervalMs(),
+                        null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("resource-explorer-2"), Set.of(),
+                        Set.of(ResourceExplorer2Controller.class)),
                 descriptor("ec2messages", "ec2messages", config.services().ssm().enabled(), false,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

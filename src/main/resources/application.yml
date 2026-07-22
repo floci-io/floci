@@ -136,6 +136,9 @@ floci:
         # mode: memory
       appsync:
         flush-interval-ms: 5000
+      resourceexplorer2:
+        mode: hybrid
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -418,6 +421,8 @@ floci:
       enabled: true
     lightsail:
     cloudcontrol:
+      enabled: true
+    resourceexplorer2:
       enabled: true
     cloudfront:
       enabled: true

@@ -61,6 +61,9 @@ floci:
       cloudfront:
       appsync:
         flush-interval-ms: 60000
+      resourceexplorer2:
+        mode: memory
+        flush-interval-ms: 5000
 
   auth:
     validate-signatures: false
@@ -265,6 +268,8 @@ floci:
       enabled: true
     lightsail:
     cloudcontrol:
+      enabled: true
+    resourceexplorer2:
       enabled: true
     cloudfront:
       enabled: true

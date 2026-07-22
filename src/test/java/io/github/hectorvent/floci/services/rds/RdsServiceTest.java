@@ -164,7 +164,7 @@ class RdsServiceTest {
         when(dockerHostResolver.resolve()).thenReturn("floci.local");
         RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver, null);
 
         DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -874,7 +874,7 @@ class RdsServiceTest {
                                   SecretsManagerService secretsManager) {
         return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(),
-                secretsManager, null);
+                secretsManager, null, null);
     }
 
     private static List<Subnet> defaultSubnets() {

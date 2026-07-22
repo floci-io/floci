@@ -48,9 +48,12 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.zip.GZIPOutputStream;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class DynamoDbService {
+public class DynamoDbService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbService.class);
 
@@ -2802,5 +2805,25 @@ public class DynamoDbService {
                 .toList();
 
         return new ListExportsResult(summaries, newNextToken);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (TableDefinition table : tableStore.scan(k -> true)) {
+            if (table.getTableArn() == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(table.getTableArn());
+            resources.add(new ExplorerResource(
+                    table.getTableArn(), "dynamodb:table", "dynamodb",
+                    parsed.region(), parsed.accountId(),
+                    table.getCreationDateTime() != null ? table.getCreationDateTime() : Instant.now(),
+                    table.getTags() != null ? table.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("dynamodb:table", "dynamodb", true));
     }
 }

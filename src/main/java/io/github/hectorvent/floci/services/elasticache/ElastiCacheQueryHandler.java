@@ -47,11 +47,11 @@ public class ElastiCacheQueryHandler {
         this.regionResolver = regionResolver;
     }
 
-    public Response handle(String action, MultivaluedMap<String, String> params) {
+    public Response handle(String action, MultivaluedMap<String, String> params, String region) {
         LOG.debugv("ElastiCache action: {0}", action);
         return switch (action) {
             case "ValidateIamAuthToken"       -> handleValidateIamAuthToken(params);
-            case "CreateReplicationGroup"     -> handleCreateReplicationGroup(params);
+            case "CreateReplicationGroup"     -> handleCreateReplicationGroup(params, region);
             case "DescribeReplicationGroups"  -> handleDescribeReplicationGroups(params);
             case "ModifyReplicationGroup"     -> handleModifyReplicationGroup(params);
             case "DeleteReplicationGroup"     -> handleDeleteReplicationGroup(params);
@@ -71,7 +71,7 @@ public class ElastiCacheQueryHandler {
 
     // ── Replication Groups ────────────────────────────────────────────────────
 
-    private Response handleCreateReplicationGroup(MultivaluedMap<String, String> params) {
+    private Response handleCreateReplicationGroup(MultivaluedMap<String, String> params, String region) {
         String groupId = params.getFirst("ReplicationGroupId");
         String description = params.getFirst("ReplicationGroupDescription");
         String authToken = params.getFirst("AuthToken");
@@ -93,7 +93,7 @@ public class ElastiCacheQueryHandler {
 
         try {
             ReplicationGroup group = service.createReplicationGroup(
-                    groupId, description != null ? description : "", authMode, authToken);
+                    groupId, description != null ? description : "", authMode, authToken, region);
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {

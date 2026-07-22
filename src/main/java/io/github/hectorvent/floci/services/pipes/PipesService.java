@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -17,13 +20,15 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class PipesService implements TagHandler {
+public class PipesService implements TagHandler, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(PipesService.class);
 
@@ -202,6 +207,27 @@ public class PipesService implements TagHandler {
         storage.put(key, pipe);
         LOG.infov("Stopped pipe: {0}", name);
         return pipe;
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Pipe pipe : storage.scan(k -> true)) {
+            String arn = pipe.getArn();
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "pipes:pipe", "pipes",
+                    parsed.region(), parsed.accountId(),
+                    pipe.getCreationTime() != null ? pipe.getCreationTime() : Instant.now(),
+                    pipe.getTags() != null ? pipe.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("pipes:pipe", "pipes", true));
     }
 
     @Override

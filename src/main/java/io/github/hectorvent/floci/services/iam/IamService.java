@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -26,6 +29,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -44,7 +48,7 @@ import java.util.Map;
  */
 @Startup
 @ApplicationScoped
-public class IamService implements SessionAccountLookup {
+public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -951,6 +955,41 @@ public class IamService implements SessionAccountLookup {
         return instanceProfiles.scan(k -> true).stream()
                 .filter(p -> p.getRoleNames().contains(roleName))
                 .toList();
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (IamUser user : users.scan(k -> true)) {
+            addIamResource(resources, user.getArn(), "iam:user", user.getCreateDate(), user.getTags());
+        }
+        for (IamRole role : roles.scan(k -> true)) {
+            addIamResource(resources, role.getArn(), "iam:role", role.getCreateDate(), role.getTags());
+        }
+        return resources;
+    }
+
+    private void addIamResource(List<ExplorerResource> out, String arn, String type,
+                                Instant createDate, Map<String, String> tags) {
+        if (arn == null) return;
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        // IAM is a global service: its ARNs carry no region. Resource Explorer reports
+        // global resources with the region "global" (not an empty string).
+        String region = parsed.region() == null || parsed.region().isEmpty()
+                ? "global"
+                : parsed.region();
+        out.add(new ExplorerResource(
+                arn, type, "iam",
+                region, parsed.accountId(),
+                createDate != null ? createDate : Instant.now(),
+                tags != null ? tags : Map.of()));
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("iam:user", "iam", true),
+                new SupportedResourceType("iam:role", "iam", true));
     }
 
     // =========================================================================
