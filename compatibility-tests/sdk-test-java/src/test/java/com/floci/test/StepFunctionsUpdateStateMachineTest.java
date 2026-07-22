@@ -9,6 +9,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.DescribeStateMachineResponse;
+import software.amazon.awssdk.services.sfn.model.EncryptionType;
+import software.amazon.awssdk.services.sfn.model.LogLevel;
 import software.amazon.awssdk.services.sfn.model.UpdateStateMachineResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,13 +59,40 @@ class StepFunctionsUpdateStateMachineTest {
         UpdateStateMachineResponse update = sfn.updateStateMachine(b -> b
                 .stateMachineArn(stateMachineArn)
                 .definition(UPDATED_DEFINITION)
-                .roleArn(ROLE_ARN));
+                .roleArn(ROLE_ARN)
+                .loggingConfiguration(logging -> logging
+                        .level(LogLevel.ALL)
+                        .includeExecutionData(true)
+                        .destinations(destination -> destination
+                                .cloudWatchLogsLogGroup(group -> group.logGroupArn(
+                                        "arn:aws:logs:us-east-1:000000000000:log-group:sfn:*"))))
+                .tracingConfiguration(tracing -> tracing.enabled(true))
+                .encryptionConfiguration(encryption -> encryption
+                        .type(EncryptionType.CUSTOMER_MANAGED_KMS_KEY)
+                        .kmsKeyId("alias/sfn-key")
+                        .kmsDataKeyReusePeriodSeconds(120))
+                .publish(true)
+                .versionDescription("SDK update snapshot"));
 
         assertThat(update.updateDate()).isNotNull();
+        assertThat(update.revisionId()).isNotBlank();
+        assertThat(update.stateMachineVersionArn()).isEqualTo(stateMachineArn + ":1");
 
         DescribeStateMachineResponse describe = sfn.describeStateMachine(b -> b
                 .stateMachineArn(stateMachineArn));
         assertThat(describe.definition()).isEqualTo(UPDATED_DEFINITION);
         assertThat(describe.roleArn()).isEqualTo(ROLE_ARN);
+        assertThat(describe.revisionId()).isEqualTo(update.revisionId());
+        assertThat(describe.loggingConfiguration().level()).isEqualTo(LogLevel.ALL);
+        assertThat(describe.loggingConfiguration().includeExecutionData()).isTrue();
+        assertThat(describe.tracingConfiguration().enabled()).isTrue();
+        assertThat(describe.encryptionConfiguration().type())
+                .isEqualTo(EncryptionType.CUSTOMER_MANAGED_KMS_KEY);
+
+        DescribeStateMachineResponse version = sfn.describeStateMachine(b -> b
+                .stateMachineArn(update.stateMachineVersionArn()));
+        assertThat(version.description()).isEqualTo("SDK update snapshot");
+        assertThat(version.definition()).isEqualTo(UPDATED_DEFINITION);
+        assertThat(version.revisionId()).isEqualTo(update.revisionId());
     }
 }

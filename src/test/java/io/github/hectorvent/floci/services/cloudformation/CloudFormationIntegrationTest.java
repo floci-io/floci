@@ -6740,7 +6740,10 @@ class CloudFormationIntegrationTest {
                 }
               },
               "Outputs": {
-                "StateMachineArn": { "Value": { "Ref": "MyStateMachine" } }
+                "StateMachineArn": { "Value": { "Ref": "MyStateMachine" } },
+                "StateMachineRevisionId": {
+                  "Value": { "Fn::GetAtt": ["MyStateMachine", "StateMachineRevisionId"] }
+                }
               }
             }
             """;
@@ -6757,6 +6760,16 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        String initialRevisionId = given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("revisionId");
 
         // Update the definition; the StateMachineName is unchanged, so this is an in-place update.
         given()
@@ -6783,7 +6796,7 @@ class CloudFormationIntegrationTest {
         assertThat(describeXml, containsString("<OutputValue>" + expectedArn + "</OutputValue>"));
 
         // The state machine kept its ARN and reflects the updated definition.
-        given()
+        String updatedRevisionId = given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
             .contentType(SFN_CONTENT_TYPE)
             .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
@@ -6792,7 +6805,31 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body("definition", containsString("marker-v2"))
-            .body("definition", not(containsString("marker-v1")));
+            .body("definition", not(containsString("marker-v1")))
+            .extract().jsonPath().getString("revisionId");
+        assertThat(updatedRevisionId, not(equalTo(initialRevisionId)));
+        assertThat(describeXml, containsString("<OutputValue>" + updatedRevisionId + "</OutputValue>"));
+
+        // Re-applying an identical resource is a no-op and must not rotate its revision.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("marker-v2"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("revisionId", equalTo(updatedRevisionId));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6892,6 +6929,364 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body("tags.size()", equalTo(0));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateStack_stepFunctionsNameChangeReplacesPhysicalResource() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-cfn-name-replace-" + suffix;
+        String oldName = "sfn-old-" + suffix;
+        String newName = "sfn-new-" + suffix;
+        String template = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-replacement-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"End\\":true}}}"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(oldName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(newName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        String oldArn = "arn:aws:states:us-east-1:000000000000:stateMachine:" + oldName;
+        String newArn = "arn:aws:states:us-east-1:000000000000:stateMachine:" + newName;
+        assertThat(physicalIdByLogicalId(resourcesXml, "MyStateMachine"), equalTo(newArn));
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + oldArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("StateMachineDoesNotExist"));
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + newArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("name", equalTo(newName));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateStack_stepFunctionsGeneratedNameTypeChangeReplacesPhysicalResource() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-" + "a".repeat(60) + suffix;
+        String template = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineType": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-type-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"End\\":true}}}"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("STANDARD"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String beforeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        String oldArn = physicalIdByLogicalId(beforeXml, "MyStateMachine");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("EXPRESS"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String afterXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        String newArn = physicalIdByLogicalId(afterXml, "MyStateMachine");
+        assertThat(newArn, not(equalTo(oldArn)));
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + newArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("type", equalTo("EXPRESS"));
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + oldArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("StateMachineDoesNotExist"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateStack_stepFunctionsLoadsS3DefinitionAndMutableConfigurations() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-cfn-s3-" + suffix;
+        String stateMachineName = "sfn-s3-" + suffix;
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:" + stateMachineName;
+        String bucket = "sfn-definitions-" + suffix;
+        String key = "definition.yaml";
+        // Flow-style YAML begins with "{" but is not necessarily valid JSON.
+        String s3Definition = """
+            {StartAt: Done, States: {Done: {Type: Pass, Result: '${Marker}', End: true}}}
+            """;
+
+        given()
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("text/yaml")
+            .body(s3Definition)
+        .when()
+            .put("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200);
+
+        String initialTemplate = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-s3-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"inline\\",\\"End\\":true}}}"
+                  }
+                }
+              }
+            }
+            """.formatted(stateMachineName);
+        String updatedTemplate = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-s3-role",
+                    "DefinitionS3Location": {"Bucket":"%s","Key":"%s"},
+                    "DefinitionSubstitutions": {"Marker":"from-s3"},
+                    "LoggingConfiguration": {
+                      "Level": "ALL",
+                      "IncludeExecutionData": true,
+                      "Destinations": [{
+                        "CloudWatchLogsLogGroup": {
+                          "LogGroupArn": "arn:aws:logs:us-east-1:000000000000:log-group:sfn:*"
+                        }
+                      }]
+                    },
+                    "TracingConfiguration": {"Enabled": true},
+                    "EncryptionConfiguration": {
+                      "Type": "CUSTOMER_MANAGED_KMS_KEY",
+                      "KmsKeyId": "alias/cfn-sfn-key",
+                      "KmsDataKeyReusePeriodSeconds": 120
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(stateMachineName, bucket, key);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", updatedTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + stateMachineArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("definition", containsString("from-s3"))
+            .body("definition", not(containsString("inline")))
+            .body("loggingConfiguration.level", equalTo("ALL"))
+            .body("loggingConfiguration.includeExecutionData", equalTo(true))
+            .body("tracingConfiguration.enabled", equalTo(true))
+            .body("encryptionConfiguration.type", equalTo("CUSTOMER_MANAGED_KMS_KEY"))
+            .body("encryptionConfiguration.kmsKeyId", equalTo("alias/cfn-sfn-key"))
+            .body("encryptionConfiguration.kmsDataKeyReusePeriodSeconds", equalTo(120));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        given().when().delete("/" + bucket + "/" + key).then().statusCode(204);
+        given().when().delete("/" + bucket).then().statusCode(204);
+    }
+
+    @Test
+    void createStack_stepFunctionsRejectsEncryptionConfigurationWithoutTypeBeforeCreate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-cfn-invalid-encryption-" + suffix;
+        String stateMachineName = "sfn-invalid-encryption-" + suffix;
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:" + stateMachineName;
+        String template = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-encryption-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"End\\":true}}}",
+                    "EncryptionConfiguration": {}
+                  }
+                }
+              }
+            }
+            """.formatted(stateMachineName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + stateMachineArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("StateMachineDoesNotExist"));
 
         given()
             .contentType("application/x-www-form-urlencoded")

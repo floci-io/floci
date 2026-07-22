@@ -111,6 +111,10 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
     private static final String LAMBDA_NAME_MODE_EXPLICIT = "explicit";
     private static final String LAMBDA_NAME_MODE_GENERATED = "generated";
+    private static final String SFN_NAME_MODE_ATTR = "FlociStepFunctionsNameMode";
+    private static final String SFN_TYPE_ATTR = "FlociStepFunctionsType";
+    private static final String SFN_NAME_MODE_EXPLICIT = "explicit";
+    private static final String SFN_NAME_MODE_GENERATED = "generated";
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
@@ -2427,58 +2431,228 @@ public class CloudFormationResourceProvisioner {
     private void provisionStepFunctionsStateMachine(StackResource r, JsonNode props,
                                                     CloudFormationTemplateEngine engine,
                                                     String region, String stackName) {
-        String name = resolveOptional(props, "StateMachineName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 80, false);
+        String explicitName = resolveOptional(props, "StateMachineName", engine);
+        boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
+        String roleArn = resolveOptional(props, "RoleArn", engine);
+        if (roleArn == null || roleArn.isBlank()) {
+            throw new AwsException("ValidationError", "RoleArn is required for a state machine", 400);
+        }
+        String type = resolveOrDefault(props, "StateMachineType", engine, "STANDARD");
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+        String definition = resolveStateMachineDefinition(props, engine);
+        JsonNode loggingConfiguration = resolveStateMachineLoggingConfiguration(props, engine);
+        JsonNode tracingConfiguration = resolveStateMachineTracingConfiguration(props, engine);
+        JsonNode encryptionConfiguration = resolveStateMachineEncryptionConfiguration(props, engine);
+
+        StateMachine existing = findStateMachine(r.getPhysicalId());
+        String desiredNameMode = hasExplicitName ? SFN_NAME_MODE_EXPLICIT : SFN_NAME_MODE_GENERATED;
+        String previousNameMode = r.getAttributes().get(SFN_NAME_MODE_ATTR);
+        boolean nameModeReplacement = existing != null
+                && previousNameMode != null
+                && !Objects.equals(previousNameMode, desiredNameMode);
+        boolean typeReplacement = existing != null && !Objects.equals(existing.getType(), type);
+
+        String name;
+        if (hasExplicitName) {
+            name = explicitName;
+        } else if (existing != null && !nameModeReplacement && !typeReplacement) {
+            name = existing.getName();
+        } else {
+            name = generateStepFunctionsPhysicalName(stackName, r.getLogicalId());
         }
 
-        String roleArn = resolveOptional(props, "RoleArn", engine);
-        String type = resolveOptional(props, "StateMachineType", engine);
-        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+        boolean nameReplacement = existing != null && !Objects.equals(existing.getName(), name);
+        boolean replacement = nameReplacement || nameModeReplacement || typeReplacement;
+        if (replacement && Objects.equals(existing.getName(), name)) {
+            throw new AwsException("ValidationError",
+                    "Cannot replace state machine " + existing.getName()
+                            + " without a new StateMachineName", 400);
+        }
 
-        String definition = resolveStateMachineDefinition(props, engine);
-
-        // On a stack update the resource already has a physical id (the state machine ARN);
-        // update it in place instead of calling CreateStateMachine, which rejects the existing name.
         StateMachine sm;
-        if (r.getPhysicalId() != null) {
-            sm = stepFunctionsService.updateStateMachine(r.getPhysicalId(), definition, roleArn, tags);
+        if (existing == null || replacement) {
+            sm = stepFunctionsService.createStateMachine(
+                    name, definition, roleArn, type, region, tags,
+                    loggingConfiguration, tracingConfiguration, encryptionConfiguration);
+            if (replacement) {
+                stepFunctionsService.deleteStateMachine(existing.getStateMachineArn());
+            }
+        } else if (stateMachineConfigurationMatches(existing, definition, roleArn, tags,
+                loggingConfiguration, tracingConfiguration, encryptionConfiguration)) {
+            sm = existing;
         } else {
-            sm = stepFunctionsService.createStateMachine(name, definition, roleArn, type, region, tags);
+            sm = stepFunctionsService.updateStateMachine(
+                    existing.getStateMachineArn(),
+                    new StepFunctionsService.UpdateStateMachineRequest(
+                            definition,
+                            roleArn,
+                            tags,
+                            loggingConfiguration, true,
+                            tracingConfiguration, true,
+                            encryptionConfiguration, true,
+                            false,
+                            null)).stateMachine();
         }
 
         r.setPhysicalId(sm.getStateMachineArn());
         r.getAttributes().put("Arn", sm.getStateMachineArn());
         r.getAttributes().put("Name", sm.getName());
+        r.getAttributes().put("StateMachineRevisionId", sm.getRevisionId());
+        r.getAttributes().put(SFN_NAME_MODE_ATTR, desiredNameMode);
+        r.getAttributes().put(SFN_TYPE_ATTR, type);
     }
 
     private String resolveStateMachineDefinition(JsonNode props, CloudFormationTemplateEngine engine) {
         if (props == null) {
-            return null;
+            throw new AwsException("ValidationError", "A state machine definition is required", 400);
         }
 
-        String definition = resolveOptional(props, "DefinitionString", engine);
-        if (definition == null && props.has("Definition") && !props.get("Definition").isNull()) {
-            definition = engine.resolveNode(props.get("Definition")).toString();
+        boolean hasDefinitionString = props.has("DefinitionString") && !props.get("DefinitionString").isNull();
+        boolean hasDefinition = props.has("Definition") && !props.get("Definition").isNull();
+        boolean hasS3Location = props.has("DefinitionS3Location")
+                && !props.get("DefinitionS3Location").isNull();
+        int sourceCount = (hasDefinitionString ? 1 : 0)
+                + (hasDefinition ? 1 : 0)
+                + (hasS3Location ? 1 : 0);
+        if (sourceCount != 1) {
+            throw new AwsException("ValidationError",
+                    "Specify exactly one of Definition, DefinitionString, or DefinitionS3Location", 400);
         }
-        if (definition == null) {
-            return null;
+
+        boolean definitionFromS3 = false;
+        String definition = null;
+        if (hasDefinitionString) {
+            definition = resolveOptional(props, "DefinitionString", engine);
+        } else if (hasDefinition) {
+            definition = engine.resolveNode(props.get("Definition")).toString();
+        } else {
+            JsonNode location = engine.resolveNode(props.get("DefinitionS3Location"));
+            String bucket = location.path("Bucket").asText(null);
+            String key = location.path("Key").asText(null);
+            String version = location.path("Version").asText(null);
+            if (bucket == null || bucket.isBlank() || key == null || key.isBlank()) {
+                throw new AwsException("ValidationError",
+                        "DefinitionS3Location requires Bucket and Key", 400);
+            }
+            S3Object object = s3Service.getObject(bucket, key, version);
+            definition = new String(object.getData(), StandardCharsets.UTF_8);
+            definitionFromS3 = true;
         }
 
         JsonNode subsNode = props.get("DefinitionSubstitutions");
-        if (subsNode == null || subsNode.isNull()) {
-            return definition;
+        if (subsNode != null && !subsNode.isNull()) {
+            JsonNode resolvedSubs = engine.resolveNode(subsNode);
+            Iterator<Map.Entry<String, JsonNode>> entries = resolvedSubs.fields();
+            while (entries.hasNext()) {
+                Map.Entry<String, JsonNode> entry = entries.next();
+                String placeholder = "${" + entry.getKey() + "}";
+                String value = entry.getValue().isTextual()
+                        ? entry.getValue().asText() : entry.getValue().toString();
+                definition = definition.replace(placeholder, value);
+            }
         }
 
-        JsonNode resolvedSubs = engine.resolveNode(subsNode);
-        Iterator<Map.Entry<String, JsonNode>> entries = resolvedSubs.fields();
-        while (entries.hasNext()) {
-            Map.Entry<String, JsonNode> entry = entries.next();
-            String placeholder = "${" + entry.getKey() + "}";
-            String value = entry.getValue().isTextual() ? entry.getValue().asText() : entry.getValue().toString();
-            definition = definition.replace(placeholder, value);
+        if (definitionFromS3) {
+            try {
+                definition = new CloudFormationYamlParser(objectMapper).parse(definition).toString();
+            } catch (Exception e) {
+                throw new AwsException("ValidationError",
+                        "DefinitionS3Location contains invalid JSON or YAML: " + e.getMessage(), 400);
+            }
         }
         return definition;
+    }
+
+    private StateMachine findStateMachine(String stateMachineArn) {
+        if (stateMachineArn == null || stateMachineArn.isBlank()) {
+            return null;
+        }
+        try {
+            return stepFunctionsService.describeStateMachine(stateMachineArn);
+        } catch (AwsException e) {
+            if ("StateMachineDoesNotExist".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private boolean stateMachineConfigurationMatches(StateMachine existing,
+                                                     String definition,
+                                                     String roleArn,
+                                                     Map<String, String> tags,
+                                                     JsonNode loggingConfiguration,
+                                                     JsonNode tracingConfiguration,
+                                                     JsonNode encryptionConfiguration) {
+        return Objects.equals(existing.getDefinition(), definition)
+                && Objects.equals(existing.getRoleArn(), roleArn)
+                && Objects.equals(existing.getTags(), tags)
+                && Objects.equals(existing.getLoggingConfiguration(), loggingConfiguration)
+                && Objects.equals(existing.getTracingConfiguration(), tracingConfiguration)
+                && Objects.equals(existing.getEncryptionConfiguration(), encryptionConfiguration);
+    }
+
+    private JsonNode resolveStateMachineLoggingConfiguration(JsonNode props,
+                                                             CloudFormationTemplateEngine engine) {
+        ObjectNode result = objectMapper.createObjectNode();
+        JsonNode source = props != null && props.has("LoggingConfiguration")
+                ? engine.resolveNode(props.get("LoggingConfiguration")) : null;
+        result.put("level", source != null ? source.path("Level").asText("OFF") : "OFF");
+        result.put("includeExecutionData",
+                source != null && source.path("IncludeExecutionData").asBoolean(false));
+        ArrayNode destinations = result.putArray("destinations");
+        if (source != null && source.path("Destinations").isArray()) {
+            for (JsonNode destination : source.path("Destinations")) {
+                ObjectNode normalizedDestination = destinations.addObject();
+                normalizedDestination.putObject("cloudWatchLogsLogGroup")
+                        .put("logGroupArn", destination.path("CloudWatchLogsLogGroup")
+                                .path("LogGroupArn").asText());
+            }
+        }
+        return result;
+    }
+
+    private JsonNode resolveStateMachineTracingConfiguration(JsonNode props,
+                                                             CloudFormationTemplateEngine engine) {
+        JsonNode source = props != null && props.has("TracingConfiguration")
+                ? engine.resolveNode(props.get("TracingConfiguration")) : null;
+        return objectMapper.createObjectNode()
+                .put("enabled", source != null && source.path("Enabled").asBoolean(false));
+    }
+
+    private JsonNode resolveStateMachineEncryptionConfiguration(JsonNode props,
+                                                                CloudFormationTemplateEngine engine) {
+        JsonNode rawSource = props != null ? props.get("EncryptionConfiguration") : null;
+        JsonNode source = rawSource != null && !rawSource.isNull()
+                ? engine.resolveNode(rawSource) : null;
+        if (rawSource != null
+                && (source == null || !source.isObject()
+                || !source.hasNonNull("Type")
+                || !source.get("Type").isTextual()
+                || source.get("Type").asText().isBlank())) {
+            throw new AwsException("ValidationError",
+                    "EncryptionConfiguration.Type is required", 400);
+        }
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("type", source != null ? source.path("Type").asText("AWS_OWNED_KEY") : "AWS_OWNED_KEY");
+        if (source != null && source.has("KmsKeyId")) {
+            result.put("kmsKeyId", source.path("KmsKeyId").asText());
+        }
+        if (source != null && source.has("KmsDataKeyReusePeriodSeconds")) {
+            result.put("kmsDataKeyReusePeriodSeconds",
+                    source.path("KmsDataKeyReusePeriodSeconds").asInt());
+        }
+        return result;
+    }
+
+    private String generateStepFunctionsPhysicalName(String stackName, String logicalId) {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String base = stackName + "-" + logicalId;
+        int maxBaseLength = 80 - suffix.length() - 1;
+        if (base.length() > maxBaseLength) {
+            base = base.substring(0, maxBaseLength);
+        }
+        return base + "-" + suffix;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
