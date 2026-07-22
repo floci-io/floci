@@ -54,6 +54,9 @@ public class StepFunctionsService implements Resettable {
             "arn:aws:states:::s3:listObjectsV2");
     private static final Set<String> ITEM_READER_INPUT_TYPES = Set.of(
             "MANIFEST", "JSON", "CSV", "JSONL", "PARQUET");
+    private static final String RESULT_WRITER_RESOURCE = "arn:aws:states:::s3:putObject";
+    private static final Set<String> RESULT_WRITER_TRANSFORMATIONS = Set.of("NONE", "COMPACT", "FLATTEN");
+    private static final Set<String> RESULT_WRITER_OUTPUT_TYPES = Set.of("JSON", "JSONL");
 
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -562,8 +565,13 @@ public class StepFunctionsService implements Resettable {
             }
         }
 
-        if ("Map".equals(stateDef.path("Type").asText()) && stateDef.has("ItemReader")) {
-            validateItemReader(stateName, stateDef, errors);
+        if ("Map".equals(stateDef.path("Type").asText())) {
+            if (stateDef.has("ItemReader")) {
+                validateItemReader(stateName, stateDef, errors);
+            }
+            if (stateDef.has("ResultWriter")) {
+                validateResultWriter(stateName, stateDef.get("ResultWriter"), stateIsJsonata, errors);
+            }
         }
     }
 
@@ -581,6 +589,97 @@ public class StepFunctionsService implements Resettable {
             errors.add("The field 'InputType' should have one of these values: "
                     + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
                     + " at /States/" + stateName + "/ItemReader/ReaderConfig/InputType");
+        }
+    }
+
+    private void validateResultWriter(String stateName, JsonNode writer,
+                                      boolean jsonata, List<String> errors) {
+        String statePath = "/States/" + stateName;
+        String writerPath = statePath + "/ResultWriter";
+        if (!writer.isObject() || writer.isEmpty()) {
+            errors.add("The field 'ResultWriter' must specify WriterConfig or Resource with "
+                    + (jsonata ? "Arguments" : "Parameters") + " at " + statePath);
+            return;
+        }
+
+        String destinationField = jsonata ? "Arguments" : "Parameters";
+        String unsupportedDestinationField = jsonata ? "Parameters" : "Arguments";
+        if (writer.has(unsupportedDestinationField)) {
+            errors.add("The field '" + unsupportedDestinationField + "' is not supported for the '"
+                    + (jsonata ? "JSONata" : "JSONPath") + "' QueryLanguage at "
+                    + writerPath + "/" + unsupportedDestinationField);
+        }
+        boolean hasConfig = writer.has("WriterConfig") && writer.get("WriterConfig").isObject();
+        boolean hasResource = writer.has("Resource");
+        boolean destinationIsExpression = jsonata
+                && writer.path(destinationField).isTextual()
+                && JsonataEvaluator.isExpression(writer.path(destinationField).asText());
+        boolean hasDestination = writer.has(destinationField)
+                && (writer.get(destinationField).isObject() || destinationIsExpression);
+
+        if (writer.has("WriterConfig") && !hasConfig) {
+            errors.add("The field 'WriterConfig' must be an object at " + writerPath);
+        }
+        if (writer.has(destinationField) && !hasDestination) {
+            errors.add("The field '" + destinationField + "' must be an object"
+                    + (jsonata ? " or a JSONata expression" : "") + " at " + writerPath);
+        }
+        if ((!hasConfig && !hasResource && !hasDestination) || hasResource != hasDestination) {
+            errors.add("The field 'ResultWriter' must specify WriterConfig alone, Resource with "
+                    + destinationField + ", or all three fields at " + statePath);
+        }
+
+        if (hasResource && (!writer.get("Resource").isTextual()
+                || !RESULT_WRITER_RESOURCE.equals(writer.get("Resource").asText()))) {
+            errors.add("The field 'Resource' does not match the allowed value "
+                    + RESULT_WRITER_RESOURCE + " at " + writerPath);
+        }
+
+        if (hasDestination && !destinationIsExpression) {
+            JsonNode destination = writer.get(destinationField);
+            boolean hasBucket = destination.hasNonNull("Bucket")
+                    || (!jsonata && destination.hasNonNull("Bucket.$"));
+            if (!hasBucket) {
+                errors.add("The field 'Bucket' is required at " + writerPath + "/" + destinationField);
+            } else if (destination.has("Bucket") && !destination.get("Bucket").isTextual()) {
+                errors.add("The field 'Bucket' must be a string at "
+                        + writerPath + "/" + destinationField + "/Bucket");
+            } else if (!jsonata && destination.has("Bucket.$")
+                    && !destination.get("Bucket.$").isTextual()) {
+                errors.add("The field 'Bucket.$' must be a string at "
+                        + writerPath + "/" + destinationField + "/Bucket.$");
+            }
+            if (destination.has("Prefix") && !destination.get("Prefix").isTextual()) {
+                errors.add("The field 'Prefix' must be a string at "
+                        + writerPath + "/" + destinationField + "/Prefix");
+            }
+            if (!jsonata && destination.has("Prefix.$")
+                    && !destination.get("Prefix.$").isTextual()) {
+                errors.add("The field 'Prefix.$' must be a string at "
+                        + writerPath + "/" + destinationField + "/Prefix.$");
+            }
+        }
+
+        if (hasConfig) {
+            JsonNode config = writer.get("WriterConfig");
+            JsonNode transformationNode = config.get("Transformation");
+            JsonNode outputTypeNode = config.get("OutputType");
+            if (transformationNode == null || !transformationNode.isTextual()
+                    || outputTypeNode == null || !outputTypeNode.isTextual()) {
+                errors.add("The field 'WriterConfig' must specify string Transformation and OutputType at "
+                        + writerPath + "/WriterConfig");
+            } else {
+                String transformation = transformationNode.asText();
+                if (!RESULT_WRITER_TRANSFORMATIONS.contains(transformation)) {
+                    errors.add("The field 'Transformation' should have one of these values: "
+                            + RESULT_WRITER_TRANSFORMATIONS + " at " + writerPath + "/WriterConfig");
+                }
+                String outputType = outputTypeNode.asText();
+                if (!RESULT_WRITER_OUTPUT_TYPES.contains(outputType)) {
+                    errors.add("The field 'OutputType' should have one of these values: "
+                            + RESULT_WRITER_OUTPUT_TYPES + " at " + writerPath + "/WriterConfig");
+                }
+            }
         }
     }
 }
