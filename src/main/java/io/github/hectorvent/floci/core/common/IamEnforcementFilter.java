@@ -33,6 +33,7 @@ import java.util.regex.Pattern;
  *   <li>Access key is {@code "test"} (root/admin stand-in)</li>
  *   <li>Access key is not found in the IAM store (backward-compatible with pre-existing credentials)</li>
  *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
+ *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions</li>
  * </ul>
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
@@ -107,6 +108,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         String action = actionRegistry.resolve(credentialScope, ctx);
         if (action == null) {
             return; // unknown action → ALLOW (permissive)
+        }
+        if ("sts:GetCallerIdentity".equals(action)) {
+            return; // AWS returns caller identity even when an identity policy explicitly denies it
         }
 
         CallerContext caller = iamService.resolveCallerContext(akid);

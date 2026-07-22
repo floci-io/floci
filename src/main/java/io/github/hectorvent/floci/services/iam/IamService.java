@@ -1017,6 +1017,60 @@ public class IamService implements SessionAccountLookup {
     }
 
     /**
+     * Stores a non-expiring session for a Lambda execution role under the function's account.
+     * Lambda launches can happen outside request scope, so the account namespace must be explicit.
+     */
+    public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
+                                                   String secretAccessKey, String roleArn) {
+        if (accountId == null || accountId.isBlank()) {
+            throw new IllegalArgumentException("Lambda function account ID must not be blank");
+        }
+        SessionCredential session = new SessionCredential(
+                sessionAccessKeyId, secretAccessKey, roleArn, null, null, accountId);
+        session.setLambdaExecutionRole(true);
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.putForAccount(accountId, sessionAccessKeyId, session);
+        } else {
+            sessions.put(sessionAccessKeyId, session);
+        }
+        LOG.debugv("Registered Lambda execution-role session {0} under account {1} for {2}",
+                sessionAccessKeyId, accountId, roleArn);
+    }
+
+    /** Removes a session from an explicit account namespace. */
+    public void unregisterSession(String accountId, String sessionAccessKeyId) {
+        if (sessionAccessKeyId == null || sessionAccessKeyId.isBlank()) {
+            return;
+        }
+        if (accountId != null && !accountId.isBlank()
+                && sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.deleteForAccount(accountId, sessionAccessKeyId);
+        } else {
+            sessions.delete(sessionAccessKeyId);
+        }
+        LOG.debugv("Unregistered session {0} from account {1}", sessionAccessKeyId, accountId);
+    }
+
+    /**
+     * Removes persisted Lambda-owned sessions left behind by a previous process. No Lambda
+     * containers survive a Floci restart, so every marked session is orphaned at startup.
+     */
+    public int sweepOrphanedLambdaExecutionRoleSessions() {
+        List<SessionCredential> storedSessions = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
+                ? aware.scanAllAccounts()
+                : sessions.scan(key -> true);
+        int removed = 0;
+        for (SessionCredential session : storedSessions) {
+            if (!session.isLambdaExecutionRole()) {
+                continue;
+            }
+            deleteSession(session.getAccessKeyId(), session);
+            removed++;
+        }
+        return removed;
+    }
+
+    /**
      * Resolves the account a temporary access key belongs to: the account encoded in the
      * session's role (or federated-user) ARN when present, otherwise the caller account captured
      * at mint time. Returns empty for unknown or expired sessions so callers fall back to the
