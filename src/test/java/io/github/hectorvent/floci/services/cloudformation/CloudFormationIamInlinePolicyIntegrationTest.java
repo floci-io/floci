@@ -170,9 +170,74 @@ class CloudFormationIamInlinePolicyIntegrationTest {
     }
 
     @Test
+    void deletingManagedPolicyDetachesItFromSurvivingRole() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String roleName = "managed-policy-role-" + suffix;
+        String policyName = "attached-managed-policy-" + suffix;
+        String policyArn = "arn:aws:iam::000000000000:policy/" + policyName;
+        String stackName = "cfn-iam-managed-del-" + suffix;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", roleName)
+            .formParam("AssumeRolePolicyDocument",
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .when().post("/").then().statusCode(200);
+
+        String template = """
+                {
+                  "Resources": {
+                    "ManagedPolicy": {
+                      "Type": "AWS::IAM::ManagedPolicy",
+                      "Properties": {
+                        "ManagedPolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+                        },
+                        "Roles": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, roleName);
+
+        createStack(stackName, template);
+        assertStackComplete(stackName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200);
+
+        awaitManagedPolicyGone(policyArn);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", roleName)
+        .when().post("/").then().statusCode(200).body(containsString(roleName));
+
+        String attachments = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListAttachedRolePolicies")
+            .formParam("RoleName", roleName)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertFalse(attachments.contains(policyName), "deleted policy must be detached: " + attachments);
+    }
+
+    @Test
     void roleWithMissingManagedPolicyFailsAndRollsBack() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-iam-role-missing-policy-" + suffix;
+        String roleName = "missing-policy-role-" + suffix;
+        String validArn = "arn:aws:iam::aws:policy/ReadOnlyAccess";
         String missingArn = "arn:aws:iam::aws:policy/DefinitelyMissing-" + suffix;
         String template = """
                 {
@@ -181,23 +246,82 @@ class CloudFormationIamInlinePolicyIntegrationTest {
                       "Type": "AWS::IAM::Role",
                       "Properties": {
                         "RoleName": "missing-policy-role-%s",
-                        "ManagedPolicyArns": ["%s"]
+                        "ManagedPolicyArns": ["%s", "%s"]
                       }
                     }
                   }
                 }
-                """.formatted(suffix, missingArn);
+                """.formatted(suffix, validArn, missingArn);
 
         createStack(stackName, template);
 
         assertFailedResource(stackName, "Role", missingArn, "does not exist");
+
+        // The first attachment succeeded before the second failed. Rollback must detach it and
+        // delete the role created by this failed resource instead of leaking a partial IAM entity.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", roleName)
+        .when().post("/").then().statusCode(404).body(containsString("NoSuchEntity"));
+    }
+
+    @Test
+    void freshStackDoesNotAdoptExistingRole() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String roleName = "externally-owned-role-" + suffix;
+        String stackName = "cfn-iam-role-collision-" + suffix;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", roleName)
+            .formParam("AssumeRolePolicyDocument",
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .when().post("/").then().statusCode(200);
+
+        String template = """
+                {
+                  "Resources": {
+                    "Role": {
+                      "Type": "AWS::IAM::Role",
+                      "Properties": {"RoleName": "%s"}
+                    }
+                  }
+                }
+                """.formatted(roleName);
+
+        createStack(stackName, template);
+
+        assertFailedResource(stackName, "Role", roleName, "already exists");
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", roleName)
+        .when().post("/").then().statusCode(200).body(containsString(roleName));
     }
 
     @Test
     void managedPolicyWithMissingRoleFailsAndRollsBack() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-iam-policy-missing-role-" + suffix;
+        String existingRole = "existing-role-" + suffix;
         String missingRole = "missing-role-" + suffix;
+        String policyName = "missing-role-policy-" + suffix;
+        String policyArn = "arn:aws:iam::000000000000:policy/" + policyName;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", existingRole)
+            .formParam("AssumeRolePolicyDocument",
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .when().post("/").then().statusCode(200);
+
         String template = """
                 {
                   "Resources": {
@@ -209,16 +333,103 @@ class CloudFormationIamInlinePolicyIntegrationTest {
                           "Version": "2012-10-17",
                           "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
                         },
-                        "Roles": ["%s"]
+                        "Roles": ["%s", "%s"]
                       }
                     }
                   }
                 }
-                """.formatted(suffix, missingRole);
+                """.formatted(suffix, existingRole, missingRole);
 
         createStack(stackName, template);
 
         assertFailedResource(stackName, "ManagedPolicy", missingRole, "cannot be found");
+
+        // Rollback removes the policy it created and only detaches the role supplied by the user.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", policyArn)
+        .when().post("/").then().statusCode(404).body(containsString("NoSuchEntity"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", existingRole)
+        .when().post("/").then().statusCode(200).body(containsString(existingRole));
+
+        String attachments = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListAttachedRolePolicies")
+            .formParam("RoleName", existingRole)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertFalse(attachments.contains(policyName), "failed policy must be detached: " + attachments);
+    }
+
+    @Test
+    void laterResourceFailureRollsBackCompletedManagedPolicyAttachments() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-iam-later-failure-" + suffix;
+        String existingRole = "rollback-target-role-" + suffix;
+        String policyName = "rollback-target-policy-" + suffix;
+        String policyArn = "arn:aws:iam::000000000000:policy/" + policyName;
+        String missingArn = "arn:aws:iam::aws:policy/RollbackMissing-" + suffix;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", existingRole)
+            .formParam("AssumeRolePolicyDocument",
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .when().post("/").then().statusCode(200);
+
+        String template = """
+                {
+                  "Resources": {
+                    "ManagedPolicy": {
+                      "Type": "AWS::IAM::ManagedPolicy",
+                      "Properties": {
+                        "ManagedPolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+                        },
+                        "Roles": ["%s"]
+                      }
+                    },
+                    "FailingRole": {
+                      "Type": "AWS::IAM::Role",
+                      "DependsOn": "ManagedPolicy",
+                      "Properties": {
+                        "RoleName": "later-failing-role-%s",
+                        "ManagedPolicyArns": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, existingRole, suffix, missingArn);
+
+        createStack(stackName, template);
+
+        assertFailedResource(stackName, "FailingRole", missingArn, "does not exist");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", policyArn)
+        .when().post("/").then().statusCode(404).body(containsString("NoSuchEntity"));
+
+        String attachments = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListAttachedRolePolicies")
+            .formParam("RoleName", existingRole)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertFalse(attachments.contains(policyName), "rolled-back policy must be detached: " + attachments);
     }
 
     @Test
@@ -315,6 +526,22 @@ class CloudFormationIamInlinePolicyIntegrationTest {
         }
         throw new AssertionError("Timed out waiting for inline policy " + policyName
                 + " to be detached from role " + roleName);
+    }
+
+    private static void awaitManagedPolicyGone(String policyArn) throws InterruptedException {
+        for (int i = 0; i < 100; i++) {
+            int status = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "GetPolicy")
+                .formParam("PolicyArn", policyArn)
+            .when().post("/").then().extract().statusCode();
+            if (status == 404) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("Timed out waiting for managed policy " + policyArn + " to be deleted");
     }
 
     private static void assertFailedResource(String stackName, String logicalId,
