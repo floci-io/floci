@@ -14,7 +14,8 @@ import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.stream.Collectors;
 
 @Provider
@@ -134,11 +135,25 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             String service = credParts[3];
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
-            // Build canonical query string from raw query (excluding X-Amz-Signature)
-            String rawQuery = requestContext.getUriInfo().getRequestUri().getRawQuery();
-            String canonicalQueryString = Arrays.stream(rawQuery.split("&"))
-                    .filter(p -> !rawParamName(p).equals("X-Amz-Signature"))
-                    .sorted((a, b) -> rawParamName(a).compareTo(rawParamName(b)))
+            // Build the canonical query string per SigV4: URI-encode each parameter
+            // name and value, exclude X-Amz-Signature, then sort by encoded name and
+            // then by encoded value.
+            List<String[]> encodedParams = new ArrayList<>();
+            for (var entry : queryParams.entrySet()) {
+                if ("X-Amz-Signature".equals(entry.getKey())) {
+                    continue;
+                }
+                String encodedName = awsUriEncode(entry.getKey());
+                for (String value : entry.getValue()) {
+                    encodedParams.add(new String[]{encodedName, awsUriEncode(value)});
+                }
+            }
+            encodedParams.sort((a, b) -> {
+                int byName = a[0].compareTo(b[0]);
+                return byName != 0 ? byName : a[1].compareTo(b[1]);
+            });
+            String canonicalQueryString = encodedParams.stream()
+                    .map(p -> p[0] + "=" + p[1])
                     .collect(Collectors.joining("&"));
 
             // Build canonical headers from signed headers
@@ -194,9 +209,19 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return null;
     }
 
-    private static String rawParamName(String rawPair) {
-        int eq = rawPair.indexOf('=');
-        return eq >= 0 ? rawPair.substring(0, eq) : rawPair;
+    private static String awsUriEncode(String value) {
+        StringBuilder encoded = new StringBuilder();
+        for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
+            int c = b & 0xFF;
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_' || c == '.' || c == '~') {
+                encoded.append((char) c);
+            } else {
+                encoded.append('%').append(String.format("%02X", c));
+            }
+        }
+        return encoded.toString();
     }
 
     private static byte[] deriveSigningKey(String secretKey, String date, String region,
