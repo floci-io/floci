@@ -46,7 +46,7 @@ class RdsCfnProvisionerTest {
                 null, null, null, null, null, null,
                 mapper,
                 null, null, null, null, null, null, null,
-                rdsService, null, null, null, null, null, null,
+                rdsService, null, null, null, null, null, null, null,
                 new io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry(java.util.List.of()));
     }
 

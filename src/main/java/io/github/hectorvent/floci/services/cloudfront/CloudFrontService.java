@@ -11,11 +11,13 @@ import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionProfile;
 import io.github.hectorvent.floci.services.cloudfront.model.Invalidation;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.MonitoringSubscription;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
@@ -28,17 +30,33 @@ import jakarta.inject.Inject;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CloudFrontService {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
+    private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
+    private static final int MAX_CUSTOM_HEADER_VALUE_LENGTH = 1_783;
+    private static final int MAX_CUSTOM_HEADERS_LENGTH = 10_240;
+    private static final Pattern HTTP_HEADER_NAME =
+            Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
+    private static final Set<String> PROHIBITED_ORIGIN_CUSTOM_HEADERS = Set.of(
+            "cache-control", "connection", "content-length", "cookie", "host", "if-match",
+            "if-modified-since", "if-none-match", "if-range", "if-unmodified-since",
+            "max-forwards", "pragma", "proxy-authenticate", "proxy-authorization",
+            "proxy-connection", "range", "request-range", "te", "trailer", "transfer-encoding",
+            "upgrade", "via", "x-real-ip");
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -103,6 +121,7 @@ public class CloudFrontService {
     // ── Distributions ─────────────────────────────────────────────────────────
 
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
+        validateOriginCustomHeaders(dist.getConfig());
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
@@ -129,6 +148,7 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        validateOriginCustomHeaders(updated.getConfig());
         updated.setId(id);
         updated.setArn(existing.getArn());
         updated.setDomainName(existing.getDomainName());
@@ -138,6 +158,50 @@ public class CloudFrontService {
         updated.setTags(existing.getTags());
         distStore.put(id, updated);
         return updated;
+    }
+
+    private static void validateOriginCustomHeaders(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        for (Origin origin : config.getOrigins()) {
+            List<Map<String, String>> headers = origin.getCustomHeaders();
+            if (headers == null) {
+                continue;
+            }
+            if (headers.size() > MAX_ORIGIN_CUSTOM_HEADERS) {
+                throw invalidOriginCustomHeader("Too many origin custom headers");
+            }
+            int combinedLength = 0;
+            Set<String> names = new HashSet<>();
+            for (Map<String, String> header : headers) {
+                String name = header == null ? null : header.get("HeaderName");
+                String value = header == null ? null : header.get("HeaderValue");
+                if (name == null || name.isBlank() || value == null
+                        || name.length() > MAX_CUSTOM_HEADER_NAME_LENGTH
+                        || value.length() > MAX_CUSTOM_HEADER_VALUE_LENGTH
+                        || !HTTP_HEADER_NAME.matcher(name).matches()
+                        || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0) {
+                    throw invalidOriginCustomHeader("Invalid origin custom header name or value");
+                }
+                String normalized = name.toLowerCase(Locale.ROOT);
+                if (PROHIBITED_ORIGIN_CUSTOM_HEADERS.contains(normalized)
+                        || normalized.startsWith("x-amz-") || normalized.startsWith("x-edge-")) {
+                    throw invalidOriginCustomHeader("Prohibited origin custom header: " + name);
+                }
+                if (!names.add(normalized)) {
+                    throw invalidOriginCustomHeader("Duplicate origin custom header: " + name);
+                }
+                combinedLength += name.length() + value.length();
+                if (combinedLength > MAX_CUSTOM_HEADERS_LENGTH) {
+                    throw invalidOriginCustomHeader("Origin custom headers exceed the size quota");
+                }
+            }
+        }
+    }
+
+    private static AwsException invalidOriginCustomHeader(String message) {
+        return new AwsException("InvalidArgument", message, 400);
     }
 
     public synchronized void deleteDistribution(String id, String ifMatch) {
@@ -150,6 +214,17 @@ public class CloudFrontService {
             throw new AwsException("DistributionNotDisabled",
                     "The distribution you are trying to delete has not been disabled.", 409);
         }
+        distStore.delete(id);
+        invalidationStore.delete(id);
+        tagStore.delete("distribution/" + id);
+    }
+
+    /**
+     * Removes a distribution and its associated invalidations/tags without the disable/If-Match guards
+     * enforced by {@link #deleteDistribution(String, String)}. Used by CloudFormation stack deletion,
+     * which owns the resource lifecycle at the stack level.
+     */
+    public synchronized void removeDistribution(String id) {
         distStore.delete(id);
         invalidationStore.delete(id);
         tagStore.delete("distribution/" + id);
@@ -190,6 +265,44 @@ public class CloudFrontService {
         }
         dist.setEtag(UUID.randomUUID().toString());
         distStore.put(targetDistributionId, dist);
+    }
+
+    /**
+     * Finds the distribution whose data-plane requests should be served for the given {@code Host}
+     * header. A distribution matches when the host equals its assigned CloudFront domain name
+     * ({@code <id>.cloudfront.net}) or one of its alternate domain names (CNAME aliases). Any port
+     * suffix is ignored and matching is case-insensitive. Returns {@code null} when nothing matches.
+     */
+    public Distribution findByHost(String host) {
+        if (host == null || host.isBlank()) {
+            return null;
+        }
+        String hostname = stripPort(host);
+        for (Distribution dist : distStore.scan(k -> true)) {
+            if (hostname.equalsIgnoreCase(dist.getDomainName())) {
+                return dist;
+            }
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg != null && cfg.getAliases() != null) {
+                for (String alias : cfg.getAliases()) {
+                    if (hostname.equalsIgnoreCase(alias)) {
+                        return dist;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String stripPort(String host) {
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) {
+            String maybePort = host.substring(colon + 1);
+            if (!maybePort.isEmpty() && maybePort.chars().allMatch(Character::isDigit)) {
+                return host.substring(0, colon);
+            }
+        }
+        return host;
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
