@@ -5,6 +5,8 @@ import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
+import com.github.dockerjava.api.command.ListVolumesCmd;
+import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.command.WaitContainerCmd;
@@ -20,6 +22,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -107,6 +110,62 @@ class ContainerLifecycleManagerVolumeTest {
         when(cmd.exec()).thenThrow(new DockerException("Connection refused", 500));
 
         assertFalse(manager.volumeExists("some-volume"));
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsAuthoritativeSnapshot() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        InspectVolumeResponse first = mock(InspectVolumeResponse.class);
+        InspectVolumeResponse second = mock(InspectVolumeResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(java.util.List.of(first, second));
+        when(first.getName()).thenReturn("floci-code-first");
+        when(second.getName()).thenReturn("shared-data");
+
+        assertEquals(Optional.of(Set.of("floci-code-first", "shared-data")),
+                manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesDistinguishesEmptyInventory() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(java.util.List.of());
+
+        assertEquals(Optional.of(Set.of()), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullResponse() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullVolumeList() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalOnDockerFailure() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenThrow(new DockerException("Connection refused", 500));
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
     }
 
     @Test
@@ -218,4 +277,3 @@ class ContainerLifecycleManagerVolumeTest {
         verify(dockerClient, times(2)).createContainerCmd("busybox:stable");
     }
 }
-
