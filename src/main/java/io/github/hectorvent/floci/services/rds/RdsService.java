@@ -56,10 +56,25 @@ public class RdsService implements Resettable {
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
-            new ManagedClusterParameterGroup(
-                    "default.aurora-postgresql16",
-                    "aurora-postgresql16",
-                    "Default cluster parameter group"));
+            managedDefault("aurora-mysql5.7"),
+            managedDefault("aurora-mysql8.0"),
+            managedDefault("aurora-mysql8.4"),
+            managedDefault("aurora-postgresql11"),
+            managedDefault("aurora-postgresql12"),
+            managedDefault("aurora-postgresql13"),
+            managedDefault("aurora-postgresql14"),
+            managedDefault("aurora-postgresql15"),
+            managedDefault("aurora-postgresql16"),
+            managedDefault("aurora-postgresql17"),
+            managedDefault("aurora-postgresql18"),
+            managedDefault("mysql8.0"),
+            managedDefault("mysql8.4"),
+            managedDefault("postgres13"),
+            managedDefault("postgres14"),
+            managedDefault("postgres15"),
+            managedDefault("postgres16"),
+            managedDefault("postgres17"),
+            managedDefault("postgres18"));
 
     private final StorageBackend<String, DbInstance> instances;
     private final StorageBackend<String, DbCluster> clusters;
@@ -973,6 +988,13 @@ public class RdsService implements Resettable {
         return null;
     }
 
+    private static ManagedClusterParameterGroup managedDefault(String family) {
+        return new ManagedClusterParameterGroup(
+                "default." + family,
+                family,
+                "Default cluster parameter group");
+    }
+
     private record ManagedClusterParameterGroup(String name, String family, String description) {
         private DbClusterParameterGroup toModel() {
             return new DbClusterParameterGroup(name, family, description);
@@ -1057,7 +1079,41 @@ public class RdsService implements Resettable {
             return;
         }
         DbClusterParameterGroup group = getDbClusterParameterGroup(paramGroupName);
-        validateParameterGroupFamily(paramGroupName, group.getDbParameterGroupFamily(), engineParam, engineVersion);
+        String family = group.getDbParameterGroupFamily();
+        String expectedFamily = expectedClusterParameterGroupFamily(engineParam, engineVersion);
+        if (family == null || !family.equalsIgnoreCase(expectedFamily)) {
+            throw new AwsException("InvalidParameterCombination", invalidParameterCombinationMessage(), 400);
+        }
+    }
+
+    private String expectedClusterParameterGroupFamily(String engineParam, String engineVersion) {
+        String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
+        String effectiveVersion = engineVersion;
+        if (effectiveVersion == null || effectiveVersion.isBlank()) {
+            effectiveVersion = switch (normalizedEngine) {
+                case "postgres", "aurora-postgresql" -> "16.3";
+                case "mysql", "aurora", "aurora-mysql" -> "8.0.36";
+                case "mariadb" -> "11.2";
+                default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+            };
+        }
+
+        Matcher matcher = IMAGE_TAG_VERSION_PATTERN.matcher(effectiveVersion.trim());
+        if (!matcher.matches()) {
+            throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        }
+        String[] versionParts = matcher.group(1).split("\\.");
+        String familyVersion = switch (normalizedEngine) {
+            case "postgres", "aurora-postgresql" -> versionParts[0];
+            case "mysql", "aurora", "aurora-mysql", "mariadb" -> {
+                if (versionParts.length < 2) {
+                    throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+                }
+                yield versionParts[0] + "." + versionParts[1];
+            }
+            default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        };
+        return expectedFamilyPrefix(normalizedEngine) + familyVersion;
     }
 
     private void validateParameterGroupFamily(String groupName, String family, String engineParam, String engineVersion) {
