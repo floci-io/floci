@@ -307,6 +307,7 @@ public class CloudFormationResourceProvisioner {
                         provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
+                case "Custom::DynamoDBReplica" -> provisionDynamoDbReplica(resource, properties, engine, region);
                 case "AWS::ECS::Cluster" -> provisionEcsCluster(resource, properties, engine, region, stackName);
                 case "AWS::ECS::TaskDefinition" -> provisionEcsTaskDefinition(resource, properties, engine, region, stackName);
                 case "AWS::ECS::Service" -> provisionEcsService(resource, properties, engine, region, stackName);
@@ -384,6 +385,12 @@ public class CloudFormationResourceProvisioner {
      */
     public void delete(StackResource resource, String region) {
         String resourceType = resource.getResourceType();
+        // Custom::DynamoDBReplica is applied natively against the DynamoDB service (not via its
+        // provider Lambda), so remove the replica the same way rather than invoking the handler.
+        if ("Custom::DynamoDBReplica".equals(resourceType)) {
+            deleteDynamoDbReplicaSafe(resource, region);
+            return;
+        }
         boolean custom = "AWS::CloudFormation::CustomResource".equals(resourceType)
                 || (resourceType != null && resourceType.startsWith("Custom::"));
         if (custom) {
@@ -3100,6 +3107,52 @@ public class CloudFormationResourceProvisioner {
         } catch (Exception e) {
             // Best-effort, consistent with the rest of delete().
             LOG.debugv("Custom resource {0} Delete invocation failed: {1}", r.getLogicalId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Provisions a {@code Custom::DynamoDBReplica} — the custom resource the CDK legacy global-table
+     * (dynamodb.Table.replicationRegions) emits per replica region. Its provider Lambda simply calls
+     * DynamoDB UpdateTable with a ReplicaUpdates Create, so apply that directly rather than running
+     * the async CDK Provider framework. {@code Ref} (PhysicalResourceId) is the replica region.
+     */
+    private void provisionDynamoDbReplica(StackResource r, JsonNode props,
+                                          CloudFormationTemplateEngine engine, String region) {
+        String tableName = resolveOptional(props, "TableName", engine);
+        String replicaRegion = resolveOptional(props, "Region", engine);
+        if (tableName == null || tableName.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing TableName", 400);
+        }
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing Region", 400);
+        }
+        String priorRegion = r.getPhysicalId();
+        List<String> removeRegions = priorRegion != null
+                && !priorRegion.isBlank()
+                && !priorRegion.equals(replicaRegion)
+                ? List.of(priorRegion)
+                : List.of();
+        // Validate and persist replacement as one operation so an old-replica removal failure
+        // cannot leave the new replica applied while the resource still points at the old region.
+        dynamoDbService.applyReplicaUpdates(
+                tableName, List.of(replicaRegion), removeRegions, region);
+        r.setPhysicalId(replicaRegion);
+        r.getAttributes().put("TableName", tableName);
+    }
+
+    private void deleteDynamoDbReplicaSafe(StackResource r, String region) {
+        String tableName = r.getAttributes().get("TableName");
+        String replicaRegion = r.getPhysicalId();
+        if (tableName == null || tableName.isBlank() || replicaRegion == null || replicaRegion.isBlank()) {
+            return;
+        }
+        try {
+            dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(replicaRegion), region);
+        } catch (Exception e) {
+            LOG.debugv("Could not remove replica {0} from table {1}: {2}",
+                    replicaRegion, tableName, e.getMessage());
         }
     }
 
