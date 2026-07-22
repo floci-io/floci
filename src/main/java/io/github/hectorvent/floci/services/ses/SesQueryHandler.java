@@ -187,9 +187,10 @@ public class SesQueryHandler {
         String configurationSetName = getParam(params, "ConfigurationSetName");
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
+        // ListManagementOptions is a v2-only SendEmail field; the v1 Query API has no equivalent.
         String messageId = sesService.sendEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, subject, bodyText, bodyHtml, configurationSetName,
-                emailTags, List.of(), region);
+                emailTags, List.of(), null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendEmail", AwsNamespaces.SES, result)).build();
@@ -207,7 +208,7 @@ public class SesQueryHandler {
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
         String messageId = sesService.sendRawEmail(source, destinations, rawMessage,
-                configurationSetName, emailTags, region);
+                configurationSetName, emailTags, null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendRawEmail", AwsNamespaces.SES, result)).build();
@@ -479,7 +480,7 @@ public class SesQueryHandler {
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
         String messageId = sesService.sendTemplatedEmail(source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, resolvedName, templateData,
-                configurationSetName, emailTags, List.of(), region);
+                configurationSetName, emailTags, List.of(), null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendTemplatedEmail", AwsNamespaces.SES, result)).build();

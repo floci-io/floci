@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.Topic;
@@ -40,6 +41,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -96,6 +99,9 @@ public class SesService {
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
+    // Base URL used to build functional list-management unsubscribe links (the {{amazonSESUnsubscribeUrl}}
+    // placeholder and the List-Unsubscribe header) that resolve to Floci's own unsubscribe endpoint.
+    private final String baseUrl;
     private final Route53Service route53Service;
     private final Clock clock;
     private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
@@ -128,6 +134,7 @@ public class SesService {
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
+        this.baseUrl = config.effectiveBaseUrl();
         this.route53Service = route53Service;
         this.clock = clock;
     }
@@ -178,6 +185,7 @@ public class SesService {
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
+        this.baseUrl = "http://localhost:4566";
         this.route53Service = route53Service;
         this.clock = clock;
     }
@@ -259,7 +267,8 @@ public class SesService {
                             List<String> bccAddresses, List<String> replyToAddresses,
                             String subject, String bodyText, String bodyHtml,
                             String configurationSetName, List<MessageTag> emailTags,
-                            List<MessageHeader> additionalHeaders, String region) {
+                            List<MessageHeader> additionalHeaders, ListManagementOptions listManagement,
+                            String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -272,20 +281,40 @@ public class SesService {
         String effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName, source, region);
         validateConfigurationSet(effectiveConfigSet, region);
 
+        // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
+        // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
+        List<String> envelope = allRecipients(toAddresses, ccAddresses, bccAddresses);
+        Map<String, String> suppressedReasons = new LinkedHashMap<>(
+                collectSuppressedReasons(envelope, effectiveConfigSet, region));
+        // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
+        // over the list-management BOUNCE and keeps its synthetic event type.
+        collectListManagementOptOuts(envelope, listManagement, region).forEach(suppressedReasons::putIfAbsent);
+
+        // A single-recipient list-managed send gets a functional unsubscribe link: the
+        // {{amazonSESUnsubscribeUrl}} body placeholder is replaced and the List-Unsubscribe headers
+        // are added, matching AWS (which only injects these for a single recipient). The link
+        // resolves to Floci's own /_aws/ses/unsubscribe endpoint.
+        if (hasListManagement(listManagement) && envelope.size() == 1) {
+            String url = buildUnsubscribeUrl(region, listManagement, extractEmailAddress(envelope.get(0)));
+            bodyText = replaceUnsubscribePlaceholder(bodyText, url);
+            bodyHtml = replaceUnsubscribePlaceholder(bodyHtml, url);
+            additionalHeaders = withUnsubscribeHeaders(additionalHeaders, url);
+        }
+
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
+        if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
+            email.setHeaders(additionalHeaders);
+        }
         emailStore.put("email::" + region + "::" + messageId, email);
-
-        List<String> envelope = allRecipients(toAddresses, ccAddresses, bccAddresses);
-        Map<String, String> suppressedReasons = collectSuppressedReasons(envelope, effectiveConfigSet, region);
 
         List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
         List<String> relayedCc = filterUnsuppressed(ccAddresses, suppressedReasons);
         List<String> relayedBcc = filterUnsuppressed(bccAddresses, suppressedReasons);
         if (sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
             smtpRelay.relay(source, relayedTo, relayedCc, relayedBcc,
-                    replyToAddresses, subject, bodyText, bodyHtml);
+                    replyToAddresses, subject, bodyText, bodyHtml, additionalHeaders);
         } else {
             LOG.infov("SES email accepted but not relayed (all recipients suppressed): messageId={0}",
                     messageId);
@@ -301,7 +330,7 @@ public class SesService {
 
     public String sendRawEmail(String source, List<String> destinations, String rawMessage,
                                String configurationSetName, List<MessageTag> emailTags,
-                               String region) {
+                               ListManagementOptions listManagement, String region) {
         if (rawMessage == null || rawMessage.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
@@ -339,11 +368,18 @@ public class SesService {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination address is required.", 400);
         }
+        // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
+        // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
+        Map<String, String> suppressedReasons = new LinkedHashMap<>(
+                collectSuppressedReasons(effectiveDestinations, effectiveConfigSet, region));
+        // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
+        // over the list-management BOUNCE and keeps its synthetic event type.
+        collectListManagementOptOuts(effectiveDestinations, listManagement, region)
+                .forEach(suppressedReasons::putIfAbsent);
+
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         emailStore.put("email::" + region + "::" + messageId, email);
-
-        Map<String, String> suppressedReasons = collectSuppressedReasons(effectiveDestinations, effectiveConfigSet, region);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!relayedDestinations.isEmpty()) {
@@ -2304,6 +2340,246 @@ public class SesService {
     }
 
     /**
+     * Resolves the recipients suppressed by SES V2 {@code SendEmail} {@code ListManagementOptions}:
+     * for each envelope recipient that is opted out of the named contact list (or the given topic),
+     * returns a {@code BOUNCE} suppression reason so the shared send path drops the recipient from
+     * the relay and publishes a Bounce event — matching AWS ("SES will issue a bounce event for a
+     * message that is sent to an unsubscribed contact"). Returns an empty map when no
+     * {@code ListManagementOptions} was supplied. Throws when the contact list does not exist, so a
+     * bad reference fails the whole send. A recipient that is not yet a contact is created
+     * automatically (matching AWS), then evaluated like any other contact.
+     */
+    private Map<String, String> collectListManagementOptOuts(Collection<String> addresses,
+                                                             ListManagementOptions listManagement, String region) {
+        if (listManagement == null || listManagement.contactListName() == null
+                || listManagement.contactListName().isBlank() || addresses == null || addresses.isEmpty()) {
+            return Map.of();
+        }
+        ContactList list = getContactList(listManagement.contactListName(), region);
+        String topicName = listManagement.topicName();
+        String effectiveTopic = (topicName == null || topicName.isBlank()) ? null : topicName;
+        // Fail fast on a topic that isn't defined on the list rather than silently skipping
+        // suppression (a typo would otherwise send to everyone). AWS does not document this, so the
+        // exact error is best-effort.
+        if (effectiveTopic != null && defaultTopicStatus(list, effectiveTopic) == null) {
+            throw new AwsException("BadRequestException",
+                    "Topic " + effectiveTopic + " does not exist in contact list "
+                            + list.getContactListName() + ".", 400);
+        }
+        Map<String, String> optOuts = new LinkedHashMap<>();
+        for (String address : addresses) {
+            if (address == null || address.isBlank() || optOuts.containsKey(address)) {
+                continue;
+            }
+            String email = extractEmailAddress(address);
+            if (email == null || email.isBlank()) {
+                continue;
+            }
+            Contact contact = getOrAutoCreateContact(list, email, region);
+            if (isListManagementOptedOut(contact, list, effectiveTopic)) {
+                optOuts.put(address, "BOUNCE");
+            }
+        }
+        return optOuts;
+    }
+
+    /**
+     * Returns the contact for {@code email} in {@code list}, creating it automatically when absent —
+     * AWS creates a contact on the list when {@code ListManagementOptions} names a recipient that is
+     * not yet a contact. The auto-created contact has no explicit topic preferences (its effective
+     * per-topic status derives from the list topic defaults) and is not unsubscribed. Creation runs
+     * under {@code contactMutationLock} so a concurrent contact-list deletion can't orphan it.
+     */
+    private Contact getOrAutoCreateContact(ContactList list, String email, String region) {
+        String key = contactKey(region, list.getContactListName(), email);
+        Contact existing = contactStore.get(key).orElse(null);
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (contactMutationLock) {
+            Contact raced = contactStore.get(key).orElse(null);
+            if (raced != null) {
+                return raced;
+            }
+            // Re-check the list under the lock so a concurrent deleteContactList (which purges the
+            // list and its contacts under the same lock) can't be followed by this creating an
+            // orphaned contact for a list that no longer exists.
+            getContactList(list.getContactListName(), region);
+            Contact contact = new Contact(email);
+            Instant now = Instant.now(clock);
+            contact.setCreatedTimestamp(now);
+            contact.setLastUpdatedTimestamp(now);
+            contactStore.put(key, contact);
+            LOG.infov("Auto-created SES contact {0} in list {1} on send (region {2})",
+                    email, list.getContactListName(), region);
+            return contact;
+        }
+    }
+
+    /**
+     * Whether a contact is opted out for a list-managed send. A contact with {@code UnsubscribeAll}
+     * is opted out of everything. When no topic is given, only {@code UnsubscribeAll} suppresses
+     * (AWS documents suppression of whole-list unsubscribers). When a topic is given, an explicit
+     * {@code OPT_OUT} preference for that topic suppresses; absent an explicit preference, the topic's
+     * {@code DefaultSubscriptionStatus} is used — the default-status fallback at send time is not
+     * documented by AWS but mirrors the effective-status model AWS uses for {@code ListContacts}.
+     */
+    private static boolean isListManagementOptedOut(Contact contact, ContactList list, String topicName) {
+        if (contact.isUnsubscribeAll()) {
+            return true;
+        }
+        if (topicName == null) {
+            return false;
+        }
+        String explicit = explicitTopicStatus(contact, topicName);
+        if (explicit != null) {
+            return "OPT_OUT".equals(explicit);
+        }
+        return "OPT_OUT".equals(defaultTopicStatus(list, topicName));
+    }
+
+    private static String explicitTopicStatus(Contact contact, String topicName) {
+        if (contact.getTopicPreferences() == null) {
+            return null;
+        }
+        for (TopicPreference pref : contact.getTopicPreferences()) {
+            if (topicName.equals(pref.getTopicName())) {
+                return pref.getSubscriptionStatus();
+            }
+        }
+        return null;
+    }
+
+    private static String defaultTopicStatus(ContactList list, String topicName) {
+        if (list.getTopics() == null) {
+            return null;
+        }
+        for (Topic topic : list.getTopics()) {
+            if (topicName.equals(topic.getTopicName())) {
+                return topic.getDefaultSubscriptionStatus();
+            }
+        }
+        return null;
+    }
+
+    private static final String UNSUBSCRIBE_PLACEHOLDER = "{{amazonSESUnsubscribeUrl}}";
+
+    private static boolean hasListManagement(ListManagementOptions listManagement) {
+        return listManagement != null && listManagement.contactListName() != null
+                && !listManagement.contactListName().isBlank();
+    }
+
+    /**
+     * Builds the functional one-click unsubscribe URL served by Floci's {@code /_aws/ses/unsubscribe}
+     * endpoint. Unlike AWS's opaque hosted URL, the list, topic, and address are carried as readable
+     * query parameters so the link is directly usable and testable against the local emulator.
+     */
+    private String buildUnsubscribeUrl(String region, ListManagementOptions listManagement, String address) {
+        StringBuilder sb = new StringBuilder(baseUrl)
+                .append("/_aws/ses/unsubscribe?region=").append(urlEncode(region))
+                .append("&contactList=").append(urlEncode(listManagement.contactListName()))
+                .append("&address=").append(urlEncode(address));
+        if (listManagement.topicName() != null && !listManagement.topicName().isBlank()) {
+            sb.append("&topic=").append(urlEncode(listManagement.topicName()));
+        }
+        return sb.toString();
+    }
+
+    private static String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    /** Replaces up to the first two {@code {{amazonSESUnsubscribeUrl}}} occurrences, as AWS does. */
+    private static String replaceUnsubscribePlaceholder(String body, String url) {
+        if (body == null || !body.contains(UNSUBSCRIBE_PLACEHOLDER)) {
+            return body;
+        }
+        StringBuilder out = new StringBuilder();
+        int from = 0;
+        int replaced = 0;
+        while (replaced < 2) {
+            int at = body.indexOf(UNSUBSCRIBE_PLACEHOLDER, from);
+            if (at < 0) {
+                break;
+            }
+            out.append(body, from, at).append(url);
+            from = at + UNSUBSCRIBE_PLACEHOLDER.length();
+            replaced++;
+        }
+        out.append(body.substring(from));
+        return out.toString();
+    }
+
+    private static List<MessageHeader> withUnsubscribeHeaders(List<MessageHeader> headers, String url) {
+        List<MessageHeader> out = new ArrayList<>();
+        // Override any caller-supplied unsubscribe headers rather than appending a duplicate, matching
+        // AWS ("SES will override these headers if they are present in the email").
+        if (headers != null) {
+            for (MessageHeader h : headers) {
+                if (!"List-Unsubscribe".equalsIgnoreCase(h.name())
+                        && !"List-Unsubscribe-Post".equalsIgnoreCase(h.name())) {
+                    out.add(h);
+                }
+            }
+        }
+        out.add(new MessageHeader("List-Unsubscribe", "<" + url + ">"));
+        out.add(new MessageHeader("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"));
+        return out;
+    }
+
+    /**
+     * Applies a list-management unsubscribe (the action behind the {@code /_aws/ses/unsubscribe}
+     * link): with a topic, sets that topic's preference to {@code OPT_OUT}; without a topic,
+     * unsubscribes the contact from the whole list ({@code UnsubscribeAll}). The contact is created
+     * if it does not exist yet, consistent with send-time auto-creation. Runs under
+     * {@code contactMutationLock} so a concurrent contact-list deletion can't orphan it.
+     */
+    public void unsubscribeContact(String listName, String emailAddress, String topicName, String region) {
+        validateEmailAddress(emailAddress);
+        String effectiveTopic = (topicName == null || topicName.isBlank()) ? null : topicName;
+        String key = contactKey(region, listName, emailAddress);
+        synchronized (contactMutationLock) {
+            ContactList list = getContactList(listName, region);
+            if (effectiveTopic != null && defaultTopicStatus(list, effectiveTopic) == null) {
+                throw new AwsException("BadRequestException",
+                        "Topic " + effectiveTopic + " does not exist in contact list " + listName + ".", 400);
+            }
+            Contact contact = contactStore.get(key).orElseGet(() -> {
+                Contact created = new Contact(emailAddress);
+                created.setCreatedTimestamp(Instant.now(clock));
+                return created;
+            });
+            if (effectiveTopic == null) {
+                contact.setUnsubscribeAll(true);
+            } else {
+                setTopicPreference(contact, effectiveTopic, "OPT_OUT");
+            }
+            contact.setLastUpdatedTimestamp(Instant.now(clock));
+            contactStore.put(key, contact);
+        }
+        LOG.infov("List-management unsubscribe: {0} from list {1} topic {2} (region {3})",
+                emailAddress, listName, effectiveTopic == null ? "<all>" : effectiveTopic, region);
+    }
+
+    private static void setTopicPreference(Contact contact, String topicName, String status) {
+        // Copy into a fresh mutable list and set it back, so this works even if the contact's
+        // preferences were stored as an unmodifiable list (setTopicPreferences keeps the list as-is).
+        List<TopicPreference> prefs = new ArrayList<>(contact.getTopicPreferences());
+        boolean found = false;
+        for (TopicPreference pref : prefs) {
+            if (topicName.equals(pref.getTopicName())) {
+                pref.setSubscriptionStatus(status);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            prefs.add(new TopicPreference(topicName, status));
+        }
+        contact.setTopicPreferences(prefs);
+    }
+
+    /**
      * Filter out recipients whose effective suppression reason is non-null. Returns a new
      * list containing only the addresses that should reach the SMTP relay, mirroring AWS
      * SES's "accept the message, but doesn't send it" behaviour for suppressed addresses.
@@ -2453,12 +2729,13 @@ public class SesService {
                                      List<String> bccAddresses, List<String> replyToAddresses,
                                      String templateName, JsonNode templateData,
                                      String configurationSetName, List<MessageTag> emailTags,
-                                     List<MessageHeader> additionalHeaders, String region) {
+                                     List<MessageHeader> additionalHeaders,
+                                     ListManagementOptions listManagement, String region) {
         EmailTemplate template = getTemplate(templateName, region);
         return sendInlineTemplatedEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, template.getSubject(), template.getTextPart(),
                 template.getHtmlPart(), templateData,
-                configurationSetName, emailTags, additionalHeaders, region);
+                configurationSetName, emailTags, additionalHeaders, listManagement, region);
     }
 
     public String renderTestTemplate(String templateName, String templateDataRaw, String region) {
@@ -2580,7 +2857,7 @@ public class SesService {
                                             JsonNode templateData,
                                             String configurationSetName, List<MessageTag> emailTags,
                                             List<MessageHeader> additionalHeaders,
-                                            String region) {
+                                            ListManagementOptions listManagement, String region) {
         boolean hasSubject = subject != null && !subject.isBlank();
         boolean hasText = textPart != null && !textPart.isBlank();
         boolean hasHtml = htmlPart != null && !htmlPart.isBlank();
@@ -2592,7 +2869,7 @@ public class SesService {
                 applyTemplateData(subject, templateData),
                 applyTemplateData(textPart, templateData),
                 applyTemplateData(htmlPart, templateData),
-                configurationSetName, emailTags, additionalHeaders, region);
+                configurationSetName, emailTags, additionalHeaders, listManagement, region);
     }
 
     public List<BulkEmailEntryResult> sendBulkTemplatedEmail(String source,
@@ -2641,13 +2918,15 @@ public class SesService {
                 JsonNode merged = mergeTemplateData(defaultTemplateData, entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(defaultEmailTags, entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(defaultHeaders, entry.replacementHeaders());
+                // SendBulkEmail has no ListManagementOptions field, so list-managed suppression
+                // does not apply to bulk sends.
                 String messageId = sendEmail(source,
                         entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses(),
                         replyToAddresses,
                         applyTemplateData(subject, merged),
                         applyTemplateData(textPart, merged),
                         applyTemplateData(htmlPart, merged),
-                        configurationSetName, mergedTags, mergedHeaders, region);
+                        configurationSetName, mergedTags, mergedHeaders, null, region);
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
                 results.add(BulkEmailEntryResult.failure(
@@ -2754,6 +3033,13 @@ public class SesService {
         StringBuilder out = new StringBuilder();
         while (matcher.find()) {
             String key = matcher.group(1);
+            if ("amazonSESUnsubscribeUrl".equals(key)) {
+                // Reserved list-management placeholder: leave it intact for post-render replacement
+                // in the send path, so a templated body can carry {{amazonSESUnsubscribeUrl}} without
+                // failing as a missing rendering attribute.
+                matcher.appendReplacement(out, Matcher.quoteReplacement(matcher.group(0)));
+                continue;
+            }
             if (data == null || !data.hasNonNull(key)) {
                 throw new AwsException("MissingRenderingAttribute",
                         "Attribute '" + key + "' is not present in the rendering data.", 400);

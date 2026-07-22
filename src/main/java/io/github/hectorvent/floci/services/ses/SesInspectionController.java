@@ -94,6 +94,15 @@ public class SesInspectionController {
                 }
             }
 
+            if (email.getHeaders() != null && !email.getHeaders().isEmpty()) {
+                ArrayNode headers = node.putArray("Headers");
+                email.getHeaders().forEach(h -> {
+                    ObjectNode ho = headers.addObject();
+                    ho.put("Name", h.name());
+                    ho.put("Value", h.value());
+                });
+            }
+
             if (email.getSentAt() != null) {
                 node.put("Timestamp", email.getSentAt().toString());
             }
