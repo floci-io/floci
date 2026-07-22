@@ -411,6 +411,7 @@ public class CloudFormationService {
 
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
                                  boolean isCreate, String region, String accountId) {
+        String previousTemplateBody = stack.getTemplateBody();
         try {
             JsonNode template = parseTemplate(templateBody);
 
@@ -462,6 +463,7 @@ public class CloudFormationService {
                             name -> exports.get(exportKey(region, name)));
 
                     StackResource resource = stack.getResources().get(logicalId);
+                    StackResource previousResource = resource;
                     if (resource == null) {
                         resource = new StackResource();
                         resource.setLogicalId(logicalId);
@@ -490,6 +492,12 @@ public class CloudFormationService {
                     if ("CREATE_FAILED".equals(resource.getStatus())
                             || "UPDATE_FAILED".equals(resource.getStatus())) {
                         failedResource = resource;
+                        if (!isCreate && previousResource != null) {
+                            // Provisioners work on a copy of the stored resource metadata. Keep the
+                            // last known-good identity and status when an update attempt fails so a
+                            // later retry or stack deletion still manages the original resource.
+                            stack.getResources().put(logicalId, previousResource);
+                        }
                         break;
                     }
                 }
@@ -498,6 +506,9 @@ public class CloudFormationService {
             // A resource failed to provision: stop, and (on create) roll back what we built so a
             // corrected re-deploy starts from a clean slate (acceptance criterion #9).
             if (failedResource != null) {
+                if (!isCreate) {
+                    stack.setTemplateBody(previousTemplateBody);
+                }
                 rollbackFailedExecution(stack, region, isCreate, failedResource);
                 return;
             }
@@ -556,6 +567,9 @@ public class CloudFormationService {
 
         } catch (Exception e) {
             LOG.errorv("Stack {0} execution failed: {1}", stack.getStackName(), e.getMessage());
+            if (!isCreate) {
+                stack.setTemplateBody(previousTemplateBody);
+            }
             String failStatus = isCreate ? "CREATE_FAILED" : "UPDATE_FAILED";
             stack.setStatus(failStatus);
             stack.setStatusReason(e.getMessage());
@@ -570,9 +584,10 @@ public class CloudFormationService {
      *
      * <p>On a <b>create</b>, rolls back by deleting the resources that were successfully created in
      * this execution, leaving a clean slate ({@code ROLLBACK_COMPLETE}) so a corrected re-deploy can
-     * start from scratch. On an <b>update</b>, marks {@code UPDATE_ROLLBACK_COMPLETE} and keeps the
-     * prior physical IDs so a corrected re-deploy proceeds (full prior-template restoration is out
-     * of scope — see plan Part 7).
+     * start from scratch. On an <b>update</b>, marks {@code UPDATE_ROLLBACK_COMPLETE}; the caller
+     * restores the prior template and failed-resource metadata so retries and deletion continue to
+     * manage the last known-good physical resource. Rolling back side effects from resources that
+     * completed earlier in the failed update remains out of scope.
      */
     private void rollbackFailedExecution(Stack stack, String region, boolean isCreate,
                                          StackResource failedResource) {

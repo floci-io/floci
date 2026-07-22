@@ -70,6 +70,99 @@ class CloudFormationEventBusIntegrationTest {
             .statusCode(200);
     }
 
+    private void updateStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private String describeStackResources(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    private String describeStackEvents(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    private String getTemplate(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "GetTemplate")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    private static String firstPhysicalResourceId(String xml) {
+        String startMarker = "<PhysicalResourceId>";
+        String endMarker = "</PhysicalResourceId>";
+        int start = xml.indexOf(startMarker);
+        if (start < 0) {
+            throw new AssertionError("No physical resource ID in response: " + xml);
+        }
+        start += startMarker.length();
+        int end = xml.indexOf(endMarker, start);
+        return xml.substring(start, end);
+    }
+
+    private static String eventBusOnlyTemplate(String busName, String description) {
+        String nameProperty = busName == null ? "" : "\"Name\": \"" + busName + "\",";
+        return """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": {
+                        %s
+                        "Description": "%s"
+                      }
+                    }
+                  }
+                }
+                """.formatted(nameProperty, description);
+    }
+
+    private void callEventBridge(String target, String body, int expectedStatus) {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", target)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(expectedStatus);
+    }
+
     private static String eventBusAndRuleTemplate(String busName) {
         return """
                 {
@@ -169,25 +262,52 @@ class CloudFormationEventBusIntegrationTest {
                 "Timed out waiting for stack " + stackName + " to be deleted. Last response: " + lastBody);
     }
 
+    private void awaitStackStatus(String stackName, String expectedStatus) throws InterruptedException {
+        String lastBody = null;
+        for (int i = 0; i < 100; i++) {
+            lastBody = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when().post("/").then().extract().asString();
+            if (lastBody.contains("<StackStatus>" + expectedStatus + "</StackStatus>")) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("Timed out waiting for stack " + stackName + " to reach "
+                + expectedStatus + ". Last response: " + lastBody);
+    }
+
     @Test
-    void eventBusWithExistingNameIsAdoptedNotRecreated() throws InterruptedException {
+    void eventBusWithExistingNameInAnotherStackFailsWithoutAdoption() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
-        String busName = "adopt-bus-" + suffix;
-        String stackA = "eventbus-adopt-a-" + suffix;
-        String stackB = "eventbus-adopt-b-" + suffix;
+        String busName = "collision-bus-" + suffix;
+        String stackA = "eventbus-collision-a-" + suffix;
+        String stackB = "eventbus-collision-b-" + suffix;
 
         createStack(stackA, eventBusAndRuleTemplate(busName));
         assertStackStatus(stackA, "CREATE_COMPLETE");
 
-        // Re-declaring an already-existing bus name — as an idempotent re-deploy / stack UPDATE does —
-        // must ADOPT the existing bus rather than fail with ResourceAlreadyExistsException.
+        // A second stack must not adopt a bus owned by the first stack.
         createStack(stackB, eventBusAndRuleTemplate(busName));
-        assertStackStatus(stackB, "CREATE_COMPLETE");
+        assertStackStatus(stackB, "ROLLBACK_COMPLETE");
+        String resources = describeStackResources(stackB);
+        if (!resources.contains("<ResourceStatus>CREATE_FAILED</ResourceStatus>")) {
+            throw new AssertionError("collision failure was not preserved: " + resources);
+        }
+        String events = describeStackEvents(stackB);
+        if (!events.contains("EventBus already exists: " + busName)) {
+            throw new AssertionError("collision reason was not preserved: " + events);
+        }
+
+        deleteStack(stackB);
+        awaitStackDeleted(stackB);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
 
         deleteStack(stackA);
         awaitStackDeleted(stackA);
-        deleteStack(stackB);
-        awaitStackDeleted(stackB);
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -199,6 +319,161 @@ class CloudFormationEventBusIntegrationTest {
         .then()
             .statusCode(404)
             .body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void sameStackUpdateReusesOwnedBusAndUpdatesDescription() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "update-bus-" + suffix;
+        String stackName = "eventbus-update-" + suffix;
+
+        createStack(stackName, eventBusOnlyTemplate(busName, "before"));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        updateStack(stackName, eventBusOnlyTemplate(busName, "after"));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("\"Description\":\"after\""));
+
+        updateStack(stackName, eventBusOnlyTemplate(busName, ""));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("\"Description\":\"\""));
+
+        deleteStack(stackName);
+        awaitStackDeleted(stackName);
+    }
+
+    @Test
+    void explicitBusNameChangeFailsWithoutReplacingOwnedBus() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String originalName = "original-bus-" + suffix;
+        String replacementName = "replacement-bus-" + suffix;
+        String stackName = "eventbus-rename-" + suffix;
+
+        createStack(stackName, eventBusOnlyTemplate(originalName, "original"));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        updateStack(stackName, eventBusOnlyTemplate(replacementName, "replacement"));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + originalName + "\"}", 200);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + replacementName + "\"}", 404);
+        String activeTemplate = getTemplate(stackName);
+        if (!activeTemplate.contains(originalName) || activeTemplate.contains(replacementName)) {
+            throw new AssertionError("failed update replaced the active template: " + activeTemplate);
+        }
+
+        updateStack(stackName, eventBusOnlyTemplate(null, "generated"));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + originalName + "\"}", 200);
+
+        deleteStack(stackName);
+        awaitStackDeleted(stackName);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + originalName + "\"}", 404);
+    }
+
+    @Test
+    void generatedBusNameRemainsStableAcrossUpdate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "eventbus-generated-" + suffix;
+        String template = eventBusOnlyTemplate(null, "generated");
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        String originalName = firstPhysicalResourceId(describeStackResources(stackName));
+
+        updateStack(stackName, template);
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+        String updatedName = firstPhysicalResourceId(describeStackResources(stackName));
+        if (!originalName.equals(updatedName)) {
+            throw new AssertionError("generated bus name changed from " + originalName + " to " + updatedName);
+        }
+
+        deleteStack(stackName);
+        awaitStackDeleted(stackName);
+    }
+
+    @Test
+    void updateDoesNotAdoptBusRecreatedUnderSameName() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "recreated-bus-" + suffix;
+        String stackName = "eventbus-recreated-" + suffix;
+        String template = eventBusOnlyTemplate(busName, "owned");
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        callEventBridge("AWSEvents.DeleteEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+        Thread.sleep(2);
+        callEventBridge("AWSEvents.CreateEventBus",
+                "{\"Name\":\"" + busName + "\",\"Description\":\"external\"}", 200);
+
+        updateStack(stackName, template);
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+
+        deleteStack(stackName);
+        awaitStackStatus(stackName, "DELETE_FAILED");
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+
+        callEventBridge("AWSEvents.DeleteEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+        deleteStack(stackName);
+        awaitStackDeleted(stackName);
+    }
+
+    @Test
+    void eventBusDeleteFailurePropagatesAndRetrySucceeds() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "blocked-delete-bus-" + suffix;
+        String ruleName = "external-rule-" + suffix;
+        String stackName = "eventbus-blocked-delete-" + suffix;
+
+        createStack(stackName, eventBusOnlyTemplate(busName, "blocked"));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        callEventBridge("AWSEvents.PutRule", """
+                {"Name":"%s","EventBusName":"%s","EventPattern":"{\\\"source\\\":[\\\"external\\\"]}"}
+                """.formatted(ruleName, busName), 200);
+
+        deleteStack(stackName);
+        awaitStackStatus(stackName, "DELETE_FAILED");
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+
+        callEventBridge("AWSEvents.DeleteRule",
+                "{\"Name\":\"" + ruleName + "\",\"EventBusName\":\"" + busName + "\"}", 200);
+        deleteStack(stackName);
+        awaitStackDeleted(stackName);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 404);
+    }
+
+    @Test
+    void deletingStackTreatsAlreadyAbsentBusAsSuccess() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "already-gone-bus-" + suffix;
+        String stackName = "eventbus-already-gone-" + suffix;
+
+        createStack(stackName, eventBusOnlyTemplate(busName, "gone"));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        callEventBridge("AWSEvents.DeleteEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+
+        deleteStack(stackName);
+        awaitStackDeleted(stackName);
     }
 
     @Test
