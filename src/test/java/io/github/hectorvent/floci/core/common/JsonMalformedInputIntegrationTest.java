@@ -69,6 +69,34 @@ class JsonMalformedInputIntegrationTest {
             .body("__type", equalTo("SerializationException"));
     }
 
+    @Test
+    void trailingContentAfterValidJsonOnJson11IsSerializationException() {
+        // Jackson's default readTree stops at the first complete value; without
+        // FAIL_ON_TRAILING_TOKENS the garbage after {} is silently ignored.
+        req(JSON_1_1, "TrentService.CreateKey", "{} not-json")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void trailingContentAfterValidJsonOnJson10IsSerializationException() {
+        req(JSON_1_0, "DynamoDB_20120810.ListTables", "{}{\"second\":\"document\"}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void trailingWhitespaceAfterValidJsonIsAccepted() {
+        req(JSON_1_0, "DynamoDB_20120810.ListTables", "{}   \n")
+        .when().post("/")
+        .then()
+            .statusCode(200);
+    }
+
     // ── KMS: base64 blob fields ──
 
     @Test

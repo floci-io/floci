@@ -269,4 +269,24 @@ class EventBridgePermissionIntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    void putPermissionPolicyWithTrailingContentIsValidationException() {
+        // A lenient readTree accepts '{} garbage' by stopping at the first value;
+        // the policy must be parsed with trailing-token validation enabled.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.PutPermission")
+            .body("""
+                {
+                    "EventBusName": "perm-test-bus",
+                    "Policy": "{} trailing-garbage"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
 }

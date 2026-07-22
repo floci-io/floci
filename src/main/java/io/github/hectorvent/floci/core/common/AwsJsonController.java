@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
@@ -33,6 +35,7 @@ public class AwsJsonController {
     private static final Logger LOG = Logger.getLogger(AwsJsonController.class);
 
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictBodyReader;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
@@ -53,6 +56,7 @@ public class AwsJsonController {
                              CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler,
                              CloudControlJsonHandler cloudControlJsonHandler) {
         this.objectMapper = objectMapper;
+        this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
         this.regionResolver = regionResolver;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
@@ -87,7 +91,7 @@ public class AwsJsonController {
 
         JsonNode request;
         try {
-            request = objectMapper.readTree(body);
+            request = strictBodyReader.readTree(body);
         } catch (JsonProcessingException e) {
             return JsonErrorResponseUtils.createSerializationErrorResponse();
         }

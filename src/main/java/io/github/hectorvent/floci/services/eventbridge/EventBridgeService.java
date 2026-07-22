@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -581,7 +582,9 @@ public class EventBridgeService {
      */
     private JsonNode parseClientJson(String json, String field) {
         try {
-            return objectMapper.readTree(json);
+            return objectMapper.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(json);
         } catch (JsonProcessingException e) {
             throw new AwsException("ValidationException", field + " is not valid JSON.", 400);
         }
