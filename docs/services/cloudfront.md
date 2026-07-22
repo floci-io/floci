@@ -115,10 +115,18 @@ CloudFront management-plane and local content-delivery emulation. Supports distr
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current `ETag`. A missing or incorrect `ETag` returns `InvalidIfMatchVersion` (400).
 - All `GET` and `POST` (create) responses include an `ETag` response header.
-- All list-type sub-elements in XML follow CloudFront's `<Quantity>N</Quantity><Items>...</Items>` wrapper pattern.
+- List operations emit the payload root declared by the CloudFront REST XML model (for example,
+  `ListDistributions` returns `<DistributionList>`), with list contents represented by
+  `<Quantity>N</Quantity><Items>...</Items>`.
 - OAI `CallerReference` uniqueness is enforced — duplicate `CallerReference` values return `CloudFrontOriginAccessIdentityAlreadyExists` (409).
-- `AssociateAlias` attaches a CNAME alias to the target distribution's config.
-- Viewer GET/HEAD requests addressed to a generated distribution domain or alias are routed to the matching S3 or custom origin. Custom origins forward the raw query string and end-to-end response headers; redirects are not followed.
+- CNAME aliases are globally unique. `AssociateAlias` atomically transfers an alias from its current
+  owner to the target distribution. Exact aliases take precedence over the most-specific matching
+  wildcard alias.
+- Viewer GET/HEAD requests addressed to an enabled distribution's generated domain or alias are
+  routed to the matching S3 or custom origin. Origin forwarding preserves the raw path and query
+  string; custom-origin redirects are not followed.
+- S3-origin reads honor S3 anonymous-read authorization, including bucket policies when strict S3
+  authentication is enabled.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
 
 ## Configuration

@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetAddress;
 import java.net.Inet6Address;
 import java.net.URI;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -57,6 +60,30 @@ class CloudFrontOriginSecurityTest {
     }
 
     @Test
+    void matchViewerUsesTheViewerProtocolAndMatchingPort() {
+        Origin origin = customOrigin("match-viewer", 8080, 8443);
+
+        URI http = CloudFrontServingController.buildCustomOriginUri(
+                origin, "http", "/asset", null);
+        URI https = CloudFrontServingController.buildCustomOriginUri(
+                origin, "https", "/asset", null);
+
+        assertEquals("http", http.getScheme());
+        assertEquals(8080, http.getPort());
+        assertEquals("https", https.getScheme());
+        assertEquals(8443, https.getPort());
+    }
+
+    @Test
+    void extractsRawViewerPathWithoutDecodingOrNormalizingIt() {
+        String raw = CloudFrontServingController.rawViewerPath(
+                "//api//data%2Fraw.json?token=redacted");
+
+        assertEquals("//api//data%2Fraw.json", raw);
+        assertEquals("//api//data/raw.json", CloudFrontServingController.decodedViewerPath(raw));
+    }
+
+    @Test
     void supportsBracketedIpv6Authorities() {
         URI target = CloudFrontServingController.buildCustomOriginUri(
                 "https", "[2606:4700:4700::1111]:80", 443, "/", null);
@@ -87,5 +114,16 @@ class CloudFrontOriginSecurityTest {
         mapped[11] = (byte) 0xff;
         System.arraycopy(InetAddress.getByName(address).getAddress(), 0, mapped, 12, 4);
         return Inet6Address.getByAddress(null, mapped, -1);
+    }
+
+    private static Origin customOrigin(String policy, int httpPort, int httpsPort) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("HTTPPort", Integer.toString(httpPort));
+        config.put("HTTPSPort", Integer.toString(httpsPort));
+        config.put("OriginProtocolPolicy", policy);
+        Origin origin = new Origin();
+        origin.setDomainName("origin.example.test");
+        origin.setCustomOriginConfig(config);
+        return origin;
     }
 }

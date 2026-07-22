@@ -3815,9 +3815,10 @@ public class CloudFormationResourceProvisioner {
 
     /**
      * Provisions an {@code AWS::CloudFront::Distribution} by translating its {@code DistributionConfig}
-     * property tree into a {@link DistributionConfig} and creating the distribution. {@code Ref} returns
-     * the distribution id; {@code Fn::GetAtt} exposes {@code Id} and {@code DomainName} (closes #1147,
-     * where {@code Fn::GetAtt DomainName} previously returned an unresolved token).
+     * property tree into a {@link DistributionConfig} and creating or updating the distribution.
+     * {@code Ref} returns the distribution id; {@code Fn::GetAtt} exposes {@code Id} and
+     * {@code DomainName} (closes #1147, where {@code Fn::GetAtt DomainName} previously returned an
+     * unresolved token).
      */
     private void provisionCloudFrontDistribution(StackResource r, JsonNode props,
                                                  CloudFormationTemplateEngine engine) {
@@ -3838,7 +3839,13 @@ public class CloudFormationResourceProvisioner {
 
         Distribution dist = new Distribution();
         dist.setConfig(config);
-        dist = cloudFrontService.createDistribution(dist, Map.of());
+        if (r.getPhysicalId() == null || r.getPhysicalId().isBlank()) {
+            dist = cloudFrontService.createDistribution(dist, Map.of());
+        } else {
+            Distribution existing = cloudFrontService.getDistribution(r.getPhysicalId());
+            dist = cloudFrontService.updateDistribution(
+                    existing.getId(), existing.getEtag(), dist);
+        }
 
         r.setPhysicalId(dist.getId());
         r.getAttributes().put("Id", dist.getId());

@@ -34,6 +34,16 @@ import java.util.regex.Pattern;
 public final class CloudFrontRequestRouter {
 
     private static final int PATTERN_CACHE_CAPACITY = 256;
+    private static final String REGION_PATTERN = "[a-z0-9-]+-[0-9]+";
+    private static final Pattern AWS_S3_ENDPOINT = Pattern.compile(
+            "(?:s3|s3\\.(?:dualstack\\.)?" + REGION_PATTERN
+                    + "|s3-" + REGION_PATTERN
+                    + "|s3-website[.-]" + REGION_PATTERN
+                    + "|s3-accelerate(?:\\.dualstack)?)\\.amazonaws\\.com(?:\\.cn)?");
+    private static final Pattern LOCAL_S3_ENDPOINT = Pattern.compile(
+            "(?:s3(?:\\." + REGION_PATTERN + ")?"
+                    + "|s3-website[.-]" + REGION_PATTERN
+                    + ")\\.localhost(?:\\.(?:floci\\.io|localstack\\.cloud))?");
     private static final Map<String, Pattern> PATTERN_CACHE =
             new LinkedHashMap<>(PATTERN_CACHE_CAPACITY, 0.75f, true);
 
@@ -47,14 +57,11 @@ public final class CloudFrontRequestRouter {
      */
     public static String normalizePath(String rawPath) {
         String path = (rawPath == null || rawPath.isEmpty()) ? "/" : rawPath;
-        int q = path.indexOf('?');
-        if (q >= 0) {
-            path = path.substring(0, q);
-        }
         if (!path.startsWith("/")) {
             path = "/" + path;
         }
-        boolean trailingSlash = path.length() > 1 && path.endsWith("/");
+        boolean trailingSlash = path.length() > 1
+                && (path.endsWith("/") || path.endsWith("/.") || path.endsWith("/.."));
         Deque<String> out = new ArrayDeque<>();
         for (String seg : path.split("/")) {
             if (seg.isEmpty() || seg.equals(".")) {
@@ -220,18 +227,29 @@ public final class CloudFrontRequestRouter {
             return null;
         }
         String host = domainName;
-        int colon = host.indexOf(':');
+        int colon = host.lastIndexOf(':');
         if (colon > 0) {
+            String port = host.substring(colon + 1);
+            if (port.isEmpty() || !port.chars().allMatch(Character::isDigit)) {
+                return null;
+            }
             host = host.substring(0, colon);
         }
+        String lowerHost = host.toLowerCase(java.util.Locale.ROOT);
+        int endpointMarker = -1;
         for (String marker : new String[] {".s3-website-", ".s3-website.", ".s3.", ".s3-"}) {
-            int idx = host.indexOf(marker);
-            if (idx > 0) {
-                return host.substring(0, idx);
-            }
+            endpointMarker = Math.max(endpointMarker, lowerHost.lastIndexOf(marker));
         }
-        // Fallback: a bare bucket label or an unrecognized form — take the first label.
-        int dot = host.indexOf('.');
-        return dot > 0 ? host.substring(0, dot) : host;
+        if (endpointMarker > 0 && supportedS3Endpoint(lowerHost.substring(endpointMarker + 1))) {
+            return host.substring(0, endpointMarker);
+        }
+        // A bare bucket name is accepted for local configuration. An unrecognized dotted host is
+        // not an S3 endpoint and must not be truncated into a different local bucket name.
+        return host.indexOf('.') < 0 ? host : null;
+    }
+
+    private static boolean supportedS3Endpoint(String endpoint) {
+        return AWS_S3_ENDPOINT.matcher(endpoint).matches()
+                || LOCAL_S3_ENDPOINT.matcher(endpoint).matches();
     }
 }

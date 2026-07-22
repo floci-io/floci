@@ -14,8 +14,11 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.net.IDN;
@@ -94,35 +97,46 @@ public class CloudFrontServingController {
 
     @GET
     @Path("/{proxy:.*}")
-    public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy) {
-        return serve(distId, proxy, currentVertxRequest.getCurrent().request().query(), true);
+    public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                        @Context HttpHeaders headers, @Context UriInfo uriInfo) {
+        String rawViewerPath = rawViewerPath(currentVertxRequest.getCurrent().request().uri());
+        return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
+                currentVertxRequest.getCurrent().request().query(),
+                uriInfo.getRequestUri().getScheme(), headers.getHeaderString("Host"), true);
     }
 
     @HEAD
     @Path("/{proxy:.*}")
-    public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy) {
-        return serve(distId, proxy, currentVertxRequest.getCurrent().request().query(), false);
+    public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                         @Context HttpHeaders headers, @Context UriInfo uriInfo) {
+        String rawViewerPath = rawViewerPath(currentVertxRequest.getCurrent().request().uri());
+        return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
+                currentVertxRequest.getCurrent().request().query(),
+                uriInfo.getRequestUri().getScheme(), headers.getHeaderString("Host"), false);
     }
 
-    private Response serve(String distId, String proxy, String rawQuery, boolean includeBody) {
-        Distribution dist;
-        try {
-            dist = service.getDistribution(distId);
-        } catch (AwsException e) {
-            return textError(e.getHttpStatus(), e.getMessage());
+    private Response serve(String distId, String rawViewerPath, String decodedViewerPath,
+                           String rawQuery, String viewerScheme, String viewerHost,
+                           boolean includeBody) {
+        Distribution dist = service.findByHost(viewerHost);
+        if (dist == null || !distId.equals(dist.getId())) {
+            return textError(404, "Distribution not found.");
         }
         DistributionConfig config = dist.getConfig();
         if (config == null) {
             return textError(502, "Distribution has no configuration.");
         }
+        if (!config.isEnabled()) {
+            return textError(404, "Distribution is disabled.");
+        }
 
-        String viewerPath = "/" + (proxy == null ? "" : proxy);
-        String normalized = CloudFrontRequestRouter.normalizePath(viewerPath);
+        String normalized = CloudFrontRequestRouter.normalizePath(decodedViewerPath);
 
-        OriginResponse origin = route(config, normalized, rawQuery, includeBody);
+        OriginResponse origin = route(config, normalized, rawViewerPath, decodedViewerPath,
+                rawQuery, viewerScheme, includeBody);
 
         if (origin.status() >= 400) {
-            Response fallback = applyCustomError(config, origin, includeBody);
+            Response fallback = applyCustomError(config, origin, viewerScheme, includeBody);
             if (fallback != null) {
                 return fallback;
             }
@@ -130,9 +144,10 @@ public class CloudFrontServingController {
         return toResponse(origin, includeBody);
     }
 
-    /** Resolves the target origin for a normalized path and fetches the content. */
-    private OriginResponse route(DistributionConfig config, String normalized, String rawQuery,
-                                 boolean includeBody) {
+    /** Selects an origin with the normalized path, then forwards the original viewer path. */
+    private OriginResponse route(DistributionConfig config, String normalized,
+                                 String rawViewerPath, String decodedViewerPath,
+                                 String rawQuery, String viewerScheme, boolean includeBody) {
         String originId = CloudFrontRequestRouter.matchTargetOriginId(config, normalized);
         Origin origin = CloudFrontRequestRouter.findOrigin(config, originId);
         if (origin == null) {
@@ -140,12 +155,13 @@ public class CloudFrontServingController {
         }
         if (CloudFrontRequestRouter.isS3Origin(origin)) {
             String key = CloudFrontRequestRouter.resolveOriginKey(
-                    origin.getOriginPath(), normalized, config.getDefaultRootObject());
+                    origin.getOriginPath(), decodedViewerPath, config.getDefaultRootObject());
             return fetchFromS3(origin, key, includeBody);
         }
         String forwardUri = CloudFrontRequestRouter.resolveForwardUri(
-                origin.getOriginPath(), normalized, config.getDefaultRootObject());
-        return fetchFromCustomOrigin(origin, forwardUri, rawQuery, includeBody);
+                origin.getOriginPath(), rawViewerPath, config.getDefaultRootObject());
+        return fetchFromCustomOrigin(
+                origin, forwardUri, rawQuery, viewerScheme, includeBody);
     }
 
     private OriginResponse fetchFromS3(Origin origin, String key, boolean includeBody) {
@@ -154,6 +170,7 @@ public class CloudFrontServingController {
             return OriginResponse.error(502, "Could not determine S3 bucket for origin.");
         }
         try {
+            s3Service.authorizeAnonymousGetObject(bucket, key);
             if (includeBody) {
                 S3Object obj = s3Service.getObject(bucket, key);
                 byte[] data = obj.getData() != null ? obj.getData() : new byte[0];
@@ -170,22 +187,10 @@ public class CloudFrontServingController {
 
     /** Fetches from a custom (non-S3) origin. {@code forwardUri} already includes the origin path. */
     private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri, String rawQuery,
-                                                 boolean includeBody) {
-        Map<String, Object> coc = origin.getCustomOriginConfig();
-        String policy = coc != null ? str(coc.get("OriginProtocolPolicy")) : "";
-        String protocol;
-        int port;
-        if ("https-only".equalsIgnoreCase(policy)) {
-            protocol = "https";
-            port = intOrDefault(coc, "HTTPSPort", 443);
-        } else {
-            protocol = "http";
-            port = intOrDefault(coc, "HTTPPort", 80);
-        }
-
+                                                 String viewerScheme, boolean includeBody) {
         try {
             URI target = buildCustomOriginUri(
-                    protocol, origin.getDomainName(), port, forwardUri, rawQuery);
+                    origin, viewerScheme, forwardUri, rawQuery);
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(target)
                     .timeout(Duration.ofSeconds(30));
@@ -281,6 +286,40 @@ public class CloudFrontServingController {
                 + (rawQuery == null || rawQuery.isEmpty() ? "" : "?" + rawQuery));
     }
 
+    static URI buildCustomOriginUri(Origin origin, String viewerScheme,
+                                    String forwardUri, String rawQuery) {
+        Map<String, Object> config = origin.getCustomOriginConfig();
+        String policy = config != null ? str(config.get("OriginProtocolPolicy")) : "";
+        boolean useHttps = "https-only".equalsIgnoreCase(policy)
+                || ("match-viewer".equalsIgnoreCase(policy)
+                        && "https".equalsIgnoreCase(viewerScheme));
+        String protocol = useHttps ? "https" : "http";
+        int port = useHttps
+                ? intOrDefault(config, "HTTPSPort", 443)
+                : intOrDefault(config, "HTTPPort", 80);
+        return buildCustomOriginUri(
+                protocol, origin.getDomainName(), port, forwardUri, rawQuery);
+    }
+
+    static String rawViewerPath(String requestUri) {
+        if (requestUri == null || requestUri.isBlank()) {
+            return "/";
+        }
+        int query = requestUri.indexOf('?');
+        String path = query >= 0 ? requestUri.substring(0, query) : requestUri;
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+            path = URI.create(path).getRawPath();
+        }
+        if (path == null || path.isEmpty()) {
+            return "/";
+        }
+        return path.startsWith("/") ? path : "/" + path;
+    }
+
+    static String decodedViewerPath(String rawViewerPath) {
+        return URI.create("http://viewer.invalid" + rawViewerPath).getPath();
+    }
+
     static String normalizeOriginHost(String domainName) {
         if (domainName == null || domainName.isBlank()) {
             throw new IllegalArgumentException("Custom origin domain name is empty");
@@ -345,7 +384,8 @@ public class CloudFrontServingController {
      *       not recurse (no loop).</li>
      * </ul>
      */
-    private Response applyCustomError(DistributionConfig config, OriginResponse origin, boolean includeBody) {
+    private Response applyCustomError(DistributionConfig config, OriginResponse origin,
+                                      String viewerScheme, boolean includeBody) {
         Map<String, Object> cer = matchCustomError(config, origin.status());
         if (cer == null) {
             return null;
@@ -371,7 +411,8 @@ public class CloudFrontServingController {
             page = fetchFromS3(errOrigin, key, includeBody);
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
-            page = fetchFromCustomOrigin(errOrigin, forwardUri, null, includeBody);
+            page = fetchFromCustomOrigin(
+                    errOrigin, forwardUri, null, viewerScheme, includeBody);
         }
         if (page.status() >= 400) {
             // Custom error page unavailable → return the status received from the error-page origin

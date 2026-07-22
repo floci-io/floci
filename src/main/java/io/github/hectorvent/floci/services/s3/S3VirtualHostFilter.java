@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -64,10 +65,9 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return;
         }
 
-        // A higher-priority CloudFront distribution filter may have already routed this request to
-        // the distribution serving controller (e.g. an alias like console.localhost that also looks
-        // like an S3 virtual host); don't re-hijack it as an S3 bucket request.
-        if (path.startsWith("/_cloudfront/")) {
+        // A higher-priority CloudFront distribution filter may have already routed this request.
+        // Use its server-side marker rather than trusting a user-controlled path prefix.
+        if (Boolean.TRUE.equals(requestContext.getProperty(CloudFrontDistributionFilter.ROUTED_PROPERTY))) {
             return;
         }
 

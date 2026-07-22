@@ -7,6 +7,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.PreMatching;
+import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
@@ -32,6 +33,7 @@ import java.net.URI;
 @Priority(15)
 public class CloudFrontDistributionFilter implements ContainerRequestFilter {
 
+    public static final String ROUTED_PROPERTY = CloudFrontDistributionFilter.class.getName() + ".routed";
     private static final Logger LOG = Logger.getLogger(CloudFrontDistributionFilter.class);
 
     // A @PreMatching filter is wired into the request pipeline at build time, so holding the
@@ -56,6 +58,10 @@ public class CloudFrontDistributionFilter implements ContainerRequestFilter {
         if (dist == null) {
             return;
         }
+        if (dist.getConfig() == null || !dist.getConfig().isEnabled()) {
+            requestContext.abortWith(Response.status(404).build());
+            return;
+        }
 
         URI originalUri = requestContext.getUriInfo().getRequestUri();
         String rawPath = originalUri.getRawPath();
@@ -78,6 +84,7 @@ public class CloudFrontDistributionFilter implements ContainerRequestFilter {
         URI newUri = URI.create(rewritten.toString());
 
         LOG.debugv("CloudFront distribution routing: {0}{1} -> {2}", host, rawPath, newUri.getPath());
+        requestContext.setProperty(ROUTED_PROPERTY, Boolean.TRUE);
         requestContext.setRequestUri(newUri);
     }
 }

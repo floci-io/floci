@@ -44,8 +44,9 @@ class CloudFrontCustomOriginServingTest {
     @Test
     void forwardsRawQueryResponseHeadersAndHeadMetadataToAllowlistedOrigin() throws Exception {
         AtomicReference<String> receivedQuery = new AtomicReference<>();
+        AtomicReference<String> receivedPath = new AtomicReference<>();
         originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        originServer.createContext("/", exchange -> respond(exchange, receivedQuery));
+        originServer.createContext("/", exchange -> respond(exchange, receivedQuery, receivedPath));
         originServer.start();
 
         Origin customOrigin = new Origin();
@@ -79,6 +80,16 @@ class CloudFrontCustomOriginServingTest {
         assertEquals("x=1&x=2&encoded=a%2Fb", receivedQuery.get());
 
         given()
+            .urlEncodingEnabled(false)
+            .header("Host", created.getDomainName())
+        .when()
+            .get("/encoded%2Fpath")
+        .then()
+            .statusCode(200);
+
+        assertEquals("/encoded%2Fpath", receivedPath.get());
+
+        given()
             .header("Host", created.getDomainName())
         .when()
             .head("/resource")
@@ -88,8 +99,10 @@ class CloudFrontCustomOriginServingTest {
             .body(equalTo(""));
     }
 
-    private static void respond(HttpExchange exchange, AtomicReference<String> receivedQuery) throws IOException {
+    private static void respond(HttpExchange exchange, AtomicReference<String> receivedQuery,
+                                AtomicReference<String> receivedPath) throws IOException {
         receivedQuery.set(exchange.getRequestURI().getRawQuery());
+        receivedPath.set(exchange.getRequestURI().getRawPath());
         exchange.getResponseHeaders().add("Content-Type", "text/plain");
         exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "https://viewer.example");
         exchange.getResponseHeaders().add("Cache-Control", "public, max-age=60");

@@ -1,16 +1,20 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end check that CloudFormation provisions an {@code AWS::CloudFront::Distribution} for real
@@ -27,6 +31,9 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
 
     @Inject
     S3Service s3Service;
+
+    @Inject
+    CloudFrontService cloudFrontService;
 
     @Test
     void createStackProvisionsBrowsableDistributionWithResolvedDomainName() {
@@ -106,5 +113,81 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("CFN-INDEX-" + suffix));
+    }
+
+    @Test
+    void updateStackUpdatesDistributionInPlace() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-cf-update-" + suffix;
+        String alias = "cfn-update-" + suffix + ".example.test";
+        String stackName = "cfn-cloudfront-update-" + suffix;
+        s3Service.createBucket(bucket, "us-east-1");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", updateTemplate(alias, bucket, "before-" + suffix))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        Distribution original = distributionsWithAlias(alias).getFirst();
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", updateTemplate(alias, bucket, "after-" + suffix))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        List<Distribution> matching = distributionsWithAlias(alias);
+        assertEquals(1, matching.size(), "UpdateStack must not leak a second distribution");
+        Distribution updated = matching.getFirst();
+        assertEquals(original.getId(), updated.getId());
+        assertEquals(original.getDomainName(), updated.getDomainName());
+        assertEquals("after-" + suffix, updated.getConfig().getComment());
+    }
+
+    private List<Distribution> distributionsWithAlias(String alias) {
+        return cloudFrontService.listDistributions(null, 1000).stream()
+                .filter(distribution -> distribution.getConfig() != null
+                        && distribution.getConfig().getAliases() != null
+                        && distribution.getConfig().getAliases().contains(alias))
+                .toList();
+    }
+
+    private static String updateTemplate(String alias, String bucket, String comment) {
+        return """
+                {
+                  "Resources": {
+                    "Dist": {
+                      "Type": "AWS::CloudFront::Distribution",
+                      "Properties": {
+                        "DistributionConfig": {
+                          "Enabled": true,
+                          "Comment": "%s",
+                          "Aliases": ["%s"],
+                          "Origins": [{
+                            "Id": "s3-origin",
+                            "DomainName": "%s.s3.us-east-1.amazonaws.com",
+                            "S3OriginConfig": {"OriginAccessIdentity": ""}
+                          }],
+                          "DefaultCacheBehavior": {
+                            "TargetOriginId": "s3-origin",
+                            "ViewerProtocolPolicy": "allow-all"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted(comment, alias, bucket);
     }
 }

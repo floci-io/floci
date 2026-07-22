@@ -24,10 +24,12 @@ class CloudFrontRequestRouterTest {
         assertEquals("/", CloudFrontRequestRouter.normalizePath("/"));
         assertEquals("/a/b", CloudFrontRequestRouter.normalizePath("//a//b"));
         assertEquals("/b", CloudFrontRequestRouter.normalizePath("/a/../b"));
-        assertEquals("/a", CloudFrontRequestRouter.normalizePath("/a/b/.."));
+        assertEquals("/a/", CloudFrontRequestRouter.normalizePath("/a/b/.."));
         assertEquals("/a/b", CloudFrontRequestRouter.normalizePath("/a/./b"));
+        assertEquals("/a/", CloudFrontRequestRouter.normalizePath("/a/."));
+        assertEquals("/", CloudFrontRequestRouter.normalizePath("/a/.."));
         assertEquals("/a/b/", CloudFrontRequestRouter.normalizePath("/a/b/"));   // trailing slash preserved
-        assertEquals("/a/b", CloudFrontRequestRouter.normalizePath("/a/b?x=1&y=2"));  // query stripped
+        assertEquals("/a/b?x=1&y=2", CloudFrontRequestRouter.normalizePath("/a/b?x=1&y=2"));
     }
 
     // ── Path pattern matching: * / ? , case-sensitive, leading slash optional ─────
@@ -87,6 +89,18 @@ class CloudFrontRequestRouterTest {
         assertEquals("default-origin", CloudFrontRequestRouter.matchTargetOriginId(cfg, "/index.html"));
     }
 
+    @Test
+    void normalizedDirectoryPathRetainsSlashForBehaviorMatching() {
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setCacheBehaviors(List.of(behavior("a/", "directory-origin")));
+        cfg.setDefaultCacheBehavior(defaultBehavior("default-origin"));
+
+        String normalized = CloudFrontRequestRouter.normalizePath("/a/b/..");
+
+        assertEquals("/a/", normalized);
+        assertEquals("directory-origin", CloudFrontRequestRouter.matchTargetOriginId(cfg, normalized));
+    }
+
     // ── Default root object: ROOT ONLY (never appended to subdirectories) ─────────
 
     @Test
@@ -142,6 +156,17 @@ class CloudFrontRequestRouterTest {
                 CloudFrontRequestRouter.bucketFromS3Domain("my-bucket.s3.amazonaws.com"));
         assertEquals("my-bucket",
                 CloudFrontRequestRouter.bucketFromS3Domain("my-bucket.s3-website-us-east-1.amazonaws.com"));
+        assertEquals("assets.s3.example",
+                CloudFrontRequestRouter.bucketFromS3Domain(
+                        "assets.s3.example.s3.us-east-1.amazonaws.com"));
+        assertEquals("foo.s3-website-bar",
+                CloudFrontRequestRouter.bucketFromS3Domain(
+                        "foo.s3-website-bar.s3.us-east-1.amazonaws.com"));
+        assertNull(CloudFrontRequestRouter.bucketFromS3Domain("sensitive.attacker.invalid"));
+        assertNull(CloudFrontRequestRouter.bucketFromS3Domain("sensitive.s3.attacker.invalid"));
+        assertNull(CloudFrontRequestRouter.bucketFromS3Domain("sensitive.s3-attacker.invalid"));
+        assertNull(CloudFrontRequestRouter.bucketFromS3Domain("sensitive.s3.amazonaws.com:invalid"));
+        assertNull(CloudFrontRequestRouter.bucketFromS3Domain("https://sensitive.s3.amazonaws.com"));
     }
 
     private static CacheBehavior behavior(String pattern, String originId) {

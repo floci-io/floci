@@ -55,22 +55,28 @@ class CloudFrontDistributionServingTest {
         String contentBucket = "cf-content-" + suffix;
         String apiBucket = "cf-api-" + suffix;
         String alias = "console-" + suffix + ".example.test";
+        String s3ShapedAlias = "console-" + suffix + ".localhost";
 
         createBucket(contentBucket);
         createBucket(apiBucket);
         putObject(contentBucket, "index.html", "INDEX-ROOT-" + suffix, "text/html");
         putObject(contentBucket, "assets/app.js", "APP-JS-" + suffix, "application/javascript");
+        putObject(contentBucket, "encoded key.txt", "ENCODED-KEY-" + suffix, "text/plain");
         putObject(apiBucket, "api/data.json", "API-DATA-" + suffix, "application/json");
+        putObject(apiBucket, "/api//raw-data.json", "RAW-PATH-" + suffix, "application/json");
+        putObject(apiBucket, "question?v1", "ENCODED-QUESTION-" + suffix, "application/json");
 
         DistributionConfig cfg = new DistributionConfig();
         cfg.setEnabled(true);
         cfg.setDefaultRootObject("index.html");
-        cfg.setAliases(List.of(alias));
+        cfg.setAliases(List.of(alias, s3ShapedAlias));
         cfg.setOrigins(List.of(
                 s3Origin("content-origin", contentBucket),
                 s3Origin("api-origin", apiBucket)));
         cfg.setDefaultCacheBehavior(defaultBehavior("content-origin"));
-        cfg.setCacheBehaviors(List.of(behavior("/api/*", "api-origin")));
+        cfg.setCacheBehaviors(List.of(
+                behavior("/api/*", "api-origin"),
+                behavior("question?*", "api-origin")));
         cfg.setCustomErrorResponses(List.of(
                 customError(403, 200, "/index.html"),
                 customError(404, 200, "/index.html")));
@@ -88,6 +94,10 @@ class CloudFrontDistributionServingTest {
                 .header("Content-Type", containsString("javascript"))
                 .body(containsString("APP-JS-" + suffix));
 
+        // URI encoding is decoded once for the in-process S3 key lookup.
+        given().urlEncodingEnabled(false).header("Host", host).when().get("/encoded%20key.txt")
+                .then().statusCode(200).body(containsString("ENCODED-KEY-" + suffix));
+
         // Unknown deep path (a client-side SPA route) → 404 rewritten to 200 /index.html.
         given().header("Host", host).when().get("/deep/spa/route")
                 .then().statusCode(200).body(containsString("INDEX-ROOT-" + suffix));
@@ -96,13 +106,30 @@ class CloudFrontDistributionServingTest {
         given().header("Host", host).when().get("/api/data.json")
                 .then().statusCode(200).body(containsString("API-DATA-" + suffix));
 
+        // CloudFront normalizes the viewer path only for behavior selection. The selected origin
+        // still receives the original path, including repeated slashes.
+        given().urlEncodingEnabled(false).header("Host", host).when().get("/%2Fapi/%2Fraw-data.json")
+                .then().statusCode(200).body(containsString("RAW-PATH-" + suffix));
+
+        // An encoded question mark is object-key data, not the start of the already-separated query.
+        given().urlEncodingEnabled(false).header("Host", host).when().get("/question%3Fv1")
+                .then().statusCode(200).body(containsString("ENCODED-QUESTION-" + suffix));
+
         // The same distribution is reachable via its alternate domain name (CNAME alias).
         given().header("Host", alias).when().get("/")
+                .then().statusCode(200).body(containsString("INDEX-ROOT-" + suffix));
+
+        // A CloudFront alias that resembles an S3 virtual host must remain CloudFront-routed.
+        given().header("Host", s3ShapedAlias).when().get("/")
                 .then().statusCode(200).body(containsString("INDEX-ROOT-" + suffix));
 
         // HEAD returns headers without a body.
         given().header("Host", host).when().head("/assets/app.js")
                 .then().statusCode(200);
+
+        // The implementation-only controller path is not an alternate public endpoint.
+        given().when().get("/_cloudfront/" + dist.getId() + "/")
+                .then().statusCode(404);
     }
 
     @Test
@@ -128,6 +155,74 @@ class CloudFrontDistributionServingTest {
         // Missing object with no matching CustomErrorResponse → the origin 404 is returned.
         given().header("Host", host).when().get("/missing-object.txt")
                 .then().statusCode(404);
+    }
+
+    @Test
+    void doesNotServeDisabledDistributionThroughInternalRoute() {
+        String suffix = suffix();
+        String bucket = "cf-disabled-" + suffix;
+        String alias = bucket + ".localhost";
+        createBucket(bucket);
+        putObject(bucket, "index.html", "DISABLED-INDEX-" + suffix, "text/html");
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(false);
+        cfg.setDefaultRootObject("index.html");
+        cfg.setAliases(List.of(alias));
+        cfg.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        cfg.setDefaultCacheBehavior(defaultBehavior("only-origin"));
+
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given().header("Host", dist.getDomainName()).when().get("/")
+                .then().statusCode(404);
+        // The disabled alias remains owned by CloudFront and must not fall through to the S3
+        // virtual-host filter, even though it names a real bucket.
+        given().header("Host", alias).when().get("/index.html")
+                .then().statusCode(404);
+        given().when().get("/_cloudfront/" + dist.getId() + "/")
+                .then().statusCode(404).body(equalTo("Distribution not found."));
+    }
+
+    @Test
+    void servesDottedS3BucketWhoseNameContainsAnEndpointMarker() {
+        String suffix = suffix();
+        String shortBucket = "assets-" + suffix;
+        String dottedBucket = shortBucket + ".s3.example";
+        createBucket(shortBucket);
+        createBucket(dottedBucket);
+        putObject(shortBucket, "asset.txt", "WRONG-BUCKET", "text/plain");
+        putObject(dottedBucket, "asset.txt", "DOTTED-BUCKET", "text/plain");
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(s3Origin("dotted-origin", dottedBucket)));
+        cfg.setDefaultCacheBehavior(defaultBehavior("dotted-origin"));
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given().header("Host", dist.getDomainName()).when().get("/asset.txt")
+                .then().statusCode(200).body(equalTo("DOTTED-BUCKET"));
+    }
+
+    @Test
+    void rejectsUnrecognizedDottedS3OriginHost() {
+        String suffix = suffix();
+        String bucket = "sensitive-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "asset.txt", "MUST-NOT-SERVE", "text/plain");
+
+        Origin origin = new Origin();
+        origin.setId("invalid-origin");
+        origin.setDomainName(bucket + ".s3.attacker.invalid");
+        origin.setS3OriginConfig(new LinkedHashMap<>(Map.of("OriginAccessIdentity", "")));
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(origin));
+        cfg.setDefaultCacheBehavior(defaultBehavior(origin.getId()));
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given().header("Host", dist.getDomainName()).when().get("/asset.txt")
+                .then().statusCode(502);
     }
 
     @Test
