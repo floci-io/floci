@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
@@ -66,7 +67,9 @@ class AslExecutorResultWriterTest {
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
                 mapper,
                 new JsonataEvaluator(mapper),
-                mock(Instance.class));
+                mock(Instance.class),
+                mock(EmulatorConfig.class),
+                null);
 
         sm = new StateMachine();
         sm.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:orderProcessing");
