@@ -102,6 +102,58 @@ class EksClusterManagerTest {
         assertTrue(yaml.contains("- \"http://my-registry:5000\""));
     }
 
+    @Test
+    void serverArgsOmitCniFlagsByDefault() {
+        List<String> args = EksClusterManager.buildServerArgs(false);
+
+        assertTrue(args.contains("--disable=traefik"));
+        assertFalse(args.contains("--flannel-backend=none"));
+        assertFalse(args.contains("--disable-network-policy"));
+        assertFalse(args.contains("--disable-kube-proxy"));
+    }
+
+    @Test
+    void serverArgsDisableFlannelAndKubeProxyWhenRequested() {
+        List<String> args = EksClusterManager.buildServerArgs(true);
+
+        assertTrue(args.contains("--flannel-backend=none"));
+        assertTrue(args.contains("--disable-network-policy"));
+        assertTrue(args.contains("--disable-kube-proxy"));
+        // Base args must still be present — disableCni only adds flags, never replaces them.
+        assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--tls-san=localhost"));
+    }
+
+    @Test
+    void rshareEntrypointIsPosixShCompatible() {
+        String script = EksClusterManager.RSHARE_ENTRYPOINT.get(2);
+
+        assertEquals(List.of("sh", "-c"), EksClusterManager.RSHARE_ENTRYPOINT.subList(0, 2));
+        assertTrue(script.contains("mount --make-rshared /"));
+        assertTrue(script.contains("exec /bin/k3s"));
+        assertFalse(script.contains("bash"), "the k3s image has no bash, only busybox sh");
+    }
+
+    @Test
+    void rshareEntrypointWarnsOnStderrWhenMountFails() {
+        String script = EksClusterManager.RSHARE_ENTRYPOINT.get(2);
+
+        // A failed mount must be surfaced, not silently swallowed, so a later CNI failure
+        // is traceable back to this step instead of looking unrelated.
+        assertTrue(script.contains("|| echo"));
+        assertTrue(script.contains(">&2"));
+        assertFalse(script.contains("2>/dev/null"));
+    }
+
+    @Test
+    void rshareWrappedCmdPreservesServerArgsAfterThePlaceholder() {
+        List<String> serverArgs = EksClusterManager.buildServerArgs(true);
+        List<String> wrapped = EksClusterManager.buildRshareWrappedCmd(serverArgs);
+
+        // First element is an unused $0 placeholder consumed by sh -c, not part of serverArgs.
+        assertEquals(serverArgs, wrapped.subList(1, wrapped.size()));
+    }
+
     /** Mirror-injection guard behavior, without a Docker daemon. */
     @Nested
     class InjectEcrRegistryMirror {
