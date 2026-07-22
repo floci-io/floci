@@ -140,6 +140,26 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullResponse() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullVolumeList() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
     void tryListVolumeNamesReturnsEmptyOptionalOnDockerFailure() {
         ListVolumesCmd cmd = mock(ListVolumesCmd.class);
         when(dockerClient.listVolumesCmd()).thenReturn(cmd);

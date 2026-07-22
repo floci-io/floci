@@ -518,10 +518,16 @@ public class ContainerLifecycleManager {
     public Optional<Set<String>> tryListVolumeNames() {
         try {
             ListVolumesResponse response = dockerClient.listVolumesCmd().exec();
-            if (response == null || response.getVolumes() == null) {
-                return Optional.of(Set.of());
+            if (response == null) {
+                LOG.warn("Container runtime returned no volume-list response");
+                return Optional.empty();
             }
-            Set<String> names = response.getVolumes().stream()
+            List<InspectVolumeResponse> volumes = response.getVolumes();
+            if (volumes == null) {
+                LOG.warn("Container runtime returned a volume-list response without an inventory");
+                return Optional.empty();
+            }
+            Set<String> names = volumes.stream()
                     .map(InspectVolumeResponse::getName)
                     .filter(name -> name != null && !name.isBlank())
                     .collect(java.util.stream.Collectors.toUnmodifiableSet());
