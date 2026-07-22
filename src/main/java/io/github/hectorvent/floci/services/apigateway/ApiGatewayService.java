@@ -1128,7 +1128,92 @@ public class ApiGatewayService {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
         }
-        return result.getOpenAPI();
+        OpenAPI openAPI = result.getOpenAPI();
+        validateImportedAuthorizers(openAPI);
+        return openAPI;
+    }
+
+    private void validateImportedAuthorizers(OpenAPI openAPI) {
+        if (openAPI.getComponents() == null || openAPI.getComponents().getSecuritySchemes() == null) {
+            return;
+        }
+        for (var entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
+            SecurityScheme scheme = entry.getValue();
+            Map<String, Object> authDef = importedAuthorizerDefinition(scheme);
+            if (authDef == null) {
+                continue;
+            }
+            String type = importedAuthorizerType(authDef);
+            int ttl = importedAuthorizerTtl(authDef, entry.getKey());
+            String identitySource = resolveImportedIdentitySource(scheme, authDef, type);
+            if ("request".equalsIgnoreCase(type) && ttl > 0 && identitySource == null) {
+                throw new AwsException(
+                        "BadRequestException",
+                        "REQUEST authorizer " + entry.getKey()
+                                + " must specify identitySource when authorizer caching is enabled.",
+                        400);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> importedAuthorizerDefinition(SecurityScheme scheme) {
+        if (scheme == null || scheme.getExtensions() == null) {
+            return null;
+        }
+        Object definition = scheme.getExtensions().get("x-amazon-apigateway-authorizer");
+        return definition instanceof Map<?, ?> ? (Map<String, Object>) definition : null;
+    }
+
+    private String importedAuthorizerType(Map<String, Object> authDef) {
+        Object value = authDef.get("type");
+        return value != null ? value.toString() : null;
+    }
+
+    private String resolveImportedIdentitySource(
+            SecurityScheme scheme, Map<String, Object> authDef, String authorizerType) {
+        Object configured = authDef.get("identitySource");
+        String identitySource = configured != null ? configured.toString().trim() : null;
+        if (identitySource != null && identitySource.isEmpty()) {
+            identitySource = null;
+        }
+        if (identitySource == null && scheme.getName() != null && scheme.getIn() != null
+                && "header".equalsIgnoreCase(scheme.getIn().toString())) {
+            identitySource = "method.request.header." + scheme.getName();
+        }
+        if (identitySource == null
+                && (authorizerType == null || "token".equalsIgnoreCase(authorizerType))) {
+            identitySource = "method.request.header.Authorization";
+        }
+        return identitySource;
+    }
+
+    private int importedAuthorizerTtl(Map<String, Object> authDef, String schemeName) {
+        Object configured = authDef.get("authorizerResultTtlInSeconds");
+        if (configured == null) {
+            return 300;
+        }
+        String value = configured.toString();
+        if (!value.matches("\\d+")) {
+            throw invalidImportedAuthorizerTtl(schemeName);
+        }
+        try {
+            int ttl = Integer.parseInt(value);
+            if (ttl > 3600) {
+                throw invalidImportedAuthorizerTtl(schemeName);
+            }
+            return ttl;
+        } catch (NumberFormatException e) {
+            throw invalidImportedAuthorizerTtl(schemeName);
+        }
+    }
+
+    private AwsException invalidImportedAuthorizerTtl(String schemeName) {
+        return new AwsException(
+                "BadRequestException",
+                "authorizerResultTtlInSeconds for authorizer " + schemeName
+                        + " must be an integer between 0 and 3600.",
+                400);
     }
 
     @SuppressWarnings("unchecked")
@@ -1191,29 +1276,17 @@ public class ApiGatewayService {
                 SecurityScheme scheme = schemeEntry.getValue();
                 Map<String, Object> ext = scheme.getExtensions();
                 String authtype = ext != null ? (String) ext.get("x-amazon-apigateway-authtype") : null;
-                @SuppressWarnings("unchecked")
-                Map<String, Object> authDef = ext != null
-                        ? (Map<String, Object>) ext.get("x-amazon-apigateway-authorizer") : null;
+                Map<String, Object> authDef = importedAuthorizerDefinition(scheme);
                 if (authDef != null) {
-                    String t = (String) authDef.get("type"); // token | request | cognito_user_pools
+                    String t = importedAuthorizerType(authDef); // token | request | cognito_user_pools
                     Map<String, Object> req = new HashMap<>();
                     req.put("name", schemeName);
                     req.put("authorizerUri", authDef.get("authorizerUri"));
-                    if (authDef.get("authorizerResultTtlInSeconds") != null) {
-                        req.put("authorizerResultTtlInSeconds", authDef.get("authorizerResultTtlInSeconds"));
+                    req.put("authorizerResultTtlInSeconds", importedAuthorizerTtl(authDef, schemeName));
+                    String identitySource = resolveImportedIdentitySource(scheme, authDef, t);
+                    if (identitySource != null) {
+                        req.put("identitySource", identitySource);
                     }
-                    Object idSource = authDef.get("identitySource");
-                    // TOKEN authorizers carry the header via the scheme's name/in, not identitySource.
-                    if (idSource == null && scheme.getName() != null && scheme.getIn() != null
-                            && "header".equalsIgnoreCase(scheme.getIn().toString())) {
-                        idSource = "method.request.header." + scheme.getName();
-                    }
-                    // AWS requires an identity source for TOKEN authorizers; when none can be derived
-                    // from the spec it defaults to the Authorization header.
-                    if (idSource == null && (t == null || "token".equalsIgnoreCase(t))) {
-                        idSource = "method.request.header.Authorization";
-                    }
-                    req.put("identitySource", idSource);
                     if ("cognito_user_pools".equalsIgnoreCase(t)) {
                         req.put("type", "COGNITO_USER_POOLS");
                         // Cognito user-pool authorizers carry the pool ARNs in the authorizer extension.

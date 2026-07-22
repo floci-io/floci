@@ -1627,6 +1627,129 @@ class ApiGatewayOpenApiImportTest {
         given().delete("/restapis/" + apiId);
     }
 
+    @Test
+    @Order(95)
+    void importRestApi_requestAuthorizerWithoutIdentitySourceRejectsDefaultCaching() {
+        String title = "InvalidCachedRequestAuthorizer";
+        String spec = requestAuthorizerSpec(title, "", "/invalid");
+
+        given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis")
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", allOf(
+                        containsString("RequestAuth"),
+                        containsString("identitySource"),
+                        containsString("caching")));
+
+        given()
+                .when().get("/restapis")
+                .then().statusCode(200)
+                .body("item.name", not(hasItem(title)));
+    }
+
+    @Test
+    @Order(96)
+    void importRestApi_requestAuthorizerWithoutIdentitySourceAllowsZeroTtl() throws Exception {
+        String spec = requestAuthorizerSpec(
+                "UncachedRequestAuthorizer", ", \"authorizerResultTtlInSeconds\": 0", "/uncached");
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        try {
+            given()
+                    .when().get("/restapis/" + apiId + "/authorizers")
+                    .then().statusCode(200)
+                    .body("item", hasSize(1))
+                    .body("item[0].type", equalTo("REQUEST"))
+                    .body("item[0].authorizerResultTtlInSeconds", equalTo(0))
+                    .body("item[0].identitySource", nullValue());
+        } finally {
+            given().delete("/restapis/" + apiId);
+        }
+    }
+
+    @Test
+    @Order(97)
+    void putRestApi_invalidCachedRequestAuthorizerDoesNotReplaceExistingApi() throws Exception {
+        String originalSpec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "PreservedAuthorizerAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "HeaderAuth": {
+                        "type": "apiKey", "name": "X-Auth", "in": "header",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "request",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:headerAuth/invocations"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {"/kept": {"get": {"security": [{"HeaderAuth": []}]}}}
+                }
+                """;
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(originalSpec)
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        try {
+            String invalidSpec = requestAuthorizerSpec("MustNotReplaceAPI", "", "/replacement");
+            given()
+                    .contentType(ContentType.JSON).queryParam("mode", "overwrite").body(invalidSpec)
+                    .when().put("/restapis/" + apiId)
+                    .then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"));
+
+            given()
+                    .when().get("/restapis/" + apiId)
+                    .then().statusCode(200)
+                    .body("name", equalTo("PreservedAuthorizerAPI"));
+            given()
+                    .when().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200)
+                    .body("item.path", hasItem("/kept"))
+                    .body("item.path", not(hasItem("/replacement")));
+            given()
+                    .when().get("/restapis/" + apiId + "/authorizers")
+                    .then().statusCode(200)
+                    .body("item", hasSize(1))
+                    .body("item[0].name", equalTo("HeaderAuth"))
+                    .body("item[0].identitySource", equalTo("method.request.header.X-Auth"))
+                    .body("item[0].authorizerResultTtlInSeconds", equalTo(300));
+        } finally {
+            given().delete("/restapis/" + apiId);
+        }
+    }
+
+    private static String requestAuthorizerSpec(String title, String ttlProperty, String path) {
+        return """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "%s", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "RequestAuth": {
+                        "type": "http", "scheme": "bearer",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "request",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:requestAuth/invocations"%s
+                        }
+                      }
+                    }
+                  },
+                  "paths": {"%s": {"get": {"security": [{"RequestAuth": []}]}}}
+                }
+                """.formatted(title, ttlProperty, path);
+    }
+
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test
