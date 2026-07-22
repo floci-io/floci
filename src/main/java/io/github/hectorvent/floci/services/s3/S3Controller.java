@@ -488,35 +488,15 @@ public class S3Controller {
                 return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
             }
 
-            // --- Website Hosting Redirection Logic ---
-            if (isWebsiteRequest(httpHeaders) && (uriInfo.getQueryParameters().isEmpty() || (uriInfo.getQueryParameters().size() == 1 && hasQueryParam(uriInfo, "list-type")))) {
-                try {
-                    WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
-                    if (webConfig.getIndexDocument() != null) {
-                        try {
-                            s3Service.authorizeGetObject(bucket, webConfig.getIndexDocument(), null, authorization);
-                            S3Object indexObj = s3Service.getObject(bucket, webConfig.getIndexDocument());
-                            return Response.ok(indexObj.getData())
-                                    .type(indexObj.getContentType())
-                                    .header("Content-Length", indexObj.getSize())
-                                    .header("ETag", indexObj.getETag())
-                                    .header("x-amz-website-redirect-location", "index")
-                                    .build();
-                        } catch (AwsException e) {
-                            if (!isWebsiteErrorDocumentTrigger(e)) {
-                                throw e;
-                            }
-                            Response r = serveErrorDocument(bucket, webConfig, authorization, e.getHttpStatus());
-                            if (r != null) {
-                                return r;
-                            }
-                        }
-                    }
-                } catch (AwsException e) {
-                    if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
-                        throw e;
-                    }
-                    // Bucket is not a website, continue to listObjects
+            // --- S3 static-website index resolution (site root) ---
+            // A website endpoint has no S3 REST API, so it serves the index document for the site root
+            // regardless of any query string — e.g. a single-page-app OAuth callback GET
+            // /?code=...&state=... must return index.html, not a ListObjects response. (?list-type and
+            // other sub-resource queries only reach the REST endpoint, never a website host.)
+            if (isWebsiteRequest(httpHeaders)) {
+                Response website = serveWebsiteObject(bucket, "", authorization);
+                if (website != null) {
+                    return website;
                 }
             }
 
@@ -736,6 +716,13 @@ public class S3Controller {
             key = extractObjectKey(uriInfo, bucket);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+
+            if (isWebsiteRequest(httpHeaders)) {
+                Response website = serveWebsiteObject(bucket, key, authorization);
+                if (website != null) {
+                    return website;
+                }
+            }
 
             if (uploadId != null) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListMultipartUploadParts", authorization);
@@ -2186,6 +2173,76 @@ public class S3Controller {
     private static boolean isWebsiteRequest(HttpHeaders httpHeaders) {
         String host = httpHeaders.getHeaderString("Host");
         return host != null && host.contains("s3-website");
+    }
+
+    /**
+     * Applies S3 static-website index-document resolution to a website-endpoint GET, mirroring how the
+     * real {@code <bucket>.s3-website-<region>.amazonaws.com} endpoint serves a site:
+     * <ul>
+     *   <li>a "directory" request (the site root, or any key ending in {@code /}) serves the index
+     *       document for that prefix — e.g. {@code /docs/} serves {@code docs/index.html};</li>
+     *   <li>a non-slash path that is not itself an object but has an index document underneath it is a
+     *       folder, so it 302-redirects to the slash-terminated form (so the page's relative asset URLs
+     *       resolve against the right base);</li>
+     *   <li>a missing index document falls back to the configured error document.</li>
+     * </ul>
+     * Returns {@code null} when the request should be served by the normal object path — i.e. an exact
+     * object hit, or a bucket that has no website configuration at all. The index read is authorized
+     * (a no-op unless S3 auth enforcement is enabled), matching the object-serving path.
+     */
+    private Response serveWebsiteObject(String bucket, String key,
+                                        S3Service.RequestAuthorization authorization) {
+        WebsiteConfiguration cfg;
+        try {
+            cfg = s3Service.getBucketWebsite(bucket);
+        } catch (AwsException e) {
+            // Only "no website configuration" means fall through to normal handling; a real error
+            // (e.g. NoSuchBucket) must propagate rather than be masked as "not a website".
+            if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return null;
+        }
+        String index = cfg.getIndexDocument();
+        if (index == null) {
+            return null;
+        }
+        // The routing layer strips a trailing slash from the object key, so recover the "directory"
+        // intent from the raw request path: a trailing slash (or the site root) means "serve this
+        // prefix's index document"; the prefix is the key without any trailing slash.
+        var request = currentVertxRequest.getCurrent().request();
+        String rawPath = request.path();
+        boolean directory = key.isEmpty() || rawPath.endsWith("/");
+        String prefix = key.endsWith("/") ? key.substring(0, key.length() - 1) : key;
+
+        if (directory) {
+            String indexKey = prefix.isEmpty() ? index : prefix + "/" + index;
+            try {
+                s3Service.authorizeGetObject(bucket, indexKey, null, authorization);
+                S3Object indexObj = s3Service.headObject(bucket, indexKey, null);
+                // A website endpoint serves the index document with no response-header overrides and no
+                // checksum headers (no viewer sends response-* or x-amz-checksum-mode to a website endpoint).
+                return fullObjectResponse(bucket, indexKey, null, indexObj,
+                        new ResponseHeaderOverrides(null, null, null, null, null, null), false);
+            } catch (AwsException e) {
+                if (!isWebsiteErrorDocumentTrigger(e)) {
+                    throw e;
+                }
+                Response err = serveErrorDocument(bucket, cfg, authorization, e.getHttpStatus());
+                return err != null ? err : xmlErrorResponse(e);
+            }
+        }
+        // Not slash-terminated: an exact object is served by the normal path; a prefix that exists only
+        // as a "folder" (an index document lives beneath it) 302-redirects to the slash-terminated form
+        // so the page's relative asset URLs resolve against the right base (matching real S3).
+        if (!s3Service.objectExists(bucket, prefix) && s3Service.objectExists(bucket, prefix + "/" + index)) {
+            String query = request.query();
+            String location = rawPath + "/" + (query == null ? "" : "?" + query);
+            return Response.status(Response.Status.FOUND)
+                    .header("Location", location)
+                    .build();
+        }
+        return null;
     }
 
     private Response serveErrorDocument(String bucket, WebsiteConfiguration cfg,
