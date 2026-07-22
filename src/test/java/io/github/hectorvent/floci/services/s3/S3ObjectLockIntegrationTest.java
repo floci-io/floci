@@ -122,10 +122,83 @@ class S3ObjectLockIntegrationTest {
             .body(containsString("<Days>30</Days>"));
     }
 
+    // --- PutObjectRetention RetainUntilDate parsing ---
+
+    private static final String RETENTION_KEY = "retained-object.txt";
+
+    @Test
+    @Order(10)
+    void putObjectForRetention() {
+        given()
+            .body("hello")
+        .when()
+            .put("/" + LOCK_BUCKET + "/" + RETENTION_KEY)
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
+    void putObjectRetentionWithValidIsoDateReturns200() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Mode>GOVERNANCE</Mode>
+                  <RetainUntilDate>2030-01-01T00:00:00Z</RetainUntilDate>
+                </Retention>
+                """;
+        given()
+            .body(body)
+        .when()
+            .put("/" + LOCK_BUCKET + "/" + RETENTION_KEY + "?retention")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(12)
+    void putObjectRetentionWithEpochSecondsReturns400MalformedXml() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Mode>GOVERNANCE</Mode>
+                  <RetainUntilDate>1577836800</RetainUntilDate>
+                </Retention>
+                """;
+        given()
+            .body(body)
+        .when()
+            .put("/" + LOCK_BUCKET + "/" + RETENTION_KEY + "?retention")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"))
+            .body(not(containsString("Internal Server Error")));
+    }
+
+    @Test
+    @Order(13)
+    void putObjectRetentionWithGarbageDateReturns400MalformedXml() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Mode>GOVERNANCE</Mode>
+                  <RetainUntilDate>notadate</RetainUntilDate>
+                </Retention>
+                """;
+        given()
+            .body(body)
+        .when()
+            .put("/" + LOCK_BUCKET + "/" + RETENTION_KEY + "?retention")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"))
+            .body(not(containsString("Internal Server Error")));
+    }
+
     // --- non-existent bucket ---
 
     @Test
-    @Order(9)
+    @Order(14)
     void nonExistentBucketReturnsNoSuchBucket() {
         given()
         .when()
