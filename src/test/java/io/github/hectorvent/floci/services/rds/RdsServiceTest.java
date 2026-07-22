@@ -914,6 +914,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void modifyManagedDefaultClusterParameterGroupIsRejectedWithoutPersistingChanges() {
+        String name = "default.aurora-postgresql16";
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbClusterParameterGroup(
+                        name, Map.of("log_statement", "all")));
+
+        assertEquals("InvalidDBParameterGroupState", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertTrue(rdsService.getDbClusterParameterGroup(name).getParameters().isEmpty());
+    }
+
+    @Test
+    void deleteManagedDefaultClusterParameterGroupIsRejectedAndGroupRemainsResolvable() {
+        String name = "default.aurora-postgresql16";
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.deleteDbClusterParameterGroup(name));
+
+        assertEquals("InvalidDBParameterGroupState", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals(name, rdsService.getDbClusterParameterGroup(name).getDbClusterParameterGroupName());
+    }
+
+    @Test
     void deleteDbClusterParameterGroupMissingThrows() {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.deleteDbClusterParameterGroup("nonexistent"));

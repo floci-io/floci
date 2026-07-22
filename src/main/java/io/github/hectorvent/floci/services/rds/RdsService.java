@@ -1002,6 +1002,10 @@ public class RdsService implements Resettable {
     }
 
     public void deleteDbClusterParameterGroup(String name) {
+        if (managedClusterParameterGroup(name) != null) {
+            throw new AwsException("InvalidDBParameterGroupState",
+                    "The default DB cluster parameter group cannot be deleted.", 400);
+        }
         if (clusterParameterGroups.get(name).isEmpty()) {
             throw new AwsException("DBClusterParameterGroupNotFound",
                     "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
@@ -1011,6 +1015,10 @@ public class RdsService implements Resettable {
 
     public DbClusterParameterGroup modifyDbClusterParameterGroup(String name,
                                                                   java.util.Map<String, String> parameters) {
+        if (managedClusterParameterGroup(name) != null) {
+            throw new AwsException("InvalidDBParameterGroupState",
+                    "The default DB cluster parameter group cannot be modified.", 400);
+        }
         DbClusterParameterGroup group = getDbClusterParameterGroup(name);
         if (parameters != null) {
             group.getParameters().putAll(parameters);
