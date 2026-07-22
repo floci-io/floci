@@ -634,7 +634,9 @@ public class ApiGatewayService {
         if (request.get("providerARNs") instanceof List<?> arns) {
             List<String> providerArns = new ArrayList<>();
             for (Object arn : arns) {
-                if (arn != null) providerArns.add(arn.toString());
+                if (arn != null) {
+                    providerArns.add(arn.toString());
+                }
             }
             authorizer.setProviderARNs(providerArns);
         }
