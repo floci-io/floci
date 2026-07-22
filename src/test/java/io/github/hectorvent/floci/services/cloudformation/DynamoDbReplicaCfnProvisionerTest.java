@@ -7,15 +7,19 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudForm
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.InOrder;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.Mockito.inOrder;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class DynamoDbReplicaCfnProvisionerTest {
@@ -36,12 +40,19 @@ class DynamoDbReplicaCfnProvisionerTest {
 
     @Test
     void changingReplicaRegionFailsWithoutOverwritingPhysicalIdWhenOldRemovalFails() throws Exception {
+        Set<String> replicas = new HashSet<>(Set.of("us-west-2"));
         when(dynamoDbService.applyReplicaUpdates(
-                "global-table", List.of("eu-west-1"), List.of(), "us-east-1"))
-                .thenReturn(null);
-        when(dynamoDbService.applyReplicaUpdates(
-                "global-table", List.of(), List.of("us-west-2"), "us-east-1"))
-                .thenThrow(new AwsException("InternalError", "simulated removal failure", 500));
+                eq("global-table"), anyList(), anyList(), eq("us-east-1")))
+                .thenAnswer(invocation -> {
+                    List<String> additions = invocation.getArgument(1);
+                    List<String> removals = invocation.getArgument(2);
+                    if (removals.contains("us-west-2")) {
+                        throw new AwsException("InternalError", "simulated removal failure", 500);
+                    }
+                    replicas.removeAll(removals);
+                    replicas.addAll(additions);
+                    return null;
+                });
 
         StackResource resource = provisioner.provision(
                 "Replica", "Custom::DynamoDBReplica",
@@ -53,11 +64,10 @@ class DynamoDbReplicaCfnProvisionerTest {
         assertEquals("CREATE_FAILED", resource.getStatus());
         assertEquals("simulated removal failure", resource.getStatusReason());
         assertEquals("us-west-2", resource.getPhysicalId());
-        InOrder calls = inOrder(dynamoDbService);
-        calls.verify(dynamoDbService).applyReplicaUpdates(
-                "global-table", List.of("eu-west-1"), List.of(), "us-east-1");
-        calls.verify(dynamoDbService).applyReplicaUpdates(
-                "global-table", List.of(), List.of("us-west-2"), "us-east-1");
+        assertEquals(Set.of("us-west-2"), replicas);
+        verify(dynamoDbService).applyReplicaUpdates(
+                "global-table", List.of("eu-west-1"), List.of("us-west-2"), "us-east-1");
+        verifyNoMoreInteractions(dynamoDbService);
     }
 
     private CloudFormationTemplateEngine engine() {

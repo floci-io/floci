@@ -3129,13 +3129,15 @@ public class CloudFormationResourceProvisioner {
                     "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing Region", 400);
         }
         String priorRegion = r.getPhysicalId();
-        dynamoDbService.applyReplicaUpdates(tableName, List.of(replicaRegion), List.of(), region);
-        // On a stack UPDATE that changes Region, CloudFormation replaces the resource; drop the
-        // prior replica region so it is not left dangling in the table metadata (and unreachable
-        // by delete once the physical id is overwritten below).
-        if (priorRegion != null && !priorRegion.isBlank() && !priorRegion.equals(replicaRegion)) {
-            dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(priorRegion), region);
-        }
+        List<String> removeRegions = priorRegion != null
+                && !priorRegion.isBlank()
+                && !priorRegion.equals(replicaRegion)
+                ? List.of(priorRegion)
+                : List.of();
+        // Validate and persist replacement as one operation so an old-replica removal failure
+        // cannot leave the new replica applied while the resource still points at the old region.
+        dynamoDbService.applyReplicaUpdates(
+                tableName, List.of(replicaRegion), removeRegions, region);
         r.setPhysicalId(replicaRegion);
         r.getAttributes().put("TableName", tableName);
     }

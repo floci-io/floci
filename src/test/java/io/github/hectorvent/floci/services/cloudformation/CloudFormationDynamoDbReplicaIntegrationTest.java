@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 
@@ -114,8 +116,9 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
                 "DescribeTable should no longer list the removed replica, was: " + afterRemove);
     }
 
-    @Test
-    void updateTableRejectsBlankReplicaRegion() {
+    @ParameterizedTest
+    @ValueSource(strings = {"Create", "Delete"})
+    void updateTableRejectsBlankReplicaRegionBeforeApplyingOtherChanges(String action) {
         String tableName = "gt-invalid-region-" + Long.toString(System.nanoTime(), 36);
         createTable(tableName);
 
@@ -124,9 +127,16 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
             .header("Authorization", DDB_AUTH)
             .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
             .body("{\"TableName\":\"" + tableName + "\","
-                    + "\"ReplicaUpdates\":[{\"Create\":{\"RegionName\":\"\"}}]}")
+                    + "\"DeletionProtectionEnabled\":true,"
+                    + "\"ReplicaUpdates\":[{\"" + action + "\":{\"RegionName\":\"\"}}]}")
         .when().post("/").then().statusCode(400)
             .body("__type", containsString("ValidationException"));
+
+        String table = ddb("DescribeTable", "{\"TableName\":\"" + tableName + "\"}");
+        assertTrue(table.contains("\"DeletionProtectionEnabled\":false"),
+                "rejected update must not partially mutate the table: " + table);
+        assertFalse(table.contains("\"Replicas\""),
+                "rejected update must not add replicas: " + table);
     }
 
     @Test

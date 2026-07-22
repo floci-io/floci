@@ -1086,11 +1086,25 @@ public class DynamoDbJsonHandler {
     private Response handleUpdateTable(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
         JsonNode replicaUpdates = request.path("ReplicaUpdates");
+        List<String> addRegions = new ArrayList<>();
+        List<String> removeRegions = new ArrayList<>();
         if (replicaUpdates.isArray()) {
             for (JsonNode update : replicaUpdates) {
                 if (update.has("Update")) {
                     throw new AwsException(
                             "ValidationException", "ReplicaUpdates.Update is not supported", 400);
+                }
+                JsonNode create = update.path("Create");
+                if (create.isObject()) {
+                    String replicaRegion = create.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    addRegions.add(replicaRegion);
+                }
+                JsonNode delete = update.path("Delete");
+                if (delete.isObject()) {
+                    String replicaRegion = delete.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    removeRegions.add(replicaRegion);
                 }
             }
         }
@@ -1202,26 +1216,8 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        if (!replicaUpdates.isMissingNode() && replicaUpdates.isArray()) {
-            List<String> addRegions = new ArrayList<>();
-            List<String> removeRegions = new ArrayList<>();
-            for (JsonNode update : replicaUpdates) {
-                JsonNode create = update.path("Create");
-                if (create.isObject()) {
-                    String replicaRegion = create.path("RegionName").asText(null);
-                    validateReplicaRegion(replicaRegion);
-                    addRegions.add(replicaRegion);
-                }
-                JsonNode delete = update.path("Delete");
-                if (delete.isObject()) {
-                    String replicaRegion = delete.path("RegionName").asText(null);
-                    validateReplicaRegion(replicaRegion);
-                    removeRegions.add(replicaRegion);
-                }
-            }
-            if (!addRegions.isEmpty() || !removeRegions.isEmpty()) {
-                table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, region);
-            }
+        if (!addRegions.isEmpty() || !removeRegions.isEmpty()) {
+            table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, region);
         }
 
         ObjectNode response = objectMapper.createObjectNode();
