@@ -404,6 +404,8 @@ public class SnsService implements Resettable {
         Topic topic = topicStore.get(topicStoreKey)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
 
+        validateTopicMessageStructure(message, messageStructure);
+
         boolean isFifo = "true".equals(topic.getAttributes().get("FifoTopic"));
         String dedupId = messageDeduplicationId;
         if (isFifo) {
@@ -435,7 +437,7 @@ public class SnsService implements Resettable {
             if (!matchesFilterPolicy(sub, parsedBody, messageAttributes)) {
                 continue;
             }
-            deliverMessage(sub, message, subject, messageAttributes, messageId, effectiveArn, messageGroupId, dedupId);
+            deliverMessage(sub, message, subject, messageAttributes, messageId, effectiveArn, messageGroupId, dedupId, messageStructure);
         }
         LOG.infov("Published message {0} to topic {1}", messageId, effectiveArn);
         return messageId;
@@ -629,6 +631,17 @@ public class SnsService implements Resettable {
             throw new AwsException("PlatformApplicationDisabled",
                     "Platform application is disabled.", 400);
         }
+        return capturePushForEndpoint(endpoint, app, message, subject, messageStructure, messageAttributes);
+    }
+
+    /**
+     * Resolves the platform payload and records a captured push for the given endpoint/app.
+     * Shared by direct-to-endpoint {@code Publish} and topic fan-out to {@code application}
+     * subscriptions, so broadcast pushes surface identically via the retrospection API.
+     */
+    private String capturePushForEndpoint(PlatformEndpoint endpoint, PlatformApplication app,
+                                          String message, String subject, String messageStructure,
+                                          Map<String, MessageAttributeValue> messageAttributes) {
         String payload = resolvePushPayload(app.getPlatform(), message, messageStructure);
         String messageId = UUID.randomUUID().toString();
         recordPushNotification(new PushNotification(
@@ -672,6 +685,35 @@ public class SnsService implements Resettable {
                 "Invalid parameter: Message Reason: Messages must have a '" + platform
                         + "' or 'default' key.",
                 400);
+    }
+
+    /**
+     * Validates {@code MessageStructure="json"} on a topic {@code Publish} the way the real SNS
+     * API does: synchronously, before any fan-out. The message must be a JSON object carrying a
+     * top-level {@code default} entry. Validating here (rather than lazily inside per-subscriber
+     * delivery) means a malformed envelope surfaces to the caller as {@code InvalidParameter}
+     * instead of being silently swallowed while the {@code publish} call still reports success.
+     */
+    private void validateTopicMessageStructure(String message, String messageStructure) {
+        if (!"json".equals(messageStructure)) {
+            return;
+        }
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(message);
+        } catch (Exception e) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message Structure - JSON message body failed to parse", 400);
+        }
+        if (root == null || !root.isObject()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message Structure - JSON message body should be an object.", 400);
+        }
+        JsonNode defaultValue = root.get("default");
+        if (defaultValue == null || defaultValue.isNull()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message Structure - No default entry in JSON message body", 400);
+        }
     }
 
     private void recordPushNotification(PushNotification notification) {
@@ -783,6 +825,7 @@ public class SnsService implements Resettable {
                 continue;
             }
             String subject = (String) entry.get("Subject");
+            String messageStructure = (String) entry.get("MessageStructure");
             String messageGroupId = (String) entry.get("MessageGroupId");
             String messageDeduplicationId = (String) entry.get("MessageDeduplicationId");
 
@@ -812,7 +855,7 @@ public class SnsService implements Resettable {
                     bodyParseAttempted = true;
                 }
                 if (!matchesFilterPolicy(sub, parsedBody, attrs)) continue;
-                deliverMessage(sub, message, subject, attrs, messageId, topicArn, messageGroupId, messageDeduplicationId);
+                deliverMessage(sub, message, subject, attrs, messageId, topicArn, messageGroupId, messageDeduplicationId, messageStructure);
             }
             LOG.debugv("Batch published message {0} (id={1}) to {2}", messageId, id, topicArn);
             successful.add(new String[]{id, messageId});
@@ -1228,7 +1271,8 @@ public class SnsService implements Resettable {
 
     private void deliverMessage(Subscription sub, String message, String subject,
                                 Map<String, MessageAttributeValue> messageAttributes, String messageId,
-                                String topicArn, String messageGroupId, String messageDeduplicationId) {
+                                String topicArn, String messageGroupId, String messageDeduplicationId,
+                                String messageStructure) {
         try {
             switch (sub.getProtocol()) {
                 case "sqs" -> {
@@ -1279,6 +1323,31 @@ public class SnsService implements Resettable {
                     httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
                             .thenAccept(response -> logHttpResult("Delivered SNS notification", endpoint, response.statusCode()))
                             .exceptionally(ex -> { LOG.warnv("Failed to deliver SNS message to {0}: {1}", endpoint, ex.getMessage()); return null; });
+                }
+                case "application" -> {
+                    String region = extractRegionFromArn(sub.getEndpoint());
+                    if (region == null) {
+                        region = extractRegionFromArn(topicArn);
+                    }
+                    String endpointArn = sub.getEndpoint();
+                    PlatformEndpoint endpoint = platformEndpointStore.get(endpointKey(region, endpointArn)).orElse(null);
+                    if (endpoint == null) {
+                        LOG.debugv("Skipping topic fan-out to missing platform endpoint {0}", endpointArn);
+                        break;
+                    }
+                    if (!"true".equalsIgnoreCase(endpoint.getAttributes().getOrDefault("Enabled", "true"))) {
+                        LOG.debugv("Skipping topic fan-out to disabled platform endpoint {0}", endpointArn);
+                        break;
+                    }
+                    PlatformApplication app = platformAppStore.get(
+                            platformAppKey(region, endpoint.getPlatformApplicationArn())).orElse(null);
+                    if (app == null || "false".equalsIgnoreCase(app.getAttributes().get("Enabled"))) {
+                        LOG.debugv("Skipping topic fan-out to endpoint {0}: platform application missing or disabled",
+                                endpointArn);
+                        break;
+                    }
+                    capturePushForEndpoint(endpoint, app, message, subject, messageStructure, messageAttributes);
+                    LOG.debugv("Delivered SNS message to platform endpoint: {0}", endpointArn);
                 }
                 case "email", "email-json" -> LOG.infov("SNS email delivery (stub): to={0}, subject={1}, message={2}",
                         sub.getEndpoint(), subject, message);

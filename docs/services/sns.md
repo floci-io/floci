@@ -86,6 +86,7 @@ Supported subscription protocols:
 - `sqs` — delivers to a Floci SQS queue
 - `lambda` — invokes a Floci Lambda function
 - `http` / `https` — posts to an HTTP endpoint
+- `application` — fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
 
 ## Mobile push (mock)
 
@@ -121,6 +122,25 @@ aws sns publish --target-arn $ENDPOINT_ARN --message-structure json \
 When `MessageStructure="json"`, Floci picks the key matching the endpoint's platform
 (`APNS`, `APNS_SANDBOX`, `GCM`, or `FCM`), falling back to `default`. The envelope
 must be a JSON object and must include `default` — otherwise `InvalidParameter`.
+
+### Broadcast to devices via a topic
+
+Subscribe platform endpoints to a topic with `Protocol="application"`, then publish to
+the topic to fan out to every subscribed device — each endpoint is captured exactly as
+if you had published to it directly (same platform-payload resolution, same `Enabled`
+gating). A disabled endpoint in the fan-out is skipped; the rest still receive the push.
+
+```bash
+aws sns subscribe --topic-arn $TOPIC_ARN \
+  --protocol application --notification-endpoint $ENDPOINT_ARN \
+  --endpoint-url http://localhost:4566
+
+aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
+  --message '{"default":"market open","GCM":"{\"notification\":{\"body\":\"market alert\"}}"}' \
+  --endpoint-url http://localhost:4566
+```
+
+Broadcast pushes surface in the same retrospection API, keyed by `EndpointArn`.
 
 ### Inspecting captured pushes
 
