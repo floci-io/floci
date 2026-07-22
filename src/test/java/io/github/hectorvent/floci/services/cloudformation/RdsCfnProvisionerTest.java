@@ -276,6 +276,20 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void nonNumericPinnedSsmVersionFailsWithValidationError() {
+        StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:ssm:/db/password:not-a-version}}"}
+                """);
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains(
+                "SSM parameter version must be a positive integer"));
+        verifyNoInteractions(ssmService, rdsService);
+    }
+
+    @Test
     void secretsManagerStageAndVersionIdTogetherFailResource() {
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",

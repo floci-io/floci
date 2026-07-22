@@ -3882,7 +3882,18 @@ public class CloudFormationResourceProvisioner {
             String[] segments = body.split(":", 2);
             String parameterName = segments[0];
             if (segments.length > 1 && !segments[1].isBlank()) {
-                long wantedVersion = Long.parseLong(segments[1].trim());
+                String version = segments[1].trim();
+                long wantedVersion;
+                try {
+                    wantedVersion = Long.parseLong(version);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                if (wantedVersion < 1) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
                 return ssmService.getParameterHistory(parameterName, region).stream()
                         .filter(h -> h.getVersion() == wantedVersion)
                         .findFirst()
