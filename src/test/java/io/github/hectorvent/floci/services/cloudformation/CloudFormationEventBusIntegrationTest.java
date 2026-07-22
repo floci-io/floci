@@ -148,23 +148,29 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     private void awaitStackDeleted(String stackName) throws InterruptedException {
+        String lastBody = null;
         for (int i = 0; i < 100; i++) {
-            String body = given()
+            lastBody = given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", CFN_AUTH)
                 .formParam("Action", "DescribeStacks")
                 .formParam("StackName", stackName)
             .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")
-                    || body.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
+            if (lastBody.contains("does not exist")
+                    || lastBody.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
                 return;
+            }
+            if (lastBody.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
+                throw new AssertionError("Stack " + stackName + " deletion failed: " + lastBody);
             }
             Thread.sleep(50);
         }
+        throw new AssertionError(
+                "Timed out waiting for stack " + stackName + " to be deleted. Last response: " + lastBody);
     }
 
     @Test
-    void eventBusWithExistingNameIsAdoptedNotRecreated() {
+    void eventBusWithExistingNameIsAdoptedNotRecreated() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "adopt-bus-" + suffix;
         String stackA = "eventbus-adopt-a-" + suffix;
@@ -179,7 +185,20 @@ class CloudFormationEventBusIntegrationTest {
         assertStackStatus(stackB, "CREATE_COMPLETE");
 
         deleteStack(stackA);
+        awaitStackDeleted(stackA);
         deleteStack(stackB);
+        awaitStackDeleted(stackB);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("ResourceNotFoundException"));
     }
 
     @Test
