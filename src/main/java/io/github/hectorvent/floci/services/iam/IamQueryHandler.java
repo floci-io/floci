@@ -92,6 +92,7 @@ public class IamQueryHandler {
             case "GetPolicy" -> handleGetPolicy(params);
             case "DeletePolicy" -> handleDeletePolicy(params);
             case "ListPolicies" -> handleListPolicies(params);
+            case "ListEntitiesForPolicy" -> handleListEntitiesForPolicy(params);
             case "CreatePolicyVersion" -> handleCreatePolicyVersion(params);
             case "GetPolicyVersion" -> handleGetPolicyVersion(params);
             case "DeletePolicyVersion" -> handleDeletePolicyVersion(params);
@@ -473,6 +474,27 @@ public class IamQueryHandler {
         }
         xml.end("Policies").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListPolicies", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleListEntitiesForPolicy(MultivaluedMap<String, String> params) {
+        IamService.PolicyEntities entities = iamService.listEntitiesForPolicy(getParam(params, "PolicyArn"));
+        var xml = new XmlBuilder().start("PolicyGroups");
+        for (IamGroup group : entities.groups()) {
+            xml.start("member").elem("GroupName", group.getGroupName())
+                    .elem("GroupId", group.getGroupId()).end("member");
+        }
+        xml.end("PolicyGroups").start("PolicyUsers");
+        for (IamUser user : entities.users()) {
+            xml.start("member").elem("UserName", user.getUserName())
+                    .elem("UserId", user.getUserId()).end("member");
+        }
+        xml.end("PolicyUsers").start("PolicyRoles");
+        for (IamRole role : entities.roles()) {
+            xml.start("member").elem("RoleName", role.getRoleName())
+                    .elem("RoleId", role.getRoleId()).end("member");
+        }
+        xml.end("PolicyRoles").elem("IsTruncated", false);
+        return Response.ok(AwsQueryResponse.envelope("ListEntitiesForPolicy", AwsNamespaces.IAM, xml.build())).build();
     }
 
     private Response handleCreatePolicyVersion(MultivaluedMap<String, String> params) {

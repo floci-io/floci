@@ -51,6 +51,7 @@
 | GetPolicy | Returns metadata for a managed IAM policy. |
 | DeletePolicy | Deletes a managed IAM policy. |
 | ListPolicies | Lists managed IAM policies, including seeded AWS managed policies. |
+| ListEntitiesForPolicy | Roles, users and groups a managed policy is attached to |
 | CreatePolicyVersion | Creates a new version of a managed policy. |
 | GetPolicyVersion | Returns a managed policy version document. |
 | DeletePolicyVersion | Deletes a non-default managed policy version. |
