@@ -31,7 +31,11 @@ class StorageFactoryDuplicateBackendTest {
     StorageFactory storageFactory;
 
     @BeforeEach
-    void cleanFile() throws IOException {
+    void reset() throws IOException {
+        // StorageFactory is an application-scoped singleton, so a backend for this file may already
+        // exist and hold in-memory state from app startup. Clear all backends (wipes memory + disk),
+        // then remove the file so both create() calls below start from an empty store.
+        storageFactory.clearAll();
         Files.deleteIfExists(Path.of(STORAGE_PATH, FILE_NAME));
     }
 

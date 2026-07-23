@@ -29,6 +29,8 @@ public class StorageFactory {
     private final EmulatorConfig config;
     private final ServiceConfigAccess serviceConfigAccess;
     private final List<StorageBackend<?, ?>> allBackends = new ArrayList<>();
+    // A file path identifies one logical store: callers sharing a path are expected to agree on
+    // its value type and storage mode. The first create() wins; repeat calls reuse that backend.
     private final Map<Path, StorageBackend<?, ?>> backendsByPath = new HashMap<>();
     private final List<HybridStorage<?, ?>> hybridBackends = new ArrayList<>();
     private final List<WalStorage<?, ?>> walBackends = new ArrayList<>();
@@ -101,21 +103,21 @@ public class StorageFactory {
     }
 
     /** Load all storage backends from disk. */
-    public void loadAll() {
+    public synchronized void loadAll() {
         for (StorageBackend<?, ?> backend : allBackends) {
             backend.load();
         }
     }
 
     /** Flush all storage backends to disk. */
-    public void flushAll() {
+    public synchronized void flushAll() {
         for (StorageBackend<?, ?> backend : allBackends) {
             backend.flush();
         }
     }
 
     /** Clear all storage backends. */
-    public void clearAll() {
+    public synchronized void clearAll() {
         for (StorageBackend<?, ?> backend : allBackends) {
             backend.clear();
         }
@@ -123,7 +125,7 @@ public class StorageFactory {
     }
 
     /** Shutdown all managed backends (stop schedulers, close connections). */
-    public void shutdownAll() {
+    public synchronized void shutdownAll() {
         for (HybridStorage<?, ?> hybrid : hybridBackends) {
             hybrid.shutdown();
         }
