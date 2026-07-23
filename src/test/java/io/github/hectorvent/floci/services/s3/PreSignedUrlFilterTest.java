@@ -6,11 +6,6 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/**
- * Unit tests for the SigV4 canonical query string construction in {@link PreSignedUrlFilter}.
- * These exercise the encoding, ordering, and exclusion rules directly on the framework's
- * decoded query representation, independently of the request filter and the signing math.
- */
 class PreSignedUrlFilterTest {
 
     private static MultivaluedMap<String, String> params() {
