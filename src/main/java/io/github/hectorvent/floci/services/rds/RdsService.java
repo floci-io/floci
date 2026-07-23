@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -60,6 +62,8 @@ public class RdsService implements Resettable {
     private final StorageBackend<String, DbParameterGroup> parameterGroups;
     private final StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups;
     private final StorageBackend<String, DbSubnetGroup> subnetGroups;
+    private final StorageBackend<String, DbSnapshot> snapshots;
+    private final StorageBackend<String, String> snapshotData;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     private final Ec2Service ec2Service;
@@ -97,6 +101,10 @@ public class RdsService implements Resettable {
                 new TypeReference<Map<String, DbClusterParameterGroup>>() {});
         this.subnetGroups = storageFactory.create("rds", "rds-subnet-groups.json",
                 new TypeReference<Map<String, DbSubnetGroup>>() {});
+        this.snapshots = storageFactory.create("rds", "rds-snapshots.json",
+                new TypeReference<Map<String, DbSnapshot>>() {});
+        this.snapshotData = storageFactory.create("rds", "rds-snapshot-data.json",
+                new TypeReference<Map<String, String>>() {});
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -138,6 +146,8 @@ public class RdsService implements Resettable {
         this.parameterGroups = parameterGroups;
         this.clusterParameterGroups = clusterParameterGroups;
         this.subnetGroups = subnetGroups;
+        this.snapshots = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
+        this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -367,6 +377,67 @@ public class RdsService implements Resettable {
 
         instances.put(id, instance);
         LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
+        return instance;
+    }
+
+    public DbSnapshot createDbSnapshot(String snapshotId, String instanceId) {
+        if (snapshots.get(snapshotId).isPresent()) {
+            throw new AwsException("DBSnapshotAlreadyExists", "DBSnapshot " + snapshotId + " already exists.", 400);
+        }
+
+        DbInstance instance = instances.get(instanceId)
+                .orElseThrow(() -> new AwsException("DBInstanceNotFound", "DBInstance " + instanceId + " not found.", 404));
+
+        if (instance.getEngine() != DatabaseEngine.POSTGRES) {
+            throw new AwsException("UnsupportedOperation", "Operation CreateDBSnapshot is not supported for engine " + instance.getEngine() + ".", 400);
+        }
+
+        DbSnapshot snapshot = new DbSnapshot(snapshotId, instanceId, Instant.now(), instance.getEngine(),
+                instance.getEngineVersion(), instance.getAllocatedStorage(), "available",
+                instance.getMasterUsername(), instance.getMasterPassword(), instance.getAvailabilityZone(), instance.getVpcId(),
+                instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
+                instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId());
+
+        String sqlDump = "";
+        if (!config.services().rds().mock()) {
+            sqlDump = containerManager.createPostgresSnapshot(instance.getContainerId(), instance.getMasterUsername());
+        }
+        snapshotData.put(snapshotId, sqlDump);
+        snapshots.put(snapshotId, snapshot);
+
+        return snapshot;
+    }
+
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass, String availabilityZone, boolean multiAz, String dbSubnetGroupName, java.util.List<String> vpcSecurityGroupIds, java.util.Map<String, String> tags) {
+        DbSnapshot snapshot = snapshots.get(snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
+
+        String sqlDump = snapshotData.get(snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot data for " + snapshotId + " not found.", 404));
+
+        String targetClass = (dbInstanceClass != null && !dbInstanceClass.isBlank()) ? dbInstanceClass : "db.t3.micro";
+        
+        // Use the parameters from the snapshot
+        DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
+                snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                null, targetClass, snapshot.getAllocatedStorage(), snapshot.isIamDatabaseAuthenticationEnabled(),
+                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds);
+
+        if (!config.services().rds().mock()) {
+            try {
+                containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
+            } catch (Exception e) {
+                try {
+                    deleteDbInstance(instanceId);
+                } catch (Exception cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+                AwsException awsEx = new AwsException("InvalidDBSnapshotStateFault", "Failed to restore snapshot: " + e.getMessage(), 400);
+                awsEx.initCause(e);
+                throw awsEx;
+            }
+        }
+
         return instance;
     }
 
