@@ -298,6 +298,50 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void describeKeyPairsThrowsNotFoundForMissingName() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of("does-not-exist"), List.of()));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void describeKeyPairsThrowsNotFoundForMissingId() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of(), List.of("key-missing")));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+    }
+
+    @Test
+    void describeKeyPairsReturnsRequestedKeyAndAllowsEmptyUnfilteredList() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        // Unfiltered describe on an empty account is not an error.
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+
+        service.createKeyPair("us-east-1", "present-key");
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("present-key"), List.of()).size());
+
+        // A missing name is not masked by a present one in the same request.
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of("present-key", "absent-key"), List.of()));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+    }
+
+    @Test
     void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
