@@ -60,11 +60,12 @@ All images are published as multi-arch manifests supporting `linux/amd64` and `l
 
 ## Reusable Image Publishing
 
-The `Build Floci Images` reusable workflow publishes native and compat images
-for an exact branch, tag, or commit. A calling repository owns the trigger,
-destination registry, credentials, and package permissions; the shared workflow
-owns the native amd64 and arm64 builds, multi-architecture manifests, image
-labels, and provenance output.
+The `Build Floci Images` reusable workflow publishes a JVM image for an exact
+branch, tag, or commit by default. This matches the ordinary Maven package and
+the repository's local-development Docker image. A calling repository owns the
+trigger, destination registry, credentials, and package permissions; the shared
+workflow owns the multi-architecture manifest, image labels, and provenance
+output.
 
 For example, a fork can keep this small manual caller on its default branch:
 
@@ -98,15 +99,18 @@ image only below the caller's repository owner. Calls targeting another OCI
 registry must pass `REGISTRY_USERNAME` and `REGISTRY_TOKEN` through the reusable
 workflow's declared secrets.
 
-The workflow publishes commit-derived convenience tags:
+The default workflow publishes a commit-derived convenience tag:
 
-- `<commit-sha-12>` for the standard native image
-- `<commit-sha-12>-compat` for the compat image
+- `<commit-sha-12>` for the JVM image
 
-A rerun for the same commit can replace either tag. The workflow therefore
-returns digest-qualified native and compat references and uploads them in a
-provenance JSON artifact. Downstream tests should use a digest-qualified
-reference when they require an immutable image:
+Callers that also need native artifacts can pass `publish-native: true`. This
+adds `<commit-sha-12>-native` and `<commit-sha-12>-native-compat`; it does not
+change the unqualified JVM tag.
+
+A rerun for the same commit can replace a tag. The workflow therefore returns
+the digest-qualified JVM reference (plus native references when requested) and
+uploads them in a provenance JSON artifact. Downstream tests should use a
+digest-qualified reference when they require an immutable image:
 
 ```text
 ghcr.io/example/floci@sha256:...

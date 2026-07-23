@@ -11,6 +11,11 @@ on:
         description: OCI image repository without a tag or digest
         required: true
         type: string
+      publish-native:
+        description: Also publish native and native compatibility images
+        required: false
+        type: boolean
+        default: false
     secrets:
       REGISTRY_USERNAME:
         description: Username for a registry other than GHCR
@@ -20,25 +25,37 @@ on:
         required: false
     outputs:
       source-sha:
-        description: Full source revision used for both images
+        description: Full source revision used for all images
         value: ${{ jobs.prepare.outputs.source-sha }}
+      image-ref:
+        description: Commit-tagged default JVM image reference
+        value: ${{ jobs.publish.outputs.jvm-ref }}
+      image-digest-ref:
+        description: Immutable default JVM image reference
+        value: ${{ jobs.publish.outputs.jvm-digest-ref }}
+      jvm-ref:
+        description: Commit-tagged JVM image reference
+        value: ${{ jobs.publish.outputs.jvm-ref }}
+      jvm-digest-ref:
+        description: Immutable JVM image reference
+        value: ${{ jobs.publish.outputs.jvm-digest-ref }}
       native-ref:
-        description: Commit-tagged native image reference
+        description: Commit-tagged native image reference when publish-native is true
         value: ${{ jobs.publish.outputs.native-ref }}
       native-digest-ref:
-        description: Immutable native image reference
+        description: Immutable native image reference when publish-native is true
         value: ${{ jobs.publish.outputs.native-digest-ref }}
       compat-ref:
-        description: Commit-tagged compatibility image reference
+        description: Commit-tagged native compatibility image reference when publish-native is true
         value: ${{ jobs.publish.outputs.compat-ref }}
       compat-digest-ref:
-        description: Immutable compatibility image reference
+        description: Immutable native compatibility image reference when publish-native is true
         value: ${{ jobs.publish.outputs.compat-digest-ref }}
 
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.repository }}-${{ inputs.source-ref }}-${{ inputs.image }}
+  group: ${{ github.workflow }}-${{ github.repository }}-${{ inputs.source-ref }}-${{ inputs.image }}-${{ inputs.publish-native }}
   cancel-in-progress: false
 
 jobs:
@@ -128,6 +145,7 @@ jobs:
 
   build-native-amd64:
     name: Build native artifact (amd64)
+    if: inputs.publish-native
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -167,6 +185,7 @@ jobs:
 
   build-native-arm64:
     name: Build native artifact (arm64)
+    if: inputs.publish-native
     needs: prepare
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
@@ -205,16 +224,26 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish native and compat images
+    name: Publish JVM image
     needs: [prepare, build-native-amd64, build-native-arm64]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        (!inputs.publish-native ||
+          (needs.build-native-amd64.result == 'success' &&
+           needs.build-native-arm64.result == 'success'))
+      }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
     outputs:
       compat-ref: ${{ steps.provenance.outputs.compat-ref }}
       compat-digest-ref: ${{ steps.provenance.outputs.compat-digest-ref }}
+      jvm-ref: ${{ steps.provenance.outputs.jvm-ref }}
+      jvm-digest-ref: ${{ steps.provenance.outputs.jvm-digest-ref }}
       native-ref: ${{ steps.provenance.outputs.native-ref }}
       native-digest-ref: ${{ steps.provenance.outputs.native-digest-ref }}
 
@@ -225,16 +254,19 @@ jobs:
           ref: ${{ needs.prepare.outputs.source-sha }}
 
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        if: inputs.publish-native
         with:
           name: floci-native-amd64-${{ needs.prepare.outputs.version }}
           path: native/amd64/
 
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        if: inputs.publish-native
         with:
           name: floci-native-arm64-${{ needs.prepare.outputs.version }}
           path: native/arm64/
 
       - name: Make native binaries executable
+        if: inputs.publish-native
         run: chmod +x native/amd64/*-runner native/arm64/*-runner
 
       - name: Set build metadata
@@ -262,8 +294,33 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_TOKEN }}
 
+      - name: Build and publish JVM image
+        id: jvm
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source-sha }}
+            org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            version=${{ needs.prepare.outputs.version }}
+            build-date=${{ steps.metadata.outputs.created }}
+            vcs-ref=${{ needs.prepare.outputs.source-sha }}
+          cache-from: type=gha,scope=floci-jvm
+          cache-to: type=gha,scope=floci-jvm,mode=max
+
       - name: Build and publish native image
         id: native
+        if: inputs.publish-native
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         env:
           SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
@@ -272,7 +329,7 @@ jobs:
           file: docker/Dockerfile.native-package
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}
+          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}-native
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}
           labels: |
@@ -288,6 +345,7 @@ jobs:
 
       - name: Build and publish compat image
         id: compat
+        if: inputs.publish-native
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         env:
           SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
@@ -296,7 +354,7 @@ jobs:
           file: docker/Dockerfile.compat
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}-compat
+          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.version }}-native-compat
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}
             BASE_IMAGE=${{ needs.prepare.outputs.image }}@${{ steps.native.outputs.digest }}
@@ -317,7 +375,9 @@ jobs:
           COMPAT_DIGEST: ${{ steps.compat.outputs.digest }}
           CREATED: ${{ steps.metadata.outputs.created }}
           IMAGE: ${{ needs.prepare.outputs.image }}
+          JVM_DIGEST: ${{ steps.jvm.outputs.digest }}
           NATIVE_DIGEST: ${{ steps.native.outputs.digest }}
+          PUBLISH_NATIVE: ${{ inputs.publish-native }}
           REPOSITORY: ${{ github.repository }}
           REQUESTED_SOURCE_REF: ${{ inputs.source-ref }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -327,8 +387,10 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         shell: bash
         run: |
-          native_ref="$IMAGE:$VERSION"
-          compat_ref="$IMAGE:$VERSION-compat"
+          jvm_ref="$IMAGE:$VERSION"
+          jvm_digest_ref="$IMAGE@$JVM_DIGEST"
+          native_ref="$IMAGE:$VERSION-native"
+          compat_ref="$IMAGE:$VERSION-native-compat"
           native_digest_ref="$IMAGE@$NATIVE_DIGEST"
           compat_digest_ref="$IMAGE@$COMPAT_DIGEST"
           run_url="$SERVER_URL/$REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT"
@@ -341,20 +403,35 @@ jobs:
             --arg runId "$RUN_ID" \
             --arg runAttempt "$RUN_ATTEMPT" \
             --arg runUrl "$run_url" \
-            --arg nativeRef "$native_ref" \
-            --arg nativeDigest "$NATIVE_DIGEST" \
-            --arg nativeDigestRef "$native_digest_ref" \
-            --arg compatRef "$compat_ref" \
-            --arg compatDigest "$COMPAT_DIGEST" \
-            --arg compatDigestRef "$compat_digest_ref" \
-            '{source: {sha: $sourceSha, requestedRef: $requestedSourceRef, repository: $repository}, workflow: {runId: $runId, attempt: $runAttempt, url: $runUrl}, created: $created, images: {native: {ref: $nativeRef, digest: $nativeDigest, digestRef: $nativeDigestRef, dockerfile: "docker/Dockerfile.native-package"}, compat: {ref: $compatRef, digest: $compatDigest, digestRef: $compatDigestRef, dockerfile: "docker/Dockerfile.compat", base: $nativeDigestRef}}, platforms: ["linux/amd64", "linux/arm64"]}' \
+            --arg jvmRef "$jvm_ref" \
+            --arg jvmDigest "$JVM_DIGEST" \
+            --arg jvmDigestRef "$jvm_digest_ref" \
+            '{source: {sha: $sourceSha, requestedRef: $requestedSourceRef, repository: $repository}, workflow: {runId: $runId, attempt: $runAttempt, url: $runUrl}, created: $created, images: {jvm: {ref: $jvmRef, digest: $jvmDigest, digestRef: $jvmDigestRef, dockerfile: "docker/Dockerfile"}}, platforms: ["linux/amd64", "linux/arm64"]}' \
             > floci-image-provenance.json
 
+          if [[ "$PUBLISH_NATIVE" == "true" ]]; then
+            jq \
+              --arg nativeRef "$native_ref" \
+              --arg nativeDigest "$NATIVE_DIGEST" \
+              --arg nativeDigestRef "$native_digest_ref" \
+              --arg compatRef "$compat_ref" \
+              --arg compatDigest "$COMPAT_DIGEST" \
+              --arg compatDigestRef "$compat_digest_ref" \
+              '.images.native = {ref: $nativeRef, digest: $nativeDigest, digestRef: $nativeDigestRef, dockerfile: "docker/Dockerfile.native-package"}
+               | .images.compat = {ref: $compatRef, digest: $compatDigest, digestRef: $compatDigestRef, dockerfile: "docker/Dockerfile.compat", base: $nativeDigestRef}' \
+              floci-image-provenance.json > floci-image-provenance.tmp
+            mv floci-image-provenance.tmp floci-image-provenance.json
+          fi
+
           {
-            echo "native-ref=$native_ref"
-            echo "native-digest-ref=$native_digest_ref"
-            echo "compat-ref=$compat_ref"
-            echo "compat-digest-ref=$compat_digest_ref"
+            echo "jvm-ref=$jvm_ref"
+            echo "jvm-digest-ref=$jvm_digest_ref"
+            if [[ "$PUBLISH_NATIVE" == "true" ]]; then
+              echo "native-ref=$native_ref"
+              echo "native-digest-ref=$native_digest_ref"
+              echo "compat-ref=$compat_ref"
+              echo "compat-digest-ref=$compat_digest_ref"
+            fi
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -364,8 +441,11 @@ jobs:
             echo
             echo "| Image tag | Immutable digest reference |"
             echo "| --- | --- |"
-            echo "| \`$native_ref\` | \`$native_digest_ref\` |"
-            echo "| \`$compat_ref\` | \`$compat_digest_ref\` |"
+            echo "| \`$jvm_ref\` | \`$jvm_digest_ref\` |"
+            if [[ "$PUBLISH_NATIVE" == "true" ]]; then
+              echo "| \`$native_ref\` | \`$native_digest_ref\` |"
+              echo "| \`$compat_ref\` | \`$compat_digest_ref\` |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
