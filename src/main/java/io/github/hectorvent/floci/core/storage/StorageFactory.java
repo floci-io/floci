@@ -11,6 +11,7 @@ import org.jboss.logging.Logger;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -28,6 +29,7 @@ public class StorageFactory {
     private final EmulatorConfig config;
     private final ServiceConfigAccess serviceConfigAccess;
     private final List<StorageBackend<?, ?>> allBackends = new ArrayList<>();
+    private final Map<Path, StorageBackend<?, ?>> backendsByPath = new HashMap<>();
     private final List<HybridStorage<?, ?>> hybridBackends = new ArrayList<>();
     private final List<WalStorage<?, ?>> walBackends = new ArrayList<>();
 
@@ -50,12 +52,23 @@ public class StorageFactory {
      * @param fileName      the JSON file name for persistent storage
      * @param typeReference Jackson type reference for deserialization
      */
-    public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+    public synchronized <V> StorageBackend<String, V> create(String serviceName, String fileName,
                                                  TypeReference<Map<String, V>> typeReference) {
         String mode = resolveMode(serviceName);
         long flushInterval = resolveFlushInterval(serviceName);
         Path basePath = Path.of(config.storage().persistentPath());
         Path filePath = basePath.resolve(fileName);
+
+        // Reuse an existing backend for the same file. Handing out a second backend bound to the
+        // same path creates a duplicate in-memory store; on shutdown the stale duplicate flushes
+        // after the active instance and clobbers persisted state (issue #1921).
+        StorageBackend<?, ?> existing = backendsByPath.get(filePath);
+        if (existing != null) {
+            LOG.debugv("Reusing existing {0} storage for service {1} (file: {2})", mode, serviceName, filePath);
+            @SuppressWarnings("unchecked")
+            StorageBackend<String, V> typed = (StorageBackend<String, V>) existing;
+            return typed;
+        }
 
         LOG.debugv("Creating {0} storage for service {1} (file: {2})", mode, serviceName, filePath);
 
@@ -83,6 +96,7 @@ public class StorageFactory {
         AccountAwareStorageBackend<V> backend = new AccountAwareStorageBackend<>(
                 inner, requestContextInstance, config.defaultAccountId());
         allBackends.add(backend);
+        backendsByPath.put(filePath, backend);
         return backend;
     }
 
