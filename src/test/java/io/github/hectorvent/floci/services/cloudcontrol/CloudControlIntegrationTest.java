@@ -38,6 +38,9 @@ class CloudControlIntegrationTest {
         String vpcId = given()
                 .formParam("Action", "CreateVpc")
                 .formParam("CidrBlock", "10.42.0.0/16")
+                .formParam("TagSpecification.1.ResourceType", "vpc")
+                .formParam("TagSpecification.1.Tag.1.Key", "Name")
+                .formParam("TagSpecification.1.Tag.1.Value", "cloudcontrol-vpc")
                 .header("Authorization", EC2_AUTH)
                 .when().post("/")
                 .then().statusCode(200)
@@ -47,6 +50,9 @@ class CloudControlIntegrationTest {
                 .formParam("Action", "CreateSubnet")
                 .formParam("VpcId", vpcId)
                 .formParam("CidrBlock", "10.42.1.0/24")
+                .formParam("TagSpecification.1.ResourceType", "subnet")
+                .formParam("TagSpecification.1.Tag.1.Key", "Name")
+                .formParam("TagSpecification.1.Tag.1.Value", "cloudcontrol-subnet")
                 .header("Authorization", EC2_AUTH)
                 .when().post("/")
                 .then().statusCode(200)
@@ -57,6 +63,9 @@ class CloudControlIntegrationTest {
                 .formParam("GroupName", "cloudcontrol-sg")
                 .formParam("GroupDescription", "cloudcontrol sg")
                 .formParam("VpcId", vpcId)
+                .formParam("TagSpecification.1.ResourceType", "security-group")
+                .formParam("TagSpecification.1.Tag.1.Key", "Name")
+                .formParam("TagSpecification.1.Tag.1.Value", "cloudcontrol-sg")
                 .header("Authorization", EC2_AUTH)
                 .when().post("/")
                 .then().statusCode(200)
@@ -78,9 +87,9 @@ class CloudControlIntegrationTest {
                 .then().statusCode(200);
 
         assertListed("AWS::S3::Bucket", bucket, "BucketName");
-        assertListed("AWS::EC2::VPC", vpcId, "CidrBlock");
-        assertListed("AWS::EC2::Subnet", subnetId, "VpcId");
-        assertListed("AWS::EC2::SecurityGroup", groupId, "GroupName");
+        assertListed("AWS::EC2::VPC", vpcId, "cloudcontrol-vpc");
+        assertListed("AWS::EC2::Subnet", subnetId, "cloudcontrol-subnet");
+        assertListed("AWS::EC2::SecurityGroup", groupId, "cloudcontrol-sg");
         assertListed("AWS::EC2::SecurityGroup", groupId, "GroupName", "application/x-amz-json-1.0");
         assertListed("AWS::IAM::User", "cloudcontrol-user", "UserName");
         assertListed("AWS::IAM::Role", "CloudControlRole", "RoleName");
