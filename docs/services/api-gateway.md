@@ -20,7 +20,7 @@ Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 | **Deployments** | CreateDeployment, GetDeployments |
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers |
-| **API Keys** | CreateApiKey, GetApiKeys |
+| **API Keys** | CreateApiKey, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
 | **Usage Plans** | CreateUsagePlan, GetUsagePlans, DeleteUsagePlan |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, DeleteRequestValidator |
@@ -30,13 +30,29 @@ Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
+### API Key Behaviour Notes
+
+#### `generateDistinctId`
+
+Controls whether the key's `id` and `value` fields are distinct. AWS's undocumented default behaviour is that they are **the same string** unless `generateDistinctId=true` is explicitly requested.
+
+| `generateDistinctId` | `id` | `value` |
+|---|---|---|
+| absent (default) | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `false` | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `true` | opaque short token (`shortId`) | caller-supplied `value`, or a generated UUID-derived string |
+
+When `generateDistinctId` is absent or `false`, a single shared string is used for both `id` and `value`. If the caller supplies a `value` in the request body, that string is used for both; otherwise a UUID-derived string is generated and assigned to both.
+
+When `generateDistinctId=true`, `id` is set to an opaque short token independent of `value`.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Deployment detail and lifecycle: `GetDeployment`, `UpdateDeployment`, `DeleteDeployment`
 - Authorizer lifecycle: `UpdateAuthorizer`, `DeleteAuthorizer`, `TestInvokeAuthorizer`
-- API key detail: `GetApiKey`, `UpdateApiKey`, `DeleteApiKey`, `ImportApiKeys`
+- API key detail: `ImportApiKeys`
 - Usage plan detail: `GetUsagePlan`, `UpdateUsagePlan`
 - Model updates and templates: `UpdateModel`, `GetModelTemplate`
 - Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)
@@ -99,6 +115,24 @@ aws apigateway create-deployment \
 # Call the deployed API
 curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 ```
+
+### Usage Plan Tags and Custom IDs
+
+Usage plans support arbitrary tags and the `_custom_id_` tag for deterministic IDs:
+
+```bash
+# Create a usage plan with a custom ID and additional tags
+aws apigateway create-usage-plan \
+  --name "my-plan" \
+  --tags '{"_custom_id_":"my-plan-id","env":"staging"}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# The plan is now accessible at its custom ID
+aws apigateway get-usage-plans --endpoint-url $AWS_ENDPOINT_URL
+```
+
+When `_custom_id_` is present in the `tags` map, it is used as the usage plan's `id`.
+Tags are persisted and returned in all usage plan responses.
 
 ---
 
