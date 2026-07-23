@@ -1583,8 +1583,27 @@ public class Ec2Service implements ContainerTeardown {
 
     public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds) {
         ensureDefaultResources(region);
-        return keyPairs.scan(k -> true).stream()
+        List<KeyPair> regionKeyPairs = keyPairs.scan(k -> true).stream()
                 .filter(k -> k.getRegion().equals(region))
+                .collect(Collectors.toList());
+
+        // A named/id lookup for a key pair that does not exist is an error in real
+        // AWS (InvalidKeyPair.NotFound), not an empty result — otherwise idempotent
+        // callers that treat exit 0 as "present" skip creating the key.
+        for (String keyName : keyNames) {
+            if (regionKeyPairs.stream().noneMatch(k -> keyName.equals(k.getKeyName()))) {
+                throw new AwsException("InvalidKeyPair.NotFound",
+                        "The key pair '" + keyName + "' does not exist", 400);
+            }
+        }
+        for (String keyPairId : keyPairIds) {
+            if (regionKeyPairs.stream().noneMatch(k -> keyPairId.equals(k.getKeyPairId()))) {
+                throw new AwsException("InvalidKeyPair.NotFound",
+                        "The key pair ID '" + keyPairId + "' does not exist", 400);
+            }
+        }
+
+        return regionKeyPairs.stream()
                 .filter(k -> keyNames.isEmpty() || keyNames.contains(k.getKeyName()))
                 .filter(k -> keyPairIds.isEmpty() || keyPairIds.contains(k.getKeyPairId()))
                 .collect(Collectors.toList());
