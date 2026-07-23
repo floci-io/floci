@@ -69,6 +69,14 @@ class PreSignedUrlFilterTest {
     }
 
     @Test
+    void canonicalHeaderValueCollapsesSequentialSpaces() {
+        assertEquals("a b", PreSignedUrlFilter.canonicalizeHeaderValue("a b"));
+        assertEquals("a b", PreSignedUrlFilter.canonicalizeHeaderValue("a    b"));
+        assertEquals("a b", PreSignedUrlFilter.canonicalizeHeaderValue("  a    b  "));
+        assertEquals("", PreSignedUrlFilter.canonicalizeHeaderValue(null));
+    }
+
+    @Test
     void excludesSignatureButKeepsEveryOtherParameter() {
         MultivaluedMap<String, String> params = params();
         params.add("X-Amz-Signature", "deadbeef");

@@ -147,8 +147,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
                 if ("host".equals(header)) {
                     canonicalHeaders.append("host:").append(authority).append("\n");
                 } else {
-                    String value = requestContext.getHeaderString(header);
-                    canonicalHeaders.append(header).append(":").append(value != null ? value.trim() : "").append("\n");
+                    String canonicalValue = canonicalizeHeaderValue(requestContext.getHeaderString(header));
+                    canonicalHeaders.append(header).append(":").append(canonicalValue).append("\n");
                 }
             }
 
@@ -211,6 +211,14 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return encodedParams.stream()
                 .map(p -> p[0] + "=" + p[1])
                 .collect(Collectors.joining("&"));
+    }
+
+    /**
+     * Canonicalizes a signed header value per SigV4: trim, then collapse sequential spaces to
+     * a single space. Package-private for unit testing.
+     */
+    static String canonicalizeHeaderValue(String value) {
+        return value == null ? "" : value.trim().replaceAll(" +", " ");
     }
 
     static String awsUriEncode(String value) {
