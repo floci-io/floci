@@ -25,6 +25,7 @@ public class DynamoDbJsonHandler {
 
     private static final String DEFAULT_ACCOUNT_ID = "000000000000";
     private static final String SSE_TYPE_KMS = "KMS";
+    private static final Set<String> VALID_SSE_TYPES = Set.of("AES256", "KMS");
 
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService dynamoDbStreamService;
@@ -208,14 +209,32 @@ public class DynamoDbJsonHandler {
 
         JsonNode sseSpec = request.path("SSESpecification");
         if (!sseSpec.isMissingNode() && sseSpec.path("Enabled").asBoolean(false)) {
+            String sseType = sseSpec.path("SSEType").asText(SSE_TYPE_KMS);
+            validateSseType(sseType);
             table.setSseEnabled(true);
-            table.setSseType(SSE_TYPE_KMS);
-            table.setKmsMasterKeyArn(defaultKmsMasterKeyArn(region));
+            table.setSseType(sseType);
+            if (SSE_TYPE_KMS.equals(sseType)) {
+                JsonNode kmsMasterKeyId = sseSpec.path("KMSMasterKeyId");
+                table.setKmsMasterKeyArn(!kmsMasterKeyId.isMissingNode() && !kmsMasterKeyId.isNull()
+                        ? kmsMasterKeyId.asText()
+                        : defaultKmsMasterKeyArn(region));
+            }
         }
+
+        dynamoDbService.persistTable(table.getTableName(), table, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
+    }
+
+    private void validateSseType(String sseType) {
+        if (!VALID_SSE_TYPES.contains(sseType)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + sseType
+                    + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [AES256, KMS]", 400);
+        }
     }
 
     private Response handleDeleteTable(JsonNode request, String region) {
@@ -1193,6 +1212,30 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        JsonNode sseSpec = request.path("SSESpecification");
+        if (!sseSpec.isMissingNode()) {
+            if (sseSpec.path("Enabled").asBoolean(false)) {
+                String sseType = sseSpec.path("SSEType").asText(SSE_TYPE_KMS);
+                validateSseType(sseType);
+                table.setSseEnabled(true);
+                table.setSseType(sseType);
+                if (SSE_TYPE_KMS.equals(sseType)) {
+                    JsonNode kmsMasterKeyId = sseSpec.path("KMSMasterKeyId");
+                    table.setKmsMasterKeyArn(!kmsMasterKeyId.isMissingNode() && !kmsMasterKeyId.isNull()
+                            ? kmsMasterKeyId.asText()
+                            : defaultKmsMasterKeyArn(region));
+                } else {
+                    table.setKmsMasterKeyArn(null);
+                }
+            } else {
+                table.setSseEnabled(false);
+                table.setSseType(null);
+                table.setKmsMasterKeyArn(null);
+            }
+        }
+
+        dynamoDbService.persistTable(table.getTableName(), table, region);
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
@@ -1887,10 +1930,13 @@ public class DynamoDbJsonHandler {
         if (table.isSseEnabled()) {
             ObjectNode sseDescription = objectMapper.createObjectNode();
             sseDescription.put("Status", "ENABLED");
-            sseDescription.put("SSEType", table.getSseType() != null ? table.getSseType() : SSE_TYPE_KMS);
-            sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
-                    ? table.getKmsMasterKeyArn()
-                    : defaultKmsMasterKeyArn(AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
+            String sseType = table.getSseType() != null ? table.getSseType() : SSE_TYPE_KMS;
+            sseDescription.put("SSEType", sseType);
+            if (SSE_TYPE_KMS.equals(sseType)) {
+                sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
+                        ? table.getKmsMasterKeyArn()
+                        : defaultKmsMasterKeyArn(AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
+            }
             node.set("SSEDescription", sseDescription);
         }
 
