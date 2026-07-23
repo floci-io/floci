@@ -8,10 +8,17 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.Map;
+import java.util.stream.Collectors;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -156,15 +163,17 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(8)
     void presignedRequestWithBadAccessKeyCannotUsePublicAccess() {
+        String path = "/" + PUBLIC_BUCKET + "/" + PUBLIC_KEY;
+        String sig = presignedSignature("GET", path, "bad-key", "bad-key", "3600");
         given()
             .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
             .queryParam("X-Amz-Credential", credential("bad-key"))
             .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
             .queryParam("X-Amz-Expires", "3600")
             .queryParam("X-Amz-SignedHeaders", "host")
-            .queryParam("X-Amz-Signature", "test")
+            .queryParam("X-Amz-Signature", sig)
         .when()
-            .get("/" + PUBLIC_BUCKET + "/" + PUBLIC_KEY)
+            .get(path)
         .then()
             .statusCode(403)
             .body(containsString("InvalidAccessKeyId"));
@@ -198,15 +207,17 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(11)
     void presignedRequestWithLocalAccessKeyCanReadPrivateObject() {
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+        String sig = presignedSignature("GET", path, "test", "test", "3600");
         given()
             .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
             .queryParam("X-Amz-Credential", credential("test"))
             .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
             .queryParam("X-Amz-Expires", "3600")
             .queryParam("X-Amz-SignedHeaders", "host")
-            .queryParam("X-Amz-Signature", "test")
+            .queryParam("X-Amz-Signature", sig)
         .when()
-            .get("/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY)
+            .get(path)
         .then()
             .statusCode(200)
             .body(equalTo("private body"));
@@ -526,6 +537,27 @@ class S3AuthEnforcementIntegrationTest {
             .body(equalTo("versioned body"));
     }
 
+    @Test
+    @Order(22)
+    void presignedRequestWithTamperedSignatureIsRejected() {
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+        String signature = presignedSignature("GET", path, "test", "test", "3600");
+        String tampered = signature.substring(0, signature.length() - 1)
+                + (signature.endsWith("0") ? "1" : "0");
+        given()
+            .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "3600")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Signature", tampered)
+        .when()
+            .get(path)
+        .then()
+            .statusCode(403)
+            .body(containsString("SignatureDoesNotMatch"));
+    }
+
     private static String publicReadPolicy(String bucket) {
         return """
                 {
@@ -555,6 +587,67 @@ class S3AuthEnforcementIntegrationTest {
 
     private static String credential(String accessKeyId) {
         return accessKeyId + "/" + SIGNING_DATE + "/us-east-1/s3/aws4_request";
+    }
+
+    private static String presignedSignature(String method, String path,
+                                              String accessKeyId, String secretKey, String expires) {
+        try {
+            String credentialScope = SIGNING_DATE + "/us-east-1/s3/aws4_request";
+            String encodedCredential = URLEncoder.encode(
+                    accessKeyId + "/" + credentialScope, StandardCharsets.UTF_8);
+
+            // Build query string in sorted order (excluding Signature)
+            String canonicalQueryString = "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+                    + "&X-Amz-Credential=" + encodedCredential
+                    + "&X-Amz-Date=" + SIGNING_TIMESTAMP
+                    + "&X-Amz-Expires=" + expires
+                    + "&X-Amz-SignedHeaders=host";
+
+            String canonicalRequest = method + "\n"
+                    + path + "\n"
+                    + canonicalQueryString + "\n"
+                    + "host:localhost:" + io.restassured.RestAssured.port + "\n\n"
+                    + "host\n"
+                    + "UNSIGNED-PAYLOAD";
+
+            String stringToSign = "AWS4-HMAC-SHA256\n"
+                    + SIGNING_TIMESTAMP + "\n"
+                    + credentialScope + "\n"
+                    + sha256Hex(canonicalRequest);
+
+            byte[] signingKey = deriveSigningKey(secretKey, SIGNING_DATE, "us-east-1", "s3");
+            return hexEncode(hmacSha256(signingKey, stringToSign));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static byte[] deriveSigningKey(String secretKey, String date, String region,
+                                           String service) throws Exception {
+        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
+        byte[] kDate = hmacSha256(kSecret, date);
+        byte[] kRegion = hmacSha256(kDate, region);
+        byte[] kService = hmacSha256(kRegion, service);
+        return hmacSha256(kService, "aws4_request");
+    }
+
+    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String sha256Hex(String input) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String hexEncode(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     private static String websiteConfiguration() {

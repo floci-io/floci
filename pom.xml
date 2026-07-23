@@ -19,6 +19,7 @@
         <jackson.version>2.21.4</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
         <wire.version>6.3.0</wire.version>
+        <aws.sdk.version>2.44.14</aws.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -66,6 +67,13 @@
                 <groupId>com.squareup.wire</groupId>
                 <artifactId>wire-runtime-jvm</artifactId>
                 <version>${wire.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${aws.sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -268,6 +276,11 @@
             <groupId>org.awaitility</groupId>
             <artifactId>awaitility</artifactId>
             <version>4.2.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
