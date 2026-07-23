@@ -52,7 +52,7 @@ jobs:
 
       - uses: graalvm/setup-graalvm@6f3fa030c4b8f77c1f554a860f593a654538fa38 # v1
         with:
-          java-version: '25'
+          java-version: '24'
           distribution: 'mandrel'
           cache: maven
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -87,7 +87,7 @@ jobs:
 
       - uses: graalvm/setup-graalvm@6f3fa030c4b8f77c1f554a860f593a654538fa38 # v1
         with:
-          java-version: '25'
+          java-version: '24'
           distribution: 'mandrel'
           cache: maven
           github-token: ${{ secrets.GITHUB_TOKEN }}
