@@ -9,6 +9,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
+import org.jboss.logging.Logger;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -23,6 +24,7 @@ import java.util.stream.Collectors;
 @Provider
 public class PreSignedUrlFilter implements ContainerRequestFilter {
 
+    private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
 
@@ -177,6 +179,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
                     signature.getBytes(StandardCharsets.UTF_8));
 
         } catch (Exception e) {
+            LOG.debugv("Presigned SigV4 signature verification failed: {0}", e.getMessage());
             return false;
         }
     }
