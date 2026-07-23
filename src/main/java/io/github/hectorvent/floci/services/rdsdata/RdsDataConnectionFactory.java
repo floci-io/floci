@@ -25,9 +25,9 @@ class RdsDataConnectionFactory {
 
     static String buildUrl(DatabaseEngine engine, String host, int port, String database) {
         return switch (engine) {
-            case MYSQL, MARIADB -> "jdbc:mysql://" + host + ":" + port + "/" + database
+            case MYSQL, AURORA_MYSQL, MARIADB -> "jdbc:mysql://" + host + ":" + port + "/" + database
                     + "?useSSL=false&allowPublicKeyRetrieval=true";
-            case POSTGRES -> "jdbc:postgresql://" + host + ":" + port + "/" + database
+            case POSTGRES, AURORA_POSTGRESQL -> "jdbc:postgresql://" + host + ":" + port + "/" + database
                     + "?sslmode=disable";
         };
     }
@@ -35,8 +35,8 @@ class RdsDataConnectionFactory {
     private static String connectTimeout(DatabaseEngine engine) {
         // MySQL Connector/J expects milliseconds; the PostgreSQL driver expects seconds.
         return switch (engine) {
-            case MYSQL, MARIADB -> "5000";
-            case POSTGRES -> "5";
+            case MYSQL, AURORA_MYSQL, MARIADB -> "5000";
+            case POSTGRES, AURORA_POSTGRESQL -> "5";
         };
     }
 }

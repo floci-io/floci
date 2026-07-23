@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -480,7 +481,7 @@ public class RdsService implements Resettable {
             return JSON.writeValueAsString(Map.of(
                     "username", instance.getMasterUsername(),
                     "password", instance.getMasterPassword(),
-                    "engine", instance.getEngine().name().toLowerCase(),
+                    "engine", instance.getEngine().apiName(),
                     "host", instance.getEndpoint().address(),
                     "port", instance.getEndpoint().port(),
                     "dbname", instance.getDbName() == null ? "" : instance.getDbName(),
@@ -980,9 +981,12 @@ public class RdsService implements Resettable {
         if (engineParam == null) {
             return DatabaseEngine.POSTGRES;
         }
-        return switch (engineParam.toLowerCase()) {
-            case "postgres", "aurora-postgresql" -> DatabaseEngine.POSTGRES;
-            case "mysql", "aurora-mysql", "aurora" -> DatabaseEngine.MYSQL;
+        return switch (engineParam.toLowerCase(Locale.ROOT)) {
+            case "postgres" -> DatabaseEngine.POSTGRES;
+            case "aurora-postgresql" -> DatabaseEngine.AURORA_POSTGRESQL;
+            case "mysql" -> DatabaseEngine.MYSQL;
+            case "aurora-mysql" -> DatabaseEngine.AURORA_MYSQL;
+            case "aurora" -> DatabaseEngine.AURORA_MYSQL;
             case "mariadb" -> DatabaseEngine.MARIADB;
             default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
@@ -990,8 +994,8 @@ public class RdsService implements Resettable {
 
     private String imageForEngine(DatabaseEngine engine, String engineVersion) {
         String defaultImage = switch (engine) {
-            case POSTGRES -> config.services().rds().defaultPostgresImage();
-            case MYSQL -> config.services().rds().defaultMysqlImage();
+            case POSTGRES, AURORA_POSTGRESQL -> config.services().rds().defaultPostgresImage();
+            case MYSQL, AURORA_MYSQL -> config.services().rds().defaultMysqlImage();
             case MARIADB -> config.services().rds().defaultMariadbImage();
         };
         return imageForRequestedVersion(defaultImage, engineVersion);

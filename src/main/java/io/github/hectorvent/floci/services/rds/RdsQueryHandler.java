@@ -22,6 +22,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -630,13 +631,13 @@ public class RdsQueryHandler {
 
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
-        String engineStr = i.getEngine() != null ? i.getEngine().name() : "";
+        String engineStr = i.getEngine() != null ? i.getEngine().apiName() : "";
         String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("DBInstanceIdentifier", i.getDbInstanceIdentifier())
                 .elem("DBInstanceStatus", statusStr)
-                .elem("Engine", engineStr.toLowerCase())
+                .elem("Engine", engineStr)
                 .elem("EngineVersion", i.getEngineVersion())
                 .elem("MasterUsername", i.getMasterUsername());
         if (i.getDbName() != null && !i.getDbName().isBlank()) {
@@ -721,7 +722,7 @@ public class RdsQueryHandler {
         }
 
         String engine = instance.getEngine() != null
-                ? instance.getEngine().name().toLowerCase()
+                ? instance.getEngine().apiName()
                 : "unknown";
         return "default." + engine + dbEngineMajorVersion(instance);
     }
@@ -729,7 +730,7 @@ public class RdsQueryHandler {
     private static String dbEngineMajorVersion(DbInstance instance) {
         String engineVersion = instance.getEngineVersion();
         if ((engineVersion == null || engineVersion.isBlank()) && instance.getEngine() != null) {
-            engineVersion = defaultEngineVersion(instance.getEngine().name());
+            engineVersion = defaultEngineVersion(instance.getEngine().apiName());
         }
         if (engineVersion == null || engineVersion.isBlank()) {
             return "";
@@ -760,13 +761,13 @@ public class RdsQueryHandler {
     private String dbClusterInnerXml(DbCluster c) {
         DbEndpoint ep = c.getEndpoint();
         DbEndpoint readerEp = c.getReaderEndpoint();
-        String engineStr = c.getEngine() != null ? c.getEngine().name() : "";
+        String engineStr = c.getEngine() != null ? c.getEngine().apiName() : "";
         String statusStr = c.getStatus() != null ? statusLabel(c.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("DBClusterIdentifier", c.getDbClusterIdentifier())
                 .elem("Status", statusStr)
-                .elem("Engine", engineStr.toLowerCase())
+                .elem("Engine", engineStr)
                 .elem("EngineVersion", c.getEngineVersion())
                 .elem("MasterUsername", c.getMasterUsername());
         if (c.getDatabaseName() != null && !c.getDatabaseName().isBlank()) {
@@ -985,7 +986,7 @@ public class RdsQueryHandler {
         if (engine == null) {
             return "16.3";
         }
-        return switch (engine.toLowerCase()) {
+        return switch (engine.toLowerCase(Locale.ROOT)) {
             case "postgres", "aurora-postgresql" -> "16.3";
             case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
             case "mariadb" -> "11.2";

@@ -168,8 +168,8 @@ public class RdsContainerManager {
 
     static String engineDefaultDataPath(DatabaseEngine engine, String image) {
         return switch (engine) {
-            case POSTGRES -> postgresDataPath(image);
-            case MYSQL, MARIADB -> "/var/lib/mysql";
+            case POSTGRES, AURORA_POSTGRESQL -> postgresDataPath(image);
+            case MYSQL, AURORA_MYSQL, MARIADB -> "/var/lib/mysql";
         };
     }
 
@@ -316,13 +316,13 @@ public class RdsContainerManager {
 
         List<String> envs = new ArrayList<>();
         switch (engine) {
-            case POSTGRES -> {
+            case POSTGRES, AURORA_POSTGRESQL -> {
                 envs.add("POSTGRES_USER=" + effectiveUser);
                 envs.add("POSTGRES_PASSWORD=" + masterPassword);
                 envs.add("POSTGRES_DB=" + effectiveDb);
                 envs.add("POSTGRES_HOST_AUTH_METHOD=md5");
             }
-            case MYSQL -> {
+            case MYSQL, AURORA_MYSQL -> {
                 envs.add("MYSQL_ROOT_PASSWORD=" + masterPassword);
                 if (!"root".equals(effectiveUser)) {
                     envs.add("MYSQL_USER=" + effectiveUser);
@@ -346,8 +346,8 @@ public class RdsContainerManager {
         // Configure MySQL to use mysql_native_password so the proxy can authenticate
         // without needing caching_sha2_password RSA key exchange
         return switch (engine) {
-            case MYSQL -> List.of("--default-authentication-plugin=mysql_native_password");
-            case POSTGRES, MARIADB -> List.of();
+            case MYSQL, AURORA_MYSQL -> List.of("--default-authentication-plugin=mysql_native_password");
+            case POSTGRES, AURORA_POSTGRESQL, MARIADB -> List.of();
         };
     }
 }
