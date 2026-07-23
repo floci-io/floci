@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 
@@ -15,6 +16,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -135,27 +137,6 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             String service = credParts[3];
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
-            // Build the canonical query string per SigV4: URI-encode each parameter
-            // name and value, exclude X-Amz-Signature, then sort by encoded name and
-            // then by encoded value.
-            List<String[]> encodedParams = new ArrayList<>();
-            for (var entry : queryParams.entrySet()) {
-                if ("X-Amz-Signature".equals(entry.getKey())) {
-                    continue;
-                }
-                String encodedName = awsUriEncode(entry.getKey());
-                for (String value : entry.getValue()) {
-                    encodedParams.add(new String[]{encodedName, awsUriEncode(value)});
-                }
-            }
-            encodedParams.sort((a, b) -> {
-                int byName = a[0].compareTo(b[0]);
-                return byName != 0 ? byName : a[1].compareTo(b[1]);
-            });
-            String canonicalQueryString = encodedParams.stream()
-                    .map(p -> p[0] + "=" + p[1])
-                    .collect(Collectors.joining("&"));
-
             // Build canonical headers from signed headers
             String host = requestContext.getUriInfo().getRequestUri().getHost();
             int port = requestContext.getUriInfo().getRequestUri().getPort();
@@ -173,6 +154,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
             // Canonical request
             String path = requestContext.getUriInfo().getRequestUri().getRawPath();
+            String canonicalQueryString = buildCanonicalQueryString(queryParams);
             String canonicalRequest = requestContext.getMethod() + "\n"
                     + path + "\n"
                     + canonicalQueryString + "\n"
@@ -209,7 +191,29 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return null;
     }
 
-    private static String awsUriEncode(String value) {
+    /**
+     * Builds the SigV4 canonical query string from the framework's decoded query parameters:
+     * URI-encode each name and value, exclude {@code X-Amz-Signature}, and sort by encoded
+     * name and then by encoded value. Package-private for unit testing.
+     */
+    static String buildCanonicalQueryString(MultivaluedMap<String, String> decodedParams) {
+        List<String[]> encodedParams = new ArrayList<>();
+        for (var entry : decodedParams.entrySet()) {
+            if ("X-Amz-Signature".equals(entry.getKey())) {
+                continue;
+            }
+            String encodedName = awsUriEncode(entry.getKey());
+            for (String value : entry.getValue()) {
+                encodedParams.add(new String[]{encodedName, awsUriEncode(value)});
+            }
+        }
+        encodedParams.sort(Comparator.comparing((String[] p) -> p[0]).thenComparing(p -> p[1]));
+        return encodedParams.stream()
+                .map(p -> p[0] + "=" + p[1])
+                .collect(Collectors.joining("&"));
+    }
+
+    static String awsUriEncode(String value) {
         StringBuilder encoded = new StringBuilder();
         for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
             int c = b & 0xFF;
