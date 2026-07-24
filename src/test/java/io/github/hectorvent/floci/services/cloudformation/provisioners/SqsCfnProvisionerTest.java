@@ -42,6 +42,23 @@ class SqsCfnProvisionerTest {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
+        // Mirrors the engine's resolveNode contract for the flat objects these tests use:
+        // Fn::GetAtt collapses to a text ARN, everything else passes through untouched.
+        when(engine.resolveNode(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            if (node == null || !node.isObject()) {
+                return node;
+            }
+            ObjectNode resolved = mapper.createObjectNode();
+            node.fields().forEachRemaining(e -> {
+                if (e.getValue().isObject() && e.getValue().has("Fn::GetAtt")) {
+                    resolved.put(e.getKey(), "arn:aws:sqs:us-east-1:000000000000:my-stack-Dlq.fifo");
+                } else {
+                    resolved.set(e.getKey(), e.getValue());
+                }
+            });
+            return resolved;
+        });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
     }
 
@@ -103,6 +120,29 @@ class SqsCfnProvisionerTest {
         // The two attributes that already worked keep working.
         assertEquals("false", attrs.get("ContentBasedDeduplication"));
         assertEquals("30", attrs.get("VisibilityTimeout"));
+    }
+
+    @Test
+    void queueSerializesRedrivePolicyWithResolvedDlqArn() {
+        // Reproduces #1907: RedrivePolicy is a JSON object in the template (with an intrinsic
+        // for the DLQ ARN) and must reach createQueue as the JSON string SqsService parses.
+        when(sqs.createQueue(eq("orders.fifo"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("orders.fifo", "http://localhost:4566/000000000000/orders.fifo"));
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        ObjectNode getAtt = mapper.createObjectNode();
+        getAtt.set("Fn::GetAtt", mapper.createArrayNode().add("Dlq").add("Arn"));
+        ObjectNode redrive = mapper.createObjectNode();
+        redrive.set("deadLetterTargetArn", getAtt);
+        redrive.put("maxReceiveCount", 5);
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders.fifo");
+        props.set("RedrivePolicy", redrive);
+
+        provisioner.provision(r, props, ctx());
+
+        Map<String, String> attrs = capturedCreateQueueAttributes("orders.fifo");
+        assertEquals(
+                "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:my-stack-Dlq.fifo\",\"maxReceiveCount\":5}",
+                attrs.get("RedrivePolicy"));
     }
 
     private Map<String, String> capturedCreateQueueAttributes(String queueName) {
