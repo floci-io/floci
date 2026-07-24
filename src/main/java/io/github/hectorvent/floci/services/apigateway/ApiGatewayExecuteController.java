@@ -232,17 +232,15 @@ public class ApiGatewayExecuteController {
                               String proxy, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         String region = regionResolver.resolveRegion(headers);
 
-        // Check if this is a v2 (HTTP API) or v1 (REST API)
-        boolean isV2 = false;
-        try {
-            apiGatewayV2Service.getApi(region, apiId);
-            isV2 = true;
-        } catch (AwsException ignored) {
-            // Not a v2 API — fall through to v1 handling
-        }
-
+        // Check if this is a v2 (HTTP API) or v1 (REST API). Unsigned data-plane
+        // requests (e.g. from a browser/frontend) carry no SigV4 Authorization header,
+        // so the region resolves to the default. Scan all regions for the API so a
+        // v2 API created in any region stays reachable — mirroring v1's
+        // resolveRestApiRegion behaviour.
+        String v2Region = apiGatewayV2Service.resolveApiRegion(region, apiId);
+        boolean isV2 = !v2Region.equals(region) || apiGatewayV2Service.apiExists(region, apiId);
         if (isV2) {
-            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, region);
+            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, v2Region);
         }
 
         // Resolve region for unsigned data-plane requests
@@ -1236,7 +1234,7 @@ public class ApiGatewayExecuteController {
 
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, stageName, headers, uriInfo, body, requestId);
+                apiId, region, stageName, headers, uriInfo, body, requestId);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1797,7 +1795,7 @@ public class ApiGatewayExecuteController {
     }
 
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
-                                     String apiId, String stageName,
+                                     String apiId, String region, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
         ObjectNode event = objectMapper.createObjectNode();
@@ -1830,7 +1828,7 @@ public class ApiGatewayExecuteController {
         ObjectNode ctx = event.putObject("requestContext");
         ctx.put("accountId", regionResolver.getAccountId());
         ctx.put("apiId", apiId);
-        ctx.put("domainName", apiId + ".execute-api.us-east-1.amazonaws.com");
+        ctx.put("domainName", apiId + ".execute-api." + region + ".amazonaws.com");
         ctx.put("domainPrefix", apiId);
         ctx.put("requestId", requestId);
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
