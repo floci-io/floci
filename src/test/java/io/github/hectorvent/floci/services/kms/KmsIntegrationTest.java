@@ -1106,4 +1106,45 @@ class KmsIntegrationTest {
                 .then()
                 .statusCode(expectedStatusCode);
     }
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicyThroughJsonHandler() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"list-key-policies\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("PolicyNames.size()", equalTo(1))
+                .body("PolicyNames[0]", equalTo("default"))
+                .body("Truncated", equalTo(false));
+    }
+
+    @Test
+    void listKeyPoliciesReturnsNotFoundForUnknownKey() {
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"non-existent-id\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+    }
 }

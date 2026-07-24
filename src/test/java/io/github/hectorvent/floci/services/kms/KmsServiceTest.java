@@ -1054,6 +1054,48 @@ class KmsServiceTest {
                 kmsService.putKeyPolicy("non-existent", "{}", REGION));
     }
 
+    // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicy() {
+        KmsKey key = kmsService.createKey("list-policy-key", REGION);
+        Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), 100, null, REGION);
+        
+        @SuppressWarnings("unchecked")
+        List<String> policyNames = (List<String>) result.get("PolicyNames");
+        assertEquals(1, policyNames.size());
+        assertEquals("default", policyNames.getFirst());
+        assertFalse((Boolean) result.get("Truncated"));
+        assertNull(result.get("NextMarker"));
+    }
+
+    @Test
+    void listKeyPoliciesThrowsOnInvalidLimit() {
+        KmsKey key = kmsService.createKey("list-policy-key", REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies(key.getKeyId(), 1001, null, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+        
+        AwsException ex2 = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies(key.getKeyId(), 0, null, REGION));
+        assertEquals("ValidationException", ex2.getErrorCode());
+    }
+
+    @Test
+    void listKeyPoliciesThrowsOnInvalidMarker() {
+        KmsKey key = kmsService.createKey("list-policy-key", REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies(key.getKeyId(), 100, "invalid", REGION));
+        assertEquals("InvalidMarkerException", ex.getErrorCode());
+    }
+
+    @Test
+    void listKeyPoliciesOnNonExistentKeyThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies("non-existent", 100, null, REGION));
+        assertEquals("NotFoundException", ex.getErrorCode());
+    }
+
     // ── Issue #290 — Key Rotation ───────────────────────────────────────────
 
     @Test

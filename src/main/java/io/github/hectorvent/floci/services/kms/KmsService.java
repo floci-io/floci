@@ -489,6 +489,26 @@ public class KmsService {
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    public Map<String, Object> listKeyPolicies(String keyId, int limit, String marker, String region) {
+        if (limit < 1 || limit > 1000) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + limit + "' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1 and less than or equal to 1000", 400);
+        }
+        if (marker != null && !marker.isBlank()) {
+            throw new AwsException("InvalidMarkerException",
+                    "The request was rejected because the marker is not valid.", 400);
+        }
+
+        Map<String, Object> policyMap = getKeyPolicy(keyId, region);
+        String policyName = (String) policyMap.get("PolicyName");
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("PolicyNames", List.of(policyName));
+        result.put("Truncated", false);
+        result.put("NextMarker", null); // Ensure NextMarker is present as requested
+        return result;
+    }
+
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
         key.setDescription(description);
