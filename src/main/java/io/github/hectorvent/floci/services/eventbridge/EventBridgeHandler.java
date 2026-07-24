@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.common.AwsJson11Controller;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
+import io.github.hectorvent.floci.services.eventbridge.model.Connection;
+import io.github.hectorvent.floci.services.eventbridge.model.ConnectionState;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
@@ -77,6 +79,11 @@ public class EventBridgeHandler {
                 case "UpdateArchive" -> handleUpdateArchive(request, region);
                 case "DeleteArchive" -> handleDeleteArchive(request, region);
                 case "ListArchives" -> handleListArchives(request, region);
+                case "CreateConnection" -> handleCreateConnection(request, region);
+                case "DescribeConnection" -> handleDescribeConnection(request, region);
+                case "UpdateConnection" -> handleUpdateConnection(request, region);
+                case "DeleteConnection" -> handleDeleteConnection(request, region);
+                case "ListConnections" -> handleListConnections(request, region);
                 case "StartReplay" -> handleStartReplay(request, region);
                 case "DescribeReplay" -> handleDescribeReplay(request, region);
                 case "CancelReplay" -> handleCancelReplay(request, region);
@@ -465,6 +472,73 @@ public class EventBridgeHandler {
         return Response.ok(response).build();
     }
 
+    // ──────────────────────────── Connections ────────────────────────────
+
+    private Response handleCreateConnection(JsonNode request, String region) {
+        Connection connection = eventBridgeService.createConnection(
+                request.path("Name").asText(null),
+                request.path("Description").asText(null),
+                request.path("AuthorizationType").asText(null),
+                objectAsJson(request.path("AuthParameters")),
+                objectAsJson(request.path("InvocationConnectivityParameters")),
+                request.path("KmsKeyIdentifier").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ConnectionArn", connection.getConnectionArn());
+        response.put("ConnectionState", connection.getConnectionState().name());
+        response.put("CreationTime", connection.getCreationTime().getEpochSecond());
+        response.put("LastModifiedTime", connection.getLastModifiedTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeConnection(JsonNode request, String region) {
+        String name = request.path("Name").asText(null);
+        Connection connection = eventBridgeService.describeConnection(name, region);
+        return Response.ok(buildConnectionNode(connection, true)).build();
+    }
+
+    private Response handleUpdateConnection(JsonNode request, String region) {
+        Connection connection = eventBridgeService.updateConnection(
+                request.path("Name").asText(null),
+                request.path("Description").asText(null),
+                request.path("AuthorizationType").asText(null),
+                objectAsJson(request.path("AuthParameters")),
+                objectAsJson(request.path("InvocationConnectivityParameters")),
+                request.path("KmsKeyIdentifier").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ConnectionArn", connection.getConnectionArn());
+        response.put("ConnectionState", connection.getConnectionState().name());
+        response.put("CreationTime", connection.getCreationTime().getEpochSecond());
+        response.put("LastModifiedTime", connection.getLastModifiedTime().getEpochSecond());
+        response.put("LastAuthorizedTime", connection.getLastAuthorizedTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteConnection(JsonNode request, String region) {
+        String name = request.path("Name").asText(null);
+        Connection connection = eventBridgeService.deleteConnection(name, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ConnectionArn", connection.getConnectionArn());
+        response.put("ConnectionState", ConnectionState.DELETING.name());
+        response.put("CreationTime", connection.getCreationTime().getEpochSecond());
+        response.put("LastModifiedTime", connection.getLastModifiedTime().getEpochSecond());
+        response.put("LastAuthorizedTime", connection.getLastAuthorizedTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListConnections(JsonNode request, String region) {
+        String namePrefix = request.path("NamePrefix").asText(null);
+        ConnectionState state = parseConnectionState(request.path("ConnectionState").asText(null));
+        List<Connection> connections = eventBridgeService.listConnections(namePrefix, state, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode connectionsArray = response.putArray("Connections");
+        for (Connection connection : connections) {
+            connectionsArray.add(buildConnectionNode(connection, false));
+        }
+        return Response.ok(response).build();
+    }
+
     // ──────────────────────────── Replays ────────────────────────────
 
     private Response handleStartReplay(JsonNode request, String region) {
@@ -627,6 +701,95 @@ public class EventBridgeHandler {
         return node;
     }
 
+    private ObjectNode buildConnectionNode(Connection connection, boolean full) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Name", connection.getName());
+        node.put("ConnectionArn", connection.getConnectionArn());
+        node.put("ConnectionState", connection.getConnectionState().name());
+        node.put("AuthorizationType", connection.getAuthorizationType());
+        if (connection.getStateReason() != null) {
+            node.put("StateReason", connection.getStateReason());
+        }
+        if (connection.getCreationTime() != null) {
+            node.put("CreationTime", connection.getCreationTime().getEpochSecond());
+        }
+        if (connection.getLastModifiedTime() != null) {
+            node.put("LastModifiedTime", connection.getLastModifiedTime().getEpochSecond());
+        }
+        if (connection.getLastAuthorizedTime() != null) {
+            node.put("LastAuthorizedTime", connection.getLastAuthorizedTime().getEpochSecond());
+        }
+        if (full) {
+            if (connection.getDescription() != null) {
+                node.put("Description", connection.getDescription());
+            }
+            node.put("SecretArn", connection.getSecretArn());
+            if (connection.getKmsKeyIdentifier() != null) {
+                node.put("KmsKeyIdentifier", connection.getKmsKeyIdentifier());
+            }
+            JsonNode authParameters = sanitizeAuthParameters(connection.getAuthParameters());
+            if (authParameters != null) {
+                node.set("AuthParameters", authParameters);
+            }
+            JsonNode connectivity = readJson(connection.getInvocationConnectivityParameters());
+            if (connectivity != null) {
+                node.set("InvocationConnectivityParameters", connectivity);
+            }
+        }
+        return node;
+    }
+
+    /**
+     * Strips secret values from stored connection auth parameters, matching what
+     * AWS DescribeConnection returns: credential fields are removed and invocation
+     * http parameter values flagged as secret are masked.
+     */
+    private JsonNode sanitizeAuthParameters(String authParametersJson) {
+        JsonNode parsed = readJson(authParametersJson);
+        if (!(parsed instanceof ObjectNode authParameters)) {
+            return parsed;
+        }
+        if (authParameters.path("ApiKeyAuthParameters") instanceof ObjectNode apiKey) {
+            apiKey.remove("ApiKeyValue");
+        }
+        if (authParameters.path("BasicAuthParameters") instanceof ObjectNode basic) {
+            basic.remove("Password");
+        }
+        if (authParameters.path("OAuthParameters") instanceof ObjectNode oauth) {
+            if (oauth.path("ClientParameters") instanceof ObjectNode client) {
+                client.remove("ClientSecret");
+            }
+            maskSecretHttpParameters(oauth.path("OAuthHttpParameters"));
+        }
+        maskSecretHttpParameters(authParameters.path("InvocationHttpParameters"));
+        return authParameters;
+    }
+
+    private void maskSecretHttpParameters(JsonNode httpParameters) {
+        if (!httpParameters.isObject()) {
+            return;
+        }
+        for (String field : List.of("BodyParameters", "HeaderParameters", "QueryStringParameters")) {
+            for (JsonNode parameter : httpParameters.path(field)) {
+                if (parameter instanceof ObjectNode param && param.path("IsValueSecret").asBoolean(false)) {
+                    param.put("Value", "*");
+                }
+            }
+        }
+    }
+
+    private JsonNode readJson(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(json);
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse stored connection parameters: {0}", e.getMessage());
+            return null;
+        }
+    }
+
     private ObjectNode buildReplayNode(Replay replay, boolean full) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ReplayName", replay.getReplayName());
@@ -670,6 +833,21 @@ public class EventBridgeHandler {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    private ConnectionState parseConnectionState(String state) {
+        if (state == null || state.isBlank()) {
+            return null;
+        }
+        try {
+            return ConnectionState.valueOf(state);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static String objectAsJson(JsonNode node) {
+        return (node.isObject() && !node.isEmpty()) ? node.toString() : null;
     }
 
     private ReplayState parseReplayState(String state) {
