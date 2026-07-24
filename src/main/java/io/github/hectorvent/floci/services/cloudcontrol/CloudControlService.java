@@ -138,11 +138,17 @@ public class CloudControlService {
         if (tags == null || tags.isEmpty()) {
             return;
         }
+        List<Tag> validTags = tags.stream()
+                .filter(tag -> tag != null && tag.getKey() != null)
+                .toList();
+        if (validTags.isEmpty()) {
+            return;
+        }
         var tagArray = properties.putArray("Tags");
-        for (Tag tag : tags) {
+        for (Tag tag : validTags) {
             tagArray.addObject()
                     .put("Key", tag.getKey())
-                    .put("Value", tag.getValue());
+                    .put("Value", tag.getValue() == null ? "" : tag.getValue());
         }
     }
 
