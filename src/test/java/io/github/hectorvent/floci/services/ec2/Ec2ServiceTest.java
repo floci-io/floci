@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -32,6 +33,183 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2ServiceTest {
+
+    @Test
+    void deleteVpcRemovesVpcOwnedDefaultResourcesAndRules() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.77.0.0/16", false).getVpcId();
+        SecurityGroup defaultGroup = service.describeSecurityGroups(region, List.of(), List.of(), Map.of()).stream()
+                .filter(group -> vpcId.equals(group.getVpcId()) && "default".equals(group.getGroupName()))
+                .findFirst().orElseThrow();
+        String mainRouteTableId = service.describeRouteTables(region, List.of(), Map.of()).stream()
+                .filter(table -> vpcId.equals(table.getVpcId()))
+                .filter(table -> table.getAssociations().stream().anyMatch(association -> association.isMain()))
+                .findFirst().orElseThrow().getRouteTableId();
+        String defaultNetworkAclId = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                .filter(acl -> vpcId.equals(acl.getVpcId()) && acl.isDefault())
+                .findFirst().orElseThrow().getNetworkAclId();
+        assertFalse(service.describeSecurityGroupRules(region, List.of(defaultGroup.getGroupId()), List.of()).isEmpty());
+
+        service.deleteVpc(region, vpcId);
+
+        assertTrue(service.describeSecurityGroups(region, List.of(defaultGroup.getGroupId()), List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeRouteTables(region, List.of(mainRouteTableId), Map.of()).isEmpty());
+        assertTrue(service.describeNetworkAcls(region, List.of(defaultNetworkAclId), Map.of()).isEmpty());
+        assertTrue(service.describeSecurityGroupRules(region, List.of(defaultGroup.getGroupId()), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteVpcDoesNotRemoveAnotherVpcDefaults() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String deletedVpcId = service.createVpc(region, "10.78.0.0/16", false).getVpcId();
+        String preservedVpcId = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup preservedGroup = service.describeSecurityGroups(region, List.of(), List.of(), Map.of()).stream()
+                .filter(group -> preservedVpcId.equals(group.getVpcId()) && "default".equals(group.getGroupName()))
+                .findFirst().orElseThrow();
+        String preservedRouteTableId = service.describeRouteTables(region, List.of(), Map.of()).stream()
+                .filter(table -> preservedVpcId.equals(table.getVpcId()))
+                .filter(table -> table.getAssociations().stream().anyMatch(association -> association.isMain()))
+                .findFirst().orElseThrow().getRouteTableId();
+        String preservedNetworkAclId = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                .filter(acl -> preservedVpcId.equals(acl.getVpcId()) && acl.isDefault())
+                .findFirst().orElseThrow().getNetworkAclId();
+
+        service.deleteVpc(region, deletedVpcId);
+
+        assertEquals(preservedGroup.getGroupId(), service.describeSecurityGroups(
+                region, List.of(preservedGroup.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+        assertEquals(preservedRouteTableId,
+                service.describeRouteTables(region, List.of(preservedRouteTableId), Map.of()).getFirst().getRouteTableId());
+        assertEquals(preservedNetworkAclId,
+                service.describeNetworkAcls(region, List.of(preservedNetworkAclId), Map.of()).getFirst().getNetworkAclId());
+    }
+
+    @Test
+    void describeVpcPeeringConnectionsReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        assertTrue(service.describeVpcPeeringConnectionIds("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeVpcPeeringConnectionIds(
+                "us-east-1", List.of(), Map.of("status-code", List.of("active"))).isEmpty());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.describeVpcPeeringConnectionIds(
+                "us-east-1", List.of("pcx-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidVpcPeeringConnectionID.NotFound", error.getErrorCode());
+        assertEquals("The vpcPeeringConnection ID 'pcx-0123456789abcdef0' does not exist", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeVpcPeeringConnectionIds(
+                        "us-east-1", List.of(), Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+    }
+
+    @Test
+    void describeTransitGatewayVpcAttachmentsReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        assertTrue(service.describeTransitGatewayVpcAttachmentIds(
+                "us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeTransitGatewayVpcAttachmentIds(
+                "us-east-1", List.of(), Map.of("state", List.of("available"))).isEmpty());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeTransitGatewayVpcAttachmentIds(
+                        "us-east-1", List.of("tgw-attach-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", error.getErrorCode());
+        assertEquals("Transit Gateway Attachment tgw-attach-0123456789abcdef0 was not found.",
+                error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeTransitGatewayVpcAttachmentIds(
+                        "us-east-1", List.of(), Map.of("subnet-id", List.of("subnet-123"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'subnet-id' is invalid", filterError.getMessage());
+
+        for (String filterName : List.of("tag:Owner", "tag-key")) {
+            AwsException tagFilterError = assertThrows(AwsException.class,
+                    () -> service.describeTransitGatewayVpcAttachmentIds(
+                            "us-east-1", List.of(), Map.of(filterName, List.of("TeamA"))));
+            assertEquals("InvalidParameterValue", tagFilterError.getErrorCode());
+            assertEquals("The filter '" + filterName + "' is invalid", tagFilterError.getMessage());
+            assertEquals(400, tagFilterError.getHttpStatus());
+        }
+    }
+
+    @Test
+    void describeVpnGatewaysReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Map<String, List<String>> vpcFilter =
+                Map.of("attachment.vpc-id", List.of("vpc-0123456789abcdef0"));
+
+        assertTrue(service.describeVpnGatewayIds("us-east-1", List.of(), vpcFilter).isEmpty());
+
+        AwsException vpnError = assertThrows(AwsException.class, () -> service.describeVpnGatewayIds(
+                "us-east-1", List.of("vgw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidVpnGatewayID.NotFound", vpnError.getErrorCode());
+        assertEquals("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist", vpnError.getMessage());
+        assertEquals(400, vpnError.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeVpnGatewayIds(
+                        "us-east-1", List.of(), Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+    }
+
+    @Test
+    void describeEgressOnlyInternetGatewaysReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Map<String, List<String>> supportedFilters = Map.of(
+                "attachment.state", List.of("attached"),
+                "attachment.vpc-id", List.of("vpc-0123456789abcdef0"),
+                "egress-only-internet-gateway-id", List.of("eigw-0123456789abcdef0"),
+                "tag:Owner", List.of("TeamA"),
+                "tag-key", List.of("Owner"));
+
+        for (Map.Entry<String, List<String>> filter : supportedFilters.entrySet()) {
+            assertTrue(service.describeEgressOnlyInternetGatewayIds(
+                    "us-east-1", List.of(), Map.of(filter.getKey(), filter.getValue())).isEmpty());
+        }
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeEgressOnlyInternetGatewayIds(
+                        "us-east-1", List.of("eigw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidEgressOnlyInternetGatewayId.NotFound", error.getErrorCode());
+        assertEquals("The egress-only internet gateway ID 'eigw-0123456789abcdef0' does not exist",
+                error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeEgressOnlyInternetGatewayIds(
+                        "us-east-1", List.of(),
+                        Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+        assertEquals(400, filterError.getHttpStatus());
+    }
 
     @Test
     void mockModeTreatsExistingNonTerminatedInstanceAsRunningContainer() {
@@ -181,6 +359,23 @@ class Ec2ServiceTest {
         assertEquals(2, types.getFirst().get("vcpu"));
         assertEquals(8192, types.getFirst().get("memoryMib"));
         assertEquals(List.of("arm64"), types.getFirst().get("supportedArchitectures"));
+    }
+
+    @Test
+    void attachedInternetGatewayRoundTripsAttachedState() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.42.0.0/16", false).getVpcId();
+        InternetGateway gateway = service.createInternetGateway(region);
+
+        service.attachInternetGateway(region, gateway.getInternetGatewayId(), vpcId);
+
+        InternetGateway described = service.describeInternetGateways(
+                region, List.of(gateway.getInternetGatewayId()), Map.of()).getFirst();
+        assertEquals(vpcId, described.getAttachments().getFirst().getVpcId());
+        assertEquals("attached", described.getAttachments().getFirst().getState());
     }
 
     @Test
