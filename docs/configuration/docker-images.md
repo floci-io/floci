@@ -58,6 +58,64 @@ image: floci/floci:nightly
 
 All images are published as multi-arch manifests supporting `linux/amd64` and `linux/arm64`. Docker selects the correct variant automatically.
 
+## Reusable Image Publishing
+
+The `Build Floci Images` reusable workflow publishes a JVM image for an exact
+branch, tag, or commit by default. This matches the ordinary Maven package and
+the repository's local-development Docker image. A calling repository owns the
+trigger, destination registry, credentials, and package permissions; the shared
+workflow owns the multi-architecture manifest, image labels, and provenance
+output.
+
+For example, a fork can keep this small manual caller on its default branch:
+
+```yaml title=".github/workflows/publish-images.yml"
+name: Publish Floci Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-ref:
+        description: Floci branch, tag, or commit to publish
+        required: true
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    uses: floci-io/floci/.github/workflows/build-images.yml@main
+    with:
+      source-ref: ${{ inputs.source-ref }}
+      image: ghcr.io/${{ github.repository_owner }}/floci
+```
+
+Pin the reusable workflow to a trusted tag or full commit SHA when the caller
+requires a stable build contract. The caller's `GITHUB_TOKEN` publishes a GHCR
+image only below the caller's repository owner. Calls targeting another OCI
+registry must pass `REGISTRY_USERNAME` and `REGISTRY_TOKEN` through the reusable
+workflow's declared secrets.
+
+The default workflow publishes a commit-derived convenience tag:
+
+- `<commit-sha-12>` for the JVM image
+
+Callers that also need native artifacts can pass `publish-native: true`. This
+adds `<commit-sha-12>-native` and `<commit-sha-12>-native-compat`; it does not
+change the unqualified JVM tag.
+
+A rerun for the same commit can replace a tag. The workflow therefore returns
+the digest-qualified JVM reference (plus native references when requested) and
+uploads them in a provenance JSON artifact. Downstream tests should use a
+digest-qualified reference when they require an immutable image:
+
+```text
+ghcr.io/example/floci@sha256:...
+```
+
 ## What's in the Compat Image
 
 The compat image installs the following on top of the standard image:
@@ -93,7 +151,10 @@ Override any of them at runtime via `docker run -e` or the Compose `environment`
 
 ## Local Development
 
-The project ships a `docker-compose.yml` at the repository root configured for local development. By default it uses `docker/Dockerfile` (a fast JVM build suited for iteration). Switch the `dockerfile` entry to test the native image locally:
+The project ships a `docker-compose.yml` at the repository root configured for local development.
+By default it uses `docker/Dockerfile`, a fast Ubuntu Noble/glibc JVM image suited for iteration
+with Java 25. The release and nightly images use the native Dockerfiles described above. Switch the
+`dockerfile` entry to test the native image locally:
 
 ```yaml title="docker-compose.yml"
 build:
