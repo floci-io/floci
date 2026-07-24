@@ -62,6 +62,12 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
             if (props.has("ContentBasedDeduplication")) {
                 attrs.put("ContentBasedDeduplication", ctx.engine().resolve(props.get("ContentBasedDeduplication")));
             }
+            if (props.has("DeduplicationScope")) {
+                attrs.put("DeduplicationScope", ctx.engine().resolve(props.get("DeduplicationScope")));
+            }
+            if (props.has("FifoThroughputLimit")) {
+                attrs.put("FifoThroughputLimit", ctx.engine().resolve(props.get("FifoThroughputLimit")));
+            }
         }
         Queue queue = sqsService.createQueue(queueName, attrs, ctx.region());
         // QueueArn is computed on demand in SqsService#getQueueAttributes and is not stored on the
