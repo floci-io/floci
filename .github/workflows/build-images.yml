@@ -168,10 +168,10 @@ jobs:
       - name: Set candidate version
         env:
           CANDIDATE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: mvn versions:set -DnewVersion="$CANDIDATE_VERSION" -DgenerateBackupPoms=false -q
+        run: ./mvnw versions:set -DnewVersion="$CANDIDATE_VERSION" -DgenerateBackupPoms=false -q
 
       - name: Build native executable
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2"
+        run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -208,10 +208,10 @@ jobs:
       - name: Set candidate version
         env:
           CANDIDATE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: mvn versions:set -DnewVersion="$CANDIDATE_VERSION" -DgenerateBackupPoms=false -q
+        run: ./mvnw versions:set -DnewVersion="$CANDIDATE_VERSION" -DgenerateBackupPoms=false -q
 
       - name: Build native executable
-        run: mvn clean package -Dnative -DskipTests -B
+        run: ./mvnw clean package -Dnative -DskipTests -B
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -224,7 +224,7 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish JVM image
+    name: Publish images
     needs: [prepare, build-native-amd64, build-native-arm64]
     if: >-
       ${{

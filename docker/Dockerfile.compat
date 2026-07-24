@@ -1,4 +1,7 @@
 ARG VERSION=latest
+# This must be the UBI-based image produced by Dockerfile.native-package.
+# Release and nightly tags use VERSION; reusable builds override BASE_IMAGE
+# with the digest-qualified native image they just published.
 ARG BASE_IMAGE=floci/floci:${VERSION}
 FROM ${BASE_IMAGE}
 

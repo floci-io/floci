@@ -33,7 +33,7 @@ RUN set -eux; \
     mv /usr/local/bin/aws /usr/bin/aws.real; \
     printf '#!/bin/sh\nexec /usr/bin/aws.real --endpoint-url=http://localhost:4566 "$@"\n' > /usr/bin/aws; \
     chmod +x /usr/bin/aws; \
-    useradd -r -u 1001 -g root -d /app -s /usr/sbin/nologin floci; \
+    useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
         amd64) gosuArch='amd64'; gosuSha256="$GOSU_AMD64_SHA256" ;; \
