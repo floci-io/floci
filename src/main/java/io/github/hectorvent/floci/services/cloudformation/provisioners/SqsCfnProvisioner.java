@@ -68,6 +68,11 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
             if (props.has("FifoThroughputLimit")) {
                 attrs.put("FifoThroughputLimit", ctx.engine().resolve(props.get("FifoThroughputLimit")));
             }
+            if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
+                // A JSON object in the template (deadLetterTargetArn is usually an Fn::GetAtt);
+                // resolveNode resolves intrinsics in place and SqsService expects the JSON string.
+                attrs.put("RedrivePolicy", ctx.engine().resolveNode(props.path("RedrivePolicy")).toString());
+            }
         }
         Queue queue = sqsService.createQueue(queueName, attrs, ctx.region());
         // QueueArn is computed on demand in SqsService#getQueueAttributes and is not stored on the
