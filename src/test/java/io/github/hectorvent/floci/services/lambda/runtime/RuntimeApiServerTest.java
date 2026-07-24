@@ -343,6 +343,185 @@ class RuntimeApiServerTest {
         assertEquals(404, resp.statusCode());
     }
 
+    @Test
+    @Timeout(10)
+    void extensionRegister_returnsIdentifierHeaderAndFunctionBody() throws Exception {
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "lambda-adapter")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"events\":[\"INVOKE\",\"SHUTDOWN\"]}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Lambda-Extension-Identifier").isPresent(),
+                "register must return a Lambda-Extension-Identifier header");
+        JsonObject body = new JsonObject(response.body());
+        assertNotNull(body.getString("functionName"));
+        assertNotNull(body.getString("functionVersion"));
+    }
+
+    /**
+     * Regression: the register response previously hardcoded functionName/functionVersion/handler
+     * to placeholder values regardless of which function the server was actually serving — extensions
+     * that key telemetry off this response (e.g. per-function metrics tagging) would mislabel every
+     * function identically. ContainerLauncher calls setFunctionMetadata once it knows which
+     * LambdaFunction a given RuntimeApiServer instance belongs to.
+     */
+    @Test
+    @Timeout(10)
+    void extensionRegister_returnsRealFunctionMetadataOnceSet() throws Exception {
+        server.setFunctionMetadata("my-real-function", "3", "index.handler");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "lambda-adapter")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        JsonObject body = new JsonObject(response.body());
+        assertEquals("my-real-function", body.getString("functionName"));
+        assertEquals("3", body.getString("functionVersion"));
+        assertEquals("index.handler", body.getString("handler"));
+    }
+
+    @Test
+    @Timeout(10)
+    void extensionRegister_missingNameHeader_returns400() throws Exception {
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(400, response.statusCode());
+    }
+
+    @Test
+    @Timeout(10)
+    void extensionEventNext_unknownIdentifier_returns403() throws Exception {
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", "not-a-real-id")
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(403, response.statusCode());
+    }
+
+    @Test
+    @Timeout(15)
+    void extensionEventNext_receivesInvokeEventWhenRuntimeInvocationEnqueued() throws Exception {
+        String extensionId = registerExtension("lambda-adapter", "INVOKE", "SHUTDOWN");
+
+        CompletableFuture<HttpResponse<String>> asyncNext = httpClient.sendAsync(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        Thread.sleep(300);
+        assertFalse(asyncNext.isDone(), "extension /event/next should be parked with no pending event");
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-ext-invoke", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        HttpResponse<String> response = asyncNext.get(2, TimeUnit.SECONDS);
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Lambda-Extension-Event-Identifier").isPresent());
+        JsonObject body = new JsonObject(response.body());
+        assertEquals("INVOKE", body.getString("eventType"));
+        assertEquals("req-ext-invoke", body.getString("requestId"));
+    }
+
+    @Test
+    @Timeout(15)
+    void extensionEventNext_notSubscribedToInvoke_isNotNotified() throws Exception {
+        // Registers for SHUTDOWN only — real AWS never delivers INVOKE to an extension that
+        // didn't ask for it.
+        String extensionId = registerExtension("shutdown-only-extension", "SHUTDOWN");
+
+        CompletableFuture<HttpResponse<String>> asyncNext = httpClient.sendAsync(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        server.enqueue(new PendingInvocation(
+                "req-not-subscribed", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>()));
+
+        Thread.sleep(500);
+        assertFalse(asyncNext.isDone(),
+                "extension not subscribed to INVOKE must not be woken by an invocation");
+    }
+
+    @Test
+    @Timeout(15)
+    void extensionEventNext_receivesShutdownEventWhenServerStops() throws Exception {
+        String extensionId = registerExtension("lambda-adapter", "INVOKE", "SHUTDOWN");
+
+        CompletableFuture<HttpResponse<String>> asyncNext = httpClient.sendAsync(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        Thread.sleep(300);
+        assertFalse(asyncNext.isDone());
+
+        server.stop();
+
+        HttpResponse<String> response = asyncNext.get(2, TimeUnit.SECONDS);
+        assertEquals(200, response.statusCode());
+        JsonObject body = new JsonObject(response.body());
+        assertEquals("SHUTDOWN", body.getString("eventType"));
+    }
+
+    @Test
+    @Timeout(10)
+    void extensionInitError_returns202AndUnregistersExtension() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.ConfigInvalid")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"errorMessage\":\"bad config\",\"errorType\":\"Extension.ConfigInvalid\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(202, response.statusCode());
+        assertEquals("OK", new JsonObject(response.body()).getString("status"));
+
+        // The unregistered extension is no longer a valid target for /event/next.
+        HttpResponse<String> nextResponse = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(403, nextResponse.statusCode());
+    }
+
+    private String registerExtension(String name, String... events) throws Exception {
+        String eventsJson = String.join(",", java.util.Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", name)
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"events\":[" + eventsJson + "]}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode());
+        return response.headers().firstValue("Lambda-Extension-Identifier").orElseThrow();
+    }
+
     private static int findFreePort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();

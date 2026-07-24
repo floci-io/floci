@@ -17,11 +17,15 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 
 import java.io.Closeable;
@@ -147,6 +151,7 @@ public class ContainerLauncher {
 
         // Start Runtime API server first so container can connect on boot
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
+        runtimeApiServer.setFunctionMetadata(fn.getFunctionName(), fn.getVersion(), fn.getHandler());
 
         // Everything after the runtime-api server is allocated runs inside one try/catch: a failure
         // ANYWHERE below — image/host resolve, the code-volume populate (ensureCodeVolume), the spec
@@ -327,6 +332,14 @@ public class ContainerLauncher {
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
+
+        // Real AWS's runtime interface client discovers and launches every binary under
+        // /opt/extensions/ as a sibling process to the main entrypoint before the runtime is
+        // considered ready; Floci only runs the image's own ENTRYPOINT/CMD, so extensions
+        // (e.g. aws-lambda-web-adapter) never start without this. Best-effort: an extension
+        // launch failure shouldn't fail the whole container launch, since a function with no
+        // extensions is the common case and this must be a no-op for it.
+        launchExtensions(dockerClient, containerId, fn.getFunctionName());
 
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
@@ -598,6 +611,96 @@ public class ContainerLauncher {
 
     private static boolean isProvidedRuntime(String runtime) {
         return runtime != null && runtime.startsWith("provided");
+    }
+
+    /** Directory Lambda's real init system scans for extension binaries. */
+    private static final String EXTENSIONS_DIR = "/opt/extensions";
+
+    /**
+     * Discovers binaries under {@link #EXTENSIONS_DIR} inside the (already started) container and
+     * launches each as a detached process — the piece of real AWS's init system (which starts every
+     * registered extension alongside the runtime) that Floci otherwise has no equivalent for. Uses
+     * {@code docker exec} rather than baking a wrapper entrypoint into the image, since the image is
+     * user-supplied and unmodified.
+     *
+     * <p>Extensions inherit the container's env (already set on the container itself, including
+     * {@code AWS_LAMBDA_RUNTIME_API}) automatically — {@code docker exec} does not need it re-supplied.
+     * Best-effort throughout: a function with no {@code /opt/extensions} directory (the common case)
+     * must be a silent no-op, and a failure launching one extension must not prevent the container
+     * (or other extensions) from running.
+     */
+    private void launchExtensions(DockerClient dockerClient, String containerId, String functionName) {
+        List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName);
+        for (String name : extensionNames) {
+            try {
+                String path = EXTENSIONS_DIR + "/" + name;
+                var create = dockerClient.execCreateCmd(containerId)
+                        .withCmd(path)
+                        .withAttachStdout(true)
+                        .withAttachStderr(true);
+                String execId = create.exec().getId();
+                // Detached: an extension runs for the container's whole lifetime, so this must not
+                // block the launch waiting for it to exit. Its stdout/stderr piggybacks onto the same
+                // ContainerLogStreamer output as the main process via Vert.x's own frame draining below,
+                // rather than left completely undrained (which can backpressure/stall the exec).
+                dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+                    @Override
+                    public void onNext(Frame frame) {
+                        // Drained, not forwarded to CloudWatch: floci's ContainerLogStreamer already
+                        // tails the container's own PID-1 log stream for that; this only exists so the
+                        // exec's output pipe doesn't fill up and block the extension process.
+                    }
+                });
+                LOG.infov("Launched extension {0} for function {1} (container {2})",
+                        name, functionName, containerId);
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to launch extension {0} for function {1}; continuing without it",
+                        name, functionName);
+            }
+        }
+    }
+
+    /**
+     * Lists file names directly under {@link #EXTENSIONS_DIR} inside the container, or an empty
+     * list if the directory doesn't exist or the probe fails (most functions have no extensions).
+     *
+     * <p>Uses Docker's archive API ({@code copyArchiveFromContainerCmd}) rather than {@code exec}ing
+     * a shell/{@code find}/{@code basename} pipeline inside the container: a minimal or distroless
+     * function image can have a valid extension binary under {@code /opt/extensions} without any of
+     * those utilities present, which would silently look like "no extensions" to a shell-based probe.
+     * The archive API only talks to the Docker daemon, so it works regardless of the image contents.
+     */
+    private List<String> listExtensionBinaries(DockerClient dockerClient, String containerId, String functionName) {
+        try (InputStream tarStream = dockerClient.copyArchiveFromContainerCmd(containerId, EXTENSIONS_DIR).exec();
+             TarArchiveInputStream tar = new TarArchiveInputStream(tarStream)) {
+
+            List<String> names = new ArrayList<>();
+            TarArchiveEntry entry;
+            while ((entry = tar.getNextEntry()) != null) {
+                if (!tar.canReadEntryData(entry) || entry.isDirectory()) {
+                    continue;
+                }
+                // Docker wraps the requested directory itself as a leading path component (e.g.
+                // "extensions/lambda-adapter"); only direct children count as extension binaries,
+                // matching the real init system's non-recursive scan of the directory.
+                String name = entry.getName();
+                int slash = name.indexOf('/');
+                if (slash < 0 || name.indexOf('/', slash + 1) >= 0) {
+                    continue;
+                }
+                if ((entry.getMode() & 0111) == 0) {
+                    continue;
+                }
+                names.add(name.substring(slash + 1));
+            }
+            return names;
+        } catch (NotFoundException e) {
+            return List.of();
+        } catch (Exception e) {
+            LOG.debugv("Could not list {0} for function {1} ({2}); assuming no extensions",
+                    EXTENSIONS_DIR, functionName, e.getMessage());
+            return List.of();
+        }
     }
 
     /**
