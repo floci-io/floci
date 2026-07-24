@@ -8,8 +8,10 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -76,6 +78,38 @@ class SqsCfnProvisionerTest {
 
         // <stack>-<logicalId>-<suffix>, capped at 80
         assertEquals("my-stack-MyQueue", r.getAttributes().get("QueueName").replaceAll("-[0-9a-f]{12}$", ""));
+    }
+
+    @Test
+    void queuePassesFifoScalarAttributesToCreateQueue() {
+        // Reproduces #1907: DeduplicationScope and FifoThroughputLimit from the template must
+        // reach SqsService.createQueue — the engine already persists them (issue Control 2).
+        when(sqs.createQueue(eq("orders.fifo"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("orders.fifo", "http://localhost:4566/000000000000/orders.fifo"));
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        ObjectNode props = mapper.createObjectNode()
+                .put("QueueName", "orders.fifo")
+                .put("FifoQueue", true)
+                .put("ContentBasedDeduplication", false)
+                .put("DeduplicationScope", "messageGroup")
+                .put("FifoThroughputLimit", "perMessageGroupId")
+                .put("VisibilityTimeout", 30);
+
+        provisioner.provision(r, props, ctx());
+
+        Map<String, String> attrs = capturedCreateQueueAttributes("orders.fifo");
+        assertEquals("messageGroup", attrs.get("DeduplicationScope"));
+        assertEquals("perMessageGroupId", attrs.get("FifoThroughputLimit"));
+        // The two attributes that already worked keep working.
+        assertEquals("false", attrs.get("ContentBasedDeduplication"));
+        assertEquals("30", attrs.get("VisibilityTimeout"));
+    }
+
+    private Map<String, String> capturedCreateQueueAttributes(String queueName) {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).createQueue(eq(queueName), captor.capture(), eq("us-east-1"));
+        return captor.getValue();
     }
 
     @Test
