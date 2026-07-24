@@ -56,6 +56,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
+      - --initialize-at-run-time=graphql.util.IdGenerator
 
 
 floci:

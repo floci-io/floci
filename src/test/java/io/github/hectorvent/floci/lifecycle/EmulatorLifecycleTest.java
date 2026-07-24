@@ -130,6 +130,21 @@ class EmulatorLifecycleTest {
     }
 
     @Test
+    @DisplayName("Should rehydrate AppSync schemas after orphan recovery on startup")
+    void shouldRehydrateAppSyncSchemasAfterOrphanRecovery() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, schemaCreationWorker);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(schemaCreationWorker).recoverOrphans();
+        inOrder.verify(schemaCreationWorker).rehydrateSchemas();
+    }
+
+    @Test
     @DisplayName("Should validate the persistent path after BOOT hooks and before loading storage")
     void shouldValidatePersistentPathBeforeStorageLoad() {
         stubStorageConfig();
