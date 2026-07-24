@@ -41,7 +41,7 @@ class BuildV2ProxyEventPathParametersTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null
+                null, null, null, null, null
         );
     }
 

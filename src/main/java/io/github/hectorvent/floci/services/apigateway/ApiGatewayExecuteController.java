@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -40,6 +41,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,6 +77,7 @@ public class ApiGatewayExecuteController {
     private final WebSocketConnectionManager webSocketConnectionManager;
     private final ElbV2Service elbV2Service;
     private final SqsQueryHandler sqsQueryHandler;
+    private final EmulatorConfig emulatorConfig;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -83,7 +86,7 @@ public class ApiGatewayExecuteController {
                                        AwsServiceRouter serviceRouter,
                                        WebSocketConnectionManager webSocketConnectionManager,
                                        ElbV2Service elbV2Service,
-                                       SqsQueryHandler sqsQueryHandler) {
+                                       SqsQueryHandler sqsQueryHandler, EmulatorConfig emulatorConfig) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -94,6 +97,7 @@ public class ApiGatewayExecuteController {
         this.webSocketConnectionManager = webSocketConnectionManager;
         this.elbV2Service = elbV2Service;
         this.sqsQueryHandler = sqsQueryHandler;
+        this.emulatorConfig = emulatorConfig;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -922,6 +926,15 @@ public class ApiGatewayExecuteController {
         try {
             if (target.action() == null) {
                 MultivaluedMap<String, String> formParams = parseFormUrlEncoded(transformedBody);
+
+                if ("sqs".equals(target.service()) && target.path() != null) {
+                    formParams.computeIfAbsent("QueueUrl", (_) -> {
+                        String queueUrl = emulatorConfig.effectiveBaseUrl() + "/" + target.path();
+
+                        return Collections.singletonList(queueUrl);
+                    });
+                }
+
                 serviceResponse = serviceRouter.invokeQuery(target.service(), formParams, region);
             } else {
                 JsonNode requestJson = objectMapper.readTree(transformedBody);
