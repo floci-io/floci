@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDi
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -27,10 +28,7 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 class CognitoServiceTest {
 
@@ -2007,7 +2005,7 @@ class CognitoServiceTest {
     // =========================================================================
 
     @ParameterizedTest
-    @CsvSource( {
+    @CsvSource({
             "use-name,basic-client",
             "prepend-to-name:prepended-,prepended-basic-client",
             "append-to-name:-appended,basic-client-appended",
@@ -2024,7 +2022,7 @@ class CognitoServiceTest {
                 "us-east-1"
         );
 
-        assertEquals("test",pool.getUserPoolTags().get("env"));
+        assertEquals("test", pool.getUserPoolTags().get("env"));
         assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY));
         assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY));
 
@@ -2043,7 +2041,7 @@ class CognitoServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource( {
+    @CsvSource({
             "prepend-to-name: prepended- ,secret",
             "append-to-name: -appended ,secret",
             "append-to-name:-appended,",
@@ -2051,7 +2049,7 @@ class CognitoServiceTest {
     })
     void createUserPoolWithInvalidOverrideForClientIdAndClientSecret(String overrideClientId, String secret) {
         Map<String, Object> createUserPool = new HashMap<>();
-        Map<String,String> userPoolTags = new HashMap<>();
+        Map<String, String> userPoolTags = new HashMap<>();
         userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, overrideClientId);
         userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY, secret);
         createUserPool.put("PoolName", "InvalidOverridesPool");
@@ -2065,4 +2063,226 @@ class CognitoServiceTest {
         assertEquals("InvalidParameterException", ex.getErrorCode());
 
     }
+
+    // Issue #1654: ConfirmSignUp updates verified attribute
+    @Nested
+    class ConfirmSignUpVerifiedAttributes {
+
+        private CognitoService svc;
+
+        @BeforeEach
+        void setUpVerificationService() {
+            svc = createVerificationEnabledService();
+        }
+
+        @Test
+        void confirmSignUpSetsEmailVerifiedAndDoesNotWritePhoneVerifiedForEmailOnlyUser() {
+            String poolName = "EmailVerifyPool";
+            String username = "alice@example.com";
+            String password = "Passw0rd!";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("email_verified"),
+                    "ConfirmSignUp should set email_verified=true when email is the auto-verified attribute");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not proactively write phone_number_verified when the user has no phone");
+        }
+
+        @Test
+        void confirmSignUpSetsPhoneNumberVerifiedAndDoesNotWriteEmailVerifiedForPhoneOnlyUser() {
+            String poolName = "PhoneVerifyPool";
+            String username = "phone-user";
+            String password = "Passw0rd!";
+            String phoneNumber = "+491701234567";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("phone_number")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("phone_number", phoneNumber));
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("phone_number_verified"),
+                    "ConfirmSignUp should set phone_number_verified=true when phone_number is the auto-verified attribute");
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not proactively write email_verified when the user has no email");
+        }
+
+        @Test
+        void confirmSignUpMarksOnlyEmailVerifiedWhenBothAutoVerifiedAndEmailIsFirstDeliveryTarget() {
+            String poolName = "BothVerifyEmailFirstPool";
+            String email = "dual-user@example.com";
+            String password = "Passw0rd!";
+            String phoneNumber = "+491701234567";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email", "phone_number")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), email, password,
+                    Map.of("email", email, "phone_number", phoneNumber));
+            svc.confirmSignUp(client.getClientId(), email, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), email);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("email_verified"),
+                    "ConfirmSignUp should set email_verified=true when email is the first auto-verified delivery target");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when the code was delivered to email, not phone");
+        }
+
+        @Test
+        void confirmSignUpMarksOnlyPhoneNumberVerifiedWhenBothAutoVerifiedAndPhoneIsFirstDeliveryTarget() {
+            String poolName = "BothVerifyPhoneFirstPool";
+            String email = "dual-user2@example.com";
+            String password = "Passw0rd!";
+            String phoneNumber = "+491701234567";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("phone_number", "email")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), email, password,
+                    Map.of("email", email, "phone_number", phoneNumber));
+            svc.confirmSignUp(client.getClientId(), email, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), email);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("phone_number_verified"),
+                    "ConfirmSignUp should set phone_number_verified=true when phone_number is the first auto-verified delivery target");
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the code was delivered to phone, not email");
+        }
+
+        @Test
+        void confirmSignUpDoesNotSetVerifiedFlagsWhenPoolHasNoAutoVerifiedAttributes() {
+            String poolName = "NoAutoVerifyPool";
+            String username = "no-auto-verify@example.com";
+            String password = "Passw0rd!";
+
+            UserPool pool = svc.createUserPool(Map.of("PoolName", poolName), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the pool has no auto-verified attributes");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when the pool has no auto-verified attributes");
+        }
+
+        @Test
+        void confirmSignUpDoesNotSetVerifiedFlagsWhenVerificationServiceIsAbsent() {
+            String poolName = "NoVerificationServicePool";
+            String username = "no-verification@example.com";
+            String password = "Passw0rd!";
+
+            // The default service from setUp() has verificationCodeService == null.
+            UserPool pool = service.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email")
+            ), "us-east-1");
+            UserPoolClient client = service.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            service.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+
+            service.confirmSignUp(client.getClientId(), username);
+
+            CognitoUser user = service.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when no verification service is configured");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when no verification service is configured");
+        }
+
+        @Test
+        void confirmSignUpDoesNotSetVerifiedFlagsWhenDeliveryTargetIsNull() {
+            String poolName = "NullDeliveryTargetPool";
+            String username = "email-only@example.com";
+            String password = "Passw0rd!";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+            svc.updateUserPool(Map.of(
+                    "UserPoolId", pool.getId(),
+                    "AutoVerifiedAttributes", List.of("phone_number")
+            ), "us-east-1");
+
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the user has no matching attribute for the updated auto verified attribute");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when the delivery target is null");
+        }
+
+        private CognitoService createVerificationEnabledService() {
+            VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+            CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+            when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                    .thenReturn("123456");
+            return new CognitoService(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    "http://localhost:4566",
+                    regionResolver,
+                    null,
+                    verificationCodeService,
+                    messageDispatcher
+            );
+        }
+    }
+
 }
