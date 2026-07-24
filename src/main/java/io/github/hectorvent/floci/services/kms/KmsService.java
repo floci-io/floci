@@ -665,12 +665,31 @@ public class KmsService {
      * Single-pass decrypt + source-key-ARN resolution. {@link #decrypt} and
      * {@link #decryptToKeyArn} remain independent primitives — neither delegates here.
      */
-    public DecryptResult decryptAndResolveKey(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
+    public DecryptResult decryptAndResolveKey(
+            byte[] ciphertext,
+            Map<String, String> encryptionContext,
+            String region,
+            String requestKeyId
+    ) {
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
             throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
         }
         byte[] plaintext = Base64.getDecoder().decode(parsed.payload);
+
+        if (requestKeyId != null && !requestKeyId.isBlank()) {
+            KmsKey requestKey = resolveKey(requestKeyId, region);
+            if (!requestKey.getKeyId().equals(parsed.keyId)) {
+                throw new AwsException(
+                        "IncorrectKeyException",
+                        "The request was rejected because the specified KMS key cannot decrypt the data.",
+                        400
+                );
+            }
+
+            return new DecryptResult(plaintext, requestKey.getArn());
+        }
+
         String keyArn;
         try {
             keyArn = resolveKey(parsed.keyId, region).getArn();
