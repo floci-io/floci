@@ -145,6 +145,27 @@ class SqsCfnProvisionerTest {
                 attrs.get("RedrivePolicy"));
     }
 
+    @Test
+    void fifoQueueWithoutNameGetsGeneratedFifoNameAndFifoAttribute() {
+        // Like real CloudFormation, a FifoQueue: true resource without a QueueName must get a
+        // generated physical name ending in .fifo — SqsService rejects FifoQueue=true otherwise.
+        when(sqs.createQueue(anyString(), any(), eq("us-east-1")))
+                .thenAnswer(inv -> new Queue(inv.getArgument(0), "http://q/" + inv.getArgument(0)));
+        StackResource r = resource("AWS::SQS::Queue", "MyDlq");
+        ObjectNode props = mapper.createObjectNode().put("FifoQueue", true);
+
+        provisioner.provision(r, props, ctx());
+
+        String queueName = r.getAttributes().get("QueueName");
+        assertTrue(queueName.endsWith(".fifo"),
+                "generated FIFO queue name should end with .fifo but was: " + queueName);
+        assertTrue(queueName.length() <= 80, "queue name must stay within the 80-char limit");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).createQueue(eq(queueName), captor.capture(), eq("us-east-1"));
+        assertEquals("true", captor.getValue().get("FifoQueue"));
+    }
+
     private Map<String, String> capturedCreateQueueAttributes(String queueName) {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
