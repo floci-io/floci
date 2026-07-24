@@ -72,6 +72,7 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 | SignUp | Creates a self-service user for an app client. |
 | ConfirmSignUp | Confirms a pending self-service signup. |
 | GetUser | Returns attributes for the authenticated access-token user. |
+| GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
 | UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
 | ChangePassword | Changes the authenticated user's password. |
 | ForgotPassword | Starts the local forgot-password flow for a user. |
