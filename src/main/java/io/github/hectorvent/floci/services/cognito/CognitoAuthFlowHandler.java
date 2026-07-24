@@ -426,7 +426,7 @@ final class CognitoAuthFlowHandler {
         }
 
         CustomAuthSession state =
-                new CustomAuthSession(pool.getId(), username, client.getClientId());
+                new CustomAuthSession(pool.getId(), user.getUsername(), client.getClientId());
         state.clientMetadata = clientMetadata == null ? Map.of() : clientMetadata;
 
         Map<String, Object> defineResp = defineAuthChallenge(pool, client, user, state);
@@ -444,7 +444,7 @@ final class CognitoAuthFlowHandler {
         state.currentChallengeName = challengeName;
 
         Map<String, String> publicParams = new HashMap<>();
-        publicParams.put("USERNAME", username);
+        publicParams.put("USERNAME", user.getUsername());
         for (Map.Entry<String, String> e : authParameters.entrySet()) {
             if (!"USERNAME".equals(e.getKey()) && !"SRP_A".equals(e.getKey())) {
                 publicParams.putIfAbsent(e.getKey(), e.getValue());
@@ -453,7 +453,7 @@ final class CognitoAuthFlowHandler {
         applyCreateResponse(state, challengeName,
                 createAuthChallenge(pool, client, user, state, challengeName), publicParams);
 
-        String sessionToken = buildSessionToken(pool.getId(), username, client.getClientId());
+        String sessionToken = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
         customAuthSessions.put(sessionToken, state);
 
         Map<String, Object> result = new HashMap<>();
@@ -481,7 +481,8 @@ final class CognitoAuthFlowHandler {
         if (answer == null || answer.isBlank()) {
             throw new AwsException("InvalidParameterException", "ANSWER is required", 400);
         }
-        validateSecretHash(client, responses, state.username);
+
+        validateSecretHash(client, responses, responses.getOrDefault("USERNAME", state.username));
 
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
 

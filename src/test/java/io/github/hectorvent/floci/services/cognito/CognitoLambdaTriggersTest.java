@@ -13,7 +13,10 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
@@ -21,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -718,5 +722,119 @@ class CognitoLambdaTriggersTest {
         assertEquals("InvalidLambdaResponseException", ex.getErrorCode());
         assertEquals("DefineAuthChallenge trigger failed: DefineAuthChallenge trigger returned a non-object response",
                         ex.getMessage());
+    }
+
+    // =========================================================================
+    // UsernameAttributes=email: triggers receive the canonical UUID as event.userName
+    // =========================================================================
+
+    private UserPool createEmailAliasPoolWithLambdaConfig(Map<String, Object> lambdaConfig) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("PoolName", "alias-trigger-pool");
+        req.put("UsernameAttributes", List.of("email"));
+        req.put("LambdaConfig", lambdaConfig);
+        return service.createUserPool(req, "us-east-1");
+    }
+
+    @Test
+    void aliasPoolTriggerReceivesUuidUserNameAndEmailAttribute() throws Exception {
+        UserPool pool = createEmailAliasPoolWithLambdaConfig(
+                Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        UserPoolClient client = createClient(pool);
+
+        // Alias pool: the supplied value is the email; canonical username is a minted UUID == sub.
+        CognitoUser user = service.adminCreateUser(pool.getId(), "person@example.com",
+                Map.of("email", "person@example.com"), null);
+        service.adminSetUserPassword(pool.getId(), "person@example.com", "Perm1234!", true);
+        String uuid = user.getUsername();
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        // Sign in with the email alias.
+        service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "person@example.com", "PASSWORD", "Perm1234!"));
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService, atLeastOnce())
+                .invoke(anyString(), eq("arn:aws:lambda:::pre"), payloadCaptor.capture(), any());
+
+        Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
+        assertEquals(uuid, event.get("userName"), "trigger event.userName must be the canonical UUID");
+        assertNotEquals("person@example.com", event.get("userName"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = (Map<String, Object>) event.get("request");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> userAttributes = (Map<String, Object>) request.get("userAttributes");
+        assertEquals("person@example.com", userAttributes.get("email"),
+                "trigger event.request.userAttributes.email must be the sign-in email");
+        assertEquals(uuid, userAttributes.get("sub"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aliasPoolCustomAuthEchoesUuidUsernameAndValidatesSecretHashAgainstSentValue() {
+        Map<String, Object> req = new HashMap<>();
+        req.put("PoolName", "alias-custom-pool");
+        req.put("UsernameAttributes", List.of("email"));
+        req.put("LambdaConfig", Map.of(
+                "DefineAuthChallenge", "arn:aws:lambda:::define",
+                "CreateAuthChallenge", "arn:aws:lambda:::create",
+                "VerifyAuthChallengeResponse", "arn:aws:lambda:::verify"));
+        UserPool pool = service.createUserPool(req, "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", true, false, List.of(), List.of());
+        String secret = client.getClientSecret();
+        assertNotNull(secret);
+
+        CognitoUser user = service.adminCreateUser(pool.getId(), "custom@example.com",
+                Map.of("email", "custom@example.com"), null);
+        service.adminSetUserPassword(pool.getId(), "custom@example.com", "Perm1234!", true);
+        String uuid = user.getUsername();
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("issueTokens", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("publicChallengeParameters", Map.of("question", "q"),
+                        "privateChallengeParameters", Map.of("answer", "blue"))));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("answerCorrect", true)));
+
+        // Round 1: sign in with the email alias.
+        Map<String, Object> init = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "custom@example.com"));
+        Map<String, String> challengeParams = (Map<String, String>) init.get("ChallengeParameters");
+        // ChallengeParameters.USERNAME must echo the canonical UUID (as real AWS does), not the email.
+        assertEquals(uuid, challengeParams.get("USERNAME"));
+        assertNotEquals("custom@example.com", challengeParams.get("USERNAME"));
+        String session = (String) init.get("Session");
+
+        // Round 2 with USERNAME=UUID but SECRET_HASH computed over the email -> rejected
+        // (SECRET_HASH is validated against the sent USERNAME).
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
+                        Map.of("USERNAME", uuid, "ANSWER", "blue",
+                                "SECRET_HASH", secretHash(secret, "custom@example.com", client.getClientId()))));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+
+        // Round 2 with USERNAME=UUID and a matching SECRET_HASH over the UUID -> tokens issued.
+        Map<String, Object> tokens = service.respondToAuthChallenge(client.getClientId(),
+                "CUSTOM_CHALLENGE", session,
+                Map.of("USERNAME", uuid, "ANSWER", "blue",
+                        "SECRET_HASH", secretHash(secret, uuid, client.getClientId())));
+        assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
+    }
+
+    private static String secretHash(String secret, String username, String clientId) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] sig = mac.doFinal((username + clientId).getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(sig);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }
