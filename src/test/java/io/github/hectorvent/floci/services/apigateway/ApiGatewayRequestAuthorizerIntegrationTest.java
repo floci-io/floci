@@ -307,6 +307,35 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
                 "multiValueQueryStringParameters must be null when no query string is present");
     }
 
+    @Test
+    @Order(11)
+    void requestAuthorizerReceivesRawPathWithTrailingSlash() throws Exception {
+        // The JAX-RS {proxy} binding strips a trailing slash, but the authorizer event must
+        // still carry the raw path so path-based access control gates the same value the Lambda
+        // later receives from buildProxyEvent (AWS parity). Path parameters keep coming from the
+        // normalized path, exactly as the AWS_PROXY event does.
+        String response = given()
+                .header("Authorization", "Bearer test")
+                .when().get("/execute-api/" + apiId + "/prod/items/42/")
+                .then()
+                .statusCode(200)
+                .extract().asString();
+
+        JsonNode payload = OBJECT_MAPPER.readTree(response);
+        String receivedEventStr = payload.path("authorizer").path("receivedEvent").asText(null);
+        assertNotNull(receivedEventStr);
+
+        JsonNode event = OBJECT_MAPPER.readTree(receivedEventStr);
+        assertEquals("/items/42/", event.path("path").asText(null),
+                "authorizer event path must preserve the trailing slash");
+        assertEquals("/items/42/", event.path("requestContext").path("path").asText(null),
+                "requestContext.path must preserve the trailing slash");
+        assertTrue(event.path("methodArn").asText("").endsWith("/items/42/"),
+                "methodArn must include the trailing slash");
+        assertEquals("42", event.path("pathParameters").path("id").asText(null),
+                "path parameters must still be extracted from the normalized path");
+    }
+
     // ──────────────────────────── TOKEN authorizer preservation ────────────────────────────
 
     @Test

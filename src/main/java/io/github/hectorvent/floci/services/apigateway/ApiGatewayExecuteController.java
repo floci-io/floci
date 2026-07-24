@@ -495,15 +495,20 @@ public class ApiGatewayExecuteController {
                                      String httpMethod, String requestPath,
                                      String resourcePath, String resourceId, Stage stage, UriInfo uriInfo,
                                      String resolvedApiKey) {
+        // Recover the trailing slash the JAX-RS {proxy} binding strips, so the authorizer sees
+        // the same raw path the Lambda later receives from buildProxyEvent (AWS parity). Path
+        // matching and path-parameter extraction keep using the normalized requestPath.
+        String preservedPath = preserveTrailingSlash(requestPath, uriInfo.getRequestUri().getRawPath());
+
         ObjectNode node = objectMapper.createObjectNode();
         node.put("type", auth.getType());
-        node.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, requestPath));
+        node.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, preservedPath));
         if ("TOKEN".equals(auth.getType())) {
             String headerName = auth.getIdentitySource().replace("method.request.header.", "");
             node.put("authorizationToken", headers.getHeaderString(headerName));
         } else if ("REQUEST".equals(auth.getType())) {
             node.put("resource", resourcePath);
-            node.put("path", requestPath);
+            node.put("path", preservedPath);
             node.put("httpMethod", httpMethod);
             putSingleValueHeaders(node, headers);
             putMultiValueHeaders(node, headers);
@@ -530,7 +535,7 @@ public class ApiGatewayExecuteController {
             ctx.put("apiId", apiId);
             ctx.put("resourceId", resourceId != null ? resourceId : "");
             ctx.put("resourcePath", resourcePath);
-            ctx.put("path", requestPath);
+            ctx.put("path", preservedPath);
             ctx.put("httpMethod", httpMethod);
             ctx.put("stage", stageName);
             ctx.put("requestId", UUID.randomUUID().toString());
@@ -600,9 +605,16 @@ public class ApiGatewayExecuteController {
                                    byte[] body, String requestId,
                                    String principalId, Map<String, Object> authorizerContext,
                                    String resolvedApiKey) {
+        // The JAX-RS {proxy} binding strips a trailing slash, but a trailing slash is
+        // significant in the delivered path (routers treat /x and /x/ as distinct routes).
+        // Recover it from the raw request URI for the event path fields. Resource matching
+        // and path-parameter extraction continue to use the normalized `path`.
+        String requestPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+        boolean trailingSlash = !requestPath.equals(path);
+
         ObjectNode event = objectMapper.createObjectNode();
         event.put("resource", resourcePath);
-        event.put("path", path);
+        event.put("path", requestPath);
         event.put("httpMethod", httpMethod);
 
         putSingleValueHeaders(event, headers);
@@ -611,7 +623,9 @@ public class ApiGatewayExecuteController {
         putMultiValueQueryStringParameters(event, uriInfo);
 
         ObjectNode pathParams = event.putObject("pathParameters");
-        if (proxy != null && !proxy.isEmpty()) pathParams.put("proxy", proxy);
+        if (proxy != null && !proxy.isEmpty()) {
+            pathParams.put("proxy", trailingSlash ? proxy + "/" : proxy);
+        }
         extractPathParams(resourcePath, path).forEach(pathParams::put);
 
         // stageVariables: populate from the Stage object (null if no variables configured)
@@ -637,7 +651,7 @@ public class ApiGatewayExecuteController {
         ctx.put("domainPrefix", apiId);
         ctx.put("extendedRequestId", requestId);
         ctx.put("httpMethod", httpMethod);
-        ctx.put("path", path);
+        ctx.put("path", requestPath);
         ctx.put("protocol", "HTTP/1.1");
         ctx.put("requestId", requestId);
         ctx.put("requestTime", requestTime);
@@ -1888,6 +1902,23 @@ public class ApiGatewayExecuteController {
     }
 
     // ──────────────────────────── Path matching ────────────────────────────
+
+    /**
+     * Re-appends a trailing slash that the JAX-RS {@code {proxy}} path-param binding strips.
+     * A trailing slash is significant in the proxy event path (many routers treat {@code /x}
+     * and {@code /x/} as distinct routes), so it is recovered from the raw request URI. The
+     * normalized path is still used for resource matching and path-parameter extraction, which
+     * mirrors AWS routing {@code /x/} to the {@code /x} resource while keeping the slash in the
+     * delivered event. Returns {@code normalizedPath} unchanged for the root path or when the
+     * raw request had no trailing slash.
+     */
+    static String preserveTrailingSlash(String normalizedPath, String rawRequestPath) {
+        if (!"/".equals(normalizedPath) && !normalizedPath.endsWith("/")
+                && rawRequestPath != null && rawRequestPath.endsWith("/")) {
+            return normalizedPath + "/";
+        }
+        return normalizedPath;
+    }
 
     /**
      * Finds the best-matching resource for {@code requestPath}.

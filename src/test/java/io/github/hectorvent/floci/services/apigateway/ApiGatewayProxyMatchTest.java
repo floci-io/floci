@@ -128,6 +128,33 @@ class ApiGatewayProxyMatchTest {
         assertNull(ctrl.matchResource(List.of(authProxy), "/other/path"));
     }
 
+    // ──────────────────────────── trailing-slash preservation (#1557) ────────────────────────────
+
+    @Test
+    void preservesTrailingSlashFromRawRequestPath() {
+        assertEquals("/thing/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/thing", "/restapis/abc/prod/_user_request_/thing/"));
+        assertEquals("/a/b/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/a/b", "/restapis/abc/prod/_user_request_/a/b/"));
+    }
+
+    @Test
+    void leavesPathUnchangedWhenRawRequestHasNoTrailingSlash() {
+        assertEquals("/thing", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/thing", "/restapis/abc/prod/_user_request_/thing"));
+    }
+
+    @Test
+    void doesNotDuplicateSlashOrAlterRootOrHandleNullRaw() {
+        // Root path is never turned into "//".
+        assertEquals("/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/", "/restapis/abc/prod/_user_request_/"));
+        // An already-normalized path that ends in "/" is not doubled.
+        assertEquals("/thing/", ApiGatewayExecuteController.preserveTrailingSlash("/thing/", "/x/thing/"));
+        // Null raw path is tolerated.
+        assertEquals("/thing", ApiGatewayExecuteController.preserveTrailingSlash("/thing", null));
+    }
+
     // ──────────────────────────── ELB_LISTENER_ARN ────────────────────────────
 
     @Test
