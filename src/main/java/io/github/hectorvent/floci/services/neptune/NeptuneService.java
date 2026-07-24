@@ -308,8 +308,11 @@ public class NeptuneService {
                 return port;
             }
         }
-        throw new AwsException("InsufficientNeptuneCapacity",
-                "No available proxy ports in range " + base + "-" + max, 503);
+        // Wire code the SDK maps to InsufficientStorageClusterCapacityFault (the only
+        // capacity fault CreateDBCluster declares); "InsufficientNeptuneCapacity" isn't a
+        // real Neptune code, so callers got an unmapped generic NeptuneException.
+        throw new AwsException("InsufficientStorageClusterCapacity",
+                "No available proxy ports in range " + base + "-" + max, 400);
     }
 
     private void releaseProxyPort(int port) {

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.neptune;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -32,6 +33,7 @@ class NeptuneServiceTest {
     private NeptuneService service;
     private NeptuneContainerManager containerManager;
     private NeptuneProxyManager proxyManager;
+    private EmulatorConfig.NeptuneServiceConfig neptuneConfig;
 
     @BeforeEach
     void setUp() {
@@ -42,7 +44,7 @@ class NeptuneServiceTest {
         RegionResolver regionResolver = mock(RegionResolver.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.NeptuneServiceConfig neptuneConfig = mock(EmulatorConfig.NeptuneServiceConfig.class);
+        neptuneConfig = mock(EmulatorConfig.NeptuneServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.neptune()).thenReturn(neptuneConfig);
         when(neptuneConfig.proxyBasePort()).thenReturn(18182);
@@ -139,5 +141,19 @@ class NeptuneServiceTest {
         NeptuneCluster recovered = service.createDbCluster("c2", "1.3.2.1", false);
         assertEquals(18182, recovered.getProxyPort(),
                 "Port from the failed create must be released so the next cluster reuses it");
+    }
+
+    @Test
+    void exhaustedProxyPortRangeThrowsMappableCapacityFault() {
+        // Shrink the range to one port so the second create exhausts it.
+        when(neptuneConfig.proxyMaxPort()).thenReturn(18182);
+        service.createDbCluster("c1", "1.3.2.1", false);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createDbCluster("c2", "1.3.2.1", false));
+        // Real Neptune wire code (maps to InsufficientStorageClusterCapacityFault), not the
+        // fabricated "InsufficientNeptuneCapacity" the SDK couldn't map to a typed exception.
+        assertEquals("InsufficientStorageClusterCapacity", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
     }
 }
