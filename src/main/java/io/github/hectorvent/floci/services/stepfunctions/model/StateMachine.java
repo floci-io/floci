@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -18,6 +19,12 @@ public class StateMachine {
     private String type = "STANDARD";
     private String status = "ACTIVE";
     private double creationDate;
+    private Double updateDate;
+    private String revisionId;
+    private JsonNode loggingConfiguration;
+    private JsonNode tracingConfiguration;
+    private JsonNode encryptionConfiguration;
+    private String description;
     private Map<String, String> tags = new HashMap<>();
     private int versionCounter = 0;
     private List<StateMachineVersion> versions = new ArrayList<>();
@@ -46,6 +53,24 @@ public class StateMachine {
 
     public double getCreationDate() { return creationDate; }
     public void setCreationDate(double creationDate) { this.creationDate = creationDate; }
+
+    public Double getUpdateDate() { return updateDate; }
+    public void setUpdateDate(Double updateDate) { this.updateDate = updateDate; }
+
+    public String getRevisionId() { return revisionId; }
+    public void setRevisionId(String revisionId) { this.revisionId = revisionId; }
+
+    public JsonNode getLoggingConfiguration() { return loggingConfiguration; }
+    public void setLoggingConfiguration(JsonNode loggingConfiguration) { this.loggingConfiguration = loggingConfiguration; }
+
+    public JsonNode getTracingConfiguration() { return tracingConfiguration; }
+    public void setTracingConfiguration(JsonNode tracingConfiguration) { this.tracingConfiguration = tracingConfiguration; }
+
+    public JsonNode getEncryptionConfiguration() { return encryptionConfiguration; }
+    public void setEncryptionConfiguration(JsonNode encryptionConfiguration) { this.encryptionConfiguration = encryptionConfiguration; }
+
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

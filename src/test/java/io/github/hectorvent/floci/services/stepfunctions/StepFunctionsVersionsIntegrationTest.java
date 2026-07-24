@@ -58,19 +58,25 @@ class StepFunctionsVersionsIntegrationTest {
     }
 
     @Test
-    void listVersionsAreReturnedNewestFirst() {
+    void publishIsIdempotentPerRevisionAndVersionsAreReturnedNewestFirst() {
         String name = "ver-order-" + System.currentTimeMillis();
         String arn = call("CreateStateMachine",
                 "{\"name\":\"" + name + "\",\"definition\":\"" + DEF + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}")
                 .then().statusCode(200).extract().jsonPath().getString("stateMachineArn");
 
-        // Publish three versions (1, 2, 3). AWS lists them newest first, and the Terraform provider
-        // reads the version ARN off this list, so the order must be descending — even though the three
-        // publishes land within the same (second-resolution) creationDate, the version-number tie-break
-        // keeps 3 ahead of 2 ahead of 1.
-        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
-        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
-        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
+        // Re-publishing the same revision is idempotent and returns the existing version.
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":1"));
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":1"));
+
+        // Each update creates a new revision, so publishing those revisions advances the version.
+        call("UpdateStateMachine", "{\"stateMachineArn\":\"" + arn
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r2\",\"publish\":true}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":2"));
+        call("UpdateStateMachine", "{\"stateMachineArn\":\"" + arn
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r3\",\"publish\":true}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":3"));
 
         call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -91,10 +97,30 @@ class StepFunctionsVersionsIntegrationTest {
     @Test
     void createWithPublishReturnsVersionArn() {
         String name = "ver-pub-" + System.currentTimeMillis();
-        call("CreateStateMachine",
+        String arn = call("CreateStateMachine",
                 "{\"name\":\"" + name + "\",\"definition\":\"" + DEF + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"publish\":true}")
                 .then().statusCode(200)
                 .body("stateMachineVersionArn", not(emptyOrNullString()))
-                .body("stateMachineVersionArn", containsString(":1"));
+                .body("stateMachineVersionArn", containsString(":1"))
+                .extract().jsonPath().getString("stateMachineArn");
+
+        call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("stateMachineVersions.size()", is(1))
+                .body("stateMachineVersions[0].stateMachineVersionArn", is(arn + ":1"));
+    }
+
+    @Test
+    void invalidCreatePublishOptionsAreRejectedBeforeTheStateMachineIsStored() {
+        String name = "ver-invalid-publish-" + System.currentTimeMillis();
+        String baseRequest = "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"";
+
+        call("CreateStateMachine", baseRequest + ",\"versionDescription\":\"requires publish\"}")
+                .then().statusCode(400).body(containsString("ValidationException"));
+
+        call("CreateStateMachine", baseRequest + "}")
+                .then().statusCode(200)
+                .body("stateMachineArn", containsString(name));
     }
 }

@@ -9,6 +9,7 @@
 | Action | Description |
 | --- | --- |
 | `CreateStateMachine` | Create a state machine (Standard or Express) |
+| `UpdateStateMachine` | Update a state machine's definition and/or role ARN |
 | `DescribeStateMachine` | Get state machine definition and metadata |
 | `ListStateMachines` | List all state machines |
 | `DeleteStateMachine` | Delete a state machine |

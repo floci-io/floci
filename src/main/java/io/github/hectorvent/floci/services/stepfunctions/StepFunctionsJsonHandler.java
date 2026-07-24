@@ -34,6 +34,7 @@ public class StepFunctionsJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "CreateStateMachine" -> handleCreateStateMachine(request, region);
+            case "UpdateStateMachine" -> handleUpdateStateMachine(request);
             case "DescribeStateMachine" -> handleDescribeStateMachine(request);
             case "ListStateMachines" -> handleListStateMachines(request, region);
             case "DeleteStateMachine" -> handleDeleteStateMachine(request);
@@ -65,27 +66,68 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleCreateStateMachine(JsonNode request, String region) {
-        StateMachine sm = service.createStateMachine(
+        boolean publish = parseOptionalBoolean(request, "publish", false);
+        String versionDescription = optionalText(request, "versionDescription");
+        StepFunctionsService.CreateStateMachineResult result = service.createStateMachine(
                 request.path("name").asText(),
                 request.path("definition").asText(),
                 request.path("roleArn").asText(),
                 request.path("type").asText(null),
                 region,
-                parseTagsArray(request.path("tags"))
+                parseTagsArray(request.path("tags")),
+                request.get("loggingConfiguration"),
+                request.get("tracingConfiguration"),
+                request.get("encryptionConfiguration"),
+                publish,
+                versionDescription
         );
+        StateMachine sm = result.stateMachine();
         ObjectNode response = objectMapper.createObjectNode();
         response.put("stateMachineArn", sm.getStateMachineArn());
         response.put("creationDate", sm.getCreationDate());
-        // Publishing a version on create is opt-in (publish=true).
-        if (request.path("publish").asBoolean(false)) {
-            var version = service.publishStateMachineVersion(sm.getStateMachineArn());
-            response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
+        if (result.version() != null) {
+            response.put("stateMachineVersionArn", result.version().getStateMachineVersionArn());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateStateMachine(JsonNode request) {
+        String stateMachineArn = requiredText(request, "stateMachineArn");
+        String definition = optionalText(request, "definition");
+        String roleArn = optionalText(request, "roleArn");
+        // AWS requires at least one updatable field; a bare stateMachineArn returns MissingRequiredParameter.
+        if (definition == null && roleArn == null) {
+            throw new AwsException("MissingRequiredParameter",
+                    "Either the definition or the roleArn must be specified.", 400);
+        }
+        boolean publish = parseOptionalBoolean(request, "publish", false);
+        StepFunctionsService.UpdateStateMachineResult result = service.updateStateMachine(
+                stateMachineArn,
+                new StepFunctionsService.UpdateStateMachineRequest(
+                        definition,
+                        roleArn,
+                        null,
+                        request.get("loggingConfiguration"), request.has("loggingConfiguration"),
+                        request.get("tracingConfiguration"), request.has("tracingConfiguration"),
+                        request.get("encryptionConfiguration"), request.has("encryptionConfiguration"),
+                        publish,
+                        optionalText(request, "versionDescription")));
+        StateMachine sm = result.stateMachine();
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("updateDate", sm.getUpdateDate());
+        response.put("revisionId", sm.getRevisionId());
+        if (result.version() != null) {
+            response.put("stateMachineVersionArn", result.version().getStateMachineVersionArn());
         }
         return Response.ok(response).build();
     }
 
     private Response handlePublishStateMachineVersion(JsonNode request) {
-        var version = service.publishStateMachineVersion(request.path("stateMachineArn").asText());
+        String stateMachineArn = requiredText(request, "stateMachineArn");
+        var version = service.publishStateMachineVersion(
+                stateMachineArn,
+                optionalText(request, "revisionId"),
+                optionalText(request, "description"));
         ObjectNode response = objectMapper.createObjectNode();
         response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
         response.put("creationDate", version.getCreationDate());
@@ -119,6 +161,21 @@ public class StepFunctionsJsonHandler {
         response.put("type", sm.getType());
         response.put("status", sm.getStatus());
         response.put("creationDate", sm.getCreationDate());
+        if (sm.getLoggingConfiguration() != null) {
+            response.set("loggingConfiguration", sm.getLoggingConfiguration());
+        }
+        if (sm.getTracingConfiguration() != null) {
+            response.set("tracingConfiguration", sm.getTracingConfiguration());
+        }
+        if (sm.getRevisionId() != null) {
+            response.put("revisionId", sm.getRevisionId());
+        }
+        if (sm.getDescription() != null) {
+            response.put("description", sm.getDescription());
+        }
+        if (sm.getEncryptionConfiguration() != null) {
+            response.set("encryptionConfiguration", sm.getEncryptionConfiguration());
+        }
         return Response.ok(response).build();
     }
 
@@ -388,6 +445,39 @@ public class StepFunctionsJsonHandler {
             }
         }
         return tags;
+    }
+
+    private static String requiredText(JsonNode request, String fieldName) {
+        JsonNode node = request.get(fieldName);
+        if (node == null || node.isNull()) {
+            throw new AwsException("MissingRequiredParameter", fieldName + " is required.", 400);
+        }
+        if (!node.isTextual()) {
+            throw new AwsException("ValidationException", fieldName + " must be a string.", 400);
+        }
+        return node.asText();
+    }
+
+    private static String optionalText(JsonNode request, String fieldName) {
+        JsonNode node = request.get(fieldName);
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isTextual()) {
+            throw new AwsException("ValidationException", fieldName + " must be a string.", 400);
+        }
+        return node.asText();
+    }
+
+    private static boolean parseOptionalBoolean(JsonNode request, String fieldName, boolean defaultValue) {
+        JsonNode node = request.get(fieldName);
+        if (node == null || node.isNull()) {
+            return defaultValue;
+        }
+        if (!node.isBoolean()) {
+            throw new AwsException("ValidationException", fieldName + " must be a boolean.", 400);
+        }
+        return node.asBoolean();
     }
 
     /**
