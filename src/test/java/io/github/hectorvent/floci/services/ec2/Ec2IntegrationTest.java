@@ -979,6 +979,17 @@ class Ec2IntegrationTest {
 
         given()
             .formParam("Action", "DescribeVpcPeeringConnections")
+            .formParam("Filter.1.Name", "tag-value")
+            .formParam("Filter.1.Value.1", "TeamA")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcPeeringConnectionsResponse.vpcPeeringConnectionSet.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeVpcPeeringConnections")
             .formParam("VpcPeeringConnectionId.1", "pcx-0123456789abcdef0")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -1006,6 +1017,17 @@ class Ec2IntegrationTest {
 
         given()
             .formParam("Action", "DescribeVpnGateways")
+            .formParam("Filter.1.Name", "tag-value")
+            .formParam("Filter.1.Value.1", "TeamA")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpnGatewaysResponse.vpnGatewaySet.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeVpnGateways")
             .formParam("VpnGatewayId.1", "vgw-0123456789abcdef0")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -1023,6 +1045,18 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeEgressOnlyInternetGateways")
             .formParam("Filter.1.Name", "tag:Owner")
+            .formParam("Filter.1.Value.1", "TeamA")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "tag-value")
             .formParam("Filter.1.Value.1", "TeamA")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -1969,7 +2003,7 @@ class Ec2IntegrationTest {
             .body("DescribeInternetGatewaysResponse.internetGatewaySet.item.attachmentSet.item.vpcId",
                     equalTo(vpcId))
             .body("DescribeInternetGatewaysResponse.internetGatewaySet.item.attachmentSet.item.state",
-                    equalTo("attached"));
+                    equalTo("available"));
     }
 
     // =========================================================================

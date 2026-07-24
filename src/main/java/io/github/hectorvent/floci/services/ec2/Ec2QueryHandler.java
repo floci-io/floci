@@ -477,7 +477,7 @@ public class Ec2QueryHandler {
                 throw invalidCreateSubnetTagSpecificationParameter(parameter);
             }
 
-            int specificationIndex = parseCreateSubnetTagMemberIndex(segments[0], false);
+            int specificationIndex = parseCreateSubnetTagMemberIndex(segments[0], false, "");
             SortedSet<Integer> tagIndexes = specificationTagIndexes.computeIfAbsent(
                     specificationIndex, ignored -> new TreeSet<>());
 
@@ -489,7 +489,7 @@ public class Ec2QueryHandler {
                     || !("Key".equals(segments[3]) || "Value".equals(segments[3]))) {
                 throw invalidCreateSubnetTagSpecificationParameter(parameter);
             }
-            tagIndexes.add(parseCreateSubnetTagMemberIndex(segments[2], true));
+            tagIndexes.add(parseCreateSubnetTagMemberIndex(segments[2], true, segments[0]));
         }
 
         int expectedIndex = 1;
@@ -532,19 +532,20 @@ public class Ec2QueryHandler {
         return specifications;
     }
 
-    private int parseCreateSubnetTagMemberIndex(String rawIndex, boolean tagIndex) {
+    private int parseCreateSubnetTagMemberIndex(
+            String rawIndex, boolean tagIndex, String specificationIndex) {
         int index;
         try {
             index = Integer.parseInt(rawIndex);
         } catch (NumberFormatException e) {
             if (tagIndex) {
-                throw invalidCreateSubnetTagIndex("", rawIndex);
+                throw invalidCreateSubnetTagIndex(specificationIndex, rawIndex);
             }
             throw invalidCreateSubnetTagSpecificationIndex(rawIndex);
         }
         if (index < 1 || !rawIndex.equals(Integer.toString(index))) {
             if (tagIndex) {
-                throw invalidCreateSubnetTagIndex("", rawIndex);
+                throw invalidCreateSubnetTagIndex(specificationIndex, rawIndex);
             }
             throw invalidCreateSubnetTagSpecificationIndex(rawIndex);
         }
