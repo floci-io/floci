@@ -149,6 +149,21 @@ class Ec2QueryHandlerTest {
         verifyNoInteractions(service);
     }
 
+    @Test
+    void identifiesTagSpecificationForInvalidNestedMemberIndex() {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = createSubnetParams("10.46.1.0/24");
+        params.putSingle("TagSpecification.1.ResourceType", "subnet");
+        putTag(params, "member", "Name", "invalid");
+
+        Response response = handler(service).handle("CreateSubnet", params, "us-east-1");
+
+        assertInvalidParameterValue(
+                response,
+                "Tag member index &apos;member&apos; in tag specification &apos;1&apos;");
+        verifyNoInteractions(service);
+    }
+
     private static Stream<Arguments> malformedNestedTagMembers() {
         return Stream.of(
                 malformed("sparse tag index", params -> putTag(params, "2", "Name", "invalid")),

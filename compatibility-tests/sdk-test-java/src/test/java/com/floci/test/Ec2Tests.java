@@ -42,6 +42,9 @@ class Ec2Tests {
         assertThat(ec2.describeVpcPeeringConnections(DescribeVpcPeeringConnectionsRequest.builder()
                 .filters(Filter.builder().name("status-code").values("active").build())
                 .build()).vpcPeeringConnections()).isEmpty();
+        assertThat(ec2.describeVpcPeeringConnections(DescribeVpcPeeringConnectionsRequest.builder()
+                .filters(Filter.builder().name("tag-value").values("TeamA").build())
+                .build()).vpcPeeringConnections()).isEmpty();
         DescribeVpcPeeringConnectionsResponse paged = ec2.describeVpcPeeringConnections(
                 DescribeVpcPeeringConnectionsRequest.builder().maxResults(5).build());
         assertThat(paged.vpcPeeringConnections()).isEmpty();
@@ -119,6 +122,9 @@ class Ec2Tests {
                         .values("vpc-0123456789abcdef0")
                         .build())
                 .build()).vpnGateways()).isEmpty();
+        assertThat(ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .filters(Filter.builder().name("tag-value").values("TeamA").build())
+                .build()).vpnGateways()).isEmpty();
 
         assertThatThrownBy(() -> ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
                 .vpnGatewayIds("vgw-0123456789abcdef0")
@@ -144,6 +150,10 @@ class Ec2Tests {
                                 .name("tag:Owner")
                                 .values("TeamA")
                                 .build())
+                        .build()).egressOnlyInternetGateways()).isEmpty();
+        assertThat(ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .filters(Filter.builder().name("tag-value").values("TeamA").build())
                         .build()).egressOnlyInternetGateways()).isEmpty();
         DescribeEgressOnlyInternetGatewaysResponse paged =
                 ec2.describeEgressOnlyInternetGateways(
@@ -592,7 +602,7 @@ class Ec2Tests {
         assertThat(resp.internetGateways().get(0).attachments())
                 .anySatisfy(attachment -> {
                     assertThat(attachment.vpcId()).isEqualTo(vpcId);
-                    assertThat(attachment.stateAsString()).isEqualTo("attached");
+                    assertThat(attachment.stateAsString()).isEqualTo("available");
                 });
     }
 

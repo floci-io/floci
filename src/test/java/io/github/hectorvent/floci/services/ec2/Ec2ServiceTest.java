@@ -100,8 +100,10 @@ class Ec2ServiceTest {
                 new InMemoryStorageFactory());
 
         assertTrue(service.describeVpcPeeringConnectionIds("us-east-1", List.of(), Map.of()).isEmpty());
-        assertTrue(service.describeVpcPeeringConnectionIds(
-                "us-east-1", List.of(), Map.of("status-code", List.of("active"))).isEmpty());
+        for (String filterName : List.of("status-code", "tag-value")) {
+            assertTrue(service.describeVpcPeeringConnectionIds(
+                    "us-east-1", List.of(), Map.of(filterName, List.of("value"))).isEmpty());
+        }
 
         AwsException error = assertThrows(AwsException.class, () -> service.describeVpcPeeringConnectionIds(
                 "us-east-1", List.of("pcx-0123456789abcdef0"), Map.of()));
@@ -158,10 +160,10 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
-        Map<String, List<String>> vpcFilter =
-                Map.of("attachment.vpc-id", List.of("vpc-0123456789abcdef0"));
-
-        assertTrue(service.describeVpnGatewayIds("us-east-1", List.of(), vpcFilter).isEmpty());
+        for (String filterName : List.of("attachment.vpc-id", "tag-value")) {
+            assertTrue(service.describeVpnGatewayIds(
+                    "us-east-1", List.of(), Map.of(filterName, List.of("value"))).isEmpty());
+        }
 
         AwsException vpnError = assertThrows(AwsException.class, () -> service.describeVpnGatewayIds(
                 "us-east-1", List.of("vgw-0123456789abcdef0"), Map.of()));
@@ -187,7 +189,8 @@ class Ec2ServiceTest {
                 "attachment.vpc-id", List.of("vpc-0123456789abcdef0"),
                 "egress-only-internet-gateway-id", List.of("eigw-0123456789abcdef0"),
                 "tag:Owner", List.of("TeamA"),
-                "tag-key", List.of("Owner"));
+                "tag-key", List.of("Owner"),
+                "tag-value", List.of("TeamA"));
 
         for (Map.Entry<String, List<String>> filter : supportedFilters.entrySet()) {
             assertTrue(service.describeEgressOnlyInternetGatewayIds(
@@ -362,7 +365,7 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void attachedInternetGatewayRoundTripsAttachedState() {
+    void attachedInternetGatewayRoundTripsAvailableState() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
                 mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
@@ -375,7 +378,7 @@ class Ec2ServiceTest {
         InternetGateway described = service.describeInternetGateways(
                 region, List.of(gateway.getInternetGatewayId()), Map.of()).getFirst();
         assertEquals(vpcId, described.getAttachments().getFirst().getVpcId());
-        assertEquals("attached", described.getAttachments().getFirst().getState());
+        assertEquals("available", described.getAttachments().getFirst().getState());
     }
 
     @Test

@@ -305,7 +305,7 @@ public class Ec2Service implements ContainerTeardown {
         igw.setInternetGatewayId(igwId);
         igw.setOwnerId(accountId);
         igw.setRegion(region);
-        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "attached"));
+        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
 
         String rtId = createMainRouteTable(region, defaultVpc, "rtb-default", "rtbassoc-default");
@@ -1128,7 +1128,7 @@ public class Ec2Service implements ContainerTeardown {
                 "accepter-vpc-info.vpc-id", "expiration-time",
                 "requester-vpc-info.cidr-block", "requester-vpc-info.owner-id",
                 "requester-vpc-info.vpc-id", "status-code", "status-message",
-                "tag-key", "vpc-peering-connection-id");
+                "tag-key", "tag-value", "vpc-peering-connection-id");
         return emptyNetworkDiscovery(connectionIds, filters, supportedFilters,
                 "InvalidVpcPeeringConnectionID.NotFound",
                 "The vpcPeeringConnection ID '%s' does not exist");
@@ -1147,7 +1147,7 @@ public class Ec2Service implements ContainerTeardown {
             String region, List<String> gatewayIds, Map<String, List<String>> filters) {
         Set<String> supportedFilters = Set.of(
                 "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
-                "state", "tag-key", "type", "vpn-gateway-id");
+                "state", "tag-key", "tag-value", "type", "vpn-gateway-id");
         return emptyNetworkDiscovery(gatewayIds, filters, supportedFilters,
                 "InvalidVpnGatewayID.NotFound",
                 "The vpnGateway ID '%s' does not exist");
@@ -1157,7 +1157,7 @@ public class Ec2Service implements ContainerTeardown {
             String region, List<String> gatewayIds, Map<String, List<String>> filters) {
         Set<String> supportedFilters = Set.of(
                 "attachment.state", "attachment.vpc-id",
-                "egress-only-internet-gateway-id", "tag-key");
+                "egress-only-internet-gateway-id", "tag-key", "tag-value");
         return emptyNetworkDiscovery(gatewayIds, filters, supportedFilters,
                 "InvalidEgressOnlyInternetGatewayId.NotFound",
                 "The egress-only internet gateway ID '%s' does not exist");
@@ -2370,7 +2370,7 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         InternetGateway igw = getRequiredInternetGateway(region, igwId);
 
-        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "attached"));
+        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
     }
 
