@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 import org.mockito.ArgumentCaptor;
@@ -29,6 +30,7 @@ class EventBridgeInvokerTest {
     private SqsService sqsService;
     private BatchService batchService;
     private FirehoseService firehoseService;
+    private EventBridgeService eventBridgeService;
 
     @BeforeEach
     void setUp() {
@@ -37,12 +39,16 @@ class EventBridgeInvokerTest {
         SnsService snsService = mock(SnsService.class);
         batchService = mock(BatchService.class);
         firehoseService = mock(FirehoseService.class);
+        eventBridgeService = mock(EventBridgeService.class);
+        when(eventBridgeService.putEvents(anyList(), anyString()))
+                .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
         invoker = new EventBridgeInvoker(
                 lambdaService,
                 sqsService,
                 snsService,
                 batchService,
                 firehoseService,
+                eventBridgeService,
                 new ObjectMapper(),
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
         );
@@ -235,5 +241,118 @@ class EventBridgeInvokerTest {
         String eventJson = "{\"source\":\"aws.s3\"}";
         InputTransformer transformer = new InputTransformer(Map.of(), null);
         assertEquals(eventJson, invoker.applyInputTransformer(transformer, eventJson));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void invokeTarget_eventBusTarget_republishesEventToTargetBus() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+        String event = "{\"source\":\"myapp.orders\",\"detail-type\":\"Order.Created\","
+                + "\"resources\":[\"arn:aws:s3:::b\"],\"detail\":{\"orderId\":\"o-1\"}}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        List<Map<String, Object>> entries = captor.getValue();
+        assertEquals(1, entries.size());
+        Map<String, Object> entry = entries.get(0);
+        assertEquals("arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                entry.get("EventBusName"));
+        assertEquals("myapp.orders", entry.get("Source"));
+        assertEquals("Order.Created", entry.get("DetailType"));
+        assertEquals("{\"orderId\":\"o-1\"}", entry.get("Detail"));
+        assertEquals("[\"arn:aws:s3:::b\"]", entry.get("Resources").toString());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void invokeTarget_eventBusTargetWithInputTransformer_usesOriginalSourceAndTransformedDetail() {
+        InputTransformer transformer = new InputTransformer(
+                Map.of("id", "$.detail.orderId"),
+                "{\"remapped\":\"<id>\"}");
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+        target.setInputTransformer(transformer);
+        String event = "{\"source\":\"myapp.orders\",\"detail-type\":\"Order.Created\","
+                + "\"detail\":{\"orderId\":\"o-1\"}}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertEquals("myapp.orders", entry.get("Source"));
+        assertEquals("Order.Created", entry.get("DetailType"));
+        assertEquals("{\"remapped\":\"o-1\"}", entry.get("Detail"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void invokeTarget_eventBusTarget_preservesOriginAccountAndRegion() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+        String event = "{\"source\":\"myapp.orders\",\"detail-type\":\"Order.Created\","
+                + "\"account\":\"111122223333\",\"region\":\"eu-central-1\","
+                + "\"detail\":{\"orderId\":\"o-1\"}}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertEquals("111122223333", entry.get("Account"));
+        assertEquals("eu-central-1", entry.get("Region"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void invokeTarget_eventBusTargetWithNullResources_omitsResourcesEntry() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+        String event = "{\"source\":\"myapp.orders\",\"detail-type\":\"Order.Created\","
+                + "\"resources\":null,\"detail\":{\"orderId\":\"o-1\"}}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertFalse(entry.containsKey("Resources"));
+        assertEquals("{\"orderId\":\"o-1\"}", entry.get("Detail"));
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetWithNonJsonInput_dropsWithoutPublishing() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+        target.setInputTransformer(new InputTransformer(
+                Map.of("bucket", "$.detail.bucket.name"),
+                "bucket=<bucket>"));
+
+        invoker.invokeTarget(target, "{\"source\":\"aws.s3\"}", "eu-west-1");
+
+        verify(eventBridgeService, never()).putEvents(anyList(), anyString());
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetWithoutEventBridgeService_skipsWithoutThrowing() {
+        EventBridgeInvoker bare = new EventBridgeInvoker(
+                mock(LambdaService.class),
+                sqsService,
+                mock(SnsService.class),
+                new ObjectMapper(),
+                mock(io.github.hectorvent.floci.config.EmulatorConfig.class));
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+
+        assertDoesNotThrow(() -> bare.invokeTarget(target, "{\"detail\":{}}", "eu-west-1"));
     }
 }
