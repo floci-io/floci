@@ -50,12 +50,21 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionQueue(StackResource r, JsonNode props, ProvisionContext ctx) {
+        boolean fifo = props != null && props.has("FifoQueue")
+                && "true".equalsIgnoreCase(ctx.engine().resolve(props.get("FifoQueue")));
         String queueName = ctx.resolveOptional(props, "QueueName");
         if (queueName == null || queueName.isBlank()) {
-            queueName = ctx.generatePhysicalName(r.getLogicalId(), 80, false);
+            // Like real CloudFormation, generated names of FIFO queues must end in .fifo
+            // (SqsService rejects FifoQueue=true otherwise). Keep within the 80-char limit.
+            queueName = fifo
+                    ? ctx.generatePhysicalName(r.getLogicalId(), 75, false) + ".fifo"
+                    : ctx.generatePhysicalName(r.getLogicalId(), 80, false);
         }
         Map<String, String> attrs = new HashMap<>();
         if (props != null) {
+            if (props.has("FifoQueue")) {
+                attrs.put("FifoQueue", ctx.engine().resolve(props.get("FifoQueue")));
+            }
             if (props.has("VisibilityTimeout")) {
                 attrs.put("VisibilityTimeout", ctx.engine().resolve(props.get("VisibilityTimeout")));
             }
