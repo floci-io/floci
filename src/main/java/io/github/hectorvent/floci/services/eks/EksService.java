@@ -100,7 +100,7 @@ public class EksService implements TagHandler {
                     "Cluster already exists: " + name, 409);
         }
 
-        String region = config.defaultRegion();
+        String region = regionResolver.getRegion();
         validateSubnets(region, request.getResourcesVpcConfig());
         String accountId = regionResolver.getAccountId();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString();
