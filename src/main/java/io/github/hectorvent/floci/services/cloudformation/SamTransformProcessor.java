@@ -361,6 +361,8 @@ class SamTransformProcessor {
         ObjectNode lambdaResource = createLambdaFunction(logicalId, roleLogicalId, properties, hasExplicitRole);
         resources.set(logicalId, lambdaResource);
 
+        expandAutoPublishAlias(logicalId, properties, resources);
+
         JsonNode events = properties.path("Events");
         if (events.isObject()) {
             Iterator<Map.Entry<String, JsonNode>> eventFields = events.fields();
@@ -369,6 +371,54 @@ class SamTransformProcessor {
                 expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources);
             }
         }
+    }
+
+    /**
+     * Expands {@code AutoPublishAlias} into the {@code AWS::Lambda::Version} +
+     * {@code AWS::Lambda::Alias} pair real SAM generates, so an alias-qualified invoke
+     * ({@code <function>:production}) resolves instead of failing with "Alias not found".
+     * Without this the property is silently dropped and the deploy still reports
+     * CREATE_COMPLETE, so the failure only surfaces later, at invoke time.
+     *
+     * <p>The alias name is normally a literal, but SAM also allows an intrinsic (e.g.
+     * {@code !Ref StageName}). The node is passed through to {@code Name} either way so the
+     * template engine resolves it at provision time; only the generated logical id needs a
+     * literal, and it drops the suffix when the value isn't textual.
+     *
+     * <p>{@code Ref}/{@code Fn::GetAtt} in the emitted properties give the ordering edges
+     * (function → version → alias) that {@code topologicalSort} already follows, so no
+     * explicit {@code DependsOn} is needed.
+     */
+    private void expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode resources) {
+        JsonNode aliasName = properties.path("AutoPublishAlias");
+        if (aliasName.isMissingNode() || aliasName.isNull()
+                || (aliasName.isTextual() && aliasName.asText().isBlank())) {
+            return;
+        }
+
+        String versionId = uniqueId(functionLogicalId + "Version", resources);
+        ObjectNode versionDef = objectMapper.createObjectNode();
+        versionDef.put("Type", "AWS::Lambda::Version");
+        ObjectNode versionProps = objectMapper.createObjectNode();
+        versionProps.set("FunctionName", ref(functionLogicalId));
+        versionDef.set("Properties", versionProps);
+        resources.set(versionId, versionDef);
+
+        String aliasSuffix = aliasName.isTextual() ? aliasName.asText() : "";
+        String aliasId = uniqueId(functionLogicalId + "Alias" + aliasSuffix, resources);
+        ObjectNode aliasDef = objectMapper.createObjectNode();
+        aliasDef.put("Type", "AWS::Lambda::Alias");
+        ObjectNode aliasProps = objectMapper.createObjectNode();
+        aliasProps.set("FunctionName", ref(functionLogicalId));
+        aliasProps.set("Name", aliasName.deepCopy());
+        ObjectNode versionGetAtt = objectMapper.createObjectNode();
+        ArrayNode getAttParts = objectMapper.createArrayNode();
+        getAttParts.add(versionId);
+        getAttParts.add("Version");
+        versionGetAtt.set("Fn::GetAtt", getAttParts);
+        aliasProps.set("FunctionVersion", versionGetAtt);
+        aliasDef.set("Properties", aliasProps);
+        resources.set(aliasId, aliasDef);
     }
 
     private ObjectNode createExecutionRole(JsonNode properties) {

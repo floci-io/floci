@@ -96,6 +96,128 @@ class SamTransformIntegrationTest {
     }
 
     @Test
+    void samFunction_withAutoPublishAlias_createsVersionAndAlias() {
+        String stackName = "sam-alias-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              AliasFunction:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-alias-func
+                  Handler: index.handler
+                  Runtime: nodejs22.x
+                  AutoPublishAlias: production
+                  InlineCode: |
+                    exports.handler = async () => ({ statusCode: 200, body: 'ok' });
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        // The point of the fix: an alias-qualified reference resolves. Before it, this 404'd with
+        // "Alias not found: production" even though the template declared the alias.
+        given()
+        .when()
+            .get("/2015-03-31/functions/sam-alias-func/aliases/production")
+        .then()
+            .statusCode(200)
+            .body("Name", equalTo("production"))
+            // Resolved through Fn::GetAtt on the generated Version resource, so a published
+            // version number rather than $LATEST proves both halves are wired together.
+            .body("FunctionVersion", equalTo("1"))
+            .body("AliasArn", containsString(":function:sam-alias-func:production"));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/sam-alias-func/aliases")
+        .then()
+            .statusCode(200)
+            .body("Aliases.size()", equalTo(1))
+            .body("Aliases[0].Name", equalTo("production"));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Version</ResourceType>"));
+        assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Alias</ResourceType>"));
+        assertThat(resourcesXml, containsString("<LogicalResourceId>AliasFunctionAliasproduction</LogicalResourceId>"));
+    }
+
+    @Test
+    void samFunction_withoutAutoPublishAlias_createsNoAlias() {
+        String stackName = "sam-no-alias-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              PlainFunction:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-no-alias-func
+                  Handler: index.handler
+                  Runtime: nodejs22.x
+                  InlineCode: |
+                    exports.handler = async () => ({ statusCode: 200, body: 'ok' });
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/sam-no-alias-func/aliases")
+        .then()
+            .statusCode(200)
+            .body("Aliases.size()", equalTo(0));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(resourcesXml, not(containsString("AWS::Lambda::Version")));
+        assertThat(resourcesXml, not(containsString("AWS::Lambda::Alias")));
+    }
+
+    @Test
     void samFunction_withExplicitRole_skipsRoleGeneration() {
         String stackName = "sam-explicit-role-stack";
         stacksToDelete.add(stackName);

@@ -102,6 +102,109 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_autoPublishAliasGeneratesVersionAndAlias() throws Exception {
+        // AutoPublishAlias must expand into the Version + Alias pair real SAM generates. Dropping it
+        // leaves the function with only $LATEST, so an alias-qualified invoke (<function>:production,
+        // which the declaration exists to enable) fails with "Alias not found" long after the deploy
+        // reported CREATE_COMPLETE.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": "production",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        assertTrue(resources.has("MyFuncVersion"));
+        assertEquals("AWS::Lambda::Version", resources.path("MyFuncVersion").path("Type").asText());
+        assertEquals("MyFunc",
+                resources.path("MyFuncVersion").path("Properties").path("FunctionName").path("Ref").asText());
+
+        assertTrue(resources.has("MyFuncAliasproduction"));
+        JsonNode aliasProps = resources.path("MyFuncAliasproduction").path("Properties");
+        assertEquals("AWS::Lambda::Alias", resources.path("MyFuncAliasproduction").path("Type").asText());
+        assertEquals("production", aliasProps.path("Name").asText());
+        assertEquals("MyFunc", aliasProps.path("FunctionName").path("Ref").asText());
+
+        // The alias points at the generated version via Fn::GetAtt, which is also what gives the
+        // provisioning order function -> version -> alias.
+        JsonNode versionRef = aliasProps.path("FunctionVersion");
+        assertTrue(versionRef.has("Fn::GetAtt"));
+        assertEquals("MyFuncVersion", versionRef.path("Fn::GetAtt").get(0).asText());
+        assertEquals("Version", versionRef.path("Fn::GetAtt").get(1).asText());
+    }
+
+    @Test
+    void expandSamTemplate_withoutAutoPublishAliasGeneratesNeither() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        Iterator<String> names = resources.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            String type = resources.path(name).path("Type").asText();
+            assertNotEquals("AWS::Lambda::Version", type, name + " should not exist");
+            assertNotEquals("AWS::Lambda::Alias", type, name + " should not exist");
+        }
+    }
+
+    @Test
+    void expandSamTemplate_autoPublishAliasFromIntrinsicPassesNodeThrough() throws Exception {
+        // SAM allows an intrinsic alias name (e.g. !Ref StageName). The logical id needs a literal,
+        // so it drops the suffix, but the node itself is passed through to Name for the template
+        // engine to resolve at provision time.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Parameters": {"StageName": {"Type": "String", "Default": "live"}},
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": {"Ref": "StageName"},
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        assertTrue(resources.has("MyFuncAlias"));
+        assertEquals("StageName",
+                resources.path("MyFuncAlias").path("Properties").path("Name").path("Ref").asText());
+    }
+
+    @Test
     void expandSamTemplate_functionWithPackageTypeImage() throws Exception {
         // PackageType must be carried through to the expanded AWS::Lambda::Function: without it,
         // CloudFormationResourceProvisioner.buildLambdaDesiredState defaults PackageType to "Zip"
