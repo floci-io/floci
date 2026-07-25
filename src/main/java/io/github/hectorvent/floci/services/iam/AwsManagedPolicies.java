@@ -62,6 +62,10 @@ final class AwsManagedPolicies {
                 "Allows write permissions to the AWS X-Ray daemon."),
         new ManagedPolicyDef("AmazonElasticFileSystemClientFullAccess", "/",
                 "Provides root client access to an Amazon EFS file system."),
+        new ManagedPolicyDef("AWSCloudTrail_FullAccess", "/",
+                "Provides full access to AWS CloudTrail."),
+        new ManagedPolicyDef("AWSCloudTrail_ReadOnlyAccess", "/",
+                "Provides read-only access to AWS CloudTrail."),
 
         // Lambda execution role policies
         new ManagedPolicyDef("AWSLambdaBasicExecutionRole", "/service-role/",

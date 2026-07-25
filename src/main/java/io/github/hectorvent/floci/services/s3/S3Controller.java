@@ -2,12 +2,15 @@ package io.github.hectorvent.floci.services.s3;
 
 import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
+import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
@@ -43,6 +46,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -93,19 +97,76 @@ public class S3Controller {
     private final SnsQueryHandler snsQueryHandler;
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
     private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
+    private final CloudTrailService cloudTrailService;
+    private final AccountResolver accountResolver;
+    private final RequestContext requestContext;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
                         RegionResolver regionResolver,
                         SnsQueryHandler snsQueryHandler,
                         io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
-                        io.github.hectorvent.floci.services.floci.ui.UiPages uiPages) {
+                        io.github.hectorvent.floci.services.floci.ui.UiPages uiPages,
+                        CloudTrailService cloudTrailService,
+                        AccountResolver accountResolver,
+                        RequestContext requestContext) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
         this.snsQueryHandler = snsQueryHandler;
         this.currentVertxRequest = currentVertxRequest;
         this.uiPages = uiPages;
+        this.cloudTrailService = cloudTrailService;
+        this.accountResolver = accountResolver;
+        this.requestContext = requestContext;
+    }
+
+    private void emitCloudTrailEvent(String eventName, String bucket, String key,
+                                     long bytesIn, long bytesOut,
+                                     String errorCode, String errorMessage) {
+        try {
+            String authHeader = null;
+            String userAgent = null;
+            String sourceIp = null;
+            try {
+                var ctx = currentVertxRequest.getCurrent();
+                if (ctx != null) {
+                    var req = ctx.request();
+                    if (req != null) {
+                        authHeader = req.getHeader("Authorization");
+                        userAgent = req.getHeader("User-Agent");
+                        String fwd = req.getHeader("X-Forwarded-For");
+                        if (fwd != null && !fwd.isBlank()) {
+                            int comma = fwd.indexOf(',');
+                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
+                        } else if (req.remoteAddress() != null) {
+                            sourceIp = req.remoteAddress().host();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                LOG.tracev(e, "CloudTrail: could not extract request context for S3 event {0}/{1}", bucket, key);
+            }
+            String akid = accountResolver.extractAccessKeyId(authHeader);
+            String region = requestContext.getRegion() != null
+                    ? requestContext.getRegion() : regionResolver.getDefaultRegion();
+            cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
+                    .region(region)
+                    .eventName(eventName)
+                    .bucketName(bucket)
+                    .key(key)
+                    .accessKeyId(akid)
+                    .sourceIp(sourceIp)
+                    .userAgent(userAgent)
+                    .bytesIn(bytesIn)
+                    .bytesOut(bytesOut)
+                    .errorCode(errorCode)
+                    .errorMessage(errorMessage)
+                    .eventTimeMillis(System.currentTimeMillis())
+                    .build());
+        } catch (Exception e) {
+            LOG.tracev(e, "CloudTrail event emission failed for {0} {1}/{2}", eventName, bucket, key);
+        }
     }
 
     // --- Bucket operations ---
@@ -516,8 +577,11 @@ public class S3Controller {
                 }
             }
             xml.end("ListBucketResult");
-            return Response.ok(xml.build()).build();
+            String body = xml.build();
+            emitCloudTrailEvent("ListObjects", bucket, null, 0L, body.length(), null, null);
+            return Response.ok(body).build();
         } catch (AwsException e) {
+            emitCloudTrailEvent("ListObjects", bucket, null, 0L, 0L, e.getErrorCode(), e.getMessage());
             return xmlErrorResponse(e);
         }
     }
@@ -634,8 +698,10 @@ public class S3Controller {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
             appendPutObjectResponseHeaders(resp, obj);
+            emitCloudTrailEvent("PutObject", bucket, key, data == null ? 0 : data.length, 0L, null, null);
             return resp.build();
         } catch (AwsException e) {
+            emitCloudTrailEvent("PutObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             return xmlErrorResponse(e);
         }
     }
@@ -690,7 +756,15 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "acl")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAcl", authorization);
-                return Response.ok(s3Service.getObjectAcl(bucket, key, versionId)).build();
+                try {
+                    String aclXml = s3Service.getObjectAcl(bucket, key, versionId);
+                    emitCloudTrailEvent("GetObjectAcl", bucket, key, 0L,
+                            aclXml == null ? 0L : aclXml.length(), null, null);
+                    return Response.ok(aclXml).build();
+                } catch (AwsException e) {
+                    emitCloudTrailEvent("GetObjectAcl", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+                    return xmlErrorResponse(e);
+                }
             }
             if (hasQueryParam(uriInfo, "attributes")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAttributes", authorization);
@@ -728,8 +802,10 @@ public class S3Controller {
                 return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides, includeChecksum);
             }
 
+            emitCloudTrailEvent("GetObject", bucket, key, 0L, obj.getSize(), null, null);
             return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
         } catch (AwsException e) {
+            emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             if (isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders)) {
                 try {
                     WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
@@ -913,8 +989,10 @@ public class S3Controller {
             }
             boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
             appendObjectHeaders(resp, obj, overrides, includeChecksum);
+            emitCloudTrailEvent("HeadObject", bucket, key, 0L, obj.getSize(), null, null);
             return resp.build();
         } catch (AwsException e) {
+            emitCloudTrailEvent("HeadObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             return xmlErrorResponse(e);
         }
     }
@@ -1020,8 +1098,10 @@ public class S3Controller {
                 }
                 resp.header("x-amz-version-id", result.getVersionId());
             }
+            emitCloudTrailEvent("DeleteObject", bucket, key, 0L, 0L, null, null);
             return resp.build();
         } catch (AwsException e) {
+            emitCloudTrailEvent("DeleteObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             return xmlErrorResponse(e);
         }
     }
@@ -1674,7 +1754,13 @@ public class S3Controller {
         String xml = new String(body, StandardCharsets.UTF_8);
         String mode = XmlParser.extractFirst(xml, "Mode", null);
         String dateStr = XmlParser.extractFirst(xml, "RetainUntilDate", null);
-        Instant retainUntil = dateStr != null ? Instant.parse(dateStr) : null;
+        Instant retainUntil;
+        try {
+            retainUntil = dateStr != null ? Instant.parse(dateStr) : null;
+        } catch (DateTimeParseException | IllegalArgumentException e) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed.", 400);
+        }
         boolean bypass = "true".equalsIgnoreCase(
                 httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
         s3Service.putObjectRetention(bucket, key, versionId, mode, retainUntil, bypass);
@@ -1839,21 +1925,13 @@ public class S3Controller {
                                       String contentType, HttpHeaders httpHeaders) {
         // copySource format: /bucket/key or bucket/key, where key is URL-encoded
         String source = copySource.startsWith("/") ? copySource.substring(1) : copySource;
-        
-        // URL decode the entire source first, then split
-        String decodedSource;
-        try {
-            decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
-        }
-        int slashIndex = decodedSource.indexOf('/');
+
+        int slashIndex = source.indexOf('/');
         if (slashIndex <= 0) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
-        String sourceBucket = decodedSource.substring(0, slashIndex);
-        String pathAfterBucket = decodedSource.substring(slashIndex + 1);
-        ParsedCopySource sourceObject = parseCopySourceObject(pathAfterBucket);
+        String sourceBucket = decodeCopySourceComponent(source.substring(0, slashIndex), copySource);
+        ParsedCopySource sourceObject = parseCopySourceObject(source.substring(slashIndex + 1), copySource);
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -1907,20 +1985,12 @@ public class S3Controller {
         // copySource format: /bucket/key or bucket/key, where key is URL-encoded
         String source = copySource.startsWith("/") ? copySource.substring(1) : copySource;
 
-        // URL decode the entire source first, then split.
-        String decodedSource;
-        try {
-            decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
-        }
-        int slashIndex = decodedSource.indexOf('/');
+        int slashIndex = source.indexOf('/');
         if (slashIndex <= 0) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
-        String sourceBucket = decodedSource.substring(0, slashIndex);
-        String pathAfterBucket = decodedSource.substring(slashIndex + 1);
-        ParsedCopySource sourceObject = parseCopySourceObject(pathAfterBucket);
+        String sourceBucket = decodeCopySourceComponent(source.substring(0, slashIndex), copySource);
+        ParsedCopySource sourceObject = parseCopySourceObject(source.substring(slashIndex + 1), copySource);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -2807,42 +2877,66 @@ public class S3Controller {
     }
 
     /**
-     * Splits the {@code CopyObject}/{@code UploadPartCopy} copy-source remainder into S3 object key and
-     * optional source {@code versionId}.
+     * Splits the raw {@code CopyObject}/{@code UploadPartCopy} copy-source remainder into decoded S3 object
+     * key and optional source {@code versionId}.
      * <ul>
-     *   <li><b>Input:</b> decoded {@code x-amz-copy-source} with bucket already removed (substring after
+     *   <li><b>Input:</b> raw {@code x-amz-copy-source} with bucket already removed (substring after
      *   the {@code '/'} that follows the bucket). Both {@code handleCopyObject} and
      *   {@code handleUploadPartCopy} compute this as {@code pathAfterBucket}.</li>
-     *   <li><b>Key:</b> substring before the first {@code '?'} if any; keys may contain more {@code '/'}
-     *   segments.</li>
-     *   <li><b>{@code versionId}:</b> first {@code versionId} query pair, when present (raw value after
-     *   {@code '='}). Other query pairs are ignored.</li>
+     *   <li><b>Key:</b> the decoded full path unless a trailing query string contains {@code versionId=}.
+     *   Literal {@code '?'} characters in the key (encoded as {@code %3F} or raw) are preserved because the
+     *   split happens before decoding.</li>
+     *   <li><b>{@code versionId}:</b> first decoded {@code versionId} query pair, when present. Other query
+     *   pairs are ignored and do not cause the key to be truncated.</li>
      * </ul>
      *
-     * @param pathAfterBucket object key alone, or key with query (for example {@code dir/k.txt?versionId=uuid})
+     * @param pathAfterBucket    raw object key alone, or key with query (for example {@code dir/k.txt?versionId=uuid})
+     * @param originalCopySource original header value, used for error messages on malformed encoding
      * @return key without trailing query plus {@code versionId} value, or {@code null} version when absent
      */
-    private ParsedCopySource parseCopySourceObject(String pathAfterBucket) {
+    private ParsedCopySource parseCopySourceObject(String pathAfterBucket, String originalCopySource) {
         int queryStart = pathAfterBucket.indexOf('?');
         if (queryStart < 0) {
-            return new ParsedCopySource(pathAfterBucket, null);
+            return new ParsedCopySource(decodeCopySourceComponent(pathAfterBucket, originalCopySource), null);
         }
-        String objectKey = pathAfterBucket.substring(0, queryStart);
+
         String query = pathAfterBucket.substring(queryStart + 1);
+        String versionId = extractVersionId(query, originalCopySource);
+        if (versionId == null) {
+            return new ParsedCopySource(decodeCopySourceComponent(pathAfterBucket, originalCopySource), null);
+        }
+
+        String objectKey = decodeCopySourceComponent(pathAfterBucket.substring(0, queryStart), originalCopySource);
+        return new ParsedCopySource(objectKey, versionId);
+    }
+
+    private String extractVersionId(String query, String originalCopySource) {
+        if (!query.contains("versionId=")) {
+            return null;
+        }
+
         String versionId = null;
         for (String pair : query.split("&")) {
             int eq = pair.indexOf('=');
             if (eq <= 0) {
                 continue;
             }
-            String name = pair.substring(0, eq);
-            String value = pair.substring(eq + 1);
+            String name = decodeCopySourceComponent(pair.substring(0, eq), originalCopySource);
+            String value = decodeCopySourceComponent(pair.substring(eq + 1), originalCopySource);
             if ("versionId".equals(name)) {
                 versionId = value;
                 break;
             }
         }
-        return new ParsedCopySource(objectKey, versionId);
+        return versionId;
+    }
+
+    private String decodeCopySourceComponent(String value, String originalCopySource) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidArgument", "Invalid copy source: " + originalCopySource, 400);
+        }
     }
 
     private record ParsedCopySource(String objectKey, String versionId) {

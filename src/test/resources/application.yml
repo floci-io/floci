@@ -178,6 +178,7 @@ floci:
       enabled: true
     stepfunctions:
       enabled: true
+      allow-plaintext-http: true
     cloudformation:
       enabled: true
     acm:

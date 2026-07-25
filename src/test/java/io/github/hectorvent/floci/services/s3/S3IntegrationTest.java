@@ -480,6 +480,67 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(120)
+    void copyObjectWithQuestionMarkInSourceKeySucceeds() {
+        String sourceBucket = "copy-question-source-bucket";
+        String destBucket = "copy-question-dest-bucket";
+        // The source key contains a literal '?'. Storing it requires a percent-encoded PUT path
+        // (with urlEncodingEnabled(false)) so the '?' is not treated as the query-string delimiter.
+        String rawSrcKey = "folder/file with question ?.txt";
+        String encodedSrcKey = "folder/file%20with%20question%20%3F.txt";
+
+        given().put("/" + sourceBucket).then().statusCode(200);
+        given().put("/" + destBucket).then().statusCode(200);
+
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("copy test")
+        .when()
+            .put("/" + sourceBucket + "/" + encodedSrcKey)
+        .then()
+            .statusCode(200);
+
+        // AWS-style copy source: the key is URL-encoded, so the literal '?' arrives as %3F.
+        given()
+            .header("x-amz-copy-source", "/" + sourceBucket + "/" + encodedSrcKey)
+        .when()
+            .put("/" + destBucket + "/copied/encoded.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        // Lenient case: a raw literal '?' in the copy source (no versionId query) is kept in the key.
+        given()
+            .header("x-amz-copy-source", "/" + sourceBucket + "/" + rawSrcKey)
+        .when()
+            .put("/" + destBucket + "/copied/raw.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .get("/" + destBucket + "/copied/encoded.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("copy test"));
+
+        given()
+        .when()
+            .get("/" + destBucket + "/copied/raw.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("copy test"));
+
+        given().urlEncodingEnabled(false).delete("/" + sourceBucket + "/" + encodedSrcKey);
+        given().delete("/" + destBucket + "/copied/encoded.txt");
+        given().delete("/" + destBucket + "/copied/raw.txt");
+        given().delete("/" + sourceBucket);
+        given().delete("/" + destBucket);
+    }
+
+    @Test
     @Order(24)
     void copyObjectWithMalformedEncodedSourceReturns400() {
         given()
