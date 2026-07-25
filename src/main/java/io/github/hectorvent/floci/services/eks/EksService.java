@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
@@ -51,11 +52,12 @@ public class EksService implements TagHandler {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final EksClusterManager clusterManager;
+    private final Ec2Service ec2Service;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
-            RegionResolver regionResolver, EksClusterManager clusterManager) {
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -68,6 +70,7 @@ public class EksService implements TagHandler {
         this.config = config;
         this.regionResolver = regionResolver;
         this.clusterManager = clusterManager;
+        this.ec2Service = ec2Service;
     }
 
     @PostConstruct
@@ -98,6 +101,7 @@ public class EksService implements TagHandler {
         }
 
         String region = config.defaultRegion();
+        validateSubnets(region, request.getResourcesVpcConfig());
         String accountId = regionResolver.getAccountId();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString();
 
@@ -378,6 +382,20 @@ public class EksService implements TagHandler {
                     "Invalid resource ARN: " + resourceArn, 400);
         }
         return resourceArn.substring(idx + 1);
+    }
+
+    private void validateSubnets(String region, ResourcesVpcConfig vpcConfig) {
+        if (vpcConfig == null || vpcConfig.getSubnetIds() == null) {
+            return;
+        }
+        for (String subnetId : vpcConfig.getSubnetIds()) {
+            try {
+                ec2Service.requireSubnet(region, subnetId);
+            } catch (AwsException e) {
+                throw new AwsException("InvalidParameterException",
+                        "Subnet ID '" + subnetId + "' does not exist", 400);
+            }
+        }
     }
 
     private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request) {
