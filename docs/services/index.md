@@ -99,3 +99,5 @@ export AWS_SECRET_ACCESS_KEY=test
 ```
 
 `AWS_ENDPOINT_URL` is the standard env var recognised by the AWS CLI v2 and AWS SDKs v2+, so no `--endpoint-url` flag is needed on each command.
+
+- [SageMaker](sagemaker.md) - model, endpoint, runtime, and training emulation with Docker execution.

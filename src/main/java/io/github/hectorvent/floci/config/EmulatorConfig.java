@@ -267,6 +267,7 @@ public interface EmulatorConfig {
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
+        SageMakerStorageConfig sagemaker();
     }
 
     interface SsmStorageConfig {
@@ -475,6 +476,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface SageMakerStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -567,6 +575,7 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        SageMakerServiceConfig sagemaker();
         LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
@@ -683,6 +692,13 @@ public interface EmulatorConfig {
 
         @WithDefault("immediate")
         String runnerMode();
+
+        Optional<String> dockerNetwork();
+    }
+
+    interface SageMakerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
 
         Optional<String> dockerNetwork();
     }

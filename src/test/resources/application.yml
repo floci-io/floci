@@ -36,6 +36,8 @@ floci:
         flush-interval-ms: 60000
       opensearch:
         flush-interval-ms: 60000
+      sagemaker:
+        flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
       lightsail:
@@ -230,6 +232,9 @@ floci:
       enabled: true
       mock: true
     codebuild:
+      enabled: true
+      # docker-network: floci-network
+    sagemaker:
       enabled: true
       # docker-network: floci-network
     batch:
