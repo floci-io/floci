@@ -143,7 +143,15 @@ public class RdsQueryHandler {
             filterId = extractRdsFilterValue(params, "db-instance-id");
         }
         try {
-            Collection<DbInstance> result = service.listDbInstances(filterId);
+            Collection<DbInstance> result;
+            if (filterId != null && !filterId.isBlank()) {
+                result = service.listDbInstances(filterId);
+            } else {
+                String resourceId = extractRdsFilterValue(params, "dbi-resource-id");
+                result = resourceId == null || resourceId.isBlank()
+                        ? service.listDbInstances(null)
+                        : service.listDbInstancesByDbiResourceId(resourceId);
+            }
             XmlBuilder xml = new XmlBuilder().start("DBInstances");
             for (DbInstance i : result) {
                 xml.start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance");

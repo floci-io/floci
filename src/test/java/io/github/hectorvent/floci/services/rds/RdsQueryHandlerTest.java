@@ -109,6 +109,23 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_filterByDbiResourceId() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setDbiResourceId("db-RESOURCE123");
+        when(service.listDbInstancesByDbiResourceId("db-RESOURCE123"))
+                .thenReturn(List.of(instance));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "dbi-resource-id");
+        p.add("Filters.Filter.1.Values.Value.1", "db-RESOURCE123");
+        Response response = handler.handle("DescribeDBInstances", p);
+
+        verify(service).listDbInstancesByDbiResourceId("db-RESOURCE123");
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
+    }
+
+    @Test
     void describeDbInstances_directIdentifierTakesPriorityOverFilters() {
         when(service.listDbInstances(any())).thenReturn(List.of());
 

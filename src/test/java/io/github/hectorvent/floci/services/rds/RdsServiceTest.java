@@ -248,6 +248,20 @@ class RdsServiceTest {
     }
 
     @Test
+    void listDbInstancesByDbiResourceIdIsCaseInsensitive() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        Collection<DbInstance> result = rdsService.listDbInstancesByDbiResourceId(
+                instance.getDbiResourceId().toLowerCase());
+
+        assertEquals(1, result.size());
+        assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
+        assertTrue(rdsService.listDbInstancesByDbiResourceId("db-missing").isEmpty());
+    }
+
+    @Test
     void modifyDbInstanceBlankPasswordDoesNotOverwriteExistingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",
