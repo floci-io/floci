@@ -99,15 +99,16 @@ image only below the caller's repository owner. Calls targeting another OCI
 registry must pass `REGISTRY_USERNAME` and `REGISTRY_TOKEN` through the reusable
 workflow's declared secrets.
 
-The default workflow publishes a commit-derived convenience tag:
+The default workflow publishes a build-and-commit-derived convenience tag:
 
-- `<commit-sha-12>` for the JVM image
+- `<YYYYMMDD.HHMMSS>.<commit-sha-8>` for the JVM image
 
 Callers that also need native artifacts can pass `publish-native: true`. This
-adds `<commit-sha-12>-native` and `<commit-sha-12>-native-compat`; it does not
-change the unqualified JVM tag.
+adds `<YYYYMMDD.HHMMSS>.<commit-sha-8>-native` and
+`<YYYYMMDD.HHMMSS>.<commit-sha-8>-native-compat`; it does not change the
+unqualified JVM tag. Timestamps are generated in UTC.
 
-A rerun for the same commit can replace a tag. The workflow therefore returns
+Each workflow invocation produces a new timestamped tag. The workflow returns
 the digest-qualified JVM reference (plus native references when requested) and
 uploads them in a provenance JSON artifact. Downstream tests should use a
 digest-qualified reference when they require an immutable image:
