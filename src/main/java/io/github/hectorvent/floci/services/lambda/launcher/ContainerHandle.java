@@ -18,6 +18,13 @@ public class ContainerHandle {
     private volatile ContainerState state;
     private volatile long lastUsedMs;
     private Closeable logStream;
+    /**
+     * The warm-pool generation this container was handed out under. {@code WarmPool} bumps a
+     * function's generation whenever its containers are invalidated (delete, redeploy, code
+     * update) and compares on release, so a container checked out across an invalidation is
+     * discarded instead of being pooled again for the new code.
+     */
+    private volatile long poolGeneration;
 
     public ContainerHandle(String containerId, String functionName,
                            RuntimeApiServer runtimeApiServer, ContainerState state) {
@@ -46,4 +53,6 @@ public class ContainerHandle {
     public void setState(ContainerState state) { this.state = state; }
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
+    public long getPoolGeneration() { return poolGeneration; }
+    public void setPoolGeneration(long poolGeneration) { this.poolGeneration = poolGeneration; }
 }

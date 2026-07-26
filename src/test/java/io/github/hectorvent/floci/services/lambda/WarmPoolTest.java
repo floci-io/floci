@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -153,6 +154,94 @@ class WarmPoolTest {
 
         // containerLauncher.launch should only have been called once (cold start)
         verify(containerLauncher, times(1)).launch(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void release_afterDrain_doesNotReturnCheckedOutContainerToPool() {
+        // drainFunction only stops containers sitting idle in the pool. A container checked out by
+        // an in-flight invocation has been polled off the queue, so the drain cannot see it, and
+        // release() then hands it back for a function that was deleted (and, on a redeploy,
+        // recreated) — the next invoke reuses it and runs the OLD code and OLD baked env.
+        // An ESM-driven function nearly always has one checked out, so the drain nearly always
+        // misses; an idle redeploy drains cleanly, which is why this is invisible without
+        // concurrent invocation.
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("drain-race-fn");
+
+        ContainerHandle stale = new ContainerHandle("cid-stale", "drain-race-fn", null, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle("cid-fresh", "drain-race-fn", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(stale, fresh);
+        lenient().when(containerLauncher.isAlive(any())).thenReturn(true);
+
+        ContainerHandle inFlight = pool.acquire(fn);
+        assertSame(stale, inFlight);
+
+        // The function is deleted while that invocation is still running.
+        pool.drainFunction("drain-race-fn");
+
+        // The invocation finishes afterwards.
+        pool.release(inFlight);
+
+        // The drained container must be stopped rather than pooled...
+        verify(containerLauncher).stop(stale);
+        // ...so the next invoke cold-starts instead of serving stale code.
+        assertNotSame(stale, pool.acquire(fn));
+        verify(containerLauncher, times(2)).launch(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void release_afterPushCodeUpdate_doesNotReturnCheckedOutContainerToPool() {
+        // Same blind spot on the code-update path: pushCodeUpdate drains the pool to force a fresh
+        // start on new code, but a container checked out mid-invocation is not in the pool, so
+        // without this it is pooled again and keeps serving the pre-update code.
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("code-update-fn");
+
+        ContainerHandle stale = new ContainerHandle("cid-old-code", "code-update-fn", null, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle("cid-new-code", "code-update-fn", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(stale, fresh);
+        lenient().when(containerLauncher.isAlive(any())).thenReturn(true);
+
+        ContainerHandle inFlight = pool.acquire(fn);
+        pool.pushCodeUpdate(fn);
+        pool.release(inFlight);
+
+        verify(containerLauncher).stop(stale);
+        assertNotSame(stale, pool.acquire(fn));
+
+        pool.shutdown();
+    }
+
+    @Test
+    void release_withoutDrain_stillReusesContainerAcrossFunctions() {
+        // Guard against over-correcting: a drain of one function must not invalidate another's
+        // checked-out container.
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction kept = mock(LambdaFunction.class);
+        when(kept.getFunctionName()).thenReturn("kept-fn");
+
+        ContainerHandle keptHandle = new ContainerHandle("cid-kept", "kept-fn", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(keptHandle);
+        when(containerLauncher.isAlive(any())).thenReturn(true);
+
+        ContainerHandle inFlight = pool.acquire(kept);
+        pool.drainFunction("some-other-fn");
+        pool.release(inFlight);
+
+        assertSame(keptHandle, pool.acquire(kept));
+        verify(containerLauncher, never()).stop(keptHandle);
 
         pool.shutdown();
     }
