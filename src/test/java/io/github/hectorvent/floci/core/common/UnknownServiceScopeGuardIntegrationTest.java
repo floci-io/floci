@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 
 /**
  * REST requests signed for a service Floci does not implement must be rejected with the
@@ -69,6 +70,24 @@ class UnknownServiceScopeGuardIntegrationTest {
         .then()
             .statusCode(404)
             .body(containsString("<Code>NoSuchBucket</Code>"));
+    }
+
+    @Test
+    void iotJobsDataPlaneScopeReachesItsIotRoutes() {
+        // The IoT Jobs Data Plane signs as iot-jobs-data while IotController serves its
+        // /things/{thing}/jobs routes. The scope has to be enumerated or the guard rejects a
+        // route Floci does implement — the SDK compat suites caught exactly this on
+        // GetPendingJobExecutions.
+        given()
+            .header("Authorization", authorization("iot-jobs-data"))
+        .when()
+            .get("/things/guard-test-thing/jobs")
+        .then()
+            // IoT's own "thing not found", which only IotController can produce: the request
+            // reached the route. The guard's rejection would be UnknownOperationException instead.
+            .statusCode(404)
+            .body("message", containsString("guard-test-thing"))
+            .body("__type", not(equalTo("UnknownOperationException")));
     }
 
     @Test

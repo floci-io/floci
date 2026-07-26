@@ -373,7 +373,11 @@ public class ResolvedServiceCatalog {
                 descriptor("iot", "iot", config.services().iot().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("iot", "execute-api"), Set.of(), Set.of(IotController.class)),
+                        // iot-jobs-data: the IoT Jobs Data Plane (GetPendingJobExecutions,
+                        // DescribeJobExecution, StartNextPendingJobExecution, UpdateJobExecution)
+                        // signs under its own name while IotController serves its /things/*/jobs routes
+                        Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
+                        Set.of(IotController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
