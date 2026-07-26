@@ -13,6 +13,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
@@ -137,8 +138,11 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body("Name", equalTo("production"))
             // Resolved through Fn::GetAtt on the generated Version resource, so a published
-            // version number rather than $LATEST proves both halves are wired together.
-            .body("FunctionVersion", equalTo("1"))
+            // version number rather than $LATEST proves both halves are wired together. Matched
+            // as "some number" rather than a literal 1: pinning the first version would fail
+            // confusingly if an earlier run leaked the function and its version counter.
+            .body("FunctionVersion", matchesPattern("\\d+"))
+            .body("FunctionVersion", not(equalTo("$LATEST")))
             .body("AliasArn", containsString(":function:sam-alias-func:production"));
 
         given()
