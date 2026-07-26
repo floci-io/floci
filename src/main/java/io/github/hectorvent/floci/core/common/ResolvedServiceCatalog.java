@@ -51,7 +51,8 @@ public class ResolvedServiceCatalog {
                         "s3", storageMode(config.storage().services().s3().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.S3, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
-                        Set.of(), Set.of("s3"), Set.of(), Set.of()),
+                        // s3express: directory-bucket (S3 Express One Zone) clients sign with it
+                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of()),
                 descriptor("dynamodb", "dynamodb", config.services().dynamodb().enabled(), true,
                         "dynamodb", storageMode(config.storage().services().dynamodb().mode(), config.storage().mode()),
                         config.storage().services().dynamodb().flushIntervalMs(), null, ServiceProtocol.JSON,
