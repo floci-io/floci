@@ -401,6 +401,23 @@ public class ResolvedServiceCatalog {
         return catalog.byCredentialScope(credentialScope);
     }
 
+    /**
+     * Canonical signing name for a credential scope. A service may answer requests signed
+     * under more than one scope (S3 also accepts {@code s3express}), but IAM action rules,
+     * resource ARNs and condition keys are all keyed by the canonical one — an alias left
+     * unnormalised resolves to no action, which the enforcement filter treats as ALLOW.
+     *
+     * <p>Only aliases are rewritten. A service whose external key is not itself one of its
+     * credential scopes (CloudWatch Logs signs as {@code logs}) has no canonical alternative
+     * here and is returned unchanged, as is any scope the catalog does not know.
+     */
+    public String canonicalCredentialScope(String credentialScope) {
+        return byCredentialScope(credentialScope)
+                .filter(descriptor -> descriptor.credentialScopes().contains(descriptor.externalKey()))
+                .map(ServiceDescriptor::externalKey)
+                .orElse(credentialScope);
+    }
+
     public Optional<ServiceDescriptor> byResourceClass(Class<?> resourceClass) {
         return catalog.byResourceClass(resourceClass);
     }

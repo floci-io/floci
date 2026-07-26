@@ -27,7 +27,11 @@ import java.util.Optional;
  * into S3's path-style wildcard routes and fail with misleading S3 XML
  * errors. This is not a catch-all — it fires only on positive identification
  * (a parseable SigV4 scope) of a service Floci does not enumerate; unsigned,
- * presigned, Bearer/Basic and SigV4a requests are untouched.
+ * presigned, Bearer/Basic and SigV4a requests are untouched. SigV4a falls out
+ * of scope because its credential omits the region segment
+ * ({@code <key>/<date>/<service>/aws4_request}), which
+ * {@link SigV4CredentialScope} does not match — widening that pattern would
+ * silently start rejecting SigV4a traffic.
  */
 @Provider
 @PreMatching
