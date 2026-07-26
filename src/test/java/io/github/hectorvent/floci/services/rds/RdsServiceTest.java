@@ -336,6 +336,21 @@ class RdsServiceTest {
     }
 
     @Test
+    void listDbInstancesByDbiResourceIdsUsesExactOrMatching() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        Collection<DbInstance> result = rdsService.listDbInstancesByDbiResourceIds(
+                List.of("db-missing", instance.getDbiResourceId()));
+
+        assertEquals(1, result.size());
+        assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
+        assertTrue(rdsService.listDbInstancesByDbiResourceIds(
+                List.of(instance.getDbiResourceId().toLowerCase())).isEmpty());
+    }
+
+    @Test
     void modifyDbInstanceBlankPasswordDoesNotOverwriteExistingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",

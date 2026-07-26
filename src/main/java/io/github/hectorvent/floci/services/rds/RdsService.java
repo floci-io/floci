@@ -545,6 +545,15 @@ public class RdsService implements Resettable {
         return instances.scan(k -> true);
     }
 
+    public Collection<DbInstance> listDbInstancesByDbiResourceIds(Collection<String> resourceIds) {
+        if (resourceIds == null || resourceIds.isEmpty()) {
+            return instances.scan(k -> true);
+        }
+        return instances.scan(k -> true).stream()
+                .filter(instance -> resourceIds.contains(instance.getDbiResourceId()))
+                .toList();
+    }
+
     public DbInstance modifyDbInstance(String id, String newPassword, Boolean iamEnabled,
                                        String dbSubnetGroupName) {
         return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName, null);
