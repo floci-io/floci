@@ -8,6 +8,9 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+import java.util.stream.Collectors;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -44,10 +47,28 @@ class CredentialScopeAliasTest {
     }
 
     @Test
-    void scopeWhoseExternalKeyIsNotASigningNameIsLeftAlone() {
-        // CloudWatch Logs signs as "logs" while its external key is "cloudwatchlogs";
-        // rewriting to the external key there would invent an action prefix AWS never uses.
+    void scopeWhoseExternalKeyIsNotItsIamNamespaceIsLeftAlone() {
+        // These are the traps: the catalog routes SES under "email" and Bedrock Runtime under
+        // "bedrock-runtime", but their IAM namespaces are "ses:" and "bedrock:". Deriving the
+        // canonical scope from the external key would rewrite valid scopes onto prefixes AWS
+        // never issues, so every action would resolve to null and enforcement would be skipped.
+        assertEquals("ses", catalog.canonicalCredentialScope("ses"));
+        assertEquals("sesv2", catalog.canonicalCredentialScope("sesv2"));
+        assertEquals("bedrock", catalog.canonicalCredentialScope("bedrock"));
         assertEquals("logs", catalog.canonicalCredentialScope("logs"));
+    }
+
+    @Test
+    void onlyExplicitlyAliasedScopesAreRewritten() {
+        // Sweep every scope the catalog declares. Anything that changes is a service whose
+        // IAM namespace we just moved, so it must be a deliberate alias, not a derivation.
+        Map<String, String> rewritten = catalog.all().stream()
+                .flatMap(descriptor -> descriptor.credentialScopes().stream())
+                .distinct()
+                .filter(scope -> !scope.equals(catalog.canonicalCredentialScope(scope)))
+                .collect(Collectors.toMap(scope -> scope, catalog::canonicalCredentialScope));
+
+        assertEquals(Map.of("s3express", "s3"), rewritten);
     }
 
     @Test

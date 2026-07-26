@@ -32,6 +32,14 @@ import java.util.Set;
 @ApplicationScoped
 public class ResolvedServiceCatalog {
 
+    /**
+     * Signing scopes that share another service's IAM namespace. S3 Express One Zone clients
+     * sign directory-bucket requests as {@code s3express} while the actions, ARNs and condition
+     * keys remain {@code s3}. Keep this minimal: every entry suppresses a distinct IAM namespace.
+     */
+    private static final java.util.Map<String, String> CREDENTIAL_SCOPE_ALIASES =
+            java.util.Map.of("s3express", "s3");
+
     private final ServiceCatalog catalog;
 
     @Inject
@@ -406,20 +414,20 @@ public class ResolvedServiceCatalog {
     }
 
     /**
-     * Canonical signing name for a credential scope. A service may answer requests signed
+     * Canonical IAM namespace for a credential scope. A service may answer requests signed
      * under more than one scope (S3 also accepts {@code s3express}), but IAM action rules,
      * resource ARNs and condition keys are all keyed by the canonical one — an alias left
      * unnormalised resolves to no action, which the enforcement filter treats as ALLOW.
      *
-     * <p>Only aliases are rewritten. A service whose external key is not itself one of its
-     * credential scopes (CloudWatch Logs signs as {@code logs}) has no canonical alternative
-     * here and is returned unchanged, as is any scope the catalog does not know.
+     * <p>Deliberately an explicit table rather than something derived from the descriptor:
+     * a descriptor's external key is a routing key, not an IAM namespace. SES routes under
+     * {@code email} and Bedrock Runtime under {@code bedrock-runtime}, while their IAM
+     * namespaces are {@code ses:} and {@code bedrock:} — deriving from the external key would
+     * rewrite valid scopes onto prefixes AWS never issues, and silently skip enforcement for
+     * those services. Add an entry here only when two scopes genuinely share one namespace.
      */
     public String canonicalCredentialScope(String credentialScope) {
-        return byCredentialScope(credentialScope)
-                .filter(descriptor -> descriptor.credentialScopes().contains(descriptor.externalKey()))
-                .map(ServiceDescriptor::externalKey)
-                .orElse(credentialScope);
+        return CREDENTIAL_SCOPE_ALIASES.getOrDefault(credentialScope, credentialScope);
     }
 
     public Optional<ServiceDescriptor> byResourceClass(Class<?> resourceClass) {
