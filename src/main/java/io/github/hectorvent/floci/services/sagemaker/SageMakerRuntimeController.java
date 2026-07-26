@@ -71,7 +71,8 @@ public class SageMakerRuntimeController {
             return out.build();
         } catch (Exception e) {
             LOG.warnv("SageMaker endpoint invocation failed for {0}: {1}", endpointName, e.getMessage());
-            return Response.status(424).entity(Map.of("__type", "ModelError", "message", e.getMessage())).build();
+            return Response.status(424).type(MediaType.APPLICATION_JSON)
+                    .entity(Map.of("__type", "ModelError", "message", e.getMessage())).build();
         }
     }
 
