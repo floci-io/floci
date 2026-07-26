@@ -1,13 +1,17 @@
 name: Release
 
 # Triggered when a version tag (e.g. 1.2.3) is pushed.
-# Builds native (amd64 + arm64) Docker images and pushes them to Docker Hub.
+# Builds native (amd64 + arm64) Docker images and pushes them to Docker Hub
+# and GitHub Container Registry.
 #
 # Published tags:
 #   Native:  floci/floci:1.2.3        floci/floci:latest
 #   Compat:  floci/floci:1.2.3-compat floci/floci:latest-compat
+#   GHCR mirrors the same tags under ghcr.io/<owner>/floci.
 #
 # Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+# GHCR pushes authenticate with the built-in GITHUB_TOKEN, so forks get
+# working image publishing without configuring any secrets.
 
 on:
   push:
@@ -16,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 # Per-tag concurrency. Back-to-back tag pushes (e.g. 1.5.3 and 1.6.0 landing
 # minutes apart) resolve to different ${{ github.ref }} values, so they run
@@ -98,6 +103,36 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
+      # Tags are computed here so registries degrade gracefully: Docker Hub
+      # tags are included only when its secrets exist (forks usually have
+      # none), while GHCR always works via the built-in GITHUB_TOKEN.
+      # GHCR image names must be lowercase; github.repository_owner may not be.
+      - name: Compute image tags
+        id: tags
+        env:
+          HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ghcr="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/floci"
+          {
+            echo "native<<EOF"
+            if [ "$HAS_DOCKERHUB" = "true" ]; then
+              echo "floci/floci:${VERSION}"
+              echo "floci/floci:latest"
+            fi
+            echo "${ghcr}:${VERSION}"
+            echo "${ghcr}:latest"
+            echo "EOF"
+            echo "compat<<EOF"
+            if [ "$HAS_DOCKERHUB" = "true" ]; then
+              echo "floci/floci:${VERSION}-compat"
+              echo "floci/floci:latest-compat"
+            fi
+            echo "${ghcr}:${VERSION}-compat"
+            echo "${ghcr}:latest-compat"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set created timestamp
         id: created
         run: echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
@@ -122,9 +157,17 @@ jobs:
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push native multi-arch image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
@@ -135,9 +178,7 @@ jobs:
           file: docker/Dockerfile.native-package
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            floci/floci:${{ steps.version.outputs.version }}
-            floci/floci:latest
+          tags: ${{ steps.tags.outputs.native }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           labels: |
@@ -159,9 +200,7 @@ jobs:
           file: docker/Dockerfile.compat
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            floci/floci:${{ steps.version.outputs.version }}-compat
-            floci/floci:latest-compat
+          tags: ${{ steps.tags.outputs.compat }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           labels: |

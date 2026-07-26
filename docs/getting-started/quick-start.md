@@ -2,6 +2,17 @@
 
 This guide gets Floci running and verifies that AWS CLI commands work against it in under five minutes.
 
+## Step 0 — (Optional) Check your environment
+
+If you have the repository checked out, `bin/floci-doctor` identifies your local environment (native Linux, Docker Desktop, WSL2) and flags the common setup traps — Docker daemon not reachable, docker socket permissions, port 4566 conflicts, the UFW firewall rule that silently breaks Lambda, and AWS CLI environment variables — printing the exact fix for each:
+
+```bash
+bin/floci-doctor          # human-readable report
+bin/floci-doctor --json   # machine-readable, for scripts and CI
+```
+
+Everything it checks is also covered step by step below, so feel free to skip straight to Step 1.
+
 ## Step 1 — Start Floci
 
 === "Native (recommended)"
@@ -187,6 +198,8 @@ See the [ECR service docs](../services/ecr.md) for the full action surface, imag
 ## Lambda on native Linux Docker (UFW)
 
 When Floci runs **natively on a Linux host** (not Docker Desktop), Lambda function containers reach Floci's Runtime API server via the docker bridge gateway. On Ubuntu / Pop!_OS / Debian boxes with **UFW enabled**, the default `INPUT DROP` policy silently drops these packets and Lambda invocations time out with `Function.TimedOut`. This affects every Lambda packaging type — Zip *and* image-backed functions deployed via emulated ECR.
+
+`bin/floci-doctor` detects this exact condition and prints the fix.
 
 **One-time fix**, scoped to the docker bridge only (does not expose anything to the network — `docker0` is internal):
 

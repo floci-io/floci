@@ -1,6 +1,6 @@
 # Docker Images
 
-Floci publishes images to [Docker Hub (`floci/floci`)](https://hub.docker.com/r/floci/floci).
+Floci publishes images to [Docker Hub (`floci/floci`)](https://hub.docker.com/r/floci/floci) and mirrors every tag to GitHub Container Registry (`ghcr.io/floci-io/floci`). Pull from GHCR when Docker Hub rate limits get in the way — the images are identical.
 
 Every image tag combines two independent choices: **what's inside** (variant) and **how stable it is** (channel).
 

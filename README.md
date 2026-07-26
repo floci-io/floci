@@ -120,6 +120,18 @@ The old `hectorvent/floci` repository no longer receives updates.
 
 </details>
 
+<details>
+<summary>Something not working? Run <code>bin/floci-doctor</code></summary>
+
+From a repository checkout, the doctor script identifies your local environment (native Linux, Docker Desktop, WSL2) and diagnoses the common setup traps — Docker daemon not reachable, docker socket permissions, port 4566 conflicts, the UFW firewall rule that silently breaks Lambda, and missing AWS environment variables — printing the exact fix for each:
+
+```bash
+bin/floci-doctor          # human-readable report
+bin/floci-doctor --json   # machine-readable, for scripts and CI
+```
+
+</details>
+
 ## Features
 
 <details open>
@@ -738,6 +750,12 @@ image: floci/floci:1.5.11
 
 # Track main
 image: floci/floci:nightly
+```
+
+Every tag is also mirrored to GitHub Container Registry — handy when Docker Hub rate limits apply:
+
+```yaml
+image: ghcr.io/floci-io/floci:latest
 ```
 
 ## Configuration
