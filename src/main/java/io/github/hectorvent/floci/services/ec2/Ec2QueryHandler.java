@@ -99,6 +99,7 @@ public class Ec2QueryHandler {
                 case "ImportKeyPair" -> handleImportKeyPair(params, region);
                 // AMIs
                 case "DescribeImages" -> handleDescribeImages(params, region);
+                case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
                 // Tags
@@ -111,6 +112,11 @@ public class Ec2QueryHandler {
                 case "DeleteInternetGateway" -> handleDeleteInternetGateway(params, region);
                 case "AttachInternetGateway" -> handleAttachInternetGateway(params, region);
                 case "DetachInternetGateway" -> handleDetachInternetGateway(params, region);
+                // VPN Gateways. There is no VPN gateway model; an empty set is
+                // AWS-accurate for an account without VPN gateways and unblocks the
+                // CDK VPC context provider, which always issues this describe.
+                case "DescribeVpnGateways" -> handleDescribeVpnGateways();
+
                 // Route Tables
                 case "CreateRouteTable" -> handleCreateRouteTable(params, region);
                 case "DescribeRouteTables" -> handleDescribeRouteTables(params, region);
@@ -1297,6 +1303,20 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleCreateImage(MultivaluedMap<String, String> p, String region) {
+        Image image = service.createImage(
+                region,
+                p.getFirst("InstanceId"),
+                p.getFirst("Name"),
+                p.getFirst("Description"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateImageResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("imageId", image.getImageId())
+                .end("CreateImageResponse");
+        return xmlResponse(xml.build());
+    }
+
     private Response handleRegisterImage(MultivaluedMap<String, String> p, String region) {
         Image image = service.registerImage(
                 region,
@@ -1430,6 +1450,16 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("routeTable").raw(routeTableXml(rt)).end("routeTable")
                 .end("CreateRouteTableResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpnGateways() {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpnGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpnGatewaySet")
+                .end("vpnGatewaySet")
+                .end("DescribeVpnGatewaysResponse");
         return xmlResponse(xml.build());
     }
 

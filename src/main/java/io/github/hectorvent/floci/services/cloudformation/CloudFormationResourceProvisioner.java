@@ -331,6 +331,10 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
+                case "AWS::EC2::VPCGatewayAttachment" ->
+                        provisionVpcGatewayAttachment(resource, properties, engine, region);
+                case "AWS::EC2::LaunchTemplate" ->
+                        provisionLaunchTemplate(resource, properties, engine, region, stackName);
                 case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
                 case "AWS::EC2::SubnetRouteTableAssociation" ->
                         provisionSubnetRouteTableAssociation(resource, properties, engine, region);
@@ -454,6 +458,8 @@ public class CloudFormationResourceProvisioner {
             case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
             case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
+            case "AWS::EC2::VPCGatewayAttachment" -> detachVpcGatewayAttachmentSafe(physicalId, region);
+            case "AWS::EC2::LaunchTemplate" -> ec2Service.deleteLaunchTemplate(region, physicalId, null);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
             case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
             case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
@@ -557,6 +563,12 @@ public class CloudFormationResourceProvisioner {
         if (vpc.getCidrBlock() != null) {
             r.getAttributes().put("CidrBlock", vpc.getCidrBlock());
         }
+        // Fn::GetAtt DefaultSecurityGroup — CDK's Custom::VpcRestrictDefaultSG handler
+        // depends on it resolving to the VPC's default security group id.
+        ec2Service.describeSecurityGroups(region, List.of(), List.of("default"), Map.of()).stream()
+                .filter(sg -> vpc.getVpcId().equals(sg.getVpcId()))
+                .findFirst()
+                .ifPresent(sg -> r.getAttributes().put("DefaultSecurityGroup", sg.getGroupId()));
     }
 
     private void provisionSubnet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
@@ -594,6 +606,56 @@ public class CloudFormationResourceProvisioner {
         var igw = ec2Service.createInternetGateway(region);
         r.setPhysicalId(igw.getInternetGatewayId());
         r.getAttributes().put("InternetGatewayId", igw.getInternetGatewayId());
+    }
+
+    private void provisionVpcGatewayAttachment(StackResource r, JsonNode props,
+                                               CloudFormationTemplateEngine engine, String region) {
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        String igwId = resolveOptional(props, "InternetGatewayId", engine);
+        if (igwId != null && !igwId.isBlank()) {
+            ec2Service.attachInternetGateway(region, igwId, vpcId);
+            r.setPhysicalId(vpcId + "|" + igwId);
+        } else {
+            // VpnGatewayId variant — record the attachment; there is no VPN gateway model.
+            String vgwId = resolveOptional(props, "VpnGatewayId", engine);
+            r.setPhysicalId(vpcId + "|" + (vgwId == null ? "" : vgwId));
+        }
+    }
+
+    private void provisionLaunchTemplate(StackResource r, JsonNode props,
+                                         CloudFormationTemplateEngine engine, String region, String stackName) {
+        String name = resolveOptional(props, "LaunchTemplateName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+        String imageId = null;
+        String instanceType = null;
+        String keyName = null;
+        String encodedUserData = null;
+        String iamInstanceProfileArn = null;
+        List<String> securityGroupIds = null;
+        if (props != null && props.has("LaunchTemplateData")) {
+            JsonNode data = engine.resolveNode(props.get("LaunchTemplateData"));
+            imageId = data.path("ImageId").asText(null);
+            instanceType = data.path("InstanceType").asText(null);
+            keyName = data.path("KeyName").asText(null);
+            // CFN carries UserData already base64-encoded.
+            encodedUserData = data.path("UserData").asText(null);
+            JsonNode profile = data.path("IamInstanceProfile");
+            iamInstanceProfileArn = profile.path("Arn").asText(profile.path("Name").asText(null));
+            if (data.has("SecurityGroupIds")) {
+                securityGroupIds = new ArrayList<>();
+                for (JsonNode sg : data.get("SecurityGroupIds")) {
+                    securityGroupIds.add(sg.asText());
+                }
+            }
+        }
+        var lt = ec2Service.createLaunchTemplate(region, name, imageId, instanceType, keyName,
+                securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null);
+        r.setPhysicalId(lt.getLaunchTemplateId());
+        r.getAttributes().put("LaunchTemplateId", lt.getLaunchTemplateId());
+        r.getAttributes().put("LatestVersionNumber", lt.getLatestVersionNumber());
+        r.getAttributes().put("DefaultVersionNumber", lt.getDefaultVersionNumber());
     }
 
     private void provisionRouteTable(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
@@ -893,10 +955,34 @@ public class CloudFormationResourceProvisioner {
                                       String region) {
         String imageId = resolveOptional(props, "ImageId", engine);
         String instanceType = resolveOptional(props, "InstanceType", engine);
+        String keyName = resolveOptional(props, "KeyName", engine);
+
+        // An instance may reference a LaunchTemplate for its config; fields the
+        // properties don't set resolve from the template's data, as on AWS.
+        if (props != null && props.has("LaunchTemplate")) {
+            JsonNode ltRef = engine.resolveNode(props.get("LaunchTemplate"));
+            try {
+                var ltData = ec2Service.resolveLaunchTemplateData(region,
+                        ltRef.path("LaunchTemplateId").asText(null),
+                        ltRef.path("LaunchTemplateName").asText(null),
+                        ltRef.path("Version").asText(null));
+                if (imageId == null || imageId.isBlank()) {
+                    imageId = ltData.getImageId();
+                }
+                if (instanceType == null || instanceType.isBlank()) {
+                    instanceType = ltData.getInstanceType();
+                }
+                if (keyName == null || keyName.isBlank()) {
+                    keyName = ltData.getKeyName();
+                }
+            } catch (Exception e) {
+                LOG.debugv("Could not resolve launch template for instance {0}: {1}",
+                        r.getLogicalId(), e.getMessage());
+            }
+        }
         if (instanceType == null || instanceType.isBlank()) {
             instanceType = "t3.micro";
         }
-        String keyName = resolveOptional(props, "KeyName", engine);
         String subnetId = resolveOptional(props, "SubnetId", engine);
         String userData = resolveOptional(props, "UserData", engine);
         String iamInstanceProfile = resolveOptional(props, "IamInstanceProfile", engine);
@@ -1887,6 +1973,22 @@ public class CloudFormationResourceProvisioner {
                     iamService.attachRolePolicy(roleName, engine.resolve(policyArn));
                 } catch (Exception ignored) {
                 }
+            }
+        }
+
+        // Create inline policies if specified. Failures propagate: silently
+        // dropping a policy while reporting CREATE_COMPLETE is the bug (#1952).
+        if (props != null && props.has("Policies")) {
+            for (JsonNode policy : props.get("Policies")) {
+                String policyName = resolveOptional(policy, "PolicyName", engine);
+                if (policyName == null || policyName.isBlank()) {
+                    policyName = generatePhysicalName(stackName, r.getLogicalId() + "Policy", 128, false);
+                }
+                JsonNode document = policy.get("PolicyDocument");
+                if (document == null || document.isNull()) {
+                    continue;
+                }
+                iamService.putRolePolicy(roleName, policyName, engine.resolveNode(document).toString());
             }
         }
     }
@@ -3810,6 +3912,17 @@ public class CloudFormationResourceProvisioner {
                                     CloudFormationTemplateEngine engine, String defaultValue) {
         String value = resolveOptional(props, name, engine);
         return (value != null && !value.isBlank()) ? value : defaultValue;
+    }
+
+    private void detachVpcGatewayAttachmentSafe(String physicalId, String region) {
+        try {
+            String[] parts = physicalId.split("\\|", 2);
+            if (parts.length == 2 && parts[1].startsWith("igw-")) {
+                ec2Service.detachInternetGateway(region, parts[1], parts[0]);
+            }
+        } catch (Exception e) {
+            LOG.debugv("Could not detach VPC gateway attachment {0}: {1}", physicalId, e.getMessage());
+        }
     }
 
     private void deleteRoleSafe(String roleName) {

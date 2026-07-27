@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.*;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -92,23 +93,11 @@ class DataLakeTest {
 
         String queryId = startResp.queryExecutionId();
 
-        // Wait for query
-        int attempts = 0;
-        QueryExecutionStatus status = null;
-        while (attempts < 30) {
-            GetQueryExecutionResponse getResp = athena.getQueryExecution(GetQueryExecutionRequest.builder()
-                    .queryExecutionId(queryId)
-                    .build());
-            status = getResp.queryExecution().status();
-            if (status.state() == QueryExecutionState.SUCCEEDED) break;
-            if (status.state() == QueryExecutionState.FAILED) {
-                Assertions.fail("Query failed: " + status.stateChangeReason());
-            }
-            Thread.sleep(1000);
-            attempts++;
-        }
-
-        assertThat(status.state()).isEqualTo(QueryExecutionState.SUCCEEDED);
+        QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                athena, queryId, Duration.ofSeconds(60));
+        assertThat(status.state())
+                .as("Athena query did not succeed: %s", status.stateChangeReason())
+                .isEqualTo(QueryExecutionState.SUCCEEDED);
 
         GetQueryResultsResponse results = athena.getQueryResults(GetQueryResultsRequest.builder()
                 .queryExecutionId(queryId)
