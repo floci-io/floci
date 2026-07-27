@@ -30,7 +30,8 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget; \
     rm -rf /var/lib/apt/lists/*; \
     pip3 install --no-cache-dir --break-system-packages awscli boto3; \
-    mv /usr/local/bin/aws /usr/bin/aws.real; \
+    aws_bin="$(command -v aws)"; \
+    mv "$aws_bin" /usr/bin/aws.real; \
     printf '#!/bin/sh\nexec /usr/bin/aws.real --endpoint-url=http://localhost:4566 "$@"\n' > /usr/bin/aws; \
     chmod +x /usr/bin/aws; \
     useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci; \
