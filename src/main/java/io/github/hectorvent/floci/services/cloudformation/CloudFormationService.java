@@ -605,6 +605,11 @@ public class CloudFormationService {
                 LOG.errorv("Stack {0} rollback failed: {1}", stack.getStackName(), reason);
             }
         } else {
+            if ("true".equals(failedResource.getAttributes().remove(
+                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))) {
+                failedResource.setStatus("CREATE_COMPLETE");
+                failedResource.setStatusReason(null);
+            }
             stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
             stack.setLastUpdatedTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),

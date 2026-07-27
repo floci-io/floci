@@ -23,6 +23,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -279,6 +280,126 @@ class CloudFormationIamAttachmentProvisionerTest {
         verify(iamService).deleteRolePolicy("retained-role", previousPolicyName);
         verify(iamService).deleteUserPolicy("retained-user", previousPolicyName);
         verify(iamService).deleteGroupPolicy("retained-group", previousPolicyName);
+    }
+
+    @Test
+    void inlinePolicyUpdateFailurePreservesPreviousTargetsAndRemovesNewAttachments() {
+        String policyName = "test-inline-policy";
+        doThrow(new AwsException("NoSuchEntity", "missing user", 404))
+                .when(iamService).putUserPolicy("missing-user", policyName, policyDocument());
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyName": "%s",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["new-role"],
+                  "Users": ["missing-user"]
+                }
+                """.formatted(policyName), policyName, Map.of(
+                        "InlineRoleTargets", "old-role",
+                        "InlineUserTargets", "old-user",
+                        "InlineGroupTargets", "old-group"));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals(policyName, result.getPhysicalId());
+        assertEquals("old-role", result.getAttributes().get("InlineRoleTargets"));
+        assertEquals("old-user", result.getAttributes().get("InlineUserTargets"));
+        assertEquals("old-group", result.getAttributes().get("InlineGroupTargets"));
+        assertEquals("true", result.getAttributes().get(
+                CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR));
+        verify(iamService).deleteRolePolicy("new-role", policyName);
+        verify(iamService, never()).deleteRolePolicy("old-role", policyName);
+    }
+
+    @Test
+    void inlinePolicyNameChangeFailureRemovesNewNameAndPreservesOldMetadata() {
+        String previousPolicyName = "previous-inline-policy";
+        String currentPolicyName = "current-inline-policy";
+        doThrow(new AwsException("NoSuchEntity", "missing user", 404))
+                .when(iamService).putUserPolicy("missing-user", currentPolicyName, policyDocument());
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyName": "%s",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["retained-role"],
+                  "Users": ["missing-user"]
+                }
+                """.formatted(currentPolicyName), previousPolicyName, Map.of(
+                        "InlineRoleTargets", "retained-role",
+                        "InlineUserTargets", "",
+                        "InlineGroupTargets", ""));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals(previousPolicyName, result.getPhysicalId());
+        assertEquals("retained-role", result.getAttributes().get("InlineRoleTargets"));
+        verify(iamService).deleteRolePolicy("retained-role", currentPolicyName);
+        verify(iamService, never()).deleteRolePolicy("retained-role", previousPolicyName);
+    }
+
+    @Test
+    void generatedInlinePolicyNameRemainsStableOnUpdate() {
+        String policyName = "generated-inline-policy";
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["retained-role"]
+                }
+                """, policyName, Map.of("InlineRoleTargets", "retained-role"));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        assertEquals(policyName, result.getPhysicalId());
+        verify(iamService).putRolePolicy("retained-role", policyName, policyDocument());
+    }
+
+    @Test
+    void inlinePolicyUpdateTracksFailedCleanupForStackDeletion() {
+        String policyName = "test-inline-policy";
+        doThrow(new AwsException("NoSuchEntity", "missing user", 404))
+                .when(iamService).putUserPolicy("missing-user", policyName, policyDocument());
+        doThrow(new AwsException("AccessDenied", "cleanup denied", 403))
+                .doNothing()
+                .when(iamService).deleteRolePolicy("new-role", policyName);
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyName": "%s",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["new-role"],
+                  "Users": ["missing-user"]
+                }
+                """.formatted(policyName), policyName,
+                Map.of("InlineRoleTargets", "old-role"));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals("old-role", result.getAttributes().get("InlineRoleTargets"));
+
+        provisioner.delete(result, "us-east-1");
+
+        verify(iamService, times(2)).deleteRolePolicy("new-role", policyName);
+        verify(iamService).deleteRolePolicy("old-role", policyName);
+    }
+
+    @Test
+    void inlinePolicyRemovalFailureDoesNotCommitTheNewTargetLedger() {
+        String policyName = "test-inline-policy";
+        doThrow(new AwsException("AccessDenied", "cannot remove old role", 403))
+                .when(iamService).deleteRolePolicy("old-role", policyName);
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyName": "%s",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["new-role"]
+                }
+                """.formatted(policyName), policyName,
+                Map.of("InlineRoleTargets", "old-role"));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals("old-role", result.getAttributes().get("InlineRoleTargets"));
+        verify(iamService).deleteRolePolicy("old-role", policyName);
+        verify(iamService).deleteRolePolicy("new-role", policyName);
     }
 
     @Test

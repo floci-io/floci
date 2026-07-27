@@ -111,6 +111,11 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
     static final String ROLLBACK_OWNED_ATTR = "__FlociRollbackOwned";
+    static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
+    private static final String INLINE_CLEANUP_POLICY_NAME_ATTR = "__FlociInlineCleanupPolicyName";
+    private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
+    private static final String INLINE_CLEANUP_USER_TARGETS_ATTR = "__FlociInlineCleanupUserTargets";
+    private static final String INLINE_CLEANUP_GROUP_TARGETS_ATTR = "__FlociInlineCleanupGroupTargets";
     private static final String LAMBDA_NAME_MODE_EXPLICIT = "explicit";
     private static final String LAMBDA_NAME_MODE_GENERATED = "generated";
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
@@ -1974,59 +1979,150 @@ public class CloudFormationResourceProvisioner {
         String previousGroupTargets = r.getAttributes().get("InlineGroupTargets");
         String policyName = resolveOptional(props, "PolicyName", engine);
         if (policyName == null || policyName.isBlank()) {
-            policyName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+            policyName = previousPolicyName != null && !previousPolicyName.isBlank()
+                    ? previousPolicyName
+                    : generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
         String document = props != null && props.has("PolicyDocument")
                 ? props.get("PolicyDocument").toString()
                 : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
 
-        r.setPhysicalId(policyName);
-
-        // Embed the inline policy into each named principal, remembering the targets so the resource
-        // delete can detach cleanly (the delete path only has the physical id + stashed attributes).
         final String name = policyName;
         final String doc = document;
-        putInlinePolicy(r, props, "Roles", "InlineRoleTargets", engine,
-                (principal) -> iamService.putRolePolicy(principal, name, doc));
-        putInlinePolicy(r, props, "Users", "InlineUserTargets", engine,
-                (principal) -> iamService.putUserPolicy(principal, name, doc));
-        putInlinePolicy(r, props, "Groups", "InlineGroupTargets", engine,
-                (principal) -> iamService.putGroupPolicy(principal, name, doc));
+        List<String> roleTargets = new ArrayList<>();
+        List<String> userTargets = new ArrayList<>();
+        List<String> groupTargets = new ArrayList<>();
+        try {
+            cleanupPendingInlinePolicies(r);
+            putInlinePolicy(props, "Roles", engine, roleTargets,
+                    principal -> iamService.putRolePolicy(principal, name, doc));
+            putInlinePolicy(props, "Users", engine, userTargets,
+                    principal -> iamService.putUserPolicy(principal, name, doc));
+            putInlinePolicy(props, "Groups", engine, groupTargets,
+                    principal -> iamService.putGroupPolicy(principal, name, doc));
 
-        deleteRemovedInlinePolicies(previousRoleTargets, r.getAttributes().get("InlineRoleTargets"),
-                previousPolicyName, policyName,
-                principal -> iamService.deleteRolePolicy(principal, previousPolicyName));
-        deleteRemovedInlinePolicies(previousUserTargets, r.getAttributes().get("InlineUserTargets"),
-                previousPolicyName, policyName,
-                principal -> iamService.deleteUserPolicy(principal, previousPolicyName));
-        deleteRemovedInlinePolicies(previousGroupTargets, r.getAttributes().get("InlineGroupTargets"),
-                previousPolicyName, policyName,
-                principal -> iamService.deleteGroupPolicy(principal, previousPolicyName));
+            deleteRemovedInlinePolicies(previousRoleTargets, roleTargets,
+                    previousPolicyName, policyName,
+                    principal -> iamService.deleteRolePolicy(principal, previousPolicyName));
+            deleteRemovedInlinePolicies(previousUserTargets, userTargets,
+                    previousPolicyName, policyName,
+                    principal -> iamService.deleteUserPolicy(principal, previousPolicyName));
+            deleteRemovedInlinePolicies(previousGroupTargets, groupTargets,
+                    previousPolicyName, policyName,
+                    principal -> iamService.deleteGroupPolicy(principal, previousPolicyName));
+        } catch (RuntimeException failure) {
+            if (previousPolicyName == null) {
+                r.setPhysicalId(policyName);
+                recordInlinePolicyTargets(r, roleTargets, userTargets, groupTargets);
+            } else {
+                rollbackInlinePolicyUpdate(r, failure, previousPolicyName, policyName,
+                        previousRoleTargets, previousUserTargets, previousGroupTargets,
+                        roleTargets, userTargets, groupTargets);
+            }
+            throw failure;
+        }
+
+        r.setPhysicalId(policyName);
+        recordInlinePolicyTargets(r, roleTargets, userTargets, groupTargets);
     }
 
     /**
-     * Applies {@code op} to each principal name listed under {@code propName}, recording each
-     * successful target immediately so a later failure in the same list can be rolled back. A
-     * newline is used because IAM role/user/group names may contain commas ({@code [\w+=,.@-]+}) but
-     * never newlines, so it is an unambiguous separator.
+     * Applies {@code op} to each principal name listed under {@code propName}. Each successful target
+     * is appended immediately so the caller can either commit the complete target set or roll back a
+     * partially applied attempt.
      */
-    private void putInlinePolicy(StackResource resource, JsonNode props, String propName,
-                                 String targetAttribute, CloudFormationTemplateEngine engine,
+    private void putInlinePolicy(JsonNode props, String propName, CloudFormationTemplateEngine engine,
+                                 List<String> successfulTargets,
                                  java.util.function.Consumer<String> op) {
-        resource.getAttributes().put(targetAttribute, "");
         if (props == null || !props.has(propName)) {
             return;
         }
-        List<String> names = new ArrayList<>();
         for (JsonNode entry : props.get(propName)) {
             String name = engine.resolve(entry);
             if (name != null && !name.isBlank()) {
                 op.accept(name);
-                names.add(name);
-                resource.getAttributes().put(targetAttribute, String.join("\n", names));
-                resource.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+                successfulTargets.add(name);
             }
         }
+    }
+
+    private void recordInlinePolicyTargets(StackResource resource,
+                                           List<String> roleTargets,
+                                           List<String> userTargets,
+                                           List<String> groupTargets) {
+        // Newlines are unambiguous because IAM principal names allow commas but never newlines.
+        resource.getAttributes().put("InlineRoleTargets", String.join("\n", roleTargets));
+        resource.getAttributes().put("InlineUserTargets", String.join("\n", userTargets));
+        resource.getAttributes().put("InlineGroupTargets", String.join("\n", groupTargets));
+        if (!roleTargets.isEmpty() || !userTargets.isEmpty() || !groupTargets.isEmpty()) {
+            resource.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+        }
+    }
+
+    private void rollbackInlinePolicyUpdate(
+            StackResource resource,
+            RuntimeException failure,
+            String previousPolicyName,
+            String currentPolicyName,
+            String previousRoleTargets,
+            String previousUserTargets,
+            String previousGroupTargets,
+            List<String> appliedRoleTargets,
+            List<String> appliedUserTargets,
+            List<String> appliedGroupTargets) {
+        List<String> pendingRoles = rollbackAppliedInlinePolicies(
+                failure, previousRoleTargets, appliedRoleTargets, previousPolicyName, currentPolicyName,
+                principal -> iamService.deleteRolePolicy(principal, currentPolicyName));
+        List<String> pendingUsers = rollbackAppliedInlinePolicies(
+                failure, previousUserTargets, appliedUserTargets, previousPolicyName, currentPolicyName,
+                principal -> iamService.deleteUserPolicy(principal, currentPolicyName));
+        List<String> pendingGroups = rollbackAppliedInlinePolicies(
+                failure, previousGroupTargets, appliedGroupTargets, previousPolicyName, currentPolicyName,
+                principal -> iamService.deleteGroupPolicy(principal, currentPolicyName));
+        recordPendingInlineCleanup(resource, currentPolicyName, pendingRoles, pendingUsers, pendingGroups);
+        resource.getAttributes().put(UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+    }
+
+    private List<String> rollbackAppliedInlinePolicies(
+            RuntimeException failure,
+            String previousTargets,
+            List<String> appliedTargets,
+            String previousPolicyName,
+            String currentPolicyName,
+            java.util.function.Consumer<String> cleanup) {
+        Set<String> previous = inlineTargetSet(previousTargets);
+        List<String> rollbackTargets = new ArrayList<>();
+        for (String target : new LinkedHashSet<>(appliedTargets)) {
+            if (!previousPolicyName.equals(currentPolicyName) || !previous.contains(target)) {
+                rollbackTargets.add(target);
+            }
+        }
+        Collections.reverse(rollbackTargets);
+
+        List<String> pendingTargets = new ArrayList<>();
+        for (String target : rollbackTargets) {
+            String description = "delete inline policy " + currentPolicyName + " from " + target;
+            if (!attemptIamCleanup(failure, description, () -> detachInline(target, cleanup))) {
+                pendingTargets.add(target);
+            }
+        }
+        Collections.reverse(pendingTargets);
+        return pendingTargets;
+    }
+
+    private void recordPendingInlineCleanup(
+            StackResource resource,
+            String policyName,
+            List<String> roleTargets,
+            List<String> userTargets,
+            List<String> groupTargets) {
+        if (roleTargets.isEmpty() && userTargets.isEmpty() && groupTargets.isEmpty()) {
+            return;
+        }
+        resource.getAttributes().put(INLINE_CLEANUP_POLICY_NAME_ATTR, policyName);
+        resource.getAttributes().put(INLINE_CLEANUP_ROLE_TARGETS_ATTR, String.join("\n", roleTargets));
+        resource.getAttributes().put(INLINE_CLEANUP_USER_TARGETS_ATTR, String.join("\n", userTargets));
+        resource.getAttributes().put(INLINE_CLEANUP_GROUP_TARGETS_ATTR, String.join("\n", groupTargets));
     }
 
     /**
@@ -4044,6 +4140,7 @@ public class CloudFormationResourceProvisioner {
 
     /** Removes an {@code AWS::IAM::Policy} inline policy from each principal it was embedded in. */
     private void deleteInlinePolicySafe(StackResource resource) {
+        cleanupPendingInlinePolicies(resource);
         String policyName = resource.getPhysicalId();
         detachInline(resource.getAttributes().get("InlineRoleTargets"),
                 (name) -> iamService.deleteRolePolicy(name, policyName));
@@ -4073,20 +4170,42 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    private void deleteRemovedInlinePolicies(String previousTargets, String currentTargets,
+    private void deleteRemovedInlinePolicies(String previousTargets, List<String> currentTargets,
                                              String previousPolicyName, String currentPolicyName,
                                              java.util.function.Consumer<String> op) {
         if (previousPolicyName == null) {
             return;
         }
-        Set<String> retainedTargets = currentTargets == null || currentTargets.isBlank()
-                ? Set.of()
-                : new HashSet<>(Arrays.asList(currentTargets.split("\n")));
+        Set<String> retainedTargets = new HashSet<>(currentTargets);
         detachInline(previousTargets, name -> {
             if (!previousPolicyName.equals(currentPolicyName) || !retainedTargets.contains(name)) {
                 op.accept(name);
             }
         });
+    }
+
+    private Set<String> inlineTargetSet(String targets) {
+        if (targets == null || targets.isBlank()) {
+            return Set.of();
+        }
+        return new HashSet<>(Arrays.asList(targets.split("\n")));
+    }
+
+    private void cleanupPendingInlinePolicies(StackResource resource) {
+        String policyName = resource.getAttributes().get(INLINE_CLEANUP_POLICY_NAME_ATTR);
+        if (policyName == null || policyName.isBlank()) {
+            return;
+        }
+        detachInline(resource.getAttributes().get(INLINE_CLEANUP_ROLE_TARGETS_ATTR),
+                principal -> iamService.deleteRolePolicy(principal, policyName));
+        detachInline(resource.getAttributes().get(INLINE_CLEANUP_USER_TARGETS_ATTR),
+                principal -> iamService.deleteUserPolicy(principal, policyName));
+        detachInline(resource.getAttributes().get(INLINE_CLEANUP_GROUP_TARGETS_ATTR),
+                principal -> iamService.deleteGroupPolicy(principal, policyName));
+        resource.getAttributes().remove(INLINE_CLEANUP_POLICY_NAME_ATTR);
+        resource.getAttributes().remove(INLINE_CLEANUP_ROLE_TARGETS_ATTR);
+        resource.getAttributes().remove(INLINE_CLEANUP_USER_TARGETS_ATTR);
+        resource.getAttributes().remove(INLINE_CLEANUP_GROUP_TARGETS_ATTR);
     }
 
     private void deleteSecretSafe(String secretId, String region) {

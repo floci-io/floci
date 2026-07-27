@@ -85,6 +85,28 @@ class CloudFormationIamInlinePolicyIntegrationTest {
                 """.formatted(policyName, action, roleName);
     }
 
+    private static String inlinePolicyForExistingRoleAndUser(
+            String policyName, String roleName, String userName, String action) {
+        return """
+                {
+                  "Resources": {
+                    "DefaultPolicy": {
+                      "Type": "AWS::IAM::Policy",
+                      "Properties": {
+                        "PolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "%s", "Resource": "*"}]
+                        },
+                        "Roles": ["%s"],
+                        "Users": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, action, roleName, userName);
+    }
+
     private static void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -200,6 +222,59 @@ class CloudFormationIamInlinePolicyIntegrationTest {
             .formParam("RoleName", newRole)
             .formParam("PolicyName", policyName)
         .when().post("/").then().statusCode(200).body(containsString("s3:PutObject"));
+    }
+
+    @Test
+    void failedUpdatePreservesPriorInlinePolicyForStackDeletion() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-iam-inline-failed-update-" + suffix;
+        String policyName = "inline-failed-update-policy-" + suffix;
+        String oldRole = "inline-failed-update-old-" + suffix;
+        String newRole = "inline-failed-update-new-" + suffix;
+        String missingUser = "inline-failed-update-missing-" + suffix;
+
+        for (String roleName : new String[] {oldRole, newRole}) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "CreateRole")
+                .formParam("RoleName", roleName)
+                .formParam("AssumeRolePolicyDocument",
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+            .when().post("/").then().statusCode(200);
+        }
+
+        createStack(stackName, inlinePolicyForExistingRole(policyName, oldRole, "s3:GetObject"));
+        assertStackComplete(stackName);
+
+        updateStack(stackName, inlinePolicyForExistingRoleAndUser(
+                policyName, newRole, missingUser, "s3:PutObject"));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", oldRole)
+            .formParam("PolicyName", policyName)
+        .when().post("/").then().statusCode(200).body(containsString("s3:GetObject"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", newRole)
+            .formParam("PolicyName", policyName)
+        .when().post("/").then().statusCode(404).body(containsString("NoSuchEntity"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200);
+
+        awaitInlinePolicyGone(oldRole, policyName);
     }
 
     @Test
