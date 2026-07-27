@@ -1322,6 +1322,22 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(52)
+    void describeVpcEndpointServicesListsInterfaceServicesWithAzs() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("com.amazonaws.us-east-1.ecr.api"))
+            .body(containsString("com.amazonaws.us-east-1.s3"))
+            .body(containsString("<serviceType>Interface</serviceType>"))
+            .body(containsString("us-east-1a"));
+    }
+
+    @Test
+    @Order(52)
     void describeInternetGateways() {
         given()
             .formParam("Action", "DescribeInternetGateways")
