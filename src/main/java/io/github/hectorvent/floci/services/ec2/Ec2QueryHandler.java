@@ -845,19 +845,24 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("serviceNameSet");
         List<String> fullNames = new ArrayList<>();
-        // S3 has both a Gateway and an Interface offering; keep it in the name set.
-        for (String name : INTERFACE_ENDPOINT_SERVICES) {
-            fullNames.add("com.amazonaws." + region + "." + name);
-        }
-        fullNames.add("com.amazonaws." + region + ".s3");
-        for (String full : fullNames) {
-            if (requested.isEmpty() || requested.contains(full)) {
-                xml.elem("item", full);
+        // An explicit ServiceName filter wins: the emulator supports any
+        // interface service in every AZ, so echo exactly what was asked. CDK's
+        // InterfaceVpcEndpoint queries a specific (often custom) service name
+        // and fails if the response omits it or lists no AZs.
+        if (!requested.isEmpty()) {
+            fullNames.addAll(requested);
+        } else {
+            // S3 has both a Gateway and an Interface offering; keep it in the set.
+            for (String name : INTERFACE_ENDPOINT_SERVICES) {
+                fullNames.add("com.amazonaws." + region + "." + name);
             }
+            fullNames.add("com.amazonaws." + region + ".s3");
+        }
+        for (String full : fullNames) {
+            xml.elem("item", full);
         }
         xml.end("serviceNameSet").start("serviceDetailSet");
         for (String full : fullNames) {
-            if (!requested.isEmpty() && !requested.contains(full)) continue;
             boolean s3 = full.endsWith(".s3");
             xml.start("item")
                     .elem("serviceName", full)

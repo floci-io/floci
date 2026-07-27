@@ -1322,6 +1322,21 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(52)
+    void describeVpcEndpointServicesEchoesAnExplicitServiceNameWithAzs() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("ServiceName.1", "com.amazonaws.us-east-1.custom-iot-data")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("custom-iot-data"))
+            .body(containsString("us-east-1a"));
+    }
+
+    @Test
+    @Order(52)
     void describeVpcEndpointServicesListsInterfaceServicesWithAzs() {
         given()
             .formParam("Action", "DescribeVpcEndpointServices")
