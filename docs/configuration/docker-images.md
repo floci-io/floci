@@ -1,6 +1,12 @@
 # Docker Images
 
-Floci publishes images to [Docker Hub (`floci/floci`)](https://hub.docker.com/r/floci/floci).
+Floci publishes images to multiple registries.
+
+| Registry | Image | Channels |
+|---|---|---|
+| [Docker Hub](https://hub.docker.com/r/floci/floci) | `floci/floci` | Release + nightly |
+| [GitHub Container Registry](https://github.com/floci-io/floci/pkgs/container/floci) | `ghcr.io/floci-io/floci` | Release + nightly |
+| [ECR Public Gallery](https://gallery.ecr.aws/floci/floci) | `public.ecr.aws/floci/floci` | Nightly |
 
 Every image tag combines two independent choices: **what's inside** (variant) and **how stable it is** (channel).
 

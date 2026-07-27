@@ -19,6 +19,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  packages: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -148,6 +149,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.2.0
         with:
@@ -173,6 +181,8 @@ jobs:
             floci/floci:nightly-${{ needs.prepare.outputs.version }}
             public.ecr.aws/floci/floci:nightly
             public.ecr.aws/floci/floci:nightly-${{ needs.prepare.outputs.version }}
+            ghcr.io/floci-io/floci:nightly
+            ghcr.io/floci-io/floci:nightly-${{ needs.prepare.outputs.version }}
           labels: |
             org.opencontainers.image.version=nightly-${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -197,6 +207,8 @@ jobs:
             floci/floci:nightly-${{ needs.prepare.outputs.version }}-compat
             public.ecr.aws/floci/floci:nightly-compat
             public.ecr.aws/floci/floci:nightly-${{ needs.prepare.outputs.version }}-compat
+            ghcr.io/floci-io/floci:nightly-compat
+            ghcr.io/floci-io/floci:nightly-${{ needs.prepare.outputs.version }}-compat
           build-args: |
             VERSION=nightly-${{ needs.prepare.outputs.version }}
           labels: |
