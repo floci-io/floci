@@ -24,16 +24,16 @@ jobs:
       # single newline in a comment as a hard line break.
       - uses: actions/first-interaction@v3.1.0
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
 
-          issue-message: |
+          issue_message: |
             👋 Thanks for opening your first issue in Floci!
 
             A maintainer will triage this and add the right service label. If you included a minimal reproduction and the Floci version, that is everything we need — no action required from you right now.
 
             Come say hi in [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) if you want to talk it through with maintainers and other contributors. Questions about AWS behaviour, design tradeoffs, and rough proposals are all welcome there.
 
-          pr-message: |
+          pr_message: |
             🎉 Thanks for your first pull request to Floci!
 
             **Your CI checks need a maintainer to approve them before they run.** That is GitHub's standard gate on first-time contributors, not a problem with your PR — so if the checks look like they are doing nothing, that is why. Once a maintainer approves, CI and the compatibility suite start automatically. Nothing is needed from you in the meantime.
