@@ -178,11 +178,14 @@ public class SageMakerEndpointManager implements ContainerTeardown {
         try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
             if (key.endsWith(".tar.gz") || key.endsWith(".tgz")) {
                 try (TarArchiveInputStream in = new TarArchiveInputStream(new GzipCompressorInputStream(new ByteArrayInputStream(data)))) {
-                    TarArchiveEntry e;
-                    while ((e = in.getNextEntry()) != null) {
-                        if (!in.canReadEntryData(e) || e.isDirectory()) continue;
-                        addFile(tar, "opt/ml/model/" + e.getName(), in.readAllBytes());
-                    }
+TarArchiveEntry e;
+while ((e = in.getNextEntry()) != null) {
+    if (!in.canReadEntryData(e) || e.isDirectory()) continue;
+    String entryName = e.getName();
+    java.nio.file.Path normalized = java.nio.file.Path.of(entryName).normalize();
+    if (normalized.isAbsolute() || normalized.startsWith("..")) continue;
+    addFile(tar, "opt/ml/model/" + normalized.toString(), in.readAllBytes());
+}
                 }
             } else {
                 addFile(tar, "opt/ml/model/" + key.substring(key.lastIndexOf('/') + 1), data);
