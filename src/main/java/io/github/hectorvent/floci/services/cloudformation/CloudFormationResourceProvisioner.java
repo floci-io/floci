@@ -2024,6 +2024,22 @@ public class CloudFormationResourceProvisioner {
             }
             throw failure;
         }
+
+        // Create inline policies if specified. Failures propagate: silently
+        // dropping a policy while reporting CREATE_COMPLETE is the bug (#1952).
+        if (props != null && props.has("Policies")) {
+            for (JsonNode policy : props.get("Policies")) {
+                String policyName = resolveOptional(policy, "PolicyName", engine);
+                if (policyName == null || policyName.isBlank()) {
+                    policyName = generatePhysicalName(stackName, r.getLogicalId() + "Policy", 128, false);
+                }
+                JsonNode document = policy.get("PolicyDocument");
+                if (document == null || document.isNull()) {
+                    continue;
+                }
+                iamService.putRolePolicy(roleName, policyName, engine.resolveNode(document).toString());
+            }
+        }
     }
 
     // ── IAM Policy ────────────────────────────────────────────────────────────
