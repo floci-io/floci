@@ -1311,8 +1311,10 @@ public class Ec2QueryHandler {
      * Deterministic id (pattern hash) so repeated lookups resolve identically. */
     private Image synthesizeLookupImage(String namePattern, Map<String, List<String>> filters, List<String> owners) {
         Image img = new Image();
-        String hash = String.format("%08x", namePattern.hashCode() & 0x7fffffffL);
-        img.setImageId("ami-" + hash + hash.substring(0, 9));
+        // 17 hex chars after "ami-", deterministic from the pattern.
+        String hash = String.format("%08x", namePattern.hashCode() & 0x7fffffff);
+        String id17 = (hash + hash + hash).substring(0, 17);
+        img.setImageId("ami-" + id17);
         // Concrete name from the pattern: drop trailing wildcards, keep the stem.
         img.setName(namePattern.replaceAll("[*?].*$", "") + "20260101");
         img.setState("available");
