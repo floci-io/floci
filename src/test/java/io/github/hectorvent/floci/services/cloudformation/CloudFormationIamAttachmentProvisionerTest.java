@@ -399,6 +399,33 @@ class CloudFormationIamAttachmentProvisionerTest {
     }
 
     @Test
+    void legacyMigrationRestoresDetachedRoleWhenPolicyDeletionFails() {
+        String legacyPolicyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/legacy-policy";
+        IamRole oldRole = role("old-role");
+        oldRole.getAttachedPolicyArns().add(legacyPolicyArn);
+        when(iamService.listRoles("/")).thenReturn(List.of(oldRole));
+        doThrow(new AwsException("ServiceFailure", "delete failed", 500))
+                .when(iamService).deletePolicy(legacyPolicyArn);
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["new-role"]
+                }
+                """, legacyPolicyArn, Map.of("Arn", legacyPolicyArn));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals(legacyPolicyArn, result.getPhysicalId());
+        assertEquals(legacyPolicyArn, result.getAttributes().get("Arn"));
+        InOrder rollback = inOrder(iamService);
+        rollback.verify(iamService).putRolePolicy(eq("new-role"), anyString(), eq(policyDocument()));
+        rollback.verify(iamService).detachRolePolicy("old-role", legacyPolicyArn);
+        rollback.verify(iamService).deletePolicy(legacyPolicyArn);
+        rollback.verify(iamService).attachRolePolicy("old-role", legacyPolicyArn);
+        rollback.verify(iamService).deleteRolePolicy(eq("new-role"), anyString());
+    }
+
+    @Test
     void inlinePolicyUpdateTracksFailedCleanupForStackDeletion() {
         String policyName = "test-inline-policy";
         doThrow(new AwsException("NoSuchEntity", "missing user", 404))

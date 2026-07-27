@@ -2003,7 +2003,7 @@ public class CloudFormationResourceProvisioner {
                     principal -> iamService.putGroupPolicy(principal, name, doc));
 
             if (legacyManagedPolicy) {
-                deleteManagedPolicy(r);
+                migrateLegacyManagedPolicy(r);
             } else {
                 deleteRemovedInlinePolicies(previousRoleTargets, roleTargets,
                         previousPolicyName, policyName,
@@ -4116,6 +4116,48 @@ public class CloudFormationResourceProvisioner {
 
     private void deleteManagedPolicy(StackResource resource) {
         String policyArn = resource.getPhysicalId();
+        for (String roleName : managedPolicyRoleTargets(resource)) {
+            try {
+                iamService.detachRolePolicy(roleName, policyArn);
+            } catch (AwsException e) {
+                // Deletion is idempotent: the role or attachment can already be absent on a
+                // retry, but permission/service failures must keep the stack in DELETE_FAILED.
+                if (!"NoSuchEntity".equals(e.getErrorCode())) {
+                    throw e;
+                }
+            }
+        }
+        deletePolicySafe(policyArn);
+    }
+
+    private void migrateLegacyManagedPolicy(StackResource resource) {
+        String policyArn = resource.getPhysicalId();
+        List<String> detachedRoles = new ArrayList<>();
+        try {
+            for (String roleName : managedPolicyRoleTargets(resource)) {
+                try {
+                    iamService.detachRolePolicy(roleName, policyArn);
+                    detachedRoles.add(roleName);
+                } catch (AwsException e) {
+                    if (!"NoSuchEntity".equals(e.getErrorCode())) {
+                        throw e;
+                    }
+                }
+            }
+            deletePolicySafe(policyArn);
+        } catch (RuntimeException failure) {
+            Collections.reverse(detachedRoles);
+            for (String roleName : detachedRoles) {
+                attemptIamCleanup(failure,
+                        "reattach legacy policy " + policyArn + " to role " + roleName,
+                        () -> iamService.attachRolePolicy(roleName, policyArn));
+            }
+            throw failure;
+        }
+    }
+
+    private List<String> managedPolicyRoleTargets(StackResource resource) {
+        String policyArn = resource.getPhysicalId();
         String targets = resource.getAttributes().get("ManagedPolicyRoleTargets");
         if (targets == null) {
             // Stacks persisted before target metadata was introduced still need to be deletable.
@@ -4125,23 +4167,12 @@ public class CloudFormationResourceProvisioner {
                     .map(IamRole::getRoleName)
                     .collect(java.util.stream.Collectors.joining("\n"));
         }
-        if (targets != null && !targets.isBlank()) {
-            for (String roleName : targets.split("\n")) {
-                if (roleName.isBlank()) {
-                    continue;
-                }
-                try {
-                    iamService.detachRolePolicy(roleName, policyArn);
-                } catch (AwsException e) {
-                    // Deletion is idempotent: the role or attachment can already be absent on a
-                    // retry, but permission/service failures must keep the stack in DELETE_FAILED.
-                    if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                        throw e;
-                    }
-                }
-            }
+        if (targets == null || targets.isBlank()) {
+            return List.of();
         }
-        deletePolicySafe(policyArn);
+        return Arrays.stream(targets.split("\n"))
+                .filter(roleName -> !roleName.isBlank())
+                .toList();
     }
 
     /** Removes an {@code AWS::IAM::Policy} inline policy from each principal it was embedded in. */
