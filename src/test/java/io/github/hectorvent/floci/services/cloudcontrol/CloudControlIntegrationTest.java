@@ -95,7 +95,9 @@ class CloudControlIntegrationTest {
 
         assertListed("AWS::S3::Bucket", bucket, "BucketName");
         assertListedWithTag("AWS::EC2::VPC", vpcId, "Name", "cloudcontrol-vpc");
+        assertListed("AWS::EC2::VPC", vpcId, "CidrBlock");
         assertListedWithTag("AWS::EC2::Subnet", subnetId, "Name", "cloudcontrol-subnet");
+        assertListed("AWS::EC2::Subnet", subnetId, "VpcId");
         assertListedWithTag("AWS::EC2::SecurityGroup", groupId, "Name", "cloudcontrol-sg");
         assertListed("AWS::EC2::SecurityGroup", groupId, "GroupName", "application/x-amz-json-1.0");
         assertListed("AWS::IAM::User", "cloudcontrol-user", "UserName");

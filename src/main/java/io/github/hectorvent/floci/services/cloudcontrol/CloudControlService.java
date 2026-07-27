@@ -139,7 +139,7 @@ public class CloudControlService {
             return;
         }
         List<Tag> validTags = tags.stream()
-                .filter(tag -> tag != null && tag.getKey() != null)
+                .filter(tag -> tag != null && tag.getKey() != null && !tag.getKey().isBlank())
                 .toList();
         if (validTags.isEmpty()) {
             return;
