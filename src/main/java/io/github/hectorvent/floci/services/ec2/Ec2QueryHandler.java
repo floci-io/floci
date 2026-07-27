@@ -111,6 +111,11 @@ public class Ec2QueryHandler {
                 case "DeleteInternetGateway" -> handleDeleteInternetGateway(params, region);
                 case "AttachInternetGateway" -> handleAttachInternetGateway(params, region);
                 case "DetachInternetGateway" -> handleDetachInternetGateway(params, region);
+                // VPN Gateways. There is no VPN gateway model; an empty set is
+                // AWS-accurate for an account without VPN gateways and unblocks the
+                // CDK VPC context provider, which always issues this describe.
+                case "DescribeVpnGateways" -> handleDescribeVpnGateways();
+
                 // Route Tables
                 case "CreateRouteTable" -> handleCreateRouteTable(params, region);
                 case "DescribeRouteTables" -> handleDescribeRouteTables(params, region);
@@ -1430,6 +1435,16 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("routeTable").raw(routeTableXml(rt)).end("routeTable")
                 .end("CreateRouteTableResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpnGateways() {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpnGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpnGatewaySet")
+                .end("vpnGatewaySet")
+                .end("DescribeVpnGatewaysResponse");
         return xmlResponse(xml.build());
     }
 
