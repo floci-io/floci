@@ -1797,6 +1797,7 @@ public class CloudFrontController {
     }
 
     private String xmlEmptyOriginGroups() {
+        // Presence-only OriginGroups is intentional for Terraform compatibility; round-tripping groups is deferred.
         return new XmlBuilder()
                 .start(ORIGIN_GROUPS)
                 .elem(QUANTITY, EMPTY_QUANTITY)
