@@ -137,12 +137,11 @@ class SamTransformProcessorTest {
         assertEquals("production", aliasProps.path("Name").asText());
         assertEquals("MyFunc", aliasProps.path("FunctionName").path("Ref").asText());
 
-        // The alias points at the generated version via Fn::GetAtt, which is also what gives the
-        // provisioning order function -> version -> alias.
-        JsonNode versionRef = aliasProps.path("FunctionVersion");
-        assertTrue(versionRef.has("Fn::GetAtt"));
-        assertEquals("MyFuncVersion", versionRef.path("Fn::GetAtt").get(0).asText());
-        assertEquals("Version", versionRef.path("Fn::GetAtt").get(1).asText());
+        // The alias deliberately targets $LATEST rather than the published version real SAM points
+        // at: Floci cannot invoke a published version (#1987 cold-start timeout, #1988 warm-pool
+        // keying), so the faithful form would break the alias-qualified invoke this expansion
+        // exists to enable.
+        assertEquals("$LATEST", aliasProps.path("FunctionVersion").asText());
     }
 
     @Test
