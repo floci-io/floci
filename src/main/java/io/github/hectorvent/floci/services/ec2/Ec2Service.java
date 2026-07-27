@@ -1691,6 +1691,15 @@ public class Ec2Service implements ContainerTeardown {
         return images;
     }
 
+    public Image createImage(String region, String instanceId, String name, String description) {
+        ensureDefaultResources(region);
+        if (instanceId == null || instanceId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
+        }
+        getRequiredInstance(region, instanceId);
+        return registerImage(region, name, description, null, null, null);
+    }
+
     public Image registerImage(String region, String name, String description, String architecture,
                                String rootDeviceName, List<BlockDeviceMapping> blockDeviceMappings) {
         if (name == null || name.isBlank()) {

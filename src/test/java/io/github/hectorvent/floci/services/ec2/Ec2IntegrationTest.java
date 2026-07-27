@@ -249,6 +249,61 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(10)
+    void createImageFromInstanceReturnsDescribableAmi() {
+        String imgInstanceId = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-createimage-src")
+            .formParam("InstanceType", "t3.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        String amiId = given()
+            .formParam("Action", "CreateImage")
+            .formParam("InstanceId", imgInstanceId)
+            .formParam("Name", "created-from-instance")
+            .formParam("Description", "CreateImage test")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("CreateImageResponse.imageId", startsWith("ami-"))
+            .extract().path("CreateImageResponse.imageId");
+
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("ImageId.1", amiId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.name", equalTo("created-from-instance"));
+    }
+
+    @Test
+    @Order(10)
+    void createImageRequiresExistingInstance() {
+        given()
+            .formParam("Action", "CreateImage")
+            .formParam("InstanceId", "i-doesnotexist12345")
+            .formParam("Name", "should-not-exist")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(10)
     void registerImageCreatesDescribableImageWithSnapshotMapping() {
         registeredImageId = given()
             .formParam("Action", "RegisterImage")
