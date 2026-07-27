@@ -689,6 +689,8 @@ class RdsServiceTest {
                 rdsService.listDbClusterParameterGroups("default.not-a-real-family"));
 
         assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBParameterGroupName doesn't refer to an existing DB parameter group.",
+                exception.getMessage());
         assertEquals(404, exception.getHttpStatus());
     }
 
