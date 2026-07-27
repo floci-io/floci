@@ -955,10 +955,34 @@ public class CloudFormationResourceProvisioner {
                                       String region) {
         String imageId = resolveOptional(props, "ImageId", engine);
         String instanceType = resolveOptional(props, "InstanceType", engine);
+        String keyName = resolveOptional(props, "KeyName", engine);
+
+        // An instance may reference a LaunchTemplate for its config; fields the
+        // properties don't set resolve from the template's data, as on AWS.
+        if (props != null && props.has("LaunchTemplate")) {
+            JsonNode ltRef = engine.resolveNode(props.get("LaunchTemplate"));
+            try {
+                var ltData = ec2Service.resolveLaunchTemplateData(region,
+                        ltRef.path("LaunchTemplateId").asText(null),
+                        ltRef.path("LaunchTemplateName").asText(null),
+                        ltRef.path("Version").asText(null));
+                if (imageId == null || imageId.isBlank()) {
+                    imageId = ltData.getImageId();
+                }
+                if (instanceType == null || instanceType.isBlank()) {
+                    instanceType = ltData.getInstanceType();
+                }
+                if (keyName == null || keyName.isBlank()) {
+                    keyName = ltData.getKeyName();
+                }
+            } catch (Exception e) {
+                LOG.debugv("Could not resolve launch template for instance {0}: {1}",
+                        r.getLogicalId(), e.getMessage());
+            }
+        }
         if (instanceType == null || instanceType.isBlank()) {
             instanceType = "t3.micro";
         }
-        String keyName = resolveOptional(props, "KeyName", engine);
         String subnetId = resolveOptional(props, "SubnetId", engine);
         String userData = resolveOptional(props, "UserData", engine);
         String iamInstanceProfile = resolveOptional(props, "IamInstanceProfile", engine);
