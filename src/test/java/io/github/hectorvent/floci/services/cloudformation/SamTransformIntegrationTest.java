@@ -13,8 +13,8 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class SamTransformIntegrationTest {
@@ -110,10 +110,10 @@ class SamTransformIntegrationTest {
                 Properties:
                   FunctionName: sam-alias-func
                   Handler: index.handler
-                  Runtime: nodejs22.x
+                  Runtime: nodejs20.x
                   AutoPublishAlias: production
                   InlineCode: |
-                    exports.handler = async () => ({ statusCode: 200, body: 'ok' });
+                    exports.handler = async () => ({ ok: true });
             """;
 
         given()
@@ -137,13 +137,24 @@ class SamTransformIntegrationTest {
         .then()
             .statusCode(200)
             .body("Name", equalTo("production"))
-            // Resolved through Fn::GetAtt on the generated Version resource, so a published
-            // version number rather than $LATEST proves both halves are wired together. Matched
-            // as "some number" rather than a literal 1: pinning the first version would fail
-            // confusingly if an earlier run leaked the function and its version counter.
-            .body("FunctionVersion", matchesPattern("\\d+"))
-            .body("FunctionVersion", not(equalTo("$LATEST")))
+            // $LATEST rather than the published version real SAM targets — see #1987/#1988 and the
+            // comment in expandAutoPublishAlias. The invoke below is what actually matters.
+            .body("FunctionVersion", equalTo("$LATEST"))
             .body("AliasArn", containsString(":function:sam-alias-func:production"));
+
+        // The behavior the whole expansion exists for: an alias-qualified invoke runs the function.
+        // Asserting only that the alias *record* exists is not enough — an alias pointing at a
+        // published version satisfies that and still times out on invoke (#1987), which is how an
+        // earlier revision of this change shipped a broken alias past its own tests.
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/2015-03-31/functions/sam-alias-func:production/invocations")
+        .then()
+            .statusCode(200)
+            .header("X-Amz-Function-Error", nullValue())
+            .body("ok", equalTo(true));
 
         given()
         .when()

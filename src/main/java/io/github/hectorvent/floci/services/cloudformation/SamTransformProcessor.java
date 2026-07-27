@@ -411,12 +411,14 @@ class SamTransformProcessor {
         ObjectNode aliasProps = objectMapper.createObjectNode();
         aliasProps.set("FunctionName", ref(functionLogicalId));
         aliasProps.set("Name", aliasName.deepCopy());
-        ObjectNode versionGetAtt = objectMapper.createObjectNode();
-        ArrayNode getAttParts = objectMapper.createArrayNode();
-        getAttParts.add(versionId);
-        getAttParts.add("Version");
-        versionGetAtt.set("Fn::GetAtt", getAttParts);
-        aliasProps.set("FunctionVersion", versionGetAtt);
+        // Real SAM points the alias at the published version (Fn::GetAtt <Version>.Version).
+        // Floci cannot invoke a published version: the snapshot carries no code path, so a
+        // version-qualified invoke times out on a cold start (#1987) and silently runs $LATEST's
+        // code when a warm container happens to exist (#1988). Aiming the alias there would break
+        // the alias-qualified invoke this expansion exists to enable, so point it at $LATEST — the
+        // alias resolves and runs the function's code, which is the behavior callers depend on.
+        // Switch to the GetAtt form once #1987 lands.
+        aliasProps.put("FunctionVersion", "$LATEST");
         aliasDef.set("Properties", aliasProps);
         resources.set(aliasId, aliasDef);
     }
