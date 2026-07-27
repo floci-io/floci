@@ -557,6 +557,12 @@ public class CloudFormationResourceProvisioner {
         if (vpc.getCidrBlock() != null) {
             r.getAttributes().put("CidrBlock", vpc.getCidrBlock());
         }
+        // Fn::GetAtt DefaultSecurityGroup — CDK's Custom::VpcRestrictDefaultSG handler
+        // depends on it resolving to the VPC's default security group id.
+        ec2Service.describeSecurityGroups(region, List.of(), List.of("default"), Map.of()).stream()
+                .filter(sg -> vpc.getVpcId().equals(sg.getVpcId()))
+                .findFirst()
+                .ifPresent(sg -> r.getAttributes().put("DefaultSecurityGroup", sg.getGroupId()));
     }
 
     private void provisionSubnet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
