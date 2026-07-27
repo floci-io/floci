@@ -31,7 +31,11 @@ import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
@@ -352,6 +356,10 @@ public class CloudFormationResourceProvisioner {
                 // fake physical id. Topological ordering guarantees parents are provisioned first.
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
+                case "AWS::EC2::SecurityGroupIngress" ->
+                        provisionSecurityGroupRule(resource, properties, engine, region, true);
+                case "AWS::EC2::SecurityGroupEgress" ->
+                        provisionSecurityGroupRule(resource, properties, engine, region, false);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
                 case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
                 case "AWS::EC2::SubnetRouteTableAssociation" ->
@@ -653,6 +661,72 @@ public class CloudFormationResourceProvisioner {
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }
+
+        // Inline rule properties — previously dropped, leaving the group empty.
+        if (props != null && props.has("SecurityGroupIngress")) {
+            for (JsonNode rule : props.get("SecurityGroupIngress")) {
+                ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(),
+                        List.of(cfnIpPermission(rule, engine)));
+            }
+        }
+        if (props != null && props.has("SecurityGroupEgress")) {
+            for (JsonNode rule : props.get("SecurityGroupEgress")) {
+                ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(),
+                        List.of(cfnIpPermission(rule, engine)));
+            }
+        }
+    }
+
+    /** Map a CloudFormation rule object (inline entry or standalone
+     * SecurityGroupIngress/Egress properties) onto the EC2 IpPermission model. */
+    private IpPermission cfnIpPermission(JsonNode rule, CloudFormationTemplateEngine engine) {
+        IpPermission perm = new IpPermission();
+        String protocol = resolveOptional(rule, "IpProtocol", engine);
+        perm.setIpProtocol(protocol != null ? protocol : "-1");
+        if (rule.hasNonNull("FromPort")) perm.setFromPort(rule.get("FromPort").asInt());
+        if (rule.hasNonNull("ToPort")) perm.setToPort(rule.get("ToPort").asInt());
+        String cidr = resolveOptional(rule, "CidrIp", engine);
+        if (cidr != null && !cidr.isBlank()) {
+            IpRange range = new IpRange();
+            range.setCidrIp(cidr);
+            range.setDescription(resolveOptional(rule, "Description", engine));
+            perm.getIpRanges().add(range);
+        }
+        String cidr6 = resolveOptional(rule, "CidrIpv6", engine);
+        if (cidr6 != null && !cidr6.isBlank()) {
+            Ipv6Range range6 = new Ipv6Range();
+            range6.setCidrIpv6(cidr6);
+            perm.getIpv6Ranges().add(range6);
+        }
+        String peerGroup = resolveOptional(rule, "SourceSecurityGroupId", engine);
+        if (peerGroup == null || peerGroup.isBlank()) {
+            peerGroup = resolveOptional(rule, "DestinationSecurityGroupId", engine);
+        }
+        if (peerGroup != null && !peerGroup.isBlank()) {
+            UserIdGroupPair pair = new UserIdGroupPair();
+            pair.setGroupId(peerGroup);
+            perm.getUserIdGroupPairs().add(pair);
+        }
+        return perm;
+    }
+
+    private void provisionSecurityGroupRule(StackResource r, JsonNode props,
+                                            CloudFormationTemplateEngine engine, String region,
+                                            boolean ingress) {
+        String groupId = resolveOptional(props, "GroupId", engine);
+        if (groupId == null || groupId.isBlank()) {
+            groupId = resolveOptional(props, "GroupName", engine);
+        }
+        IpPermission perm = cfnIpPermission(props, engine);
+        var rules = ingress
+                ? ec2Service.authorizeSecurityGroupIngress(region, groupId, List.of(perm))
+                : ec2Service.authorizeSecurityGroupEgress(region, groupId, List.of(perm));
+        // Physical id: the created rule id when the service reports one; rules
+        // are removed with their group, so stack delete needs no revoke here.
+        String physicalId = !rules.isEmpty() && rules.get(0).getSecurityGroupRuleId() != null
+                ? rules.get(0).getSecurityGroupRuleId()
+                : r.getLogicalId();
+        r.setPhysicalId(physicalId);
     }
 
     private void provisionInternetGateway(StackResource r, String region) {
