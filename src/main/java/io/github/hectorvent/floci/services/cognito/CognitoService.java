@@ -91,7 +91,7 @@ public class CognitoService {
                         new TypeReference<Map<String, CognitoGroup>>() {}),
                 storageFactory.create("cognito", "cognito-revoked-tokens.json",
                         new TypeReference<Map<String, RevokedTokenInfo>>() {}),
-                trimTrailingSlash(emulatorConfig.baseUrl()),
+                trimTrailingSlash(emulatorConfig.effectiveBaseUrl()),
                 regionResolver,
                 lambdaService,
                 new VerificationCodeService(storageFactory, clock),
