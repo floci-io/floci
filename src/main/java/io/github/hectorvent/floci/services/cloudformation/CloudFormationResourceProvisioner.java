@@ -1967,6 +1967,10 @@ public class CloudFormationResourceProvisioner {
      */
     private void provisionIamInlinePolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                           String stackName) {
+        String previousPolicyName = r.getPhysicalId();
+        String previousRoleTargets = r.getAttributes().get("InlineRoleTargets");
+        String previousUserTargets = r.getAttributes().get("InlineUserTargets");
+        String previousGroupTargets = r.getAttributes().get("InlineGroupTargets");
         String policyName = resolveOptional(props, "PolicyName", engine);
         if (policyName == null || policyName.isBlank()) {
             policyName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
@@ -1987,6 +1991,16 @@ public class CloudFormationResourceProvisioner {
                 (principal) -> iamService.putUserPolicy(principal, name, doc));
         putInlinePolicy(r, props, "Groups", "InlineGroupTargets", engine,
                 (principal) -> iamService.putGroupPolicy(principal, name, doc));
+
+        deleteRemovedInlinePolicies(previousRoleTargets, r.getAttributes().get("InlineRoleTargets"),
+                previousPolicyName, policyName,
+                principal -> iamService.deleteRolePolicy(principal, previousPolicyName));
+        deleteRemovedInlinePolicies(previousUserTargets, r.getAttributes().get("InlineUserTargets"),
+                previousPolicyName, policyName,
+                principal -> iamService.deleteUserPolicy(principal, previousPolicyName));
+        deleteRemovedInlinePolicies(previousGroupTargets, r.getAttributes().get("InlineGroupTargets"),
+                previousPolicyName, policyName,
+                principal -> iamService.deleteGroupPolicy(principal, previousPolicyName));
     }
 
     /**
@@ -4056,6 +4070,22 @@ public class CloudFormationResourceProvisioner {
                 }
             }
         }
+    }
+
+    private void deleteRemovedInlinePolicies(String previousTargets, String currentTargets,
+                                             String previousPolicyName, String currentPolicyName,
+                                             java.util.function.Consumer<String> op) {
+        if (previousPolicyName == null) {
+            return;
+        }
+        Set<String> retainedTargets = currentTargets == null || currentTargets.isBlank()
+                ? Set.of()
+                : new HashSet<>(Arrays.asList(currentTargets.split("\n")));
+        detachInline(previousTargets, name -> {
+            if (!previousPolicyName.equals(currentPolicyName) || !retainedTargets.contains(name)) {
+                op.accept(name);
+            }
+        });
     }
 
     private void deleteSecretSafe(String secretId, String region) {

@@ -65,6 +65,26 @@ class CloudFormationIamInlinePolicyIntegrationTest {
                 """.formatted(roleName, policyName);
     }
 
+    private static String inlinePolicyForExistingRole(String policyName, String roleName, String action) {
+        return """
+                {
+                  "Resources": {
+                    "DefaultPolicy": {
+                      "Type": "AWS::IAM::Policy",
+                      "Properties": {
+                        "PolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "%s", "Resource": "*"}]
+                        },
+                        "Roles": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, action, roleName);
+    }
+
     private static void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -78,7 +98,24 @@ class CloudFormationIamInlinePolicyIntegrationTest {
             .statusCode(200);
     }
 
+    private static void updateStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     private static void assertStackComplete(String stackName) {
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+    }
+
+    private static void assertStackStatus(String stackName, String status) {
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -88,7 +125,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+            .body(containsString("<StackStatus>" + status + "</StackStatus>"));
     }
 
     @Test
@@ -121,6 +158,48 @@ class CloudFormationIamInlinePolicyIntegrationTest {
                 .body(containsString(sharedPolicyName))
                 .body(containsString("s3:GetObject"));
         }
+    }
+
+    @Test
+    void updateRemovingRoleDetachesInlinePolicy() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-iam-inline-update-" + suffix;
+        String policyName = "inline-update-policy-" + suffix;
+        String oldRole = "inline-update-old-" + suffix;
+        String newRole = "inline-update-new-" + suffix;
+
+        for (String roleName : new String[] {oldRole, newRole}) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "CreateRole")
+                .formParam("RoleName", roleName)
+                .formParam("AssumeRolePolicyDocument",
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+            .when().post("/").then().statusCode(200);
+        }
+
+        createStack(stackName, inlinePolicyForExistingRole(policyName, oldRole, "s3:GetObject"));
+        assertStackComplete(stackName);
+
+        updateStack(stackName, inlinePolicyForExistingRole(policyName, newRole, "s3:PutObject"));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", oldRole)
+            .formParam("PolicyName", policyName)
+        .when().post("/").then().statusCode(404).body(containsString("NoSuchEntity"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetRolePolicy")
+            .formParam("RoleName", newRole)
+            .formParam("PolicyName", policyName)
+        .when().post("/").then().statusCode(200).body(containsString("s3:PutObject"));
     }
 
     @Test
