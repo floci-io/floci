@@ -331,6 +331,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
+                case "AWS::EC2::VPCGatewayAttachment" ->
+                        provisionVpcGatewayAttachment(resource, properties, engine, region);
                 case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
                 case "AWS::EC2::SubnetRouteTableAssociation" ->
                         provisionSubnetRouteTableAssociation(resource, properties, engine, region);
@@ -454,6 +456,7 @@ public class CloudFormationResourceProvisioner {
             case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
             case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
+            case "AWS::EC2::VPCGatewayAttachment" -> detachVpcGatewayAttachmentSafe(physicalId, region);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
             case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
             case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
@@ -594,6 +597,20 @@ public class CloudFormationResourceProvisioner {
         var igw = ec2Service.createInternetGateway(region);
         r.setPhysicalId(igw.getInternetGatewayId());
         r.getAttributes().put("InternetGatewayId", igw.getInternetGatewayId());
+    }
+
+    private void provisionVpcGatewayAttachment(StackResource r, JsonNode props,
+                                               CloudFormationTemplateEngine engine, String region) {
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        String igwId = resolveOptional(props, "InternetGatewayId", engine);
+        if (igwId != null && !igwId.isBlank()) {
+            ec2Service.attachInternetGateway(region, igwId, vpcId);
+            r.setPhysicalId(vpcId + "|" + igwId);
+        } else {
+            // VpnGatewayId variant — record the attachment; there is no VPN gateway model.
+            String vgwId = resolveOptional(props, "VpnGatewayId", engine);
+            r.setPhysicalId(vpcId + "|" + (vgwId == null ? "" : vgwId));
+        }
     }
 
     private void provisionRouteTable(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
@@ -3826,6 +3843,17 @@ public class CloudFormationResourceProvisioner {
                                     CloudFormationTemplateEngine engine, String defaultValue) {
         String value = resolveOptional(props, name, engine);
         return (value != null && !value.isBlank()) ? value : defaultValue;
+    }
+
+    private void detachVpcGatewayAttachmentSafe(String physicalId, String region) {
+        try {
+            String[] parts = physicalId.split("\\|", 2);
+            if (parts.length == 2 && parts[1].startsWith("igw-")) {
+                ec2Service.detachInternetGateway(region, parts[1], parts[0]);
+            }
+        } catch (Exception e) {
+            LOG.debugv("Could not detach VPC gateway attachment {0}: {1}", physicalId, e.getMessage());
+        }
     }
 
     private void deleteRoleSafe(String roleName) {
