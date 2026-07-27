@@ -17,8 +17,11 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -354,6 +357,48 @@ class CloudFormationIamAttachmentProvisionerTest {
     }
 
     @Test
+    void legacyManagedInlinePolicyMigratesDuringUpdate() {
+        String legacyPolicyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/legacy-policy";
+        IamRole oldRole = role("old-role");
+        oldRole.getAttachedPolicyArns().add(legacyPolicyArn);
+        when(iamService.listRoles("/")).thenReturn(List.of(oldRole));
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["new-role"]
+                }
+                """, legacyPolicyArn, Map.of("Arn", legacyPolicyArn));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        assertFalse(result.getPhysicalId().startsWith("arn:"));
+        assertNull(result.getAttributes().get("Arn"));
+        InOrder migration = inOrder(iamService);
+        migration.verify(iamService).putRolePolicy("new-role", result.getPhysicalId(), policyDocument());
+        migration.verify(iamService).detachRolePolicy("old-role", legacyPolicyArn);
+        migration.verify(iamService).deletePolicy(legacyPolicyArn);
+    }
+
+    @Test
+    void failedLegacyMigrationPreservesManagedPolicyForRetry() {
+        String legacyPolicyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/legacy-policy";
+        doThrow(new AwsException("NoSuchEntity", "missing user", 404))
+                .when(iamService).putUserPolicy(eq("missing-user"), anyString(), eq(policyDocument()));
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Users": ["missing-user"]
+                }
+                """, legacyPolicyArn, Map.of("Arn", legacyPolicyArn));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals(legacyPolicyArn, result.getPhysicalId());
+        assertEquals(legacyPolicyArn, result.getAttributes().get("Arn"));
+        verify(iamService, never()).deletePolicy(legacyPolicyArn);
+    }
+
+    @Test
     void inlinePolicyUpdateTracksFailedCleanupForStackDeletion() {
         String policyName = "test-inline-policy";
         doThrow(new AwsException("NoSuchEntity", "missing user", 404))
@@ -431,6 +476,24 @@ class CloudFormationIamAttachmentProvisionerTest {
                 () -> provisioner.delete(resource, "us-east-1"));
 
         assertEquals("AccessDenied", failure.getErrorCode());
+    }
+
+    @Test
+    void legacyManagedInlinePolicyIsDetachedAndDeleted() {
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/legacy-policy";
+        IamRole role = role("legacy-role");
+        role.getAttachedPolicyArns().add(policyArn);
+        when(iamService.listRoles("/")).thenReturn(List.of(role));
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::IAM::Policy");
+        resource.setPhysicalId(policyArn);
+        resource.setAttributes(Map.of("Arn", policyArn));
+
+        provisioner.delete(resource, "us-east-1");
+
+        InOrder deletion = inOrder(iamService);
+        deletion.verify(iamService).detachRolePolicy("legacy-role", policyArn);
+        deletion.verify(iamService).deletePolicy(policyArn);
     }
 
     @Test

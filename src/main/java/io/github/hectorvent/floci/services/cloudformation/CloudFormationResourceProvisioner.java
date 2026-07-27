@@ -1977,9 +1977,10 @@ public class CloudFormationResourceProvisioner {
         String previousRoleTargets = r.getAttributes().get("InlineRoleTargets");
         String previousUserTargets = r.getAttributes().get("InlineUserTargets");
         String previousGroupTargets = r.getAttributes().get("InlineGroupTargets");
+        boolean legacyManagedPolicy = isIamManagedPolicyArn(previousPolicyName);
         String policyName = resolveOptional(props, "PolicyName", engine);
         if (policyName == null || policyName.isBlank()) {
-            policyName = previousPolicyName != null && !previousPolicyName.isBlank()
+            policyName = previousPolicyName != null && !previousPolicyName.isBlank() && !legacyManagedPolicy
                     ? previousPolicyName
                     : generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
@@ -2001,15 +2002,19 @@ public class CloudFormationResourceProvisioner {
             putInlinePolicy(props, "Groups", engine, groupTargets,
                     principal -> iamService.putGroupPolicy(principal, name, doc));
 
-            deleteRemovedInlinePolicies(previousRoleTargets, roleTargets,
-                    previousPolicyName, policyName,
-                    principal -> iamService.deleteRolePolicy(principal, previousPolicyName));
-            deleteRemovedInlinePolicies(previousUserTargets, userTargets,
-                    previousPolicyName, policyName,
-                    principal -> iamService.deleteUserPolicy(principal, previousPolicyName));
-            deleteRemovedInlinePolicies(previousGroupTargets, groupTargets,
-                    previousPolicyName, policyName,
-                    principal -> iamService.deleteGroupPolicy(principal, previousPolicyName));
+            if (legacyManagedPolicy) {
+                deleteManagedPolicy(r);
+            } else {
+                deleteRemovedInlinePolicies(previousRoleTargets, roleTargets,
+                        previousPolicyName, policyName,
+                        principal -> iamService.deleteRolePolicy(principal, previousPolicyName));
+                deleteRemovedInlinePolicies(previousUserTargets, userTargets,
+                        previousPolicyName, policyName,
+                        principal -> iamService.deleteUserPolicy(principal, previousPolicyName));
+                deleteRemovedInlinePolicies(previousGroupTargets, groupTargets,
+                        previousPolicyName, policyName,
+                        principal -> iamService.deleteGroupPolicy(principal, previousPolicyName));
+            }
         } catch (RuntimeException failure) {
             if (previousPolicyName == null) {
                 r.setPhysicalId(policyName);
@@ -2023,6 +2028,7 @@ public class CloudFormationResourceProvisioner {
         }
 
         r.setPhysicalId(policyName);
+        r.getAttributes().remove("Arn");
         recordInlinePolicyTargets(r, roleTargets, userTargets, groupTargets);
     }
 
@@ -4141,6 +4147,12 @@ public class CloudFormationResourceProvisioner {
     /** Removes an {@code AWS::IAM::Policy} inline policy from each principal it was embedded in. */
     private void deleteInlinePolicySafe(StackResource resource) {
         cleanupPendingInlinePolicies(resource);
+        if (isIamManagedPolicyArn(resource.getPhysicalId())) {
+            // Before AWS::IAM::Policy was modelled as an inline policy, Floci persisted it as a
+            // customer-managed policy ARN. Delete that legacy representation during an upgrade.
+            deleteManagedPolicy(resource);
+            return;
+        }
         String policyName = resource.getPhysicalId();
         detachInline(resource.getAttributes().get("InlineRoleTargets"),
                 (name) -> iamService.deleteRolePolicy(name, policyName));
@@ -4148,6 +4160,13 @@ public class CloudFormationResourceProvisioner {
                 (name) -> iamService.deleteUserPolicy(name, policyName));
         detachInline(resource.getAttributes().get("InlineGroupTargets"),
                 (name) -> iamService.deleteGroupPolicy(name, policyName));
+    }
+
+    private boolean isIamManagedPolicyArn(String physicalId) {
+        return physicalId != null
+                && physicalId.startsWith("arn:")
+                && physicalId.contains(":iam::")
+                && physicalId.contains(":policy/");
     }
 
     private void detachInline(String targets, java.util.function.Consumer<String> op) {

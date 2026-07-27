@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **cloudformation:** report failed rollback cleanup as `ROLLBACK_FAILED` and detach removed IAM inline-policy targets on stack updates ([#1800](https://github.com/floci-io/floci/pull/1800))
+- **cloudformation:** report failed rollback cleanup as `ROLLBACK_FAILED`, detach removed IAM inline-policy targets on stack updates, and migrate the legacy managed-policy representation during update or deletion ([#1800](https://github.com/floci-io/floci/pull/1800))
 
 ## [1.5.33] - 2026-07-15
 
