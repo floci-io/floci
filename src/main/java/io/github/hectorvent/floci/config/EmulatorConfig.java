@@ -86,6 +86,19 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean strictClaiming();
+
+        /**
+         * When enabled, a REST request whose SigV4 credential scope names a service
+         * absent from the catalog is rejected with {@code UnknownOperationException}
+         * instead of falling through JAX-RS matching into S3's path-style routes,
+         * where it surfaces as a misleading {@code NoSuchBucket} (issue #1754).
+         *
+         * <p>On by default. Turn it off if Floci serves a route whose signing scope
+         * is not yet enumerated in the catalog: the request then falls through as it
+         * did before, rather than failing with a 404 that has no workaround.
+         */
+        @WithDefault("true")
+        boolean rejectUnknownServiceScope();
     }
 
     interface DnsConfig {

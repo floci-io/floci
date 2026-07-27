@@ -179,6 +179,7 @@ floci:
 
   protocols:
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
+    reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
   docker:
     log-max-size: "10m"
