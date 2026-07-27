@@ -22,6 +22,63 @@ class CloudFormationLaunchTemplateIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
 
     @Test
+    void ec2InstanceResolvesImageAndTypeFromLaunchTemplate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-lt-inst-stack-" + suffix;
+
+        String template = """
+                {
+                  "Resources": {
+                    "Lt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {
+                        "LaunchTemplateData": {
+                          "ImageId": "ami-87654321",
+                          "InstanceType": "t3.small"
+                        }
+                      }
+                    },
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {
+                        "LaunchTemplate": {
+                          "LaunchTemplateId": {"Ref": "Lt"},
+                          "Version": {"Fn::GetAtt": ["Lt", "LatestVersionNumber"]}
+                        }
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "InstanceId": {"Value": {"Ref": "Inst"}}
+                  }
+                }
+                """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .body(containsString("<OutputValue>i-"));
+    }
+
+    @Test
     void createStackProvisionsLaunchTemplateWithVersionAttributes() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String templateName = "cfn-lt-" + suffix;
