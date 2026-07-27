@@ -1269,6 +1269,16 @@ public class Ec2QueryHandler {
         List<String> owners = getList(p, "Owner");
         Map<String, List<String>> filters = getFilters(p);
         List<Image> images = service.describeImages(region, imageIds, owners, filters);
+        // CDK's MachineImage.lookup is a synth-time context provider that queries
+        // by a `name` wildcard and aborts `cdk deploy` if the response is empty.
+        // When a wildcard name filter matches no seeded AMI, synthesize one that
+        // satisfies it, so the lookup resolves — the exact id is a runtime detail.
+        if (images.isEmpty() && imageIds.isEmpty() && filters.containsKey("name")) {
+            String namePattern = filters.get("name").stream().findFirst().orElse("");
+            if (namePattern.contains("*") || namePattern.contains("?")) {
+                images = List.of(synthesizeLookupImage(namePattern, filters, owners));
+            }
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeImagesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1295,6 +1305,29 @@ public class Ec2QueryHandler {
         }
         xml.end("imagesSet").end("DescribeImagesResponse");
         return xmlResponse(xml.build());
+    }
+
+    /** Build an AMI that satisfies a lookup's name-wildcard + owner/arch filters.
+     * Deterministic id (pattern hash) so repeated lookups resolve identically. */
+    private Image synthesizeLookupImage(String namePattern, Map<String, List<String>> filters, List<String> owners) {
+        Image img = new Image();
+        String hash = String.format("%08x", namePattern.hashCode() & 0x7fffffffL);
+        img.setImageId("ami-" + hash + hash.substring(0, 9));
+        // Concrete name from the pattern: drop trailing wildcards, keep the stem.
+        img.setName(namePattern.replaceAll("[*?].*$", "") + "20260101");
+        img.setState("available");
+        String owner = filters.getOrDefault("owner-id", owners).stream().findFirst().orElse("137112412989");
+        img.setOwnerId(owner);
+        img.setImageOwnerAlias("amazon");
+        img.setPublic(true);
+        img.setArchitecture(filters.getOrDefault("architecture", List.of("x86_64")).stream().findFirst().orElse("x86_64"));
+        img.setRootDeviceType("ebs");
+        img.setRootDeviceName("/dev/xvda");
+        img.setVirtualizationType("hvm");
+        img.setHypervisor("xen");
+        img.setDescription("Synthesized AMI for MachineImage.lookup(" + namePattern + ")");
+        img.setCreationDate("2026-01-01T00:00:00.000Z");
+        return img;
     }
 
     private Response handleRegisterImage(MultivaluedMap<String, String> p, String region) {
