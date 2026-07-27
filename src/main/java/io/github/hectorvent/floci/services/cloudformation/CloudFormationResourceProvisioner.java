@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
@@ -156,6 +157,7 @@ public class CloudFormationResourceProvisioner {
     private final KinesisService kinesisService;
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
+    private final FlowLogService flowLogService;
     private final FirehoseService firehoseService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
@@ -189,6 +191,7 @@ public class CloudFormationResourceProvisioner {
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
                                              AutoScalingService autoScalingService,
+                                             FlowLogService flowLogService,
                                              FirehoseService firehoseService,
                                              CloudFormationResourceRegistry resourceRegistry) {
         this.s3Service = s3Service;
@@ -221,6 +224,7 @@ public class CloudFormationResourceProvisioner {
         this.kinesisService = kinesisService;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
+        this.flowLogService = flowLogService;
         this.firehoseService = firehoseService;
         this.resourceRegistry = resourceRegistry;
     }
@@ -331,6 +335,14 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
+                case "AWS::EC2::FlowLog" ->
+                        provisionFlowLog(resource, properties, engine, region);
+                case "AWS::ApiGateway::Account" -> {
+                    // Account-level CloudWatch role setting — metadata only.
+                    resource.setPhysicalId(resource.getLogicalId());
+                }
+                case "AWS::AutoScaling::LifecycleHook" ->
+                        provisionLifecycleHook(resource, properties, engine, region, stackName);
                 case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
                 case "AWS::EC2::SubnetRouteTableAssociation" ->
                         provisionSubnetRouteTableAssociation(resource, properties, engine, region);
@@ -588,6 +600,42 @@ public class CloudFormationResourceProvisioner {
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }
+    }
+
+    private void provisionFlowLog(StackResource r, JsonNode props,
+                                  CloudFormationTemplateEngine engine, String region) {
+        String resourceId = resolveOptional(props, "ResourceId", engine);
+        var fl = flowLogService.createFlowLog(region, resourceId,
+                resolveOptional(props, "ResourceType", engine),
+                resolveOptional(props, "TrafficType", engine),
+                resolveOptional(props, "LogDestinationType", engine),
+                resolveOptional(props, "LogDestination", engine),
+                resolveOptional(props, "LogFormat", engine),
+                props != null && props.hasNonNull("MaxAggregationInterval")
+                        ? props.get("MaxAggregationInterval").asInt() : 600);
+        r.setPhysicalId(fl.getFlowLogId());
+        r.getAttributes().put("Id", fl.getFlowLogId());
+    }
+
+    private void provisionLifecycleHook(StackResource r, JsonNode props,
+                                        CloudFormationTemplateEngine engine, String region,
+                                        String stackName) {
+        String hookName = resolveOptional(props, "LifecycleHookName", engine);
+        if (hookName == null || hookName.isBlank()) {
+            hookName = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        Integer heartbeat = props != null && props.hasNonNull("HeartbeatTimeout")
+                ? props.get("HeartbeatTimeout").asInt() : null;
+        autoScalingService.putLifecycleHook(region,
+                resolveOptional(props, "AutoScalingGroupName", engine),
+                hookName,
+                resolveOptional(props, "LifecycleTransition", engine),
+                resolveOptional(props, "NotificationTargetARN", engine),
+                resolveOptional(props, "RoleARN", engine),
+                resolveOptional(props, "NotificationMetadata", engine),
+                heartbeat,
+                resolveOptional(props, "DefaultResult", engine));
+        r.setPhysicalId(hookName);
     }
 
     private void provisionInternetGateway(StackResource r, String region) {
