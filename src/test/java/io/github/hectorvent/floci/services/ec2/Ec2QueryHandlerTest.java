@@ -82,6 +82,20 @@ class Ec2QueryHandlerTest {
     }
 
     @Test
+    void rejectsDuplicateCreateSubnetTagSpecificationResourceTypeBeforeMutation() {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = createSubnetParams("10.40.2.0/24");
+        params.put("TagSpecification.1.ResourceType", List.of("subnet", "vpc"));
+        params.putSingle("TagSpecification.1.Tag.1.Key", "Name");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "invalid");
+
+        Response response = handler(service).handle("CreateSubnet", params, "us-east-1");
+
+        assertInvalidParameterValue(response, "TagSpecification.1.ResourceType");
+        verifyNoInteractions(service);
+    }
+
+    @Test
     void rejectsSparseCreateSubnetTagSpecificationBeforeMutation() {
         Ec2Service service = mock(Ec2Service.class);
         MultivaluedMap<String, String> params = createSubnetParams("10.41.1.0/24");

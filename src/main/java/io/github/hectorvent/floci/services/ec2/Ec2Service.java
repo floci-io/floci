@@ -83,6 +83,20 @@ public class Ec2Service implements ContainerTeardown {
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
+    private static final Set<String> VPC_PEERING_FILTERS = Set.of(
+            "accepter-vpc-info.cidr-block", "accepter-vpc-info.owner-id",
+            "accepter-vpc-info.vpc-id", "expiration-time",
+            "requester-vpc-info.cidr-block", "requester-vpc-info.owner-id",
+            "requester-vpc-info.vpc-id", "status-code", "status-message",
+            "tag-key", "tag-value", "vpc-peering-connection-id");
+    private static final Set<String> TRANSIT_GATEWAY_VPC_ATTACHMENT_FILTERS = Set.of(
+            "state", "transit-gateway-attachment-id", "transit-gateway-id", "vpc-id");
+    private static final Set<String> VPN_GATEWAY_FILTERS = Set.of(
+            "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
+            "state", "tag-key", "tag-value", "type", "vpn-gateway-id");
+    private static final Set<String> EGRESS_ONLY_INTERNET_GATEWAY_FILTERS = Set.of(
+            "attachment.state", "attachment.vpc-id",
+            "egress-only-internet-gateway-id", "tag-key", "tag-value");
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -1123,42 +1137,28 @@ public class Ec2Service implements ContainerTeardown {
 
     public List<String> describeVpcPeeringConnectionIds(String region, List<String> connectionIds,
                                                          Map<String, List<String>> filters) {
-        Set<String> supportedFilters = Set.of(
-                "accepter-vpc-info.cidr-block", "accepter-vpc-info.owner-id",
-                "accepter-vpc-info.vpc-id", "expiration-time",
-                "requester-vpc-info.cidr-block", "requester-vpc-info.owner-id",
-                "requester-vpc-info.vpc-id", "status-code", "status-message",
-                "tag-key", "tag-value", "vpc-peering-connection-id");
-        return emptyNetworkDiscovery(connectionIds, filters, supportedFilters,
+        return emptyNetworkDiscovery(connectionIds, filters, VPC_PEERING_FILTERS,
                 "InvalidVpcPeeringConnectionID.NotFound",
                 "The vpcPeeringConnection ID '%s' does not exist");
     }
 
     public List<String> describeTransitGatewayVpcAttachmentIds(
             String region, List<String> attachmentIds, Map<String, List<String>> filters) {
-        Set<String> supportedFilters = Set.of(
-                "state", "transit-gateway-attachment-id", "transit-gateway-id", "vpc-id");
-        return emptyNetworkDiscovery(attachmentIds, filters, supportedFilters,
+        return emptyNetworkDiscovery(attachmentIds, filters, TRANSIT_GATEWAY_VPC_ATTACHMENT_FILTERS,
                 "InvalidTransitGatewayAttachmentID.NotFound",
                 "Transit Gateway Attachment %s was not found.");
     }
 
     public List<String> describeVpnGatewayIds(
             String region, List<String> gatewayIds, Map<String, List<String>> filters) {
-        Set<String> supportedFilters = Set.of(
-                "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
-                "state", "tag-key", "tag-value", "type", "vpn-gateway-id");
-        return emptyNetworkDiscovery(gatewayIds, filters, supportedFilters,
+        return emptyNetworkDiscovery(gatewayIds, filters, VPN_GATEWAY_FILTERS,
                 "InvalidVpnGatewayID.NotFound",
                 "The vpnGateway ID '%s' does not exist");
     }
 
     public List<String> describeEgressOnlyInternetGatewayIds(
             String region, List<String> gatewayIds, Map<String, List<String>> filters) {
-        Set<String> supportedFilters = Set.of(
-                "attachment.state", "attachment.vpc-id",
-                "egress-only-internet-gateway-id", "tag-key", "tag-value");
-        return emptyNetworkDiscovery(gatewayIds, filters, supportedFilters,
+        return emptyNetworkDiscovery(gatewayIds, filters, EGRESS_ONLY_INTERNET_GATEWAY_FILTERS,
                 "InvalidEgressOnlyInternetGatewayId.NotFound",
                 "The egress-only internet gateway ID '%s' does not exist");
     }
@@ -1191,28 +1191,36 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private void deleteVpcDefaultResources(String region, String vpcId) {
-        securityGroups.scan(k -> true).stream()
+        List<SecurityGroup> defaultGroups = securityGroups.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(group -> region.equals(group.getRegion()))
                 .filter(group -> vpcId.equals(group.getVpcId()))
                 .filter(group -> "default".equals(group.getGroupName()))
-                .forEach(group -> {
-                    securityGroupRules.scan(k -> k.startsWith(region + "::")).stream()
+                .toList();
+        for (SecurityGroup group : defaultGroups) {
+            List<String> ruleIds = securityGroupRules.scan(k -> k.startsWith(region + "::")).stream()
                             .filter(rule -> group.getGroupId().equals(rule.getGroupId()))
-                            .forEach(rule -> securityGroupRules.delete(
-                                    key(region, rule.getSecurityGroupRuleId())));
-                    securityGroups.delete(key(region, group.getGroupId()));
-                });
-        routeTables.scan(k -> true).stream()
+                    .map(SecurityGroupRule::getSecurityGroupRuleId)
+                    .toList();
+            ruleIds.forEach(ruleId -> securityGroupRules.delete(key(region, ruleId)));
+            securityGroups.delete(key(region, group.getGroupId()));
+        }
+
+        List<String> mainRouteTableIds = routeTables.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(table -> region.equals(table.getRegion()))
                 .filter(table -> vpcId.equals(table.getVpcId()))
                 .filter(table -> table.getAssociations().stream()
                         .anyMatch(association -> association.isMain()))
-                .forEach(table -> routeTables.delete(key(region, table.getRouteTableId())));
-        networkAcls.scan(k -> true).stream()
+                .map(RouteTable::getRouteTableId)
+                .toList();
+        mainRouteTableIds.forEach(routeTableId -> routeTables.delete(key(region, routeTableId)));
+
+        List<String> defaultNetworkAclIds = networkAcls.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(acl -> region.equals(acl.getRegion()))
                 .filter(acl -> vpcId.equals(acl.getVpcId()))
                 .filter(acl -> acl.isDefault())
-                .forEach(acl -> networkAcls.delete(key(region, acl.getNetworkAclId())));
+                .map(NetworkAcl::getNetworkAclId)
+                .toList();
+        defaultNetworkAclIds.forEach(aclId -> networkAcls.delete(key(region, aclId)));
     }
 
     public void modifyVpcAttribute(String region, String vpcId, String attribute, String value) {

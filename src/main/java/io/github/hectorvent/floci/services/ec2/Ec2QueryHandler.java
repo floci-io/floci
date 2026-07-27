@@ -384,8 +384,11 @@ public class Ec2QueryHandler {
 
             String index = Integer.toString(indexedSpecification.getKey());
             List<String> requestedTypes = p.get(prefix + index + ".ResourceType");
-            if (requestedTypes == null || requestedTypes.size() != 1) {
+            if (requestedTypes == null) {
                 throw invalidCreateSubnetTagResourceType(null);
+            }
+            if (requestedTypes.size() != 1) {
+                throw invalidCreateSubnetTagSpecificationParameter(prefix + index + ".ResourceType");
             }
             String requestedType = requestedTypes.getFirst();
             if (!"subnet".equals(requestedType)) {
