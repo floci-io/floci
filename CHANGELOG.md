@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **iam:** seeded `AWSCloudTrail_FullAccess` and `AWSCloudTrail_ReadOnlyAccess` AWS managed policies.
 - **iam:** distinguish `s3:GetObjectAcl` / `s3:PutObjectAcl` / `s3:Get|Put|DeleteObjectTagging` from base S3 ops via `?acl` / `?tagging` query parameters when resolving an action for IAM enforcement.
 
+### Fixed
+
+- **cloudformation:** report failed rollback cleanup as `ROLLBACK_FAILED` and detach removed IAM inline-policy targets on stack updates ([#1800](https://github.com/floci-io/floci/pull/1800))
+
 ## [1.5.33] - 2026-07-15
 
 ### Added

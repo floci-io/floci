@@ -1962,8 +1962,9 @@ public class CloudFormationResourceProvisioner {
      * named roles/users/groups (equivalent to PutRolePolicy/PutUserPolicy/PutGroupPolicy) — <em>not</em>
      * a standalone managed policy. Because an inline policy name is scoped to the principal that owns
      * it (not the account), two stacks that reuse the same construct sub-tree — and therefore emit the
-     * same auto-generated {@code PolicyName} on different roles — no longer collide. {@code Ref} returns
-     * the policy name; the resource exposes no ARN attribute (AWS::IAM::Policy has none).
+     * same auto-generated {@code PolicyName} on different roles — no longer collide. Floci currently
+     * uses the policy name for {@code Ref}; AWS returns an opaque generated resource identifier.
+     * The resource exposes no ARN attribute.
      */
     private void provisionIamInlinePolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                           String stackName) {

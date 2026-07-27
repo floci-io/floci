@@ -229,6 +229,59 @@ class CloudFormationIamAttachmentProvisionerTest {
     }
 
     @Test
+    void inlinePolicyUpdateDetachesRemovedTargetsAcrossPrincipalTypes() {
+        String policyName = "test-inline-policy";
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyName": "%s",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["retained-role", "added-role"],
+                  "Users": ["added-user"],
+                  "Groups": ["retained-group"]
+                }
+                """.formatted(policyName), policyName, Map.of(
+                        "InlineRoleTargets", "removed-role\nretained-role",
+                        "InlineUserTargets", "removed-user",
+                        "InlineGroupTargets", "removed-group\nretained-group"));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        assertEquals("retained-role\nadded-role", result.getAttributes().get("InlineRoleTargets"));
+        assertEquals("added-user", result.getAttributes().get("InlineUserTargets"));
+        assertEquals("retained-group", result.getAttributes().get("InlineGroupTargets"));
+        verify(iamService).deleteRolePolicy("removed-role", policyName);
+        verify(iamService, never()).deleteRolePolicy("retained-role", policyName);
+        verify(iamService).deleteUserPolicy("removed-user", policyName);
+        verify(iamService).deleteGroupPolicy("removed-group", policyName);
+        verify(iamService, never()).deleteGroupPolicy("retained-group", policyName);
+    }
+
+    @Test
+    void inlinePolicyNameChangeDeletesOldPolicyFromRetainedTargets() {
+        String previousPolicyName = "previous-inline-policy";
+        String currentPolicyName = "current-inline-policy";
+
+        StackResource result = provision("InlinePolicy", "AWS::IAM::Policy", """
+                {
+                  "PolicyName": "%s",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                  "Roles": ["retained-role"],
+                  "Users": ["retained-user"],
+                  "Groups": ["retained-group"]
+                }
+                """.formatted(currentPolicyName), previousPolicyName, Map.of(
+                        "InlineRoleTargets", "retained-role",
+                        "InlineUserTargets", "retained-user",
+                        "InlineGroupTargets", "retained-group"));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        assertEquals(currentPolicyName, result.getPhysicalId());
+        verify(iamService).deleteRolePolicy("retained-role", previousPolicyName);
+        verify(iamService).deleteUserPolicy("retained-user", previousPolicyName);
+        verify(iamService).deleteGroupPolicy("retained-group", previousPolicyName);
+    }
+
+    @Test
     void inlinePolicyDeletionIgnoresAlreadyMissingPrincipal() {
         String policyName = "test-inline-policy";
         StackResource resource = new StackResource();
