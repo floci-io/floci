@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       image:
-        description: OCI image repository without a tag or digest
+        description: OCI image repository including registry host (for example, ghcr.io/org/floci), without a tag or digest
         required: true
         type: string
       publish-native:
