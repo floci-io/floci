@@ -45,6 +45,7 @@ class SesServiceSmtpTest {
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 new InMemoryStorage<String, ContactList>(),
                 new InMemoryStorage<String, Contact>(),
+                new InMemoryStorage<String, String>(),
                 smtpRelay,
                 new ObjectMapper(),
                 Clock.systemUTC());
