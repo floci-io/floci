@@ -7,8 +7,13 @@ name: Nightly
 # Published tags:
 #   Native:  floci/floci:nightly   floci/floci:nightly-mmddyyyy
 #   Compat:  floci/floci:nightly-compat   floci/floci:nightly-mmddyyyy-compat
+#   GHCR mirrors the same tags under ghcr.io/<owner>/floci.
 #
-# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ROLE_ARN
+# Optional secrets: DOCKERHUB_USERNAME + DOCKERHUB_TOKEN (Docker Hub) and
+# AWS_ROLE_ARN (ECR Public) — publishing to each registry is skipped when
+# its secrets are absent (typical for forks).
+# GHCR pushes authenticate with the built-in GITHUB_TOKEN, so forks get
+# working image publishing without configuring any secrets.
 
 on:
   schedule:
@@ -19,6 +24,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  packages: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -141,20 +147,70 @@ jobs:
         id: source_date
         run: echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
 
+      # Tags are computed here so registries degrade gracefully: Docker Hub
+      # and ECR Public tags are included only when their secrets exist (forks
+      # usually have none), while GHCR always works via the built-in
+      # GITHUB_TOKEN. GHCR image names must be lowercase;
+      # github.repository_owner may not be.
+      - name: Compute image tags
+        id: tags
+        env:
+          HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+          HAS_ECR: ${{ secrets.AWS_ROLE_ARN != '' }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          ghcr="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/floci"
+          {
+            echo "native<<EOF"
+            if [ "$HAS_DOCKERHUB" = "true" ]; then
+              echo "floci/floci:nightly"
+              echo "floci/floci:nightly-${VERSION}"
+            fi
+            if [ "$HAS_ECR" = "true" ]; then
+              echo "public.ecr.aws/floci/floci:nightly"
+              echo "public.ecr.aws/floci/floci:nightly-${VERSION}"
+            fi
+            echo "${ghcr}:nightly"
+            echo "${ghcr}:nightly-${VERSION}"
+            echo "EOF"
+            echo "compat<<EOF"
+            if [ "$HAS_DOCKERHUB" = "true" ]; then
+              echo "floci/floci:nightly-compat"
+              echo "floci/floci:nightly-${VERSION}-compat"
+            fi
+            if [ "$HAS_ECR" = "true" ]; then
+              echo "public.ecr.aws/floci/floci:nightly-compat"
+              echo "public.ecr.aws/floci/floci:nightly-${VERSION}-compat"
+            fi
+            echo "${ghcr}:nightly-compat"
+            echo "${ghcr}:nightly-${VERSION}-compat"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Configure AWS credentials
+        if: ${{ secrets.AWS_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@v6.2.0
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Login to Amazon ECR Public
+        if: ${{ secrets.AWS_ROLE_ARN != '' }}
         uses: aws-actions/amazon-ecr-login@v2
         with:
           registry-type: public
@@ -168,11 +224,7 @@ jobs:
           file: docker/Dockerfile.native-package
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            floci/floci:nightly
-            floci/floci:nightly-${{ needs.prepare.outputs.version }}
-            public.ecr.aws/floci/floci:nightly
-            public.ecr.aws/floci/floci:nightly-${{ needs.prepare.outputs.version }}
+          tags: ${{ steps.tags.outputs.native }}
           labels: |
             org.opencontainers.image.version=nightly-${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -192,11 +244,7 @@ jobs:
           file: docker/Dockerfile.compat
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            floci/floci:nightly-compat
-            floci/floci:nightly-${{ needs.prepare.outputs.version }}-compat
-            public.ecr.aws/floci/floci:nightly-compat
-            public.ecr.aws/floci/floci:nightly-${{ needs.prepare.outputs.version }}-compat
+          tags: ${{ steps.tags.outputs.compat }}
           build-args: |
             VERSION=nightly-${{ needs.prepare.outputs.version }}
           labels: |

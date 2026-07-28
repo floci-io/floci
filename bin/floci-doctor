@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# floci-doctor — diagnoses the local environment for running Floci.
+#
+# Detects the host flavor (native Linux, Docker Desktop, WSL2), verifies
+# Docker and Compose availability, checks the docker socket, the Floci
+# port, a running emulator's health, firewall rules that silently break
+# Lambda, and the AWS CLI environment. Every failed check prints the
+# exact command that fixes it.
+#
+# Usage:
+#   bin/floci-doctor            # run all checks
+#   bin/floci-doctor --json     # machine-readable summary
+#
+# Exit codes: 0 = all checks passed (warnings allowed), 1 = at least one failure.
+
+set -u
+
+ENDPOINT="${FLOCI_ENDPOINT:-http://localhost:4566}"
+PORT="${ENDPOINT##*:}"
+PORT="${PORT%%/*}"
+JSON_MODE=false
+[[ "${1:-}" == "--json" ]] && JSON_MODE=true
+
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+JSON_RESULTS=()
+
+if [[ -t 1 && "$JSON_MODE" == false ]]; then
+    C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RESET=$'\033[0m'
+else
+    C_GREEN=''; C_YELLOW=''; C_RED=''; C_BOLD=''; C_DIM=''; C_RESET=''
+fi
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '
+}
+
+report() {
+    # report <pass|warn|fail> <check-id> <message> [fix]
+    local status="$1" id="$2" msg="$3" fix="${4:-}"
+    case "$status" in
+        pass) PASS_COUNT=$((PASS_COUNT + 1)) ;;
+        warn) WARN_COUNT=$((WARN_COUNT + 1)) ;;
+        fail) FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+    esac
+    JSON_RESULTS+=("{\"check\":\"$(json_escape "$id")\",\"status\":\"$status\",\"message\":\"$(json_escape "$msg")\",\"fix\":\"$(json_escape "$fix")\"}")
+    if [[ "$JSON_MODE" == false ]]; then
+        case "$status" in
+            pass) printf '  %s✔%s %s\n' "$C_GREEN" "$C_RESET" "$msg" ;;
+            warn) printf '  %s⚠%s %s\n' "$C_YELLOW" "$C_RESET" "$msg" ;;
+            fail) printf '  %s✘%s %s\n' "$C_RED" "$C_RESET" "$msg" ;;
+        esac
+        if [[ -n "$fix" ]]; then
+            printf '    %s→ %s%s\n' "$C_DIM" "$fix" "$C_RESET"
+        fi
+    fi
+}
+
+section() {
+    [[ "$JSON_MODE" == false ]] && printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"
+}
+
+http_get() {
+    # http_get <url> — prints the body, returns curl/wget exit status.
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 3 "$1" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 3 -O - "$1" 2>/dev/null
+    else
+        return 127
+    fi
+}
+
+# ── Environment detection ────────────────────────────────────────────────
+detect_environment() {
+    OS_KIND="unknown"
+    ENV_LABEL="unknown"
+    IS_WSL=false
+    IS_CONTAINER=false
+
+    local uname_s
+    uname_s="$(uname -s 2>/dev/null || echo unknown)"
+    case "$uname_s" in
+        Linux)  OS_KIND="linux" ;;
+        Darwin) OS_KIND="macos" ;;
+        *)      OS_KIND="$uname_s" ;;
+    esac
+
+    if [[ "$OS_KIND" == "linux" ]]; then
+        if grep -qi 'microsoft' /proc/version 2>/dev/null; then
+            IS_WSL=true
+        fi
+        if [[ -f /.dockerenv ]] || grep -qE '/(docker|containerd|kubepods)/' /proc/1/cgroup 2>/dev/null; then
+            IS_CONTAINER=true
+        fi
+    fi
+
+    if [[ "$IS_CONTAINER" == true ]]; then
+        ENV_LABEL="inside a container"
+    elif [[ "$IS_WSL" == true ]]; then
+        ENV_LABEL="Windows (WSL2)"
+    elif [[ "$OS_KIND" == "macos" ]]; then
+        ENV_LABEL="macOS"
+    elif [[ "$OS_KIND" == "linux" ]]; then
+        ENV_LABEL="native Linux"
+    fi
+}
+
+# ── Docker checks ────────────────────────────────────────────────────────
+check_docker() {
+    section "Docker"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        report fail docker-cli "docker CLI not found" \
+            "Install Docker: https://docs.docker.com/get-docker/"
+        DOCKER_OK=false
+        return
+    fi
+    report pass docker-cli "docker CLI found ($(docker --version 2>/dev/null | head -1))"
+
+    if ! docker info >/dev/null 2>&1; then
+        local fix="Start the Docker daemon"
+        if [[ "$OS_KIND" == "linux" && "$IS_WSL" == false ]]; then
+            fix="sudo systemctl start docker — and if it is a permissions error: sudo usermod -aG docker \$USER && newgrp docker"
+        elif [[ "$OS_KIND" == "macos" || "$IS_WSL" == true ]]; then
+            fix="Start Docker Desktop and wait for it to report 'running'"
+        fi
+        report fail docker-daemon "docker daemon not reachable" "$fix"
+        DOCKER_OK=false
+        return
+    fi
+    DOCKER_OK=true
+
+    DOCKER_FLAVOR="native Linux Engine"
+    local docker_os
+    docker_os="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)"
+    if printf '%s' "$docker_os" | grep -qi 'docker desktop'; then
+        DOCKER_FLAVOR="Docker Desktop"
+    fi
+    report pass docker-daemon "docker daemon reachable ($DOCKER_FLAVOR)"
+
+    if docker compose version >/dev/null 2>&1; then
+        report pass docker-compose "docker compose v2 available"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        report warn docker-compose "only legacy docker-compose v1 found — Floci docs use the v2 plugin syntax" \
+            "Install the compose plugin: https://docs.docker.com/compose/install/"
+    else
+        report warn docker-compose "docker compose not found (only needed for compose-based setups)" \
+            "Install the compose plugin: https://docs.docker.com/compose/install/"
+    fi
+
+    if [[ "$OS_KIND" == "linux" && -S /var/run/docker.sock ]]; then
+        if [[ -w /var/run/docker.sock ]]; then
+            report pass docker-socket "/var/run/docker.sock is writable (needed by ECR, Lambda, RDS emulation)"
+        else
+            report warn docker-socket "/var/run/docker.sock is not writable by $(id -un) — ECR, Lambda and RDS emulation need it" \
+                "sudo usermod -aG docker \$USER && newgrp docker"
+        fi
+    fi
+}
+
+# ── Port / running instance checks ───────────────────────────────────────
+check_floci() {
+    section "Floci endpoint ($ENDPOINT)"
+
+    local health
+    if health="$(http_get "$ENDPOINT/_floci/health")"; then
+        local version
+        version="$(printf '%s' "$health" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+        report pass floci-health "Floci is running${version:+ (version $version)}"
+        FLOCI_RUNNING=true
+        return
+    fi
+    FLOCI_RUNNING=false
+
+    local port_in_use=false
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT\$" && port_in_use=true
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 && port_in_use=true
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT\$" && port_in_use=true
+    fi
+
+    if [[ "$port_in_use" == true ]]; then
+        report fail floci-port "port $PORT is in use but did not answer the Floci health check" \
+            "Another process owns the port. Find it: sudo ss -ltnp 'sport = :$PORT' (or lsof -iTCP:$PORT)"
+    else
+        report warn floci-health "Floci is not running (port $PORT is free)" \
+            "Start it: docker run --rm -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock floci/floci:latest"
+    fi
+}
+
+# ── Firewall checks (the Lambda Function.TimedOut footgun) ───────────────
+check_firewall() {
+    [[ "$OS_KIND" != "linux" || "$IS_WSL" == true || "$IS_CONTAINER" == true ]] && return
+    [[ "${DOCKER_FLAVOR:-}" == "Docker Desktop" ]] && return
+
+    section "Firewall (Lambda containers → host)"
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        report pass firewall "ufw not installed — no docker0 filtering to worry about"
+        return
+    fi
+
+    local ufw_status=""
+    if [[ -r /etc/ufw/ufw.conf ]] && grep -qE '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null; then
+        ufw_status="active"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        ufw_status="$(sudo -n ufw status 2>/dev/null | head -1 | grep -qi 'active' && echo active || echo inactive)"
+    fi
+
+    case "$ufw_status" in
+        active)
+            local rules=""
+            if [[ -r /etc/ufw/user.rules ]]; then
+                rules="$(grep -c 'docker0' /etc/ufw/user.rules 2>/dev/null || true)"
+            elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                rules="$(sudo -n ufw status 2>/dev/null | grep -c 'docker0' || true)"
+            fi
+            if [[ -z "$rules" ]]; then
+                report warn firewall "ufw is active but its rules could not be read without sudo — if Lambda invocations time out, a missing docker0 rule is the usual cause" \
+                    "Check with: sudo ufw status verbose — and if docker0 is missing: sudo ufw allow in on docker0 comment 'floci: containers reach host'"
+            elif [[ "$rules" != "0" ]]; then
+                report pass firewall "ufw is active with a docker0 allow rule — Lambda containers can reach Floci"
+            else
+                report fail firewall "ufw is active with no docker0 rule — Lambda invocations will time out (Function.TimedOut)" \
+                    "sudo ufw allow in on docker0 comment 'floci: containers reach host'"
+            fi
+            ;;
+        inactive)
+            report pass firewall "ufw installed but inactive"
+            ;;
+        *)
+            report warn firewall "ufw detected but status could not be read without sudo — if Lambda invocations time out, this is the usual cause" \
+                "Check with: sudo ufw status — and if active: sudo ufw allow in on docker0 comment 'floci: containers reach host'"
+            ;;
+    esac
+}
+
+# ── AWS CLI environment ──────────────────────────────────────────────────
+check_aws_env() {
+    section "AWS CLI environment"
+
+    if ! command -v aws >/dev/null 2>&1; then
+        report warn aws-cli "aws CLI not found (optional — SDKs work without it)" \
+            "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    else
+        report pass aws-cli "aws CLI found ($(aws --version 2>&1 | head -1))"
+    fi
+
+    local missing=()
+    [[ -z "${AWS_ENDPOINT_URL:-}" ]] && missing+=("AWS_ENDPOINT_URL")
+    [[ -z "${AWS_ACCESS_KEY_ID:-}" ]] && missing+=("AWS_ACCESS_KEY_ID")
+    [[ -z "${AWS_SECRET_ACCESS_KEY:-}" ]] && missing+=("AWS_SECRET_ACCESS_KEY")
+    [[ -z "${AWS_DEFAULT_REGION:-}${AWS_REGION:-}" ]] && missing+=("AWS_DEFAULT_REGION")
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        if [[ "${AWS_ENDPOINT_URL:-}" == "$ENDPOINT" ]]; then
+            report pass aws-env "AWS environment points at Floci ($AWS_ENDPOINT_URL)"
+        else
+            report warn aws-env "AWS_ENDPOINT_URL is '${AWS_ENDPOINT_URL:-}' — not the Floci endpoint ($ENDPOINT); CLI calls may hit real AWS" \
+                "eval \$(bin/awslocal env)   # or: export AWS_ENDPOINT_URL=$ENDPOINT"
+        fi
+    else
+        report warn aws-env "unset: ${missing[*]} — CLI calls may hit real AWS or fail on credentials" \
+            "eval \$(bin/awslocal env)   # exports endpoint, dummy credentials and region"
+    fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────
+detect_environment
+
+if [[ "$JSON_MODE" == false ]]; then
+    printf '%sfloci-doctor%s — checking your environment\n' "$C_BOLD" "$C_RESET"
+    printf '\n%sHost%s\n' "$C_BOLD" "$C_RESET"
+fi
+report pass environment "detected: $ENV_LABEL"
+
+DOCKER_OK=false
+DOCKER_FLAVOR=""
+check_docker
+check_floci
+check_firewall
+check_aws_env
+
+if [[ "$JSON_MODE" == true ]]; then
+    printf '{"environment":"%s","passed":%d,"warnings":%d,"failed":%d,"checks":[' \
+        "$(json_escape "$ENV_LABEL")" "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
+    for i in "${!JSON_RESULTS[@]}"; do
+        [[ $i -gt 0 ]] && printf ','
+        printf '%s' "${JSON_RESULTS[$i]}"
+    done
+    printf ']}\n'
+else
+    printf '\n%s%d passed%s' "$C_GREEN" "$PASS_COUNT" "$C_RESET"
+    [[ $WARN_COUNT -gt 0 ]] && printf ', %s%d warning(s)%s' "$C_YELLOW" "$WARN_COUNT" "$C_RESET"
+    [[ $FAIL_COUNT -gt 0 ]] && printf ', %s%d failed%s' "$C_RED" "$FAIL_COUNT" "$C_RESET"
+    printf '\n'
+    if [[ $FAIL_COUNT -eq 0 && $WARN_COUNT -eq 0 ]]; then
+        printf 'Your environment is ready. Start Floci and go build.\n'
+    fi
+fi
+
+[[ $FAIL_COUNT -eq 0 ]]

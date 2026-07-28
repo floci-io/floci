@@ -10,6 +10,12 @@ No installation required beyond Docker itself.
 docker pull floci/floci:latest
 ```
 
+Images are also mirrored to GitHub Container Registry — useful when Docker Hub rate limits apply:
+
+```bash
+docker pull ghcr.io/floci-io/floci:latest
+```
+
 ### Requirements
 
 - Docker 20.10+
