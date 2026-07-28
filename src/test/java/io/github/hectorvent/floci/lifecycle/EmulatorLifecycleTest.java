@@ -134,6 +134,36 @@ class EmulatorLifecycleTest {
     }
 
     @Test
+    @DisplayName("Should restore ELBv2 persisted runtime after loading storage when elbv2 is enabled")
+    void shouldRestoreElbV2PersistedRuntimeAfterStorageLoad() {
+        // The restore has to happen after the bean is constructed, not from @PostConstruct, or
+        // ElbV2DataPlane's callback re-enters bean creation (#1913). Pin the ordering so the call
+        // cannot be dropped or moved back into construction unnoticed.
+        stubStorageConfig();
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, elbV2Service);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(elbV2Service).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should not restore ELBv2 persisted runtime when elbv2 is disabled")
+    void shouldNotRestoreElbV2PersistedRuntimeWhenDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        Mockito.verify(elbV2Service, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
     @DisplayName("Should validate the persistent path after BOOT hooks and before loading storage")
     void shouldValidatePersistentPathBeforeStorageLoad() {
         stubStorageConfig();
