@@ -2249,6 +2249,32 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(121)
+    void listObjectVersionsPagesCombinedVersionsAndPrefixes() {
+        String bucket = "versions-pagination-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            given().urlEncodingEnabled(false).body("data1").when().put("/" + bucket + "/a/one.txt").then().statusCode(200);
+            given().urlEncodingEnabled(false).body("data2").when().put("/" + bucket + "/b/two.txt").then().statusCode(200);
+
+            // With max-keys=1, only 'a/' should be returned, IsTruncated should be true, and NextKeyMarker should be 'a/'
+            given()
+            .when()
+                .get("/" + bucket + "?versions&delimiter=/&max-keys=1")
+            .then()
+                .statusCode(200)
+                .body(containsString("<IsTruncated>true</IsTruncated>"))
+                .body(containsString("<NextKeyMarker>a/</NextKeyMarker>"))
+                .body(containsString("<Prefix>a/</Prefix>"))
+                .body(not(containsString("<Prefix>b/</Prefix>")));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/a/one.txt");
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/b/two.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(104)
     void cleanupPaginationBucket() {
         given().when().delete("/pag-test-bucket/a.txt");

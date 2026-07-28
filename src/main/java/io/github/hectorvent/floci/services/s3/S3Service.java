@@ -1097,21 +1097,37 @@ public class S3Service implements Resettable {
 
         boolean isTruncated = false;
         String nextKeyMarker = null;
-        if (maxKeys > 0 && versions.size() > maxKeys) {
-            // Extend the cutoff to avoid splitting versions of the same key across pages.
-            // All versions of the same key must appear on the same page.
-            int cutoff = maxKeys;
-            String lastKey = versions.get(maxKeys - 1).getKey();
-            while (cutoff < versions.size() && versions.get(cutoff).getKey().equals(lastKey)) {
-                cutoff++;
+        if (maxKeys > 0) {
+            List<S3Object> limitedVersions = new ArrayList<>();
+            List<String> limitedPrefixes = new ArrayList<>();
+            int count = 0;
+            int vIdx = 0;
+            int cpIdx = 0;
+            String lastEmittedKey = null;
+
+            while (count < maxKeys && (vIdx < versions.size() || cpIdx < commonPrefixes.size())) {
+                String vKey = vIdx < versions.size() ? versions.get(vIdx).getKey() : null;
+                String cpKey = cpIdx < commonPrefixes.size() ? commonPrefixes.get(cpIdx) : null;
+
+                if (vKey != null && (cpKey == null || vKey.compareTo(cpKey) <= 0)) {
+                    String currentKey = vKey;
+                    while (vIdx < versions.size() && versions.get(vIdx).getKey().equals(currentKey)) {
+                        limitedVersions.add(versions.get(vIdx++));
+                    }
+                    lastEmittedKey = currentKey;
+                } else {
+                    limitedPrefixes.add(commonPrefixes.get(cpIdx++));
+                    lastEmittedKey = cpKey;
+                }
+                count++;
             }
-            isTruncated = cutoff < versions.size();
+
+            isTruncated = vIdx < versions.size() || cpIdx < commonPrefixes.size();
             if (isTruncated) {
-                // nextKeyMarker is used as an exclusive lower bound: next page gets key > nextKeyMarker.
-                // Set it to the last included key so the next page starts right after it.
-                nextKeyMarker = versions.get(cutoff - 1).getKey();
+                nextKeyMarker = lastEmittedKey;
             }
-            versions = new ArrayList<>(versions.subList(0, cutoff));
+            versions = limitedVersions;
+            commonPrefixes = limitedPrefixes;
         }
         return new ListVersionsResult(versions, commonPrefixes, isTruncated, nextKeyMarker);
     }
