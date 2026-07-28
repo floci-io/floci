@@ -114,6 +114,23 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     }
 
     @Test
+    @Order(8)
+    void update_missingTemplateName_returnsInvalidParameterValueOnV1() {
+        // TemplateName is validated before the existence check, so omitting it yields the required-field
+        // InvalidParameterValue rather than a NotFoundException for a null-named template.
+        query("UpdateCustomVerificationEmailTemplate")
+                // TemplateName omitted
+                .formParam("FromEmailAddress", FROM)
+                .formParam("TemplateSubject", "Updated via v1")
+                .formParam("TemplateContent", "<html><body>verify</body></html>")
+                .formParam("SuccessRedirectionURL", "https://example.com/ok")
+                .formParam("FailureRedirectionURL", "https://example.com/fail")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("TemplateName is required."));
+    }
+
+    @Test
     @Order(6)
     void v1Template_isVisibleViaV2() {
         create("cvet-v1-shared", "Shared").when().post("/").then().statusCode(200);

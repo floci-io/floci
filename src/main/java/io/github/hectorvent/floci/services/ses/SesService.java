@@ -1071,6 +1071,10 @@ public class SesService {
     }
 
     public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+        // Validate required fields (including TemplateName) before the existence check so a missing or
+        // blank name yields the required-field InvalidParameterValue rather than NotFoundException,
+        // matching createCustomVerificationEmailTemplate.
+        validateCustomVerificationTemplate(template, region);
         String key = cvetKey(region, template.getTemplateName());
         // Guard the existence check and the put together so a concurrent delete can't slip between
         // them and have the update resurrect the just-deleted template.
@@ -1078,7 +1082,6 @@ public class SesService {
             if (cvetStore.get(key).isEmpty()) {
                 throw cvetNotFound(template.getTemplateName());
             }
-            validateCustomVerificationTemplate(template, region);
             cvetStore.put(key, template);
         }
         LOG.infov("Updated custom verification email template {0} in region {1}",
