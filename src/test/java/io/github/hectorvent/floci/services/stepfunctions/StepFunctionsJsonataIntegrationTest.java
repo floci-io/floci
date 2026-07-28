@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -14,6 +16,8 @@ class StepFunctionsJsonataIntegrationTest {
 
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/test-role";
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -1191,6 +1195,303 @@ class StepFunctionsJsonataIntegrationTest {
         assertTrue(output.contains("Jane"));
         assertTrue(output.contains("Doe"));
         assertTrue(output.contains("Jane Doe"));
+    }
+
+    @Test
+    void assignedVariablesSurviveBeyondNextStateOutput() throws Exception {
+        // Variables set via Assign persist across states even after a later state replaces the output.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "AssignVariables",
+                    "States": {
+                        "AssignVariables": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "CheckpointCount": "0",
+                                "ExecutionWaitTimeInSeconds": "3"
+                            },
+                            "Output": {
+                                "transient": 3
+                            },
+                            "Next": "UseAndReplaceOutput"
+                        },
+                        "UseAndReplaceOutput": {
+                            "Type": "Pass",
+                            "Output": {
+                                "fromAssignedVariable": "{% $ExecutionWaitTimeInSeconds %}",
+                                "fromPreviousOutput": "{% $states.input.transient %}"
+                            },
+                            "Next": "UseAssignedAgain"
+                        },
+                        "UseAssignedAgain": {
+                            "Type": "Pass",
+                            "Output": {
+                                "checkpoint": "{% $CheckpointCount %}",
+                                "fromAssignedVariable": "{% $ExecutionWaitTimeInSeconds %}",
+                                "previousTransientStillPresent": "{% $exists($states.input.transient) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-vars-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"checkpoint\":\"0\"") || output.contains("\"checkpoint\": \"0\""));
+        assertTrue(output.contains("\"fromAssignedVariable\":\"3\"") || output.contains("\"fromAssignedVariable\": \"3\""));
+        assertTrue(output.contains("\"previousTransientStillPresent\":false")
+                || output.contains("\"previousTransientStillPresent\": false"));
+    }
+
+    @Test
+    void assignedVariablesAreNotVisibleUntilTheNextState() throws Exception {
+        // Every variable reference in a state resolves against the values held on state entry, so a
+        // state's own Output never sees that state's Assign; the new values land in the next state.
+        // Assignments within one Assign block are likewise independent of each other. This mirrors
+        // the evaluation-order example in the AWS docs: starting from $x=3 and $a=6,
+        // {"x": "{% $a %}", "nextX": "{% $x %}"} ends with $x=6 and $nextX=3.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "SeedVariables",
+                    "States": {
+                        "SeedVariables": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "x": 3,
+                                "a": 6
+                            },
+                            "Next": "ReassignAndEmit"
+                        },
+                        "ReassignAndEmit": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "x": "{% $a %}",
+                                "nextX": "{% $x %}"
+                            },
+                            "Output": {
+                                "xSeenByAssigningState": "{% $x %}"
+                            },
+                            "Next": "ObserveAfterAssign"
+                        },
+                        "ObserveAfterAssign": {
+                            "Type": "Pass",
+                            "Output": {
+                                "xSeenByAssigningState": "{% $states.input.xSeenByAssigningState %}",
+                                "xAfter": "{% $x %}",
+                                "nextXAfter": "{% $nextX %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-evaluation-order-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
+
+        // The assigning state's own Output still sees the pre-assignment value of $x.
+        assertEquals(3, output.get("xSeenByAssigningState").asInt());
+        // The next state sees both new values: $x from $a, and $nextX from the old $x.
+        assertEquals(6, output.get("xAfter").asInt());
+        assertEquals(3, output.get("nextXAfter").asInt());
+    }
+
+    @Test
+    void variablesAssignedInsideMapDoNotLeakToParentScope() throws Exception {
+        // Map iterations can read outer-scope variables but keep their own workflow-local scope:
+        // a variable assigned inside an iteration goes out of scope once the Map completes.
+        // The inner variable deliberately uses a name distinct from the outer one — AWS rejects an
+        // inner-scope assignment that reuses an outer-scope variable name.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "SetOuter",
+                    "States": {
+                        "SetOuter": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "outerVar": 42
+                            },
+                            "Next": "MapState"
+                        },
+                        "MapState": {
+                            "Type": "Map",
+                            "Items": [1, 2],
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "INLINE"
+                                },
+                                "StartAt": "AssignInner",
+                                "States": {
+                                    "AssignInner": {
+                                        "Type": "Pass",
+                                        "Assign": {
+                                            "innerVar": "{% $outerVar %}"
+                                        },
+                                        "Output": {
+                                            "outerSeenFromIteration": "{% $outerVar %}"
+                                        },
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "Next": "CheckScope"
+                        },
+                        "CheckScope": {
+                            "Type": "Pass",
+                            "Output": {
+                                "iterations": "{% $states.input %}",
+                                "outerStillInScope": "{% $outerVar %}",
+                                "innerLeaked": "{% $exists($innerVar) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-map-scope-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
+
+        // Each iteration could read the outer variable.
+        assertEquals(42, output.get("iterations").get(0).get("outerSeenFromIteration").asInt());
+        assertEquals(42, output.get("iterations").get(1).get("outerSeenFromIteration").asInt());
+        // The outer variable survives the Map, and the iteration-local one does not escape it.
+        assertEquals(42, output.get("outerStillInScope").asInt());
+        assertFalse(output.get("innerLeaked").asBoolean());
+    }
+
+    @Test
+    void assignInMatchedChoiceRuleApplies() throws Exception {
+        // A Choice rule carries its own Assign, which applies when that rule matches. The state-level
+        // Assign belongs to the Default path and must not run when a rule matches.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "ChoiceState",
+                    "States": {
+                        "ChoiceState": {
+                            "Type": "Choice",
+                            "Choices": [
+                                {
+                                    "Condition": "{% $states.input.condition %}",
+                                    "Next": "Report",
+                                    "Assign": {
+                                        "assignment": "Condition assignment"
+                                    }
+                                }
+                            ],
+                            "Default": "Report",
+                            "Assign": {
+                                "assignment": "Default Assignment"
+                            }
+                        },
+                        "Report": {
+                            "Type": "Pass",
+                            "Output": {
+                                "assignment": "{% $assignment %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-in-choice-test", definition);
+
+        JsonNode matched = objectMapper.readTree(
+                waitForExecution(startExecution(smArn, "{\"condition\": true}")));
+        assertEquals("Condition assignment", matched.get("assignment").asText());
+
+        JsonNode defaulted = objectMapper.readTree(
+                waitForExecution(startExecution(smArn, "{\"condition\": false}")));
+        assertEquals("Default Assignment", defaulted.get("assignment").asText());
+    }
+
+    @Test
+    void assignInWaitStateApplies() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "WaitState",
+                    "States": {
+                        "WaitState": {
+                            "Type": "Wait",
+                            "Seconds": 0,
+                            "Assign": {
+                                "foo": "oof"
+                            },
+                            "Next": "Report"
+                        },
+                        "Report": {
+                            "Type": "Pass",
+                            "Output": {
+                                "foo": "{% $foo %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-in-wait-test", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        assertEquals("oof", output.get("foo").asText());
+    }
+
+    @Test
+    void assignInCatchAppliesAndSeesErrorOutput() throws Exception {
+        // A Catch block supports Assign and Output, and $states.errorOutput is bound inside it.
+        // The Task fails while evaluating its Arguments, which is a catchable States.QueryEvaluationError.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Boom",
+                    "States": {
+                        "Boom": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::lambda:invoke",
+                            "Arguments": {
+                                "bad": "{% $number('not-a-number') %}"
+                            },
+                            "Catch": [
+                                {
+                                    "ErrorEquals": ["States.QueryEvaluationError"],
+                                    "Next": "Report",
+                                    "Assign": {
+                                        "caughtError": "{% $states.errorOutput.Error %}"
+                                    }
+                                }
+                            ],
+                            "End": true
+                        },
+                        "Report": {
+                            "Type": "Pass",
+                            "Output": {
+                                "caughtError": "{% $caughtError %}",
+                                "catchOutputError": "{% $states.input.Error %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-in-catch-test", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        // The Catch's Assign ran, and it could read $states.errorOutput.
+        assertEquals("States.QueryEvaluationError", output.get("caughtError").asText());
+        // With no Output on the Catch, the error output becomes the state output.
+        assertEquals("States.QueryEvaluationError", output.get("catchOutputError").asText());
     }
 
     @Test

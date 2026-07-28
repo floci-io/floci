@@ -62,50 +62,93 @@ public class NeptuneService {
                     "Neptune cluster " + id + " already exists.", 400);
         }
 
+        // Open the try immediately after reserving the port so config reads below can't leak it.
         int proxyPort = allocateProxyPort();
-        String configuredDbType = config.services().neptune().dbType();
-        NeptuneDbType dbType = NeptuneDbType.fromConfig(configuredDbType).orElseGet(() -> {
-            LOG.warnv("Unsupported Neptune db-type ''{0}'', falling back to {1}. Supported: gremlin, neo4j.",
-                    configuredDbType, NeptuneDbType.GREMLIN);
-            return NeptuneDbType.GREMLIN;
-        });
-        String image = switch (dbType) {
-            case GREMLIN -> config.services().neptune().defaultImage();
-            case NEO4J -> config.services().neptune().defaultNeo4jImage();
-        };
+        NeptuneContainerHandle handle = null;
+        boolean provisioned = false;
+        try {
+            String configuredDbType = config.services().neptune().dbType();
+            NeptuneDbType dbType = NeptuneDbType.fromConfig(configuredDbType).orElseGet(() -> {
+                LOG.warnv("Unsupported Neptune db-type ''{0}'', falling back to {1}. Supported: gremlin, neo4j.",
+                        configuredDbType, NeptuneDbType.GREMLIN);
+                return NeptuneDbType.GREMLIN;
+            });
+            String image = switch (dbType) {
+                case GREMLIN -> config.services().neptune().defaultImage();
+                case NEO4J -> config.services().neptune().defaultNeo4jImage();
+            };
 
-        LOG.infov("Creating Neptune cluster {0} on proxy port {1}, dbType={2}, image={3}",
-                id, String.valueOf(proxyPort), dbType, image);
+            LOG.infov("Creating Neptune cluster {0} on proxy port {1}, dbType={2}, image={3}",
+                    id, String.valueOf(proxyPort), dbType, image);
 
-        NeptuneContainerHandle handle = containerManager.start(id, image, dbType);
+            handle = containerManager.start(id, image, dbType);
 
-        String region = regionResolver.getDefaultRegion();
-        String endpointHost = resolveEndpointHost();
+            String region = regionResolver.getDefaultRegion();
+            String endpointHost = resolveEndpointHost();
 
-        NeptuneCluster cluster = new NeptuneCluster();
-        cluster.setDbClusterIdentifier(id);
-        cluster.setStatus("available");
-        cluster.setEngineVersion(engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT);
-        cluster.setEndpoint(endpointHost);
-        cluster.setReaderEndpoint(endpointHost);
-        cluster.setPort(proxyPort);
-        cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
-        cluster.setDbClusterArn(regionResolver.buildArn("neptune", region, "cluster:" + id));
-        cluster.setDbClusterResourceId("cluster-" + UUID.randomUUID().toString()
-                .replace("-", "").substring(0, 24).toUpperCase());
-        cluster.setCreatedAt(Instant.now());
-        cluster.setDbClusterMembers(new ArrayList<>());
-        cluster.setContainerId(handle.getContainerId());
-        cluster.setContainerHost(handle.getHost());
-        cluster.setContainerPort(handle.getPort());
-        cluster.setProxyPort(proxyPort);
+            NeptuneCluster cluster = new NeptuneCluster();
+            cluster.setDbClusterIdentifier(id);
+            cluster.setStatus("available");
+            cluster.setEngineVersion(engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT);
+            cluster.setEndpoint(endpointHost);
+            cluster.setReaderEndpoint(endpointHost);
+            cluster.setPort(proxyPort);
+            cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
+            cluster.setDbClusterArn(regionResolver.buildArn("neptune", region, "cluster:" + id));
+            cluster.setDbClusterResourceId("cluster-" + UUID.randomUUID().toString()
+                    .replace("-", "").substring(0, 24).toUpperCase());
+            cluster.setCreatedAt(Instant.now());
+            cluster.setDbClusterMembers(new ArrayList<>());
+            cluster.setContainerId(handle.getContainerId());
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
+            cluster.setProxyPort(proxyPort);
 
-        proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
+            proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
 
-        clusters.put(id, cluster);
-        LOG.infov("Neptune cluster {0} created ({1}), endpoint={2}:{3}",
-                id, dbType, endpointHost, String.valueOf(proxyPort));
-        return cluster;
+            clusters.put(id, cluster);
+            provisioned = true;
+            LOG.infov("Neptune cluster {0} created ({1}), endpoint={2}:{3}",
+                    id, dbType, endpointHost, String.valueOf(proxyPort));
+            return cluster;
+        } catch (RuntimeException e) {
+            LOG.warnv("Neptune cluster {0} provisioning failed, rolling back: {1}", id, e.getMessage());
+            throw e;
+        } finally {
+            // Roll back on ANY non-success exit — including a JVM Error, which a
+            // catch (RuntimeException) would miss — so a failed create never leaks the
+            // reserved port or leaves a container behind. Idempotent and a no-op on success.
+            if (!provisioned) {
+                rollbackDbCluster(id, handle, proxyPort);
+            }
+        }
+    }
+
+    private void rollbackDbCluster(String id, NeptuneContainerHandle handle, int proxyPort) {
+        try {
+            try {
+                // The proxy only starts after the container is ready, so a null handle means it
+                // never started — nothing to stop.
+                if (handle != null) {
+                    proxyManager.stopProxy(id);
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping proxy for Neptune cluster {0}: {1}", id, e.getMessage());
+            }
+            try {
+                // Stop by id, not handle: a readiness timeout in containerManager.start() throws
+                // after the container was created and registered but before the handle is returned,
+                // so cleaning up by handle here would miss (and orphan) it. stopByClusterId is
+                // idempotent, so it's safe when the container never started.
+                containerManager.stopByClusterId(id);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping container for Neptune cluster {0}: {1}", id, e.getMessage());
+            }
+        } finally {
+            // Always release the port — even if a cleanup step throws a non-RuntimeException
+            // (e.g. an Error) — since leaking the port is the exact failure this rollback prevents.
+            releaseProxyPort(proxyPort);
+        }
     }
 
     public NeptuneCluster getDbCluster(String id) {

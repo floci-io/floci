@@ -1077,6 +1077,55 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void listAppendAgainstNullAttributeThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u-null-list"));
+        ObjectNode nullAttr = mapper.createObjectNode();
+        nullAttr.put("NULL", true);
+        existing.set("tags", nullAttr);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u-null-list");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":new", listAttributeValue("tag-a"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#t", "tags");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", key, null,
+                        "SET #t = list_append(#t, :new)",
+                        exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("An operand in the update expression has an incorrect data type"));
+    }
+
+    @Test
+    void listAppendAgainstMissingAttributeThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        service.putItem("Users", item("userId", "u-no-tags"), region);
+
+        ObjectNode key = item("userId", "u-no-tags");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":new", listAttributeValue("tag-a"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#t", "tags");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", key, null,
+                        "SET #t = list_append(#t, :new)",
+                        exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("The provided expression refers to an attribute that does not exist in the item"));
+    }
+
+    @Test
     void scanContainsOnListWithNumericElements() {
         String region = "eu-west-1";
         createUsersTable(region);

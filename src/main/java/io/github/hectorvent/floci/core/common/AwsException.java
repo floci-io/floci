@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -9,6 +11,10 @@ import java.util.Map;
  * Some services use different error code formats for Query (XML) and JSON protocols.
  * {@link #jsonType()} returns the JSON-protocol {@code __type} value that the AWS SDK v2
  * uses to instantiate a specific typed exception rather than falling back to a generic one.
+ * <p>
+ * When {@link #getExtendedData()} is non-null, the exception mapper produces an extended
+ * response with a {@code reason} and {@code detail} field (e.g. {@code reason: "CODE_ERROR"}
+ * with structured code errors for schema validation failures).
  */
 public class AwsException extends RuntimeException {
 
@@ -26,11 +32,17 @@ public class AwsException extends RuntimeException {
 
     private final String errorCode;
     private final int httpStatus;
+    private final Map<String, Object> extendedData;
 
     public AwsException(String errorCode, String message, int httpStatus) {
+        this(errorCode, message, httpStatus, null);
+    }
+
+    public AwsException(String errorCode, String message, int httpStatus, Map<String, Object> extendedData) {
         super(message);
         this.errorCode = errorCode;
         this.httpStatus = httpStatus;
+        this.extendedData = extendedData != null ? new HashMap<>(extendedData) : null;
     }
 
     public String getErrorCode() {
@@ -39,6 +51,15 @@ public class AwsException extends RuntimeException {
 
     public int getHttpStatus() {
         return httpStatus;
+    }
+
+    /**
+     * Returns the extended data for structured error responses, or {@code null} if not present.
+     * Used for schema validation errors that include {@code reason: "CODE_ERROR"} and
+     * {@code detail.codeErrors}.
+     */
+    public Map<String, Object> getExtendedData() {
+        return extendedData != null ? Collections.unmodifiableMap(extendedData) : null;
     }
 
     /**

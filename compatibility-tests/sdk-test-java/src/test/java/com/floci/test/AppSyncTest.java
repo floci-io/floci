@@ -12,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
@@ -106,12 +107,11 @@ class AppSyncTest {
     @Test
     @Order(11)
     void getSchemaCreationStatus() {
-        GetSchemaCreationStatusResponse resp = client.getSchemaCreationStatus(
-                GetSchemaCreationStatusRequest.builder()
-                        .apiId(apiId)
-                        .build());
-
-        assertThat(resp.statusAsString()).isEqualTo("ACTIVE");
+        // Schema creation is async in real AWS: poll until terminal (SUCCESS
+        // or FAILED). All subsequent tests in this class depend on the
+        // schema being ACTIVE because the 409 gate fires while PROCESSING.
+        SchemaStatus status = pollSchemaStatusToTerminal();
+        assertThat(status).isEqualTo(SchemaStatus.SUCCESS);
     }
 
     // ── API Keys ────────────────────────────────────────────────────────
@@ -540,12 +540,28 @@ class AppSyncTest {
     @Test
     @Order(93)
     void startSchemaCreation_invalidSchema() {
-        assertThatThrownBy(() -> client.startSchemaCreation(StartSchemaCreationRequest.builder()
-                        .apiId(apiId)
-                        .definition(SdkBytes.fromUtf8String("type Query { invalid !!! }"))
-                        .build()))
-                .isInstanceOf(AppSyncException.class)
-                .hasMessageContaining("Invalid schema");
+        StartSchemaCreationResponse resp = client.startSchemaCreation(StartSchemaCreationRequest.builder()
+                .apiId(apiId)
+                .definition(SdkBytes.fromUtf8String("type Query { invalid !!! }"))
+                .build());
+        assertThat(resp.status()).isEqualTo(SchemaStatus.PROCESSING);
+        SchemaStatus terminal = pollSchemaStatusToTerminal();
+        assertThat(terminal).isEqualTo(SchemaStatus.FAILED);
+    }
+
+    private SchemaStatus pollSchemaStatusToTerminal() {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(10));
+        SchemaStatus s = client.getSchemaCreationStatus(r -> r.apiId(apiId)).status();
+        while (s == SchemaStatus.PROCESSING && Instant.now().isBefore(deadline)) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(ie);
+            }
+            s = client.getSchemaCreationStatus(r -> r.apiId(apiId)).status();
+        }
+        return s;
     }
 
     @Test
@@ -600,9 +616,11 @@ class AppSyncTest {
                 UpdateChannelNamespaceRequest.builder()
                         .apiId(apiId)
                         .name(channelNsName)
+                        .codeHandlers("export function handler(ctx) { return ctx; }")
                         .build());
 
         assertThat(resp.channelNamespace()).isNotNull();
+        assertThat(resp.channelNamespace().codeHandlers()).contains("handler");
     }
 
     @Test
@@ -672,6 +690,7 @@ class AppSyncTest {
 
         assertThat(resp.domainNameConfig()).isNotNull();
         assertThat(resp.domainNameConfig().domainName()).isEqualTo(tempDomainName);
+        assertThat(resp.domainNameConfig().description()).isEqualTo("updated-domain");
     }
 
     @Test
@@ -949,31 +968,34 @@ class AppSyncTest {
 
     @Test
     @Order(80)
-    void getNonExistentApiThrowsException() {
+    void getNonExistentApiThrowsNotFoundException() {
         assertThatThrownBy(() -> client.getGraphqlApi(GetGraphqlApiRequest.builder()
                         .apiId("nonexistent12345678901234")
                         .build()))
-                .isInstanceOf(AppSyncException.class);
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("GraphQL API not found:");
     }
 
     @Test
     @Order(81)
-    void getNonExistentDataSourceThrowsException() {
+    void getNonExistentDataSourceThrowsNotFoundException() {
         assertThatThrownBy(() -> client.getDataSource(GetDataSourceRequest.builder()
                         .apiId(apiId)
                         .name("nonexistent-ds")
                         .build()))
-                .isInstanceOf(AppSyncException.class);
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Data source not found:");
     }
 
     @Test
     @Order(82)
-    void getNonExistentTypeThrowsException() {
+    void getNonExistentTypeThrowsNotFoundException() {
         assertThatThrownBy(() -> client.getType(GetTypeRequest.builder()
                         .apiId(apiId)
                         .typeName("NonExistentType")
                         .build()))
-                .isInstanceOf(AppSyncException.class);
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Type not found:");
     }
 
     @Test
@@ -985,5 +1007,262 @@ class AppSyncTest {
 
         assertThat(resp.apiKey()).isNotNull();
         assertThat(resp.apiKey().id()).isNotBlank();
+    }
+
+    // ── SDK Coverage Gaps: Environment Variables ───────────────────────────
+
+    @Test
+    @Order(120)
+    void putGraphqlApiEnvironmentVariables() {
+        PutGraphqlApiEnvironmentVariablesResponse resp = client.putGraphqlApiEnvironmentVariables(
+                PutGraphqlApiEnvironmentVariablesRequest.builder()
+                        .apiId(apiId)
+                        .environmentVariables(Map.of("TABLE_NAME", "my-table", "REGION", "us-east-1"))
+                        .build());
+
+        assertThat(resp.environmentVariables())
+                .containsEntry("TABLE_NAME", "my-table")
+                .containsEntry("REGION", "us-east-1");
+    }
+
+    @Test
+    @Order(121)
+    void getGraphqlApiEnvironmentVariables() {
+        GetGraphqlApiEnvironmentVariablesResponse resp = client.getGraphqlApiEnvironmentVariables(
+                GetGraphqlApiEnvironmentVariablesRequest.builder()
+                        .apiId(apiId)
+                        .build());
+
+        assertThat(resp.environmentVariables())
+                .containsEntry("TABLE_NAME", "my-table")
+                .containsEntry("REGION", "us-east-1");
+    }
+
+    // ── SDK Coverage Gaps: Pagination ──────────────────────────────────────
+
+    @Test
+    @Order(122)
+    void listGraphqlApisWithMaxResults() {
+        for (int i = 0; i < 2; i++) {
+            client.createGraphqlApi(CreateGraphqlApiRequest.builder()
+                    .name("pg-sdk-api-" + i + "-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                    .authenticationType("API_KEY")
+                    .build());
+        }
+
+        ListGraphqlApisResponse page1 = client.listGraphqlApis(ListGraphqlApisRequest.builder()
+                .maxResults(2)
+                .build());
+
+        assertThat(page1.graphqlApis()).hasSizeLessThanOrEqualTo(2);
+        if (page1.nextToken() != null) {
+            ListGraphqlApisResponse page2 = client.listGraphqlApis(ListGraphqlApisRequest.builder()
+                    .maxResults(2)
+                    .nextToken(page1.nextToken())
+                    .build());
+            assertThat(page2.graphqlApis()).isNotEmpty();
+        }
+    }
+
+    @Test
+    @Order(123)
+    void listDataSourcesWithMaxResults() {
+        for (int i = 0; i < 2; i++) {
+            client.createDataSource(CreateDataSourceRequest.builder()
+                    .apiId(apiId)
+                    .name("pg-sdk-ds-" + i + "-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                    .type("NONE")
+                    .build());
+        }
+
+        ListDataSourcesResponse page1 = client.listDataSources(ListDataSourcesRequest.builder()
+                .apiId(apiId)
+                .maxResults(1)
+                .build());
+
+        assertThat(page1.dataSources()).hasSize(1);
+        assertThat(page1.nextToken()).isNotNull();
+
+        ListDataSourcesResponse page2 = client.listDataSources(ListDataSourcesRequest.builder()
+                .apiId(apiId)
+                .maxResults(1)
+                .nextToken(page1.nextToken())
+                .build());
+
+        assertThat(page2.dataSources()).isNotEmpty();
+    }
+
+    // ── SDK Coverage Gaps: Mirror Error Tests (409/429/404) ────────────────
+
+    @Test
+    @Order(130)
+    void createDataSourceDuplicateThrowsBadRequestException() {
+        String dsName = "sdk-conflict-ds-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        client.createDataSource(CreateDataSourceRequest.builder()
+                .apiId(apiId)
+                .name(dsName)
+                .type("NONE")
+                .build());
+
+        assertThatThrownBy(() -> client.createDataSource(CreateDataSourceRequest.builder()
+                        .apiId(apiId)
+                        .name(dsName)
+                        .type("NONE")
+                        .build()))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessageContaining("Data source with name");
+
+        client.deleteDataSource(r -> r.apiId(apiId).name(dsName));
+    }
+
+    @Test
+    @Order(131)
+    void createApiKeyExceedsLimitThrowsApiKeyLimitExceededException() {
+        CreateGraphqlApiResponse tempApi = client.createGraphqlApi(CreateGraphqlApiRequest.builder()
+                .name("sdk-limit-test-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                .authenticationType("API_KEY")
+                .build());
+        String tempApiId = tempApi.graphqlApi().apiId();
+
+        try {
+            client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build());
+            client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build());
+
+            assertThatThrownBy(() -> client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build()))
+                    .isInstanceOf(ApiKeyLimitExceededException.class)
+                    .hasMessageContaining("The API key exceeded a limit");
+        } finally {
+            client.deleteGraphqlApi(r -> r.apiId(tempApiId));
+        }
+    }
+
+    @Test
+    @Order(132)
+    void updateResolverNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.updateResolver(UpdateResolverRequest.builder()
+                        .apiId(apiId)
+                        .typeName("Query")
+                        .fieldName("nonExistentSdkField")
+                        .dataSourceName("none-ds")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Resolver not found:");
+    }
+
+    @Test
+    @Order(133)
+    void deleteFunctionNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.deleteFunction(DeleteFunctionRequest.builder()
+                        .apiId(apiId)
+                        .functionId("nonexistent00000000000")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Function not found:");
+    }
+
+    @Test
+    @Order(134)
+    void updateApiKeyNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.updateApiKey(UpdateApiKeyRequest.builder()
+                        .apiId(apiId)
+                        .id("nonexistent00000000000")
+                        .description("updated")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("API key not found:");
+    }
+
+    @Test
+    @Order(135)
+    void updateDomainNameNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.updateDomainName(UpdateDomainNameRequest.builder()
+                        .domainName("nonexistent.example.com")
+                        .description("updated")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Domain name not found:");
+    }
+
+    @Test
+    @Order(136)
+    void createResolverMissingDataSourceThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.createResolver(CreateResolverRequest.builder()
+                        .apiId(apiId)
+                        .typeName("Query")
+                        .fieldName("crossRefSdkField")
+                        .dataSourceName("nonexistent-ds-for-sdk-resolver")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Data source not found:");
+    }
+
+    @Test
+    @Order(137)
+    void createSourceApiAssociationDuplicateThrowsConcurrentModificationException() {
+        String sourceApiId = client.createGraphqlApi(CreateGraphqlApiRequest.builder()
+                .name("sdk-dup-source-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                .authenticationType("API_KEY")
+                .build()).graphqlApi().apiId();
+
+        try {
+            client.associateSourceGraphqlApi(AssociateSourceGraphqlApiRequest.builder()
+                    .mergedApiIdentifier(apiId)
+                    .sourceApiIdentifier(sourceApiId)
+                    .build());
+
+            assertThatThrownBy(() -> client.associateSourceGraphqlApi(AssociateSourceGraphqlApiRequest.builder()
+                            .mergedApiIdentifier(apiId)
+                            .sourceApiIdentifier(sourceApiId)
+                            .build()))
+                    .isInstanceOf(ConcurrentModificationException.class)
+                    .hasMessageContaining("Source API association already exists for Source API ID")
+                    .hasMessageContaining("and Merged API ID");
+        } finally {
+            client.deleteGraphqlApi(r -> r.apiId(sourceApiId));
+        }
+    }
+
+    @Test
+    @Order(200)
+    void startSchemaCreation_syntaxError_throwsBadRequestWithExtendedBody() throws Exception {
+        String body = """
+            { "definition": "type Query { invalid syntax!!! }" }
+            """;
+        String url = TestFixtures.endpoint() + "/v1/apis/" + apiId + "/schemacreation";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
+
+        // Async path: 200 + PROCESSING; the error surfaces in the FAILED details.
+        assertThat(resp.statusCode()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> jsonBody = mapper.readValue(resp.body(), Map.class);
+        assertThat(jsonBody.get("status")).isEqualTo("PROCESSING");
+
+        SchemaStatus terminal = pollSchemaStatusToTerminal();
+        assertThat(terminal).isEqualTo(SchemaStatus.FAILED);
+
+        GetSchemaCreationStatusResponse status = client.getSchemaCreationStatus(r -> r.apiId(apiId));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> extended = mapper.readValue(status.details(), Map.class);
+        assertThat(extended.get("reason")).isEqualTo("CODE_ERROR");
+        assertThat(extended).containsKey("detail");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> detail = (Map<String, Object>) extended.get("detail");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> codeErrors = (List<Map<String, Object>>) detail.get("codeErrors");
+        assertThat(codeErrors).isNotEmpty();
+        Map<String, Object> first = codeErrors.get(0);
+        assertThat(first.get("errorType")).isEqualTo("PARSER_ERROR");
+        assertThat(first.get("value")).isNotNull();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> location = (Map<String, Object>) first.get("location");
+        assertThat(location.get("line")).isNotNull();
+        assertThat(location.get("column")).isNotNull();
+        assertThat(location.get("span")).isEqualTo(-1);
     }
 }

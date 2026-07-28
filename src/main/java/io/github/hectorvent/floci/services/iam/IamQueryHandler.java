@@ -35,21 +35,24 @@ public class IamQueryHandler {
 
     private final IamService iamService;
     private final IamPolicyEvaluator policyEvaluator;
+    private final AccountResolver accountResolver;
 
     @Inject
-    public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator) {
+    public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
+                           AccountResolver accountResolver) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
+        this.accountResolver = accountResolver;
     }
 
-    public Response handle(String action, MultivaluedMap<String, String> params) {
+    public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
         LOG.debugv("IAM action: {0}", action);
 
         try {
             return switch (action) {
             // Users
             case "CreateUser" -> handleCreateUser(params);
-            case "GetUser" -> handleGetUser(params);
+            case "GetUser" -> handleGetUser(params, authorization);
             case "DeleteUser" -> handleDeleteUser(params);
             case "ListUsers" -> handleListUsers(params);
             case "UpdateUser" -> handleUpdateUser(params);
@@ -133,8 +136,8 @@ public class IamQueryHandler {
 
             // Access Keys
             case "CreateAccessKey" -> handleCreateAccessKey(params);
-            case "DeleteAccessKey" -> handleDeleteAccessKey(params);
-            case "ListAccessKeys" -> handleListAccessKeys(params);
+            case "DeleteAccessKey" -> handleDeleteAccessKey(params, authorization);
+            case "ListAccessKeys" -> handleListAccessKeys(params, authorization);
             case "UpdateAccessKey" -> handleUpdateAccessKey(params);
             case "GetAccessKeyLastUsed" -> handleGetAccessKeyLastUsed(params);
 
@@ -179,9 +182,28 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.IAM, result)).build();
     }
 
-    private Response handleGetUser(MultivaluedMap<String, String> params) {
+    // UserName is optional on GetUser/ListAccessKeys/DeleteAccessKey: real AWS determines
+    // it implicitly from the access key that signed the request. Mirrors moto: an access
+    // key that maps to no stored IAM user is the documented NoSuchEntity error.
+    private String resolveUserName(MultivaluedMap<String, String> params, String authorization) {
         String userName = getParam(params, "UserName");
-        IamUser user = iamService.getUser(userName != null ? userName : "root");
+        if (userName != null) {
+            return userName;
+        }
+        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        if (accessKeyId == null) {
+            throw new AwsException("NoSuchEntity",
+                    "No access key could be determined from the request.", 404);
+        }
+        return iamService.findUserNameByAccessKeyId(accessKeyId)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Access Key with id " + accessKeyId + " cannot be found.", 404));
+    }
+
+    private Response handleGetUser(MultivaluedMap<String, String> params, String authorization) {
+        // UserName is optional per the IAM model: it defaults to the user owning the
+        // access key that signed the request.
+        IamUser user = iamService.getUser(resolveUserName(params, authorization));
         String result = new XmlBuilder().start("User").raw(userXml(user)).end("User").build();
         return Response.ok(AwsQueryResponse.envelope("GetUser", AwsNamespaces.IAM, result)).build();
     }
@@ -672,13 +694,13 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("CreateAccessKey", AwsNamespaces.IAM, result)).build();
     }
 
-    private Response handleDeleteAccessKey(MultivaluedMap<String, String> params) {
-        iamService.deleteAccessKey(getParam(params, "UserName"), getParam(params, "AccessKeyId"));
+    private Response handleDeleteAccessKey(MultivaluedMap<String, String> params, String authorization) {
+        iamService.deleteAccessKey(resolveUserName(params, authorization), getParam(params, "AccessKeyId"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccessKey", AwsNamespaces.IAM)).build();
     }
 
-    private Response handleListAccessKeys(MultivaluedMap<String, String> params) {
-        List<AccessKey> keys = iamService.listAccessKeys(getParam(params, "UserName"));
+    private Response handleListAccessKeys(MultivaluedMap<String, String> params, String authorization) {
+        List<AccessKey> keys = iamService.listAccessKeys(resolveUserName(params, authorization));
         var xml = new XmlBuilder().start("AccessKeyMetadata");
         for (AccessKey k : keys) {
             xml.start("member").raw(accessKeyXml(k, false)).end("member");

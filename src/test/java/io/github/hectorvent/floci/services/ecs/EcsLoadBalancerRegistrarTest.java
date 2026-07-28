@@ -84,6 +84,25 @@ class EcsLoadBalancerRegistrarTest {
     }
 
     @Test
+    void awsvpcInContainerShapedBindingRegistersContainerPort() {
+        // In-container mode, awsvpc tasks are expose-only: resolveNetworkBindings
+        // reports hostPort == containerPort and the registrar must register that
+        // port (reachable at containerIP:containerPort). The dynamic-host-port
+        // shape of native mode is covered by registerThenDeregisterTaskContainer.
+        String tgArn = createTargetGroup("reg-tg-awsvpc");
+        EcsTask task = taskWithContainer("web", 80, 80);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 80);
+
+        registrar.registerTask(task, svc, REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size(), "one target should be registered");
+        assertEquals(80, health.get(0).getTarget().getPort());
+
+        registrar.deregisterTask(task, svc, REGION);
+    }
+
+    @Test
     void serviceWithoutLoadBalancersRegistersNothing() {
         String tgArn = createTargetGroup("reg-tg-2");
         EcsTask task = taskWithContainer("web", 8080, 40000);

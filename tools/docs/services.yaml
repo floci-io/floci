@@ -66,6 +66,7 @@ services:
     doc: docs/services/rds.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds]
   - service: secretsmanager
     doc: docs/services/secrets-manager.md
     sources:
@@ -111,6 +112,7 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/glue/GlueJsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/iam/IamQueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java }  # sts (lives in iam package); single-table, registerable next
+  - { path: src/main/java/io/github/hectorvent/floci/services/lightsail/LightsailJsonHandler.java }  # non-tabular doc (grouped/inline); standalone action table to be added
   - { path: src/main/java/io/github/hectorvent/floci/services/pricing/PricingJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/ses/SesQueryHandler.java }  # mixed-mode (Query + REST surface)

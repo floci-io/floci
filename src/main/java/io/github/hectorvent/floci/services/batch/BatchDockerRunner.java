@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.batch;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -22,12 +23,18 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class BatchDockerRunner {
+public class BatchDockerRunner implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(BatchDockerRunner.class);
     private static final String LOG_GROUP = "/aws/batch/job";
+
+    // Containers of jobs currently inside run(); drained on emulator shutdown so a
+    // SIGTERM mid-job does not orphan the container.
+    private final ConcurrentHashMap<String, String> inFlightContainers = new ConcurrentHashMap<>();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -76,24 +83,56 @@ public class BatchDockerRunner {
 
             ContainerSpec spec = builder.build();
             containerId = lifecycleManager.createAndStart(spec).containerId();
+            inFlightContainers.put(job.getJobId(), containerId);
             logHandle = logStreamer.attach(containerId, LOG_GROUP, logStreamName, job.getRegion(),
                     "batch:" + job.getJobName() + ":" + job.getJobId());
 
             Integer exitCode = waitForExit(containerId, timeout(job));
             long stoppedAt = System.currentTimeMillis();
+            releaseAndStop(job.getJobId(), containerId, logHandle);
             if (exitCode == null) {
-                lifecycleManager.stopAndRemove(containerId, logHandle);
                 return new BatchRunResult(137, "Job timed out", logStreamName, startedAt, stoppedAt, true);
             }
-            lifecycleManager.stopAndRemove(containerId, logHandle);
             return new BatchRunResult(exitCode, exitCode == 0 ? null : "Container exited with code " + exitCode,
                     logStreamName, startedAt, stoppedAt, false);
         } catch (Exception e) {
             LOG.warnv("Batch Docker job {0} failed: {1}", job.getJobId(), e.getMessage());
             if (containerId != null) {
-                lifecycleManager.stopAndRemove(containerId, logHandle);
+                releaseAndStop(job.getJobId(), containerId, logHandle);
             }
             return failed(startedAt, logStreamName, e.getMessage());
+        }
+    }
+
+    // Whoever wins the map removal owns the stop — stopManagedContainers() may have
+    // claimed the container first during shutdown, but the log stream is still ours.
+    private void releaseAndStop(String jobId, String containerId, Closeable logHandle) {
+        if (inFlightContainers.remove(jobId, containerId)) {
+            lifecycleManager.stopAndRemove(containerId, logHandle);
+        } else if (logHandle != null) {
+            try {
+                logHandle.close();
+            } catch (Exception e) {
+                LOG.debugv("Error closing log stream for job {0}: {1}", jobId, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Stops the containers of jobs still inside {@link #run} on emulator shutdown;
+     * without this a SIGTERM mid-job orphans the container.
+     */
+    @Override
+    public void stopManagedContainers() {
+        for (Map.Entry<String, String> entry : new ConcurrentHashMap<>(inFlightContainers).entrySet()) {
+            if (inFlightContainers.remove(entry.getKey(), entry.getValue())) {
+                try {
+                    lifecycleManager.stopAndRemove(entry.getValue(), null);
+                } catch (Exception e) {
+                    LOG.warnv("Failed to stop Batch container for job {0} on shutdown: {1}",
+                            entry.getKey(), e.getMessage());
+                }
+            }
         }
     }
 
