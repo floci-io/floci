@@ -2211,6 +2211,44 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(120)
+    void listObjectVersionsSupportsDelimiterAndUrlEncoding() {
+        String bucket = "versions-delimiter-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            given()
+                .urlEncodingEnabled(false)
+                .body("data1")
+            .when()
+                .put("/" + bucket + "/dir/one.txt")
+            .then()
+                .statusCode(200);
+
+            given()
+                .urlEncodingEnabled(false)
+                .body("data2")
+            .when()
+                .put("/" + bucket + "/root.txt")
+            .then()
+                .statusCode(200);
+
+            given()
+            .when()
+                .get("/" + bucket + "?versions&delimiter=/&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Delimiter>%2F</Delimiter>"))
+                .body(containsString("<Prefix>dir%2F</Prefix>"))
+                .body(containsString("<Key>root.txt</Key>"))
+                .body(not(containsString("<Key>dir%2Fone.txt</Key>")));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/dir/one.txt");
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/root.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(104)
     void cleanupPaginationBucket() {
         given().when().delete("/pag-test-bucket/a.txt");

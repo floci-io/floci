@@ -428,7 +428,7 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "versions")) {
                 s3Service.authorizeBucketRead(bucket, "s3:ListBucketVersions", authorization);
-                return handleListObjectVersions(bucket, prefix, maxKeys, keyMarker, encodingType);
+                return handleListObjectVersions(bucket, prefix, delimiter, maxKeys, keyMarker, encodingType);
             }
             if (hasQueryParam(uriInfo, "location")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketLocation", authorization);
@@ -1362,17 +1362,20 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListObjectVersions(String bucket, String prefix, Integer maxKeys, String keyMarker, String encodingType) {
+    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, Integer maxKeys, String keyMarker, String encodingType) {
         int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
-        S3Service.ListVersionsResult result = s3Service.listObjectVersions(bucket, prefix, max, keyMarker);
+        S3Service.ListVersionsResult result = s3Service.listObjectVersions(bucket, prefix, delimiter, max, keyMarker);
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("ListVersionsResult", AwsNamespaces.S3)
                 .elem("Name", bucket)
                 .elem("Prefix", maybeEncode(prefix, encodingType))
-                .elem("KeyMarker", maybeEncode(keyMarker, encodingType))
-                .elem("MaxKeys", max)
-                .elem("IsTruncated", result.isTruncated());
+                .elem("KeyMarker", maybeEncode(keyMarker, encodingType));
+        if (delimiter != null) {
+            xml.elem("Delimiter", maybeEncode(delimiter, encodingType));
+        }
+        xml.elem("MaxKeys", max)
+           .elem("IsTruncated", result.isTruncated());
         if (result.isTruncated()) {
             xml.elem("NextKeyMarker", maybeEncode(result.nextKeyMarker(), encodingType));
         }
@@ -1395,6 +1398,11 @@ public class S3Controller {
                    .elem("StorageClass", obj.getStorageClass())
                    .end("Version");
             }
+        }
+        for (String cp : result.commonPrefixes()) {
+            xml.start("CommonPrefixes")
+               .elem("Prefix", maybeEncode(cp, encodingType))
+               .end("CommonPrefixes");
         }
         if (encodingType != null) {
             xml.elem("EncodingType", encodingType);
