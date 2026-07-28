@@ -10,8 +10,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -19,24 +20,17 @@ import static org.mockito.Mockito.when;
 
 /**
  * Verifies that {@link ApiGatewayExecuteController#buildV2ProxyEvent} surfaces the
- * validated JWT's claims at {@code requestContext.authorizer.jwt.claims} for HTTP API
- * (V2) routes with {@code AuthorizationType: JWT}, matching the payload 2.0 event
- * real API Gateway delivers to an AWS_PROXY Lambda.
+ * validated JWT claims handed over by dispatch at {@code requestContext.authorizer.jwt.claims},
+ * matching the payload 2.0 event real API Gateway delivers to an AWS_PROXY Lambda.
+ * The builder never parses the Authorization header itself — dispatch only passes a
+ * claims map for routes that went through {@code enforceJwtAuthorizer}, so unvalidated
+ * tokens can never surface as authorizer context.
  */
 class BuildV2ProxyEventJwtAuthorizerClaimsTest {
 
     private ApiGatewayExecuteController controller;
     private HttpHeaders headers;
     private UriInfo uriInfo;
-
-    private static String b64url(String s) {
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(s.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String token(String payloadJson) {
-        return b64url("{\"alg\":\"none\"}") + "." + b64url(payloadJson) + ".sig";
-    }
 
     @BeforeEach
     void setUp() throws Exception {
@@ -59,58 +53,52 @@ class BuildV2ProxyEventJwtAuthorizerClaimsTest {
     }
 
     @Test
-    void jwtRouteInjectsClaimsIntoRequestContext() throws Exception {
-        String jwt = token("{\"sub\":\"user-123\",\"email\":\"a@example.com\",\"exp\":9999999999}");
-        when(headers.getHeaderString("Authorization")).thenReturn("Bearer " + jwt);
+    void validatedClaimsAreInjectedWithPayload20Stringification() throws Exception {
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("sub", "user-123");
+        claims.put("email", "a@example.com");
+        claims.put("exp", 9999999999L);
+        claims.put("email_verified", true);
+        claims.put("cognito:groups", List.of("admin", "poweruser"));
+        claims.put("nickname", null);
 
         String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", "JWT",
+                "GET", "/assets", "GET /assets", claims,
                 "abc123", "v1", headers, uriInfo, null, "req-1");
         JsonNode authorizer = new ObjectMapper().readTree(json)
                 .path("requestContext").path("authorizer");
 
-        assertFalse(authorizer.isMissingNode(), "authorizer must be present for JWT routes");
-        JsonNode claims = authorizer.path("jwt").path("claims");
-        assertEquals("user-123", claims.get("sub").asText());
-        assertEquals("a@example.com", claims.get("email").asText());
-        assertEquals("9999999999", claims.get("exp").asText(),
-                "claim values are stringified in the 2.0 payload");
+        assertFalse(authorizer.isMissingNode(), "authorizer must be present for validated JWT routes");
+        JsonNode claimsNode = authorizer.path("jwt").path("claims");
+        assertEquals("user-123", claimsNode.get("sub").asText());
+        assertEquals("a@example.com", claimsNode.get("email").asText());
+        assertEquals("9999999999", claimsNode.get("exp").asText(),
+                "numeric claims are stringified in the 2.0 payload");
+        assertEquals("true", claimsNode.get("email_verified").asText(),
+                "boolean claims are stringified in the 2.0 payload");
+        assertEquals("[admin poweruser]", claimsNode.get("cognito:groups").asText(),
+                "array claims use API Gateway's space-separated bracket form, not JSON");
+        assertFalse(claimsNode.has("nickname"), "null-valued claims are omitted, not \"null\"");
         assertTrue(authorizer.path("jwt").get("scopes").isNull(),
                 "scopes is null when no authorization scopes are configured");
     }
 
     @Test
-    void jwtRouteWithoutTokenOmitsAuthorizer() throws Exception {
-        when(headers.getHeaderString("Authorization")).thenReturn(null);
-
+    void nullClaimsMapOmitsAuthorizer() throws Exception {
         String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", "JWT",
+                "GET", "/assets", "GET /assets", null,
                 "abc123", "v1", headers, uriInfo, null, "req-2");
         JsonNode event = new ObjectMapper().readTree(json);
 
-        assertTrue(event.path("requestContext").path("authorizer").isMissingNode());
+        assertTrue(event.path("requestContext").path("authorizer").isMissingNode(),
+                "no claims handed over by dispatch → no authorizer context");
     }
 
     @Test
-    void nonJwtRouteOmitsAuthorizerEvenWithBearerToken() throws Exception {
-        String jwt = token("{\"sub\":\"user-123\"}");
-        when(headers.getHeaderString("Authorization")).thenReturn("Bearer " + jwt);
-
+    void emptyClaimsMapOmitsAuthorizer() throws Exception {
         String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", "NONE",
+                "GET", "/assets", "GET /assets", Map.of(),
                 "abc123", "v1", headers, uriInfo, null, "req-3");
-        JsonNode event = new ObjectMapper().readTree(json);
-
-        assertTrue(event.path("requestContext").path("authorizer").isMissingNode());
-    }
-
-    @Test
-    void malformedTokenOmitsAuthorizer() throws Exception {
-        when(headers.getHeaderString("Authorization")).thenReturn("Bearer not-a-jwt");
-
-        String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", "JWT",
-                "abc123", "v1", headers, uriInfo, null, "req-4");
         JsonNode event = new ObjectMapper().readTree(json);
 
         assertTrue(event.path("requestContext").path("authorizer").isMissingNode());
