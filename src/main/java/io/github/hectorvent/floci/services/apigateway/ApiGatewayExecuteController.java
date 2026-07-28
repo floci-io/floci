@@ -1497,7 +1497,16 @@ public class ApiGatewayExecuteController {
             }
         }
 
-        return JwtEnforcement.authorized(parseAllJwtClaims(token));
+        Map<String, Object> allClaims = parseAllJwtClaims(token);
+        if (allClaims == null) {
+            // parseJwtClaims above already decoded this token, so this only happens for
+            // exotic payloads (e.g. a non-object JSON body). Keep the record's contract:
+            // authorized always carries a non-null map; empty means "no claims to expose".
+            LOG.debugv("JWT validated but full-claims extraction failed; exposing no claims: api {0}, authorizer {1}",
+                    apiId, route.getAuthorizerId());
+            allClaims = Map.of();
+        }
+        return JwtEnforcement.authorized(allClaims);
     }
 
     // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
