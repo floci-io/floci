@@ -149,7 +149,8 @@ public class ContainerLauncher {
 
         // Start Runtime API server first so container can connect on boot
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
-        runtimeApiServer.setFunctionMetadata(fn.getFunctionName(), fn.getVersion(), fn.getHandler());
+        runtimeApiServer.setFunctionMetadata(fn.getFunctionName(), fn.getVersion(), fn.getHandler(),
+                fn.getAccountId());
 
         // Everything after the runtime-api server is allocated runs inside one try/catch: a failure
         // ANYWHERE below — image/host resolve, the code-volume populate (ensureCodeVolume), the spec

@@ -380,7 +380,7 @@ class RuntimeApiServerTest {
     @Test
     @Timeout(10)
     void extensionRegister_returnsRealFunctionMetadataOnceSet() throws Exception {
-        server.setFunctionMetadata("my-real-function", "3", "index.handler");
+        server.setFunctionMetadata("my-real-function", "3", "index.handler", "123456789012");
 
         HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
@@ -394,6 +394,88 @@ class RuntimeApiServerTest {
         assertEquals("my-real-function", body.getString("functionName"));
         assertEquals("3", body.getString("functionVersion"));
         assertEquals("index.handler", body.getString("handler"));
+    }
+
+    /**
+     * AWS includes {@code accountId} in the register response when the extension opts in via
+     * {@code Lambda-Extension-Accept-Feature: accountId}. Without it a telemetry extension
+     * registers successfully but silently loses account attribution.
+     */
+    @Test
+    @Timeout(10)
+    void extensionRegister_withAccountIdFeature_includesAccountId() throws Exception {
+        server.setFunctionMetadata("my-fn", "$LATEST", "index.handler", "210987654321");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "telemetry-extension")
+                        .header("Lambda-Extension-Accept-Feature", "accountId")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertEquals("210987654321", new JsonObject(response.body()).getString("accountId"));
+    }
+
+    /**
+     * The feature is opt-in: an extension that does not request it must get the unchanged response
+     * shape, since real AWS omits the field entirely rather than always sending it.
+     */
+    @Test
+    @Timeout(10)
+    void extensionRegister_withoutAccountIdFeature_omitsAccountId() throws Exception {
+        server.setFunctionMetadata("my-fn", "$LATEST", "index.handler", "210987654321");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "plain-extension")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertNull(new JsonObject(response.body()).getString("accountId"),
+                "accountId must only appear when the extension opts in");
+    }
+
+    /**
+     * The header carries a comma-separated feature list, so accountId must still be honoured
+     * alongside other requested features and regardless of casing/spacing.
+     */
+    @Test
+    @Timeout(10)
+    void extensionRegister_accountIdFeatureAmongOthers_isHonoured() throws Exception {
+        server.setFunctionMetadata("my-fn", "$LATEST", "index.handler", "210987654321");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "telemetry-extension")
+                        .header("Lambda-Extension-Accept-Feature", "someOtherFeature, AccountID")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertEquals("210987654321", new JsonObject(response.body()).getString("accountId"));
+    }
+
+    /** A function with no account falls back to the same placeholder used elsewhere in Floci. */
+    @Test
+    @Timeout(10)
+    void extensionRegister_withNoFunctionAccountId_fallsBackToPlaceholder() throws Exception {
+        server.setFunctionMetadata("my-fn", "$LATEST", "index.handler", null);
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "telemetry-extension")
+                        .header("Lambda-Extension-Accept-Feature", "accountId")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertEquals("000000000000", new JsonObject(response.body()).getString("accountId"));
     }
 
     @Test

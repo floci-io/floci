@@ -82,6 +82,13 @@ public class RuntimeApiServer {
     private static final String EXTENSION_NAME_HEADER = "Lambda-Extension-Name";
     private static final String EXTENSION_ID_HEADER = "Lambda-Extension-Identifier";
     private static final String EXTENSION_EVENT_ID_HEADER = "Lambda-Extension-Event-Identifier";
+    private static final String EXTENSION_ACCEPT_FEATURE_HEADER = "Lambda-Extension-Accept-Feature";
+
+    /** Opt-in feature that adds {@code accountId} to the register response. */
+    private static final String ACCOUNT_ID_FEATURE = "accountId";
+
+    /** Matches the account used elsewhere when a function carries none (see LambdaService). */
+    private static final String DEFAULT_ACCOUNT_ID = "000000000000";
 
     private static final byte[] CONTAINER_STOPPED_PAYLOAD =
             "{\"errorMessage\":\"Container stopped\",\"errorType\":\"ContainerStopped\"}".getBytes();
@@ -146,16 +153,19 @@ public class RuntimeApiServer {
     private volatile String functionName = "function";
     private volatile String functionVersion = "$LATEST";
     private volatile String handler = "";
+    private volatile String accountId = DEFAULT_ACCOUNT_ID;
 
     RuntimeApiServer(Vertx vertx, int port) {
         this.vertx = vertx;
         this.port = port;
     }
 
-    public void setFunctionMetadata(String functionName, String functionVersion, String handler) {
+    public void setFunctionMetadata(String functionName, String functionVersion, String handler,
+                                    String accountId) {
         this.functionName = functionName != null ? functionName : "function";
         this.functionVersion = functionVersion != null ? functionVersion : "$LATEST";
         this.handler = handler != null ? handler : "";
+        this.accountId = accountId != null && !accountId.isBlank() ? accountId : DEFAULT_ACCOUNT_ID;
     }
 
     public int getPort() {
@@ -306,6 +316,12 @@ public class RuntimeApiServer {
                     .put("functionName", functionName)
                     .put("functionVersion", functionVersion)
                     .put("handler", handler);
+            // AWS only includes accountId when the extension opts in via Lambda-Extension-Accept-
+            // Feature; adding it unconditionally would diverge from the real response shape for
+            // extensions that never asked. The header is a comma-separated feature list.
+            if (acceptsFeature(ctx.request().getHeader(EXTENSION_ACCEPT_FEATURE_HEADER), ACCOUNT_ID_FEATURE)) {
+                responseBody.put("accountId", accountId);
+            }
             ctx.response()
                     .setStatusCode(200)
                     .putHeader(EXTENSION_ID_HEADER, identifier)
@@ -527,6 +543,24 @@ public class RuntimeApiServer {
             });
         }
         return invocation.getResultFuture();
+    }
+
+    /**
+     * True if {@code headerValue} — the comma-separated {@code Lambda-Extension-Accept-Feature}
+     * list an extension sends at registration — opts into {@code feature}. Matching is
+     * case-insensitive and tolerant of surrounding whitespace; a null/blank header opts into
+     * nothing.
+     */
+    private static boolean acceptsFeature(String headerValue, String feature) {
+        if (headerValue == null || headerValue.isBlank()) {
+            return false;
+        }
+        for (String candidate : headerValue.split(",")) {
+            if (candidate.trim().equalsIgnoreCase(feature)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void sendStatusOk(RoutingContext ctx) {
