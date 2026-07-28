@@ -229,7 +229,7 @@ class TlsCertificateHostnameTest {
         List<String> sans = extractSansFromCertificate(cert);
         
         Set<String> expectedSans = Set.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                "localhost.floci.io", "*.localhost.floci.io");
+                "localhost.floci.io", "*.localhost.floci.io", "host.docker.internal");
         Set<String> actualSans = new HashSet<>(sans);
         
         assertEquals(expectedSans, actualSans,
@@ -252,7 +252,7 @@ class TlsCertificateHostnameTest {
         List<String> sans = extractSansFromCertificate(cert);
         
         Set<String> expectedSans = Set.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                "localhost.floci.io", "*.localhost.floci.io");
+                "localhost.floci.io", "*.localhost.floci.io", "host.docker.internal");
         Set<String> actualSans = new HashSet<>(sans);
         
         assertEquals(expectedSans, actualSans,

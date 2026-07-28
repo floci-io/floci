@@ -66,7 +66,7 @@ public class NeptuneContainerManager {
         LOG.infov("Starting Neptune backend container ({0}) for cluster: {1}", dbType, clusterId);
 
         int backendPort = dbType.backendPort();
-        String containerName = ContainerStorageHelper.resourceName(config, "neptune", null, clusterId);
+        String containerName = containerName(clusterId);
         lifecycleManager.removeIfExists(containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
@@ -126,6 +126,28 @@ public class NeptuneContainerManager {
         }
         activeContainers.remove(handle.getClusterId());
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+    }
+
+    /**
+     * Stops and removes the backend container for a cluster by id, if one exists.
+     * Used by the service's provisioning rollback: {@link #start} registers the container in
+     * {@code activeContainers} <em>before</em> {@link #waitForBackendReady}, so a readiness
+     * timeout throws without ever returning the handle to the caller. In that case rollback
+     * can't go through {@link #stop} (it has no handle), so it cleans up by id instead. Falls
+     * back to the deterministic container name to catch a container that failed before it was
+     * registered. Idempotent — a no-op when nothing is running for the id.
+     */
+    public void stopByClusterId(String clusterId) {
+        NeptuneContainerHandle handle = activeContainers.get(clusterId);
+        if (handle != null) {
+            stop(handle);
+            return;
+        }
+        lifecycleManager.removeIfExists(containerName(clusterId));
+    }
+
+    private String containerName(String clusterId) {
+        return ContainerStorageHelper.resourceName(config, "neptune", null, clusterId);
     }
 
     public void stopAll() {

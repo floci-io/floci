@@ -72,6 +72,11 @@ class S3VirtualHostFilterTest {
             "s3.localhost.localstack.cloud:4566, localhost",
             "s3.localhost.floci.io,             localhost",
             "s3.localhost.floci.io:4566,        localhost",
+            // Shared edge hosts are endpoints, not buckets named localhost
+            "localhost.localstack.cloud,        localhost",
+            "localhost.localstack.cloud:4566,   localhost",
+            "localhost.floci.io,                localhost",
+            "localhost.floci.io:4566,           localhost",
             // K8s service hostname used as endpoint (path-style) — must NOT be rewritten
             "floci.default.svc.cluster.local,           localhost",
             "floci-service.namespace.svc.cluster.local, localhost",

@@ -28,7 +28,12 @@ import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityResponse;
+import software.amazon.awssdk.services.sesv2.model.IdentityInfo;
+import software.amazon.awssdk.services.sesv2.model.ListEmailIdentitiesRequest;
 import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityMailFromAttributesRequest;
+import software.amazon.awssdk.services.sesv2.model.VerificationStatus;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -166,5 +171,31 @@ class SesIdentityAttributesTest {
                 .isInstanceOf(BadRequestException.class)
                 .extracting(e -> ((AwsServiceException) e).statusCode())
                 .isEqualTo(400);
+    }
+
+    @Test
+    @Order(12)
+    void listEmailIdentities_populatesVerificationStatus() {
+        String email = TestFixtures.uniqueName("lei") + "@example.com";
+        String domain = TestFixtures.uniqueName("lei") + ".example.com";
+        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(email).build());
+        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(domain).build());
+        try {
+            List<IdentityInfo> identities = sesV2.listEmailIdentities(
+                    ListEmailIdentitiesRequest.builder().build()).emailIdentities();
+            IdentityInfo emailIdentity = identities.stream()
+                    .filter(i -> email.equals(i.identityName())).findFirst().orElseThrow();
+            IdentityInfo domainIdentity = identities.stream()
+                    .filter(i -> domain.equals(i.identityName())).findFirst().orElseThrow();
+            // Regression: VerificationStatus used to be null in the list response.
+            assertThat(emailIdentity.verificationStatus()).isEqualTo(VerificationStatus.SUCCESS);
+            assertThat(domainIdentity.verificationStatus()).isEqualTo(VerificationStatus.PENDING);
+            // SendingEnabled tracks verification status on AWS: SUCCESS -> true, PENDING -> false.
+            assertThat(emailIdentity.sendingEnabled()).isTrue();
+            assertThat(domainIdentity.sendingEnabled()).isFalse();
+        } finally {
+            sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(email).build());
+            sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(domain).build());
+        }
     }
 }

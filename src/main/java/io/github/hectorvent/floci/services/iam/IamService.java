@@ -193,9 +193,21 @@ public class IamService implements SessionAccountLookup {
     }
 
     public IamUser getUser(String userName) {
+        if (userName == null) {
+            throw new AwsException("NoSuchEntity",
+                    "The user with name null cannot be found.", 404);
+        }
         return users.get(userName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "The user with name " + userName + " cannot be found.", 404));
+    }
+
+    /** The IAM user that owns the given access key id, when it is a real stored key. */
+    public Optional<String> findUserNameByAccessKeyId(String accessKeyId) {
+        if (accessKeyId == null) {
+            return Optional.empty();
+        }
+        return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
     public void deleteUser(String userName) {
@@ -951,6 +963,14 @@ public class IamService implements SessionAccountLookup {
             return fromAccessKey;
         }
         return findSessionAnyAccount(accessKeyId).map(SessionCredential::getSecretAccessKey);
+    }
+
+    public Optional<AccessKey> findAccessKey(String accessKeyId) {
+        return accessKeys.get(accessKeyId);
+    }
+
+    public Optional<IamUser> findUser(String userName) {
+        return users.get(userName);
     }
 
     // =========================================================================

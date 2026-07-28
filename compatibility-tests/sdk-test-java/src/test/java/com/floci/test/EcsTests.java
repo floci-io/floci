@@ -17,6 +17,7 @@ class EcsTests {
     private static String clusterName;
     private static String family;
     private static String serviceName;
+    private static String secretArn;
     private static Cluster cluster;
     private static TaskDefinition taskDef;
     private static TaskDefinition taskDefRev2;
@@ -30,6 +31,7 @@ class EcsTests {
         clusterName = "sdk-test-cluster-" + suffix;
         family = "sdk-test-task-" + suffix;
         serviceName = "sdk-test-svc-" + suffix;
+        secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:sdk-db-password-AbCdEf";
     }
 
     @AfterAll
@@ -1022,5 +1024,36 @@ class EcsTests {
     void listClustersAfterDelete() {
         List<String> arns = ecs.listClusters(ListClustersRequest.builder().build()).clusterArns();
         assertThat(arns).doesNotContain(cluster.clusterArn());
+    }
+
+    @Test
+    @Order(57)
+    @DisplayName("RegisterTaskDefinition - container secrets round trip")
+    void registerTaskDefinitionWithSecrets() {
+        String secretFamily = family + "-secrets";
+        TaskDefinition secretTaskDef = ecs.registerTaskDefinition(RegisterTaskDefinitionRequest.builder()
+                .family(secretFamily)
+                .containerDefinitions(ContainerDefinition.builder()
+                        .name("app")
+                        .image("alpine:latest")
+                        .essential(true)
+                        .secrets(Secret.builder()
+                                .name("DB_PASSWORD")
+                                .valueFrom(secretArn)
+                                .build())
+                        .build())
+                .build()).taskDefinition();
+
+        assertThat(secretTaskDef.containerDefinitions().get(0).secrets()).hasSize(1);
+        assertThat(secretTaskDef.containerDefinitions().get(0).secrets().get(0).name()).isEqualTo("DB_PASSWORD");
+        assertThat(secretTaskDef.containerDefinitions().get(0).secrets().get(0).valueFrom()).isEqualTo(secretArn);
+
+        TaskDefinition described = ecs.describeTaskDefinition(DescribeTaskDefinitionRequest.builder()
+                .taskDefinition(secretTaskDef.taskDefinitionArn())
+                .build()).taskDefinition();
+
+        assertThat(described.containerDefinitions().get(0).secrets()).hasSize(1);
+        assertThat(described.containerDefinitions().get(0).secrets().get(0).name()).isEqualTo("DB_PASSWORD");
+        assertThat(described.containerDefinitions().get(0).secrets().get(0).valueFrom()).isEqualTo(secretArn);
     }
 }

@@ -9,6 +9,7 @@ public class Route {
 
     private String destinationCidrBlock;
     private String gatewayId;
+    private String natGatewayId;
     private String state = "active";
     private String origin;
 
@@ -25,6 +26,9 @@ public class Route {
 
     public String getGatewayId() { return gatewayId; }
     public void setGatewayId(String gatewayId) { this.gatewayId = gatewayId; }
+
+    public String getNatGatewayId() { return natGatewayId; }
+    public void setNatGatewayId(String natGatewayId) { this.natGatewayId = natGatewayId; }
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }

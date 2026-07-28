@@ -86,6 +86,19 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean strictClaiming();
+
+        /**
+         * When enabled, a REST request whose SigV4 credential scope names a service
+         * absent from the catalog is rejected with {@code UnknownOperationException}
+         * instead of falling through JAX-RS matching into S3's path-style routes,
+         * where it surfaces as a misleading {@code NoSuchBucket} (issue #1754).
+         *
+         * <p>On by default. Turn it off if Floci serves a route whose signing scope
+         * is not yet enumerated in the catalog: the request then falls through as it
+         * did before, rather than failing with a 404 that has no workaround.
+         */
+        @WithDefault("true")
+        boolean rejectUnknownServiceScope();
     }
 
     interface DnsConfig {
@@ -256,6 +269,7 @@ public interface EmulatorConfig {
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
+        LightsailStorageConfig lightsail();
         CodePipelineStorageConfig codepipeline();
         S3VectorsStorageConfig s3vectors();
         EcsStorageConfig ecs();
@@ -265,6 +279,7 @@ public interface EmulatorConfig {
         TranscribeStorageConfig transcribe();
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
+        CloudTrailStorageConfig cloudtrail();
     }
 
     interface SsmStorageConfig {
@@ -403,6 +418,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface LightsailStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodePipelineStorageConfig {
         Optional<String> mode();
 
@@ -453,6 +475,13 @@ public interface EmulatorConfig {
     }
 
     interface ElasticBeanstalkStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface CloudTrailStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -551,6 +580,7 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
@@ -583,7 +613,7 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
-    interface CloudTrailServiceConfig {
+    interface LightsailServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -592,7 +622,6 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
     }
-
     interface S3VectorsServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -631,6 +660,17 @@ public interface EmulatorConfig {
     interface ConfigServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** How often the writer flushes pending records into the destination
+         *  bucket. Real AWS delivers data events with ~5-minute lag; the
+         *  default here is 60s so dev/CI feedback loops stay fast. */
+        @WithDefault("60")
+        int flushIntervalSeconds();
     }
 
     interface AutoScalingServiceConfig {
@@ -695,6 +735,9 @@ public interface EmulatorConfig {
     interface S3ServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean enforceAuth();
 
         @WithDefault("3600")
         int defaultPresignExpirySeconds();
@@ -985,6 +1028,10 @@ public interface EmulatorConfig {
     interface StepFunctionsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
+        @WithDefault("true")
+        boolean allowPlaintextHttp();
     }
 
     interface CloudFormationServiceConfig {
@@ -1175,6 +1222,14 @@ public interface EmulatorConfig {
     interface AppSyncServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Worker threads for async schema creation. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_THREADS */
+        @WithDefault("4")
+        int schemaWorkerThreads();
+
+        /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
+        @WithDefault("30")
+        int schemaWorkerShutdownTimeoutSeconds();
     }
 
     interface BcmDataExportsServiceConfig {

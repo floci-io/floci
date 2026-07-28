@@ -676,6 +676,27 @@ class ElbV2IntegrationTest {
                         equalTo("Elb.RegistrationInProgress"));
     }
 
+    @Test
+    @Order(28)
+    void describeTargetHealthReturnsUnusedForExplicitUnregisteredTarget() {
+        given()
+                .formParam("Action", "DescribeTargetHealth")
+                .formParam("TargetGroupArn", tgArn)
+                .formParam("Targets.member.1.Id", "i-1234567890abcdef0")
+                .formParam("Targets.member.1.Port", "80")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.TargetHealth.State",
+                        equalTo("unused"))
+                .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.TargetHealth.Reason",
+                        equalTo("Target.NotRegistered"))
+                .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.TargetHealth.Description",
+                        equalTo("Target is not registered to the target group"));
+    }
+
     // ── Listeners ─────────────────────────────────────────────────────────────
 
     @Test

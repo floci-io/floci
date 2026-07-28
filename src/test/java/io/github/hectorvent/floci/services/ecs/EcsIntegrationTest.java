@@ -348,6 +348,56 @@ class EcsIntegrationTest {
 
     @Test
     @Order(16)
+    void registerTaskDefinitionWithSecretsRoundTripsReferences() {
+        String secretArn = "arn:aws:secretsmanager:%s:%s:secret:db-password-AbCdEf"
+                .formatted(REGION, ACCOUNT);
+
+        String secretsTaskDefArn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "task-with-secrets",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true,
+                            "secrets": [
+                                {"name": "DB_PASSWORD", "valueFrom": "%s"},
+                                {"name": "CONFIG_VALUE", "valueFrom": "/app/config"}
+                            ]
+                        }
+                    ]
+                }
+                """.formatted(secretArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(secretsTaskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
+            .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"));
+    }
+
+    @Test
+    @Order(17)
     void describeTaskDefinition() {
         ecs("DescribeTaskDefinition")
             .body("""
@@ -363,7 +413,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(17)
+    @Order(18)
     void listTaskDefinitions() {
         ecs("ListTaskDefinitions")
             .body("{}")
@@ -375,7 +425,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void listTaskDefinitionFamilies() {
         ecs("ListTaskDefinitionFamilies")
             .body("{}")

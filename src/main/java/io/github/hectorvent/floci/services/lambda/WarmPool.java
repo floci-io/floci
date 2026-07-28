@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
@@ -31,7 +32,7 @@ import java.util.concurrent.TimeUnit;
  *    after the invocation completes.
  */
 @ApplicationScoped
-public class WarmPool {
+public class WarmPool implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(WarmPool.class);
 
@@ -43,7 +44,6 @@ public class WarmPool {
     private final ConcurrentHashMap<String, ArrayDeque<ContainerHandle>> pool = new ConcurrentHashMap<>();
     private final ScheduledExecutorService evictionScheduler = Executors.newSingleThreadScheduledExecutor(
             r -> { Thread t = new Thread(r, "warm-pool-evictor"); t.setDaemon(true); return t; });
-    private Thread shutdownHook;
 
     @Inject
     public WarmPool(ContainerLauncher containerLauncher, EmulatorConfig config) {
@@ -77,19 +77,21 @@ public class WarmPool {
             LOG.infov("Lambda containers running in ephemeral mode (destroyed after each invocation)");
         }
 
-        shutdownHook = new Thread(this::drainAll, "warm-pool-shutdown-hook");
-        Runtime.getRuntime().addShutdownHook(shutdownHook);
+    }
+
+    /**
+     * Invoked from EmulatorLifecycle.onStop for a deterministic drain during the
+     * ShutdownEvent phase; the {@code @PreDestroy} below stays as an idempotent fallback.
+     * This replaces the previous raw JVM shutdown hook, which raced the Quarkus-managed
+     * shutdown sequence.
+     */
+    @Override
+    public void stopManagedContainers() {
+        drainAll();
     }
 
     @PreDestroy
     void shutdown() {
-        if (shutdownHook != null) {
-            try {
-                Runtime.getRuntime().removeShutdownHook(shutdownHook);
-            } catch (IllegalStateException ignored) {
-                // JVM already shutting down
-            }
-        }
         evictionScheduler.shutdownNow();
         drainAll();
     }
