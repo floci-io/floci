@@ -176,7 +176,7 @@ class SamTransformIntegrationTest {
 
         assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Version</ResourceType>"));
         assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Alias</ResourceType>"));
-        assertThat(resourcesXml, containsString("<LogicalResourceId>AliasFunctionAliasproduction</LogicalResourceId>"));
+        assertThat(resourcesXml, containsString("<LogicalResourceId>AliasFunctionAliasProduction</LogicalResourceId>"));
     }
 
     @Test

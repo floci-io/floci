@@ -131,9 +131,12 @@ class SamTransformProcessorTest {
         assertEquals("MyFunc",
                 resources.path("MyFuncVersion").path("Properties").path("FunctionName").path("Ref").asText());
 
-        assertTrue(resources.has("MyFuncAliasproduction"));
-        JsonNode aliasProps = resources.path("MyFuncAliasproduction").path("Properties");
-        assertEquals("AWS::Lambda::Alias", resources.path("MyFuncAliasproduction").path("Type").asText());
+        // Suffix is sanitize()d, so the logical id stays alphanumeric — see the alias-name case
+        // below, where the raw name would otherwise leak a '-' into it.
+        assertTrue(resources.has("MyFuncAliasProduction"));
+        JsonNode aliasProps = resources.path("MyFuncAliasProduction").path("Properties");
+        assertEquals("AWS::Lambda::Alias", resources.path("MyFuncAliasProduction").path("Type").asText());
+        // The alias NAME itself is untouched — only the logical id is sanitized.
         assertEquals("production", aliasProps.path("Name").asText());
         assertEquals("MyFunc", aliasProps.path("FunctionName").path("Ref").asText());
 
@@ -201,6 +204,46 @@ class SamTransformProcessorTest {
         assertTrue(resources.has("MyFuncAlias"));
         assertEquals("StageName",
                 resources.path("MyFuncAlias").path("Properties").path("Name").path("Ref").asText());
+    }
+
+    @Test
+    void expandSamTemplate_autoPublishAliasWithSeparatorsYieldsAlphanumericLogicalId() throws Exception {
+        // '-' and '_' are legal in a Lambda alias name but not in a CloudFormation logical id, so
+        // the suffix has to be sanitized. Using the raw name emits "MyFuncAliasblue-green".
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": "blue-green_2",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        String aliasId = null;
+        Iterator<String> names = resources.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if ("AWS::Lambda::Alias".equals(resources.path(name).path("Type").asText())) {
+                aliasId = name;
+            }
+        }
+        assertNotNull(aliasId, "expansion emitted no AWS::Lambda::Alias");
+        assertTrue(aliasId.matches("[A-Za-z0-9]+"),
+                "logical id must be alphanumeric, was: " + aliasId);
+        assertEquals("MyFuncAliasBlueGreen2", aliasId);
+
+        // The alias name reaching Lambda keeps its separators — only the logical id is sanitized.
+        assertEquals("blue-green_2", resources.path(aliasId).path("Properties").path("Name").asText());
     }
 
     @Test

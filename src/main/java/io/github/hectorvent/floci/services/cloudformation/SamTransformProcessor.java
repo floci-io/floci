@@ -385,9 +385,11 @@ class SamTransformProcessor {
      * template engine resolves it at provision time; only the generated logical id needs a
      * literal, and it drops the suffix when the value isn't textual.
      *
-     * <p>{@code Ref}/{@code Fn::GetAtt} in the emitted properties give the ordering edges
-     * (function → version → alias) that {@code topologicalSort} already follows, so no
-     * explicit {@code DependsOn} is needed.
+     * <p>The {@code Ref}s on {@code FunctionName} give {@code topologicalSort} the edges it needs
+     * — function → version and function → alias — so no explicit {@code DependsOn} is needed.
+     * There is no version → alias edge while {@code FunctionVersion} is the literal
+     * {@code $LATEST}; none is required, since the alias does not reference the version. It
+     * returns with the {@code Fn::GetAtt} form once #1987 lands.
      */
     private void expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode resources) {
         JsonNode aliasName = properties.path("AutoPublishAlias");
@@ -404,7 +406,10 @@ class SamTransformProcessor {
         versionDef.set("Properties", versionProps);
         resources.set(versionId, versionDef);
 
-        String aliasSuffix = aliasName.isTextual() ? aliasName.asText() : "";
+        // Alias names may legally contain '-' and '_', neither of which is valid in a
+        // CloudFormation logical id, so the suffix goes through the same sanitize() every other
+        // derived id in this file uses.
+        String aliasSuffix = aliasName.isTextual() ? sanitize(aliasName.asText()) : "";
         String aliasId = uniqueId(functionLogicalId + "Alias" + aliasSuffix, resources);
         ObjectNode aliasDef = objectMapper.createObjectNode();
         aliasDef.put("Type", "AWS::Lambda::Alias");
