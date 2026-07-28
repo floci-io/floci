@@ -2801,7 +2801,8 @@ public class SesService {
      * query parameters so the link is directly usable and testable against the local emulator.
      */
     private String buildUnsubscribeUrl(String region, ListManagementOptions listManagement, String address) {
-        StringBuilder sb = new StringBuilder(baseUrl)
+        String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        StringBuilder sb = new StringBuilder(base)
                 .append("/_aws/ses/unsubscribe?region=").append(urlEncode(region))
                 .append("&contactList=").append(urlEncode(listManagement.contactListName()))
                 .append("&address=").append(urlEncode(address));

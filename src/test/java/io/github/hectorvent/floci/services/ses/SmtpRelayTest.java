@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.vertx.core.Future;
 import io.vertx.ext.mail.MailClient;
 import io.vertx.ext.mail.MailMessage;
@@ -75,6 +76,30 @@ class SmtpRelayTest {
         ArgumentCaptor<MailMessage> captor = ArgumentCaptor.forClass(MailMessage.class);
         verify(mailClient).sendMail(captor.capture());
         assertNull(captor.getValue().getHeaders());
+    }
+
+    @Test
+    void relay_dropsHeadersWithCrlfOrBlankName_preventingInjection() {
+        SmtpRelay relay = enabledRelay();
+
+        relay.relay("from@example.com", List.of("to@example.com"),
+                null, null, null, "Subject", "text", null, List.of(
+                        new MessageHeader("X-Safe", "ok"),
+                        new MessageHeader("X-Evil", "value\r\nBcc: attacker@evil.com"),
+                        new MessageHeader("Injected\r\nBcc", "x"),
+                        new MessageHeader("", "no-name")));
+
+        ArgumentCaptor<MailMessage> captor = ArgumentCaptor.forClass(MailMessage.class);
+        verify(mailClient).sendMail(captor.capture());
+        MailMessage sent = captor.getValue();
+
+        assertEquals("ok", sent.getHeaders().get("X-Safe"));
+        // The CR/LF-bearing and blank-name headers are dropped entirely, so no smuggled header
+        // (e.g. Bcc) reaches the relayed message and no header name/value carries a line break.
+        assertFalse(sent.getHeaders().contains("X-Evil"));
+        assertNull(sent.getHeaders().get("Bcc"));
+        assertTrue(sent.getHeaders().names().stream()
+                .noneMatch(n -> n.isBlank() || n.indexOf('\r') >= 0 || n.indexOf('\n') >= 0));
     }
 
     @Test

@@ -141,6 +141,17 @@ public class SmtpRelay {
         }
     }
 
+    // A user-supplied header (SES SendEmail Headers) is only relayed when its name is non-blank and
+    // neither name nor value contains CR/LF, so it cannot inject extra SMTP headers into the message.
+    private static boolean isRelaySafeHeader(MessageHeader header) {
+        return header.name() != null && !header.name().isBlank() && !containsCrlf(header.name())
+                && header.value() != null && !containsCrlf(header.value());
+    }
+
+    private static boolean containsCrlf(String value) {
+        return value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0;
+    }
+
     private void doRelay(String from, List<String> toAddresses, List<String> ccAddresses,
                          List<String> bccAddresses, List<String> replyToAddresses,
                          String subject, String bodyText, String bodyHtml,
@@ -162,8 +173,11 @@ public class SmtpRelay {
             }
             if (additionalHeaders != null) {
                 for (MessageHeader header : additionalHeaders) {
-                    if (header.name() != null && header.value() != null) {
+                    if (isRelaySafeHeader(header)) {
                         mail.addHeader(header.name(), header.value());
+                    } else {
+                        LOG.warnv("SMTP relay: skipping a header with a blank name or CR/LF in its "
+                                + "name/value (possible header injection) for from={0}", from);
                     }
                 }
             }
