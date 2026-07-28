@@ -28,6 +28,7 @@ import org.junit.jupiter.api.condition.OS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -508,6 +509,72 @@ class RuntimeApiServerTest {
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(403, nextResponse.statusCode());
+
+        // Both init/error and exit/error are fatal to the execution environment in real AWS, so
+        // the server is marked faulted for WarmPool to retire the container rather than reuse it.
+        assertTrue(server.isFaulted(), "init/error must condemn the execution environment");
+    }
+
+    @Test
+    @Timeout(30)
+    void extensionExitError_condemnsExecutionEnvironment() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+        assertFalse(server.isFaulted(), "environment must not be faulted before any error is reported");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/exit/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"errorMessage\":\"crashed\",\"errorType\":\"Extension.Crash\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(202, response.statusCode());
+        assertTrue(server.isFaulted(), "exit/error must condemn the execution environment");
+    }
+
+    /**
+     * The in-flight invocation must still complete normally: real AWS condemns the environment for
+     * *future* work, and tearing the runtime down mid-invoke would lose a result that did compute.
+     */
+    @Test
+    @Timeout(30)
+    void extensionFatalError_doesNotBreakInFlightInvocation() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-fatal", "{\"hello\":\"world\"}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        CompletableFuture<InvokeResult> resultFuture = server.enqueue(invocation);
+
+        // Runtime picks the invocation up, then the extension dies mid-invoke.
+        HttpResponse<String> next = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, next.statusCode());
+
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/exit/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"crashed\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertTrue(server.isFaulted());
+
+        // The runtime's own response still lands and completes the invocation successfully.
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port
+                                + "/2018-06-01/runtime/invocation/req-fatal/response"))
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"ok\":true}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        InvokeResult result = resultFuture.get(10, TimeUnit.SECONDS);
+        assertEquals(200, result.getStatusCode());
+        assertNull(result.getFunctionError(), "in-flight invocation must not be failed by the extension fault");
+        assertEquals("{\"ok\":true}", new String(result.getPayload()));
     }
 
     private String registerExtension(String name, String... events) throws Exception {

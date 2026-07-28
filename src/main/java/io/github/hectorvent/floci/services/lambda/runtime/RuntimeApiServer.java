@@ -90,6 +90,13 @@ public class RuntimeApiServer {
     private volatile boolean stopped;
     private volatile CompletableFuture<Void> closeFuture;
 
+    // Set once an extension reports an init/exit error. Real AWS treats both as fatal to the
+    // execution environment, so the container must not serve further invocations. Deliberately
+    // NOT read anywhere in the dispatch path (unlike `stopped`): the in-flight invocation still
+    // completes normally via /response, and WarmPool retires the container afterwards rather
+    // than tearing the server down underneath a runtime that is still working.
+    private volatile boolean faulted;
+
     // Set by ContainerLauncher once it knows which function this server instance is for (the
     // factory creates the server generically, before that's known) — used only to populate the
     // Extensions API register response.
@@ -110,6 +117,15 @@ public class RuntimeApiServer {
 
     public int getPort() {
         return port;
+    }
+
+    /**
+     * True once a registered extension reported an init or exit error. The execution environment
+     * is condemned: {@code WarmPool} must not return this container to the pool or hand it out
+     * again, matching real AWS's treatment of both errors as fatal to the environment.
+     */
+    public boolean isFaulted() {
+        return faulted;
     }
 
     public CompletableFuture<Void> start() {
@@ -465,11 +481,16 @@ public class RuntimeApiServer {
     private void handleExtensionFatalError(RoutingContext ctx, String phase) {
         String identifier = ctx.request().getHeader(EXTENSION_ID_HEADER);
         RegisteredExtension removed = identifier != null ? extensions.remove(identifier) : null;
+        // Condemn the environment regardless of whether the reporting extension was known: an
+        // unrecognised identifier still means some extension in this container has failed
+        // fatally, and serving further invocations from it would hide that failure.
+        faulted = true;
         if (removed != null) {
-            LOG.warnv("Extension {0} ({1}) reported {2} error on port {3}",
+            LOG.warnv("Extension {0} ({1}) reported {2} error on port {3}; retiring execution environment",
                     removed.getName(), identifier, phase, String.valueOf(port));
         } else {
-            LOG.warnv("Unknown extension reported {0} error on port {1}", phase, String.valueOf(port));
+            LOG.warnv("Unknown extension reported {0} error on port {1}; retiring execution environment",
+                    phase, String.valueOf(port));
         }
         ctx.response()
                 .setStatusCode(202)
