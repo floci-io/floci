@@ -114,14 +114,17 @@ public class RuntimeApiServer {
     private CompletableFuture<Void> closeFuture;
 
     // Set once an extension reports an init/exit error. Real AWS treats both as fatal to the
-    // execution environment, so the container must not serve further invocations. Deliberately
-    // NOT read anywhere in the dispatch path (unlike `stopped`): the in-flight invocation still
-    // completes normally via /response, and WarmPool retires the container afterwards rather
-    // than tearing the server down underneath a runtime that is still working.
+    // execution environment, so the container must neither accept new work nor be reused.
     //
-    // Written under `lock` (alongside the unregistration it accompanies) but `volatile` because
-    // WarmPool reads it from a request thread that holds no lock — a write-once latch that never
-    // participates in a dispatch decision, so it adds no check-then-act window.
+    // Read under `lock` alongside `stopped` in enqueue()/NEXT_PATH — a condemned environment
+    // refuses new invocations rather than queueing them to a runtime that will never receive
+    // them — and read without the lock by WarmPool (hence `volatile`) to decide whether to
+    // retire the container instead of pooling it.
+    //
+    // Distinct from `stopped`: this does *not* tear the server down. The invocation already
+    // in flight when the extension failed still completes normally through the runtime's own
+    // /response call, matching AWS's treatment of the environment as condemned for future work
+    // rather than aborted mid-invoke. WarmPool performs the actual teardown afterwards.
     private volatile boolean faulted;
 
     // Set by ContainerLauncher once it knows which function this server instance is for (the
@@ -169,7 +172,9 @@ public class RuntimeApiServer {
             PendingInvocation toDispatch = null;
             boolean send204 = false;
             synchronized (lock) {
-                if (stopped) {
+                // `faulted` alongside `stopped`: a condemned environment must not be handed work,
+                // including an invocation that was queued just before the fault was reported.
+                if (stopped || faulted) {
                     send204 = true;
                 } else {
                     toDispatch = pendingQueue.poll();
@@ -407,13 +412,18 @@ public class RuntimeApiServer {
     }
 
     public CompletableFuture<InvokeResult> enqueue(PendingInvocation invocation) {
-        boolean alreadyStopped;
+        boolean rejected;
         List<Runnable> dispatches = new ArrayList<>();
         RoutingContext waitingCtxForInvocation = null;
 
         synchronized (lock) {
-            alreadyStopped = stopped;
-            if (!alreadyStopped) {
+            // A condemned environment (an extension reported init/exit error) refuses new work the
+            // same way a stopping one does. Without this the invocation is queued to a runtime that
+            // will never be given it, and the caller hangs until the function timeout rather than
+            // failing fast. Read inside the lock alongside `stopped` so the accept/reject decision
+            // stays a single atomic step.
+            rejected = stopped || faulted;
+            if (!rejected) {
                 if (!extensions.isEmpty()) {
                     ExtensionEvent event = ExtensionEvent.invoke(
                             invocation.getRequestId(), invocation.getDeadlineMs(), invocation.getFunctionArn());
@@ -445,7 +455,7 @@ public class RuntimeApiServer {
             }
         }
 
-        if (alreadyStopped) {
+        if (rejected) {
             invocation.getResultFuture().complete(
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
             return invocation.getResultFuture();
@@ -514,6 +524,8 @@ public class RuntimeApiServer {
     private void handleExtensionFatalError(RoutingContext ctx, String phase) {
         String identifier = ctx.request().getHeader(EXTENSION_ID_HEADER);
         RegisteredExtension removed;
+        List<PendingInvocation> strandedInvocations;
+        List<RoutingContext> strandedPollers;
         synchronized (lock) {
             removed = identifier != null ? extensions.remove(identifier) : null;
             // Condemn the environment regardless of whether the reporting extension was known: an
@@ -521,6 +533,14 @@ public class RuntimeApiServer {
             // fatally, and serving further invocations from it would hide that failure. Set under
             // the lock alongside the unregistration so both land as one atomic state change.
             faulted = true;
+
+            // Anything already queued or parked would otherwise wait forever, since the guards in
+            // enqueue()/NEXT_PATH now refuse to move work through a condemned environment. Drain
+            // both here so callers fail fast instead of hanging until the function timeout.
+            strandedInvocations = new ArrayList<>(pendingQueue);
+            pendingQueue.clear();
+            strandedPollers = new ArrayList<>(waitingContexts);
+            waitingContexts.clear();
         }
         if (removed != null) {
             LOG.warnv("Extension {0} ({1}) reported {2} error on port {3}; retiring execution environment",
@@ -529,6 +549,19 @@ public class RuntimeApiServer {
             LOG.warnv("Unknown extension reported {0} error on port {1}; retiring execution environment",
                     phase, String.valueOf(port));
         }
+
+        for (PendingInvocation stranded : strandedInvocations) {
+            stranded.getResultFuture().complete(
+                    new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, stranded.getRequestId()));
+        }
+        for (RoutingContext poller : strandedPollers) {
+            vertx.runOnContext(v -> {
+                if (!poller.response().ended()) {
+                    poller.response().setStatusCode(204).end();
+                }
+            });
+        }
+
         ctx.response()
                 .setStatusCode(202)
                 .putHeader("Content-Type", "application/json")

@@ -542,6 +542,46 @@ class RuntimeApiServerTest {
     }
 
     /**
+     * The behaviour abanna reported on PR #1773: "a later invoke can still be served after
+     * init/error". A *new* invocation enqueued after the environment was condemned must not be
+     * dispatched to the runtime — serving it would hide a failed adapter or security extension.
+     * This is distinct from the in-flight invocation covered below, which must still complete.
+     */
+    @Test
+    @Timeout(30)
+    void invokeEnqueuedAfterExtensionFatalError_isNotServed() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad config\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertTrue(server.isFaulted());
+
+        // A brand-new invocation arrives at the condemned environment.
+        PendingInvocation later = new PendingInvocation(
+                "req-after-fault", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        CompletableFuture<InvokeResult> laterFuture = server.enqueue(later);
+
+        // It must be rejected outright rather than handed to the runtime's /next poller.
+        InvokeResult result = laterFuture.get(5, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError(),
+                "an invoke enqueued after a fatal extension error must not be served");
+
+        HttpResponse<String> next = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .timeout(java.time.Duration.ofSeconds(5))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(204, next.statusCode(),
+                "the runtime must not receive work from a condemned environment");
+    }
+
+    /**
      * The in-flight invocation must still complete normally: real AWS condemns the environment for
      * *future* work, and tearing the runtime down mid-invoke would lose a result that did compute.
      */
