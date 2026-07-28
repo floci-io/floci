@@ -121,6 +121,24 @@ The old `hectorvent/floci` repository no longer receives updates.
 </details>
 
 <details>
+<summary>Working from a repository checkout? Use <code>make</code></summary>
+
+The Makefile wraps the full lifecycle — no commands to memorize:
+
+```bash
+make install    # pull the image (IMAGE=ghcr.io/floci-io/floci:latest to use GHCR)
+make start      # run Floci in Docker with Docker-backed services enabled
+make status     # health check
+make logs       # tail emulator logs
+make stop       # stop and remove the container
+eval $(make -s env)   # export AWS_ENDPOINT_URL + dummy credentials
+```
+
+For hacking on Floci itself: `make dev` (Quarkus live reload), `make test`, `make build`, and `make up`/`make down` to build and run the image from source via Docker Compose. Run plain `make` for the full target list.
+
+</details>
+
+<details>
 <summary>Something not working? Run <code>bin/floci-doctor</code></summary>
 
 From a repository checkout, the doctor script identifies your local environment (native Linux, Docker Desktop, WSL2) and diagnoses the common setup traps — Docker daemon not reachable, docker socket permissions, port 4566 conflicts, the UFW firewall rule that silently breaks Lambda, and missing AWS environment variables — printing the exact fix for each:
