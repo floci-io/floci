@@ -663,6 +663,9 @@ public class Ec2Service implements ContainerTeardown {
             inst.setPlacement(new Placement(az));
             inst.setSubnetId(finalSubnetId);
             inst.setVpcId(vpcId);
+            // Public IP is assigned only when the subnet opts in via
+            // MapPublicIpOnLaunch (#1984); private-subnet instances get none.
+            inst.setAssociatePublicIp(subnet != null && subnet.isMapPublicIpOnLaunch());
             inst.setPrivateIpAddress(privateIp);
             inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
             inst.setKeyName(keyName);
