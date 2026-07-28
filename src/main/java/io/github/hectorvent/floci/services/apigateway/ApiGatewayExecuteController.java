@@ -1256,7 +1256,7 @@ public class ApiGatewayExecuteController {
 
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, stageName, headers, uriInfo, body, requestId);
+                route.getAuthorizationType(), apiId, stageName, headers, uriInfo, body, requestId);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1822,7 +1822,7 @@ public class ApiGatewayExecuteController {
     }
 
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
-                                     String apiId, String stageName,
+                                     String authorizationType, String apiId, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
         ObjectNode event = objectMapper.createObjectNode();
@@ -1871,6 +1871,21 @@ public class ApiGatewayExecuteController {
         http.put("sourceIp", "127.0.0.1");
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
+
+        // JWT authorizer context: the route's JWT was already validated by
+        // enforceJwtAuthorizer before dispatch, so mirror real API Gateway and
+        // surface the verified claims at requestContext.authorizer.jwt.claims.
+        // Claim values are stringified, matching the payload 2.0 wire format.
+        if ("JWT".equalsIgnoreCase(authorizationType)) {
+            String token = extractBearerToken(headers);
+            Map<String, Object> claims = token != null ? parseAllJwtClaims(token) : null;
+            if (claims != null && !claims.isEmpty()) {
+                ObjectNode jwtNode = ctx.putObject("authorizer").putObject("jwt");
+                ObjectNode claimsNode = jwtNode.putObject("claims");
+                claims.forEach((k, v) -> claimsNode.put(k, String.valueOf(v)));
+                jwtNode.putNull("scopes");
+            }
+        }
 
         if (body != null && body.length > 0) {
             event.put("body", new String(body));
