@@ -1213,9 +1213,9 @@ public class ApiGatewayExecuteController {
 
         Map<String, Object> validatedJwtClaims = null;
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
-            Response authError = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
-            if (authError != null) return authError;
-            validatedJwtClaims = extractValidatedJwtClaims(region, apiId, route, headers);
+            JwtEnforcement enforcement = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
+            if (enforcement.error() != null) return enforcement.error();
+            validatedJwtClaims = enforcement.claims();
         }
 
         if ("CUSTOM".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
@@ -1433,43 +1433,54 @@ public class ApiGatewayExecuteController {
     /** Extracts parameter names from a route template; the pattern itself is constant. */
     private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
 
-    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
-                                          UriInfo uriInfo) {
+    /**
+     * Outcome of JWT enforcement: exactly one of {@code error} (denial Response) or
+     * {@code claims} (full claims of the token that passed validation) is non-null,
+     * so the proxy event can only ever carry claims the enforcement step accepted —
+     * derived from the same authorizer snapshot and extracted token, with no re-lookup.
+     */
+    private record JwtEnforcement(Response error, Map<String, Object> claims) {
+        static JwtEnforcement denied(Response error) { return new JwtEnforcement(error, null); }
+        static JwtEnforcement authorized(Map<String, Object> claims) { return new JwtEnforcement(null, claims); }
+    }
+
+    private JwtEnforcement enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
+                                                UriInfo uriInfo) {
         Authorizer authorizer;
         try {
             authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
         } catch (AwsException e) {
-            return Response.status(500)
+            return JwtEnforcement.denied(Response.status(500)
                     .entity(jsonMessage("Authorizer not found"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         String token = extractToken(authorizer, headers, uriInfo);
         if (token == null) {
-            return Response.status(401)
+            return JwtEnforcement.denied(Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         JwtClaims claims = parseJwtClaims(token);
         if (claims == null) {
-            return Response.status(401)
+            return JwtEnforcement.denied(Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         if (claims.exp > 0 && claims.exp < System.currentTimeMillis() / 1000) {
-            return Response.status(401)
+            return JwtEnforcement.denied(Response.status(401)
                     .entity(jsonMessage("The incoming token has expired"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         if (authorizer.getJwtConfiguration() != null) {
             String issuer = authorizer.getJwtConfiguration().issuer();
             if (issuer != null && !issuer.isBlank() && !issuer.equals(claims.iss)) {
-                return Response.status(401)
+                return JwtEnforcement.denied(Response.status(401)
                         .entity(jsonMessage("Unauthorized"))
-                        .type(MediaType.APPLICATION_JSON).build();
+                        .type(MediaType.APPLICATION_JSON).build());
             }
 
             List<String> audiences = authorizer.getJwtConfiguration().audience();
@@ -1479,14 +1490,14 @@ public class ApiGatewayExecuteController {
                 boolean audMatch = audiences.stream().anyMatch(a ->
                         a.equals(claims.aud) || a.equals(claims.clientId));
                 if (!audMatch) {
-                    return Response.status(401)
+                    return JwtEnforcement.denied(Response.status(401)
                             .entity(jsonMessage("Unauthorized"))
-                            .type(MediaType.APPLICATION_JSON).build();
+                            .type(MediaType.APPLICATION_JSON).build());
                 }
             }
         }
 
-        return null; // authorized
+        return JwtEnforcement.authorized(parseAllJwtClaims(token));
     }
 
     // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
@@ -1781,26 +1792,6 @@ public class ApiGatewayExecuteController {
         if (value == null) return null;
         if (value.startsWith("Bearer ")) return value.substring(7);
         return value;
-    }
-
-    /**
-     * Re-derives the full claims of the JWT that {@link #enforceJwtAuthorizer} just
-     * validated, using the same identity-source extraction ({@link #extractToken} +
-     * {@link #stripBearer}), so the proxy event carries exactly what was validated.
-     * Only called after enforcement succeeded; returns null if anything is off.
-     */
-    private Map<String, Object> extractValidatedJwtClaims(String region, String apiId, Route route, HttpHeaders headers) {
-        try {
-            Authorizer authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
-            String token = extractToken(authorizer, headers);
-            return token != null ? parseAllJwtClaims(token) : null;
-        } catch (AwsException e) {
-            // Unreachable in practice (enforceJwtAuthorizer just resolved the same authorizer),
-            // but if it ever fires the event silently loses its claims — leave a trace.
-            LOG.debugv("JWT claims extraction failed after enforcement: api {0}, authorizer {1}: {2}",
-                    apiId, route.getAuthorizerId(), e.getMessage());
-            return null;
-        }
     }
 
     /**
