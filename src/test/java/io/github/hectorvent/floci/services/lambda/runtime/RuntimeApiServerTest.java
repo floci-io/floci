@@ -624,67 +624,121 @@ class RuntimeApiServerTest {
     }
 
     /**
-     * The init-readiness barrier: awaitExtensionsRegistered() must block until every expected
-     * extension has called /extension/register.
+     * The init-readiness barrier: awaitExtensionsReady() must block until every expected extension
+     * is init-ready, which AWS defines as its first /extension/event/next.
      */
     @Test
     @Timeout(30)
-    void awaitExtensionsRegistered_blocksUntilAllExpectedExtensionsRegister() throws Exception {
+    void awaitExtensionsReady_blocksUntilAllExpectedExtensionsPollForEvents() throws Exception {
         server.expectExtensions(2);
 
         CompletableFuture<Boolean> awaited = CompletableFuture.supplyAsync(() -> {
             try {
-                return server.awaitExtensionsRegistered(10_000);
+                return server.awaitExtensionsReady(10_000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return false;
             }
         });
 
-        registerExtension("first-extension", "INVOKE");
+        String first = registerExtension("first-extension", "INVOKE");
+        String second = registerExtension("second-extension", "INVOKE");
         Thread.sleep(200);
-        assertFalse(awaited.isDone(), "must still be waiting while one extension has not registered");
+        assertFalse(awaited.isDone(), "registering alone must not open the barrier");
 
-        registerExtension("second-extension", "INVOKE");
-        assertTrue(awaited.get(5, TimeUnit.SECONDS), "must unblock once all extensions registered");
+        pollExtensionEventNext(first);
+        Thread.sleep(200);
+        assertFalse(awaited.isDone(), "must still be waiting while one extension has not polled");
+
+        pollExtensionEventNext(second);
+        assertTrue(awaited.get(5, TimeUnit.SECONDS), "must unblock once all extensions are ready");
     }
 
     /**
-     * The missed-signal case: registration completing *before* anyone waits must not strand the
+     * The distinction abanna raised on PR #1773: an extension that registers immediately but then
+     * spends time initialising before its first Next is *not* ready, and the barrier must hold the
+     * container out of service for that whole gap. Gating on register would release it early and
+     * let the first invoke race the extension's own startup — the bug the barrier exists to stop.
+     */
+    @Test
+    @Timeout(30)
+    void awaitExtensionsReady_waitsForDelayedFirstNextAfterFastRegistration() throws Exception {
+        server.expectExtensions(1);
+        String extensionId = registerExtension("slow-starting-extension", "INVOKE");
+
+        CompletableFuture<Boolean> awaited = CompletableFuture.supplyAsync(() -> {
+            try {
+                return server.awaitExtensionsReady(10_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        });
+
+        Thread.sleep(700);
+        assertFalse(awaited.isDone(),
+                "a registered-but-not-yet-polling extension must keep the barrier closed");
+
+        pollExtensionEventNext(extensionId);
+        assertTrue(awaited.get(5, TimeUnit.SECONDS),
+                "the delayed first /event/next must open the barrier");
+    }
+
+    /**
+     * The missed-signal case: readiness completing *before* anyone waits must not strand the
      * launch. A CountDownLatch is level-triggered, so a late await returns immediately — this
      * pins that behaviour, since an edge-triggered signal here would hang the cold start.
      */
     @Test
     @Timeout(30)
-    void awaitExtensionsRegistered_returnsImmediatelyWhenRegistrationAlreadyCompleted() throws Exception {
+    void awaitExtensionsReady_returnsImmediatelyWhenExtensionAlreadyReady() throws Exception {
         server.expectExtensions(1);
-        registerExtension("fast-extension", "INVOKE");
+        pollExtensionEventNext(registerExtension("fast-extension", "INVOKE"));
 
         long start = System.currentTimeMillis();
-        assertTrue(server.awaitExtensionsRegistered(10_000));
+        assertTrue(server.awaitExtensionsReady(10_000));
         assertTrue(System.currentTimeMillis() - start < 1000,
-                "an await arriving after registration must not wait");
+                "an await arriving after readiness must not wait");
+    }
+
+    /**
+     * Repeated polling must not count the barrier down more than once per extension, which would
+     * let one chatty extension open a barrier that others have not reached yet.
+     */
+    @Test
+    @Timeout(30)
+    void awaitExtensionsReady_countsEachExtensionOnceAcrossRepeatedPolls() throws Exception {
+        server.expectExtensions(2);
+        String chatty = registerExtension("chatty-extension", "INVOKE");
+        registerExtension("quiet-extension", "INVOKE");
+
+        for (int i = 0; i < 3; i++) {
+            pollExtensionEventNext(chatty);
+        }
+
+        assertFalse(server.awaitExtensionsReady(300),
+                "one extension polling repeatedly must not satisfy the other's slot");
     }
 
     /** A function with no extensions must not wait at all. */
     @Test
     @Timeout(30)
-    void awaitExtensionsRegistered_withNoExpectedExtensions_doesNotBlock() throws Exception {
+    void awaitExtensionsReady_withNoExpectedExtensions_doesNotBlock() throws Exception {
         server.expectExtensions(0);
 
         long start = System.currentTimeMillis();
-        assertTrue(server.awaitExtensionsRegistered(10_000));
+        assertTrue(server.awaitExtensionsReady(10_000));
         assertTrue(System.currentTimeMillis() - start < 1000, "zero extensions must not wait");
     }
 
-    /** A never-registering extension must time out rather than block forever. */
+    /** A never-ready extension must time out rather than block forever. */
     @Test
     @Timeout(30)
-    void awaitExtensionsRegistered_timesOutWhenExtensionNeverRegisters() throws Exception {
+    void awaitExtensionsReady_timesOutWhenExtensionNeverPolls() throws Exception {
         server.expectExtensions(1);
 
-        assertFalse(server.awaitExtensionsRegistered(300),
-                "a missing registration must report timeout, not hang");
+        assertFalse(server.awaitExtensionsReady(300),
+                "a missing first /event/next must report timeout, not hang");
     }
 
     /**
@@ -725,6 +779,56 @@ class RuntimeApiServerTest {
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(204, next.statusCode(),
                 "the runtime must not receive work from a condemned environment");
+    }
+
+    /**
+     * AWS makes an init/exit error terminal for the Extensions API too, not only for runtime work:
+     * once the environment is condemned no further extension call succeeds. A registration that
+     * still returned 200 would hand a second extension an identifier that can never receive an
+     * event, leaving it polling a container that is on its way to being retired.
+     */
+    @Test
+    @Timeout(30)
+    void extensionRegisterAfterFatalError_isRejected() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+        reportExtensionInitError(extensionId);
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", "late-extension")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"events\":[\"INVOKE\"]}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(500, response.statusCode(),
+                "registration into a condemned environment must fail, not hand back an identifier");
+        assertTrue(response.body().contains("Extension.SandboxFaulted"));
+    }
+
+    /**
+     * The same rule for /event/next, and the reason it is a 500 rather than the 204 used for an
+     * orderly shutdown: an extension reads 204 as "nothing right now" and polls again, so a 204
+     * here would spin it against a dead environment instead of telling it to stop.
+     */
+    @Test
+    @Timeout(30)
+    void extensionEventNextAfterFatalError_isRejected() throws Exception {
+        String survivorId = registerExtension("surviving-extension", "INVOKE");
+        String failingId = registerExtension("failing-extension", "INVOKE");
+        reportExtensionInitError(failingId);
+
+        // The still-registered extension polls after a *different* extension condemned the
+        // environment — the fault is environment-wide, not scoped to the reporter.
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", survivorId)
+                        .timeout(java.time.Duration.ofSeconds(5))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(500, response.statusCode(),
+                "a condemned environment must not park or serve further extension polls");
+        assertTrue(response.body().contains("Extension.SandboxFaulted"));
     }
 
     /**
@@ -1030,6 +1134,42 @@ class RuntimeApiServerTest {
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
         return response.headers().firstValue("Lambda-Extension-Identifier").orElseThrow();
+    }
+
+    /** Has the given extension report an init error, condemning the execution environment. */
+    private void reportExtensionInitError(String extensionId) throws Exception {
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad config\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, response.statusCode());
+        assertTrue(server.isFaulted());
+    }
+
+    /**
+     * Issues one /extension/event/next for the given extension, which is what marks it init-ready.
+     *
+     * <p>Deliberately async and un-awaited: with no event pending the handler parks the request
+     * until an INVOKE or SHUTDOWN arrives, so a blocking send here would hang the test. The
+     * readiness countdown happens as the handler runs, before it parks — callers observe it
+     * through the barrier rather than through this response.
+     *
+     * <p>Sleeps briefly before returning so the request has actually reached the handler. Without
+     * that, a caller asserting on the barrier immediately afterwards could observe the state from
+     * before this poll and pass (or fail) for the wrong reason.
+     */
+    private CompletableFuture<HttpResponse<String>> pollExtensionEventNext(String extensionId)
+            throws Exception {
+        CompletableFuture<HttpResponse<String>> pending = httpClient.sendAsync(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(150);
+        return pending;
     }
 
     private String registerExtension(String name, String... events) throws Exception {

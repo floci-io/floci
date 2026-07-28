@@ -137,15 +137,20 @@ public class RuntimeApiServer {
 
     // Init-readiness barrier. ContainerLauncher launches extension binaries as detached `docker
     // exec`s and returns immediately, so without this the first invocation can reach the runtime
-    // before an extension has called /extension/register — the adapter never sees that invoke and
-    // silently misses it. ContainerLauncher declares how many binaries it launched via
-    // expectExtensions(); the register handler counts each one down; awaitExtensionsRegistered()
-    // blocks the launch until they have all checked in (or the deadline passes).
+    // before an extension is ready — the adapter never sees that invoke and silently misses it.
+    // ContainerLauncher declares how many binaries it launched via expectExtensions();
+    // awaitExtensionsReady() blocks the launch until they are all ready (or the deadline passes).
     //
-    // A CountDownLatch is level-triggered, so an await() that arrives after the last registration
-    // returns immediately rather than missing the signal — the latch is created before any
-    // extension can register, which is what makes that safe.
-    private volatile CountDownLatch extensionsRegistered;
+    // Readiness is the extension's *first /extension/event/next*, not its register call, matching
+    // AWS's lifecycle: registering only obtains an identifier, whereas an extension that is
+    // polling for events has finished its own initialisation and can actually receive an INVOKE.
+    // An extension that registers and then spends time initialising is correctly still counted as
+    // not-ready during that gap.
+    //
+    // A CountDownLatch is level-triggered, so an await() that arrives after the last extension
+    // became ready returns immediately rather than missing the signal — the latch is created
+    // before any extension can register, which is what makes that safe.
+    private volatile CountDownLatch extensionsReady;
 
     // Set by ContainerLauncher once it knows which function this server instance is for (the
     // factory creates the server generically, before that's known) — used only to populate the
@@ -183,26 +188,27 @@ public class RuntimeApiServer {
 
     /**
      * Declares how many extension binaries were launched for this container, arming the
-     * init-readiness barrier that {@link #awaitExtensionsRegistered(long)} waits on.
+     * init-readiness barrier that {@link #awaitExtensionsReady(long)} waits on.
      *
      * <p>Must be called <em>before</em> the extension processes are started, so the latch exists
      * before any of them can call {@code /extension/register}. A count of zero (the common case:
      * no {@code /opt/extensions} directory) leaves the barrier permanently open.
      */
     public void expectExtensions(int count) {
-        extensionsRegistered = new CountDownLatch(Math.max(0, count));
+        extensionsReady = new CountDownLatch(Math.max(0, count));
     }
 
     /**
-     * Blocks until every extension declared via {@link #expectExtensions(int)} has registered, or
-     * the timeout elapses.
+     * Blocks until every extension declared via {@link #expectExtensions(int)} is init-ready —
+     * that is, until each has issued its first {@code /extension/event/next} — or the timeout
+     * elapses.
      *
-     * @return true if all expected extensions registered; false if the wait timed out with some
+     * @return true if all expected extensions became ready; false if the wait timed out with some
      *         still missing, in which case the container is still usable — it simply starts
      *         serving invocations without the extensions that never checked in.
      */
-    public boolean awaitExtensionsRegistered(long timeoutMs) throws InterruptedException {
-        CountDownLatch latch = extensionsRegistered;
+    public boolean awaitExtensionsReady(long timeoutMs) throws InterruptedException {
+        CountDownLatch latch = extensionsReady;
         if (latch == null) {
             return true;
         }
@@ -279,6 +285,14 @@ public class RuntimeApiServer {
         // header to equal the extension's own file name; floci does not validate that here
         // (the identifier it hands back is sufficient for the extension to poll /event/next).
         router.post(EXTENSION_REGISTER_PATH).handler(ctx -> {
+            // AWS makes an init/exit error terminal for the whole Extensions API, not just for
+            // runtime work: once the environment is condemned no further extension call succeeds.
+            // Registering a new extension into a container that is about to be retired would hand
+            // it an identifier that can never receive an event.
+            if (faulted) {
+                sendExtensionFaulted(ctx);
+                return;
+            }
             String name = ctx.request().getHeader(EXTENSION_NAME_HEADER);
             if (name == null || name.isBlank()) {
                 ctx.response().setStatusCode(400)
@@ -305,13 +319,6 @@ public class RuntimeApiServer {
             }
             LOG.infov("Extension registered: {0} ({1}), events={2}", name, identifier, events);
 
-            // Release this extension's slot in the init-readiness barrier so the launch can
-            // proceed once every expected extension has checked in.
-            CountDownLatch latch = extensionsRegistered;
-            if (latch != null) {
-                latch.countDown();
-            }
-
             JsonObject responseBody = new JsonObject()
                     .put("functionName", functionName)
                     .put("functionVersion", functionVersion)
@@ -337,23 +344,47 @@ public class RuntimeApiServer {
             ExtensionEvent toDispatch = null;
             boolean send204 = false;
             boolean unknownExtension = false;
+            boolean environmentFaulted = false;
+            CountDownLatch readyLatch = null;
             synchronized (lock) {
                 RegisteredExtension extension = identifier != null ? extensions.get(identifier) : null;
                 if (extension == null) {
                     unknownExtension = true;
-                } else if (stopped) {
-                    send204 = true;
+                } else if (faulted) {
+                    // Read under the lock alongside `stopped`: handleExtensionFatalError() sets
+                    // `faulted` and drains the parked pollers as one atomic change, so checking it
+                    // here is what stops a poller parking again straight after that drain.
+                    environmentFaulted = true;
                 } else {
+                    // AWS treats an extension as init-ready at its first /event/next, not at
+                    // register: the extension has finished its own initialisation only once it
+                    // starts polling. Count the readiness barrier down here, once per extension.
+                    if (extension.markFirstNextReceived()) {
+                        readyLatch = extensionsReady;
+                    }
+                    // Poll before checking `stopped`: stop() offers a SHUTDOWN to pendingEvents for
+                    // any extension it doesn't find already parked, so a request arriving just
+                    // after `stopped` was set — but after that offer landed — must still see it.
+                    // Checking `stopped` first would answer 204 and orphan the queued SHUTDOWN.
                     toDispatch = extension.getPendingEvents().poll();
                     if (toDispatch == null) {
-                        extension.setWaitingContext(ctx);
+                        if (stopped) {
+                            send204 = true;
+                        } else {
+                            extension.setWaitingContext(ctx);
+                        }
                     }
                 }
+            }
+            if (readyLatch != null) {
+                readyLatch.countDown();
             }
             if (unknownExtension) {
                 ctx.response().setStatusCode(403)
                         .putHeader("Content-Type", "application/json")
                         .end("{\"errorMessage\":\"Unknown or missing Lambda-Extension-Identifier\"}");
+            } else if (environmentFaulted) {
+                sendExtensionFaulted(ctx);
             } else if (send204) {
                 ctx.response().setStatusCode(204).end();
             } else if (toDispatch != null) {
@@ -601,6 +632,21 @@ public class RuntimeApiServer {
                 .putHeader("Content-Type", "application/json")
                 .putHeader(EXTENSION_EVENT_ID_HEADER, UUID.randomUUID().toString())
                 .end(body.encode());
+    }
+
+    /**
+     * Response for any Extensions API call made after an extension reported an init/exit error.
+     * AWS makes the fault terminal for the whole environment — no further extension call succeeds
+     * — so this is a hard error rather than the 204 used for an orderly shutdown, which an
+     * extension is entitled to read as "nothing right now, poll again".
+     */
+    private void sendExtensionFaulted(RoutingContext ctx) {
+        ctx.response()
+                .setStatusCode(500)
+                .putHeader("Content-Type", "application/json")
+                .end("{\"errorType\":\"Extension.SandboxFaulted\","
+                        + "\"errorMessage\":\"Execution environment condemned by an extension "
+                        + "init/exit error\"}");
     }
 
     private void handleExtensionFatalError(RoutingContext ctx, String phase) {

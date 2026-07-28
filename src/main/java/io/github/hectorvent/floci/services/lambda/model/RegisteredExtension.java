@@ -21,6 +21,7 @@ public class RegisteredExtension {
     private final List<String> subscribedEvents;
     private final ArrayDeque<ExtensionEvent> pendingEvents = new ArrayDeque<>();
     private RoutingContext waitingContext;
+    private boolean firstNextReceived;
 
     public RegisteredExtension(String identifier, String name, List<String> subscribedEvents) {
         this.identifier = identifier;
@@ -46,5 +47,21 @@ public class RegisteredExtension {
 
     public void setWaitingContext(RoutingContext ctx) {
         waitingContext = ctx;
+    }
+
+    /**
+     * Records that this extension has issued its first {@code /extension/event/next}, which is
+     * what AWS treats as the extension being init-ready (registering alone only obtains an
+     * identifier). Called under the owning server's lock, like the rest of this class.
+     *
+     * @return true only on the first call, so the caller counts the readiness barrier down once
+     *         per extension no matter how many times it polls.
+     */
+    public boolean markFirstNextReceived() {
+        if (firstNextReceived) {
+            return false;
+        }
+        firstNextReceived = true;
+        return true;
     }
 }

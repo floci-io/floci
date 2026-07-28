@@ -781,13 +781,13 @@ class ContainerLauncherTest {
     /**
      * The init-readiness barrier abanna asked for on PR #1773: extension processes are started as
      * detached execs, so without waiting the caller could enqueue the first invocation before an
-     * extension had called /extension/register and the adapter would silently miss that invoke.
-     * The launch must arm the barrier with the discovered binary count *before* starting any exec
-     * (so a fast registration can't check in before there is a latch to count it down), and must
-     * not return until the extensions have registered.
+     * extension was ready for it and the adapter would silently miss that invoke. The launch must
+     * arm the barrier with the discovered binary count *before* starting any exec (so a
+     * fast-starting extension can't become ready before there is a latch to count it down), and
+     * must not return until the extensions are init-ready.
      */
     @Test
-    void launchFunction_waitsForExtensionsToRegisterBeforeReturning() throws Exception {
+    void launchFunction_waitsForExtensionsToBecomeReadyBeforeReturning() throws Exception {
         stubExtensionDiscovery("lambda-adapter", "otel-collector");
 
         LambdaFunction fn = new LambdaFunction();
@@ -795,19 +795,19 @@ class ContainerLauncherTest {
         fn.setPackageType("Image");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
 
-        // Registration is delayed: awaitExtensionsRegistered only reports success after a pause,
-        // standing in for extension processes that take a moment to start up and check in.
-        AtomicBoolean registrationComplete = new AtomicBoolean(false);
-        when(runtimeApiServer.awaitExtensionsRegistered(anyLong())).thenAnswer(inv -> {
+        // Readiness is delayed: awaitExtensionsReady only reports success after a pause, standing
+        // in for extension processes that take a moment to start up and poll for their first event.
+        AtomicBoolean readinessComplete = new AtomicBoolean(false);
+        when(runtimeApiServer.awaitExtensionsReady(anyLong())).thenAnswer(inv -> {
             Thread.sleep(150);
-            registrationComplete.set(true);
+            readinessComplete.set(true);
             return true;
         });
 
         launcher.launch(fn);
 
-        assertTrue(registrationComplete.get(),
-                "launch() must not return before the extensions have registered");
+        assertTrue(readinessComplete.get(),
+                "launch() must not return before the extensions are init-ready");
 
         // The barrier is armed with the number of binaries actually discovered, and armed before
         // any extension process is started.
@@ -815,7 +815,7 @@ class ContainerLauncherTest {
         InOrder inOrder = inOrder(runtimeApiServer, dockerClient);
         inOrder.verify(runtimeApiServer).expectExtensions(2);
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
-        inOrder.verify(runtimeApiServer).awaitExtensionsRegistered(anyLong());
+        inOrder.verify(runtimeApiServer).awaitExtensionsReady(anyLong());
     }
 
     /**
@@ -823,7 +823,7 @@ class ContainerLauncherTest {
      * function launch — the same outcome as before the barrier existed.
      */
     @Test
-    void launchFunction_extensionRegistrationTimeout_doesNotFailLaunch() throws Exception {
+    void launchFunction_extensionReadinessTimeout_doesNotFailLaunch() throws Exception {
         stubExtensionDiscovery("never-registers");
 
         LambdaFunction fn = new LambdaFunction();
@@ -831,11 +831,11 @@ class ContainerLauncherTest {
         fn.setPackageType("Image");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
 
-        when(runtimeApiServer.awaitExtensionsRegistered(anyLong())).thenReturn(false);
+        when(runtimeApiServer.awaitExtensionsReady(anyLong())).thenReturn(false);
 
         ContainerHandle handle = launcher.launch(fn);
 
-        assertNotNull(handle, "a registration timeout must not fail the launch");
+        assertNotNull(handle, "a readiness timeout must not fail the launch");
         assertEquals("container-123", handle.getContainerId());
     }
 

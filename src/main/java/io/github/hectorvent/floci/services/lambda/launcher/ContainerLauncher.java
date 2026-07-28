@@ -347,10 +347,11 @@ public class ContainerLauncher {
         launchExtensions(dockerClient, containerId, fn.getFunctionName(), runtimeApiServer, logDestination);
 
         // Init-readiness barrier: the execs above are detached, so without waiting here the caller
-        // could enqueue the first invocation before an extension has called /extension/register —
-        // the adapter would silently miss that invoke. Real AWS likewise holds the environment out
-        // of service until every extension has registered. A no-extensions function (the common
-        // case) does not wait at all; a timeout is non-fatal, since a container that serves
+        // could enqueue the first invocation before an extension is ready to receive it — the
+        // adapter would silently miss that invoke. Real AWS likewise holds the environment out of
+        // service until every extension is init-ready, which it defines as the extension's first
+        // /extension/event/next rather than its register call. A no-extensions function (the
+        // common case) does not wait at all; a timeout is non-fatal, since a container that serves
         // invocations without a slow extension is strictly better than failing the launch.
         awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
 
@@ -657,8 +658,8 @@ public class ContainerLauncher {
                                   RuntimeApiServer runtimeApiServer, LogDestination logDestination) {
         List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName);
         // Arm the readiness barrier before starting any extension process, so the latch already
-        // exists when the first one calls /extension/register — otherwise a fast-registering
-        // extension could check in before there is anything to count it down.
+        // exists when the first one starts polling /extension/event/next — otherwise a
+        // fast-starting extension could become ready before there is anything to count it down.
         runtimeApiServer.expectExtensions(extensionNames.size());
         for (String name : extensionNames) {
             try {
@@ -690,8 +691,9 @@ public class ContainerLauncher {
     }
 
     /**
-     * Waits for every launched extension to call {@code /extension/register} before the container
-     * is handed to the caller for its first invocation.
+     * Waits for every launched extension to become init-ready — its first
+     * {@code /extension/event/next}, the point at which AWS considers an extension initialised —
+     * before the container is handed to the caller for its first invocation.
      *
      * <p>Best-effort by design: a timeout logs and proceeds rather than failing the launch. An
      * extension that is slow or crashes on startup should degrade to "invocations run without it"
@@ -701,14 +703,14 @@ public class ContainerLauncher {
      */
     private void awaitExtensionReadiness(RuntimeApiServer runtimeApiServer, String functionName) {
         try {
-            if (!runtimeApiServer.awaitExtensionsRegistered(EXTENSION_REGISTRATION_TIMEOUT_MS)) {
-                LOG.warnv("Not all extensions for function {0} registered within {1}ms; "
+            if (!runtimeApiServer.awaitExtensionsReady(EXTENSION_REGISTRATION_TIMEOUT_MS)) {
+                LOG.warnv("Not all extensions for function {0} became ready within {1}ms; "
                                 + "continuing without them",
                         functionName, String.valueOf(EXTENSION_REGISTRATION_TIMEOUT_MS));
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            LOG.debugv("Interrupted waiting for extensions of function {0} to register", functionName);
+            LOG.debugv("Interrupted waiting for extensions of function {0} to become ready", functionName);
         }
     }
 
