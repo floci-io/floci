@@ -1388,6 +1388,18 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /**
+         * When true, DescribeInstances and IMDS report each instance's CFN- and
+         * subnet-allocated private IP (AWS-faithful) instead of the Docker
+         * container's bridge IP (#1983). Default false keeps the bridge IP as the
+         * reported private address, which lets instances reach each other at that
+         * address on the shared Docker network. Routing/IMDS always use the
+         * container bridge IP regardless of this flag; only the reported
+         * PrivateIpAddress changes.
+         */
+        @WithDefault("false")
+        boolean awsFaithfulPrivateIp();
+
         /** Port on the Floci host for the IMDS HTTP server (169.254.169.254 equivalent). */
         @WithDefault("9169")
         int imdsPort();
