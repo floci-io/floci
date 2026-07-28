@@ -135,6 +135,8 @@ jobs:
           file: docker/Dockerfile.native-package
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             floci/floci:${{ steps.version.outputs.version }}
             floci/floci:latest
@@ -159,6 +161,8 @@ jobs:
           file: docker/Dockerfile.compat
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             floci/floci:${{ steps.version.outputs.version }}-compat
             floci/floci:latest-compat
