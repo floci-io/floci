@@ -223,6 +223,47 @@ class WarmPoolTest {
     }
 
     @Test
+    void release_afterDrainDuringAcquire_doesNotReturnCheckedOutContainerToPool() {
+        // The generation must be sampled before the container leaves the pool, not after. acquire
+        // polls the handle off the queue and only then probes isAlive() — a Docker daemon
+        // round-trip — or cold-starts a container, which is slower still. A drain landing in that
+        // window bumps the generation, finds an empty queue and stops nothing, and the handle then
+        // gets stamped with the POST-drain generation, so release pools it. Sampling after the
+        // poll narrows the reported bug from "always" to "whenever a delete lands during a Docker
+        // call", which a function under continuous ESM invocation reaches.
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("acquire-race-fn");
+
+        ContainerHandle stale = new ContainerHandle("cid-stale", "acquire-race-fn", null, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle("cid-fresh", "acquire-race-fn", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(stale, fresh);
+
+        // Seed the pool, so the acquire under test takes the reuse path through isAlive().
+        pool.release(pool.acquire(fn));
+
+        // The function is deleted *inside* acquire: after pollFirst() has checked the handle out,
+        // while the liveness probe is still in flight.
+        when(containerLauncher.isAlive(any())).thenAnswer(invocation -> {
+            pool.drainFunction("acquire-race-fn");
+            return true;
+        });
+
+        ContainerHandle inFlight = pool.acquire(fn);
+        assertSame(stale, inFlight);
+
+        pool.release(inFlight);
+
+        // Stamped with the generation in force when acquire started, so release sees it as stale.
+        verify(containerLauncher).stop(stale);
+        assertNotSame(stale, pool.acquire(fn));
+
+        pool.shutdown();
+    }
+
+    @Test
     void release_withoutDrain_stillReusesContainerAcrossFunctions() {
         // Guard against over-correcting: a drain of one function must not invalidate another's
         // checked-out container.

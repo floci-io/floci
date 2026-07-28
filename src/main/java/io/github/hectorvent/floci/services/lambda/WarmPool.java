@@ -120,6 +120,13 @@ public class WarmPool implements ContainerTeardown {
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
         ContainerHandle handle = null;
 
+        // Sample before the container leaves the pool, not after: from pollFirst() onwards the
+        // handle is checked out and invisible to a drain, and what follows — the isAlive() probe,
+        // or a cold start — is a Docker round-trip wide enough for a delete to land in. Reading
+        // the generation afterwards would stamp the handle with the post-drain value and let
+        // release() pool it, which is the very bug this guards against.
+        long generation = currentGeneration(fn.getFunctionName());
+
         if (!ephemeral) {
             ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(fn.getFunctionName(), k -> new ArrayDeque<>());
             // Skip pooled handles whose container died out-of-band — otherwise the
@@ -152,7 +159,7 @@ public class WarmPool implements ContainerTeardown {
         handle.setState(ContainerState.BUSY);
         // Stamp the generation this container is valid for; release() drops it if a drain has
         // bumped the function's generation in the meantime.
-        handle.setPoolGeneration(currentGeneration(fn.getFunctionName()));
+        handle.setPoolGeneration(generation);
         return handle;
     }
 
@@ -228,13 +235,17 @@ public class WarmPool implements ContainerTeardown {
      * Called on function delete or code update.
      */
     public void drainFunction(String functionName) {
-        // Bump first, and unconditionally: containers checked out right now are not in the queue,
-        // so this is the only thing that keeps them from being pooled again on release. It has to
-        // happen even when the queue is empty — that is precisely the case where every live
-        // container is checked out.
-        generations.merge(functionName, 1L, Long::sum);
-
+        // Detach the queue first, then bump — and bump unconditionally, before the empty-queue
+        // early return, since containers checked out right now are not in the queue and the
+        // generation is the only thing that keeps them from being pooled again on release.
+        //
+        // Order matters as much as unconditionality. Bumping first leaves a window where the
+        // generation has moved but the queue is still reachable, so an acquire sampling after the
+        // bump could still poll a pre-drain handle and stamp it valid. Detaching first means a
+        // concurrent acquire either finds a fresh empty deque (and cold-starts) or sampled its
+        // generation before the bump (and is discarded on release).
         ArrayDeque<ContainerHandle> queue = pool.remove(functionName);
+        generations.merge(functionName, 1L, Long::sum);
         if (queue == null) {
             return;
         }
