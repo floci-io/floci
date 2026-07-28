@@ -1,23 +1,26 @@
 package io.github.hectorvent.floci.services.lambda.model;
 
+import java.util.ArrayDeque;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import io.vertx.ext.web.RoutingContext;
 
 /**
  * Tracks one extension's Extensions API registration state within a single container's
  * {@code RuntimeApiServer} — its subscribed event types and the queue/parked-poller pair
- * used to deliver {@link ExtensionEvent}s to its {@code /extension/event/next} polling loop,
- * mirroring the runtime invocation queue/park pattern already used for
- * {@code /runtime/invocation/next}.
+ * used to deliver {@link ExtensionEvent}s to its {@code /extension/event/next} polling loop.
+ *
+ * Not thread-safe on its own — all access to {@code pendingEvents}/{@code waitingContext}
+ * must happen while holding the owning {@code RuntimeApiServer}'s lock. This class
+ * intentionally has no internal synchronization; see {@code RuntimeApiServer}'s class doc
+ * for the locking discipline.
  */
 public class RegisteredExtension {
 
     private final String identifier;
     private final String name;
     private final List<String> subscribedEvents;
-    private final ConcurrentLinkedQueue<ExtensionEvent> pendingEvents = new ConcurrentLinkedQueue<>();
-    private volatile RoutingContext waitingContext;
+    private final ArrayDeque<ExtensionEvent> pendingEvents = new ArrayDeque<>();
+    private RoutingContext waitingContext;
 
     public RegisteredExtension(String identifier, String name, List<String> subscribedEvents) {
         this.identifier = identifier;
@@ -33,15 +36,15 @@ public class RegisteredExtension {
         return subscribedEvents.contains(type.name());
     }
 
-    public ConcurrentLinkedQueue<ExtensionEvent> getPendingEvents() { return pendingEvents; }
+    public ArrayDeque<ExtensionEvent> getPendingEvents() { return pendingEvents; }
 
-    public synchronized RoutingContext takeWaitingContext() {
+    public RoutingContext takeWaitingContext() {
         RoutingContext ctx = waitingContext;
         waitingContext = null;
         return ctx;
     }
 
-    public synchronized void setWaitingContext(RoutingContext ctx) {
+    public void setWaitingContext(RoutingContext ctx) {
         waitingContext = ctx;
     }
 }

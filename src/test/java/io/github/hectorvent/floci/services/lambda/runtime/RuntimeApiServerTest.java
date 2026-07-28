@@ -17,6 +17,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -575,6 +577,261 @@ class RuntimeApiServerTest {
         assertEquals(200, result.getStatusCode());
         assertNull(result.getFunctionError(), "in-flight invocation must not be failed by the extension fault");
         assertEquals("{\"ok\":true}", new String(result.getPayload()));
+    }
+
+    /**
+     * Regression for the historical orphaned-SHUTDOWN race (floci-io/floci#1882): stop()
+     * could flip stopped=true and offer a SHUTDOWN event in the exact window a concurrent
+     * /event/next request had already polled-empty and was about to check stopped, so the
+     * request got a bare 204 with the SHUTDOWN never delivered. Stress it with many
+     * iterations of a jittered race between stop() and /event/next, asserting SHUTDOWN is
+     * always delivered exactly once — never orphaned (zero deliveries) and never duplicated.
+     */
+    @Test
+    @Timeout(60)
+    void extensionShutdown_racedAgainstStop_isNeverOrphaned() throws Exception {
+        int iterations = 500;
+        java.util.concurrent.atomic.AtomicInteger totalDelivered = new java.util.concurrent.atomic.AtomicInteger();
+
+        for (int i = 0; i < iterations; i++) {
+            int freshPort = findFreePort();
+            RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
+            freshServer.start().get(5, TimeUnit.SECONDS);
+            // A fresh client per iteration — freshPort may reuse a port from an earlier
+            // iteration, and a shared client's connection pool could otherwise hand back a
+            // stale pooled connection to that iteration's now-closed server.
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            try {
+                String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
+
+                CompletableFuture<HttpResponse<String>> asyncNext = client.sendAsync(
+                        HttpRequest.newBuilder()
+                                .uri(URI.create("http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
+                                .header("Lambda-Extension-Identifier", extensionId)
+                                .GET().build(),
+                        HttpResponse.BodyHandlers.ofString());
+
+                // Give the request just enough time to actually connect and park server-side
+                // (a few ms is plenty on localhost) before racing stop() against it — without
+                // this, stop() can close the listening socket before the connection is even
+                // established, which isn't the race we're testing.
+                Thread.sleep(5);
+                freshServer.stop();
+
+                HttpResponse<String> response = asyncNext.get(5, TimeUnit.SECONDS);
+                boolean deliveredHere = response.statusCode() == 200
+                        && "SHUTDOWN".equals(new JsonObject(response.body()).getString("eventType"));
+                if (deliveredHere) {
+                    totalDelivered.incrementAndGet();
+                } else {
+                    // Didn't land in this specific request — a subsequent poll with the same
+                    // identifier must still find the SHUTDOWN queued (never orphaned).
+                    HttpResponse<String> retry = client.send(HttpRequest.newBuilder()
+                                    .uri(URI.create(
+                                            "http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
+                                    .header("Lambda-Extension-Identifier", extensionId)
+                                    .GET().build(),
+                            HttpResponse.BodyHandlers.ofString());
+                    if (retry.statusCode() == 200
+                            && "SHUTDOWN".equals(new JsonObject(retry.body()).getString("eventType"))) {
+                        totalDelivered.incrementAndGet();
+                    }
+                }
+            } finally {
+                freshServer.stop().get(5, TimeUnit.SECONDS);
+            }
+        }
+
+        assertEquals(iterations, totalDelivered.get(),
+                "every iteration's SHUTDOWN must be delivered exactly once (never orphaned)");
+    }
+
+    /**
+     * Equivalent race for the runtime invocation queue: races enqueue() against stop() with
+     * jitter across many iterations, asserting the invocation's resultFuture always completes
+     * (real dispatch or ContainerStopped) — a hang here trips the test timeout, an unambiguous
+     * regression signal for an orphaned invocation.
+     */
+    @Test
+    @Timeout(60)
+    void enqueueRacedAgainstStop_alwaysCompletesResultFuture() throws Exception {
+        int iterations = 500;
+        java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
+
+        for (int i = 0; i < iterations; i++) {
+            int freshPort = findFreePort();
+            RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
+            freshServer.start().get(5, TimeUnit.SECONDS);
+            try {
+                PendingInvocation invocation = new PendingInvocation(
+                        "req-race-" + i, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                        "arn:aws:lambda:us-east-1:000000000000:function:test",
+                        new CompletableFuture<>());
+
+                Thread stopper = new Thread(() -> {
+                    try {
+                        Thread.sleep(random.nextInt(0, 5));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    freshServer.stop();
+                });
+                stopper.start();
+                freshServer.enqueue(invocation);
+                stopper.join(5000);
+
+                InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+                assertNotNull(result, "resultFuture must always complete, never hang");
+            } finally {
+                freshServer.stop().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    /**
+     * /extension/register racing stop() (floci-io/floci#1882: register previously didn't
+     * check stopped at all). Registration itself always completes before stop() can begin
+     * (the race is purely over which one observes the other's effect first — stop() draining
+     * an empty extensions map vs. register() finding stopped already true), and whatever
+     * identifier comes back, a subsequent /event/next with it must eventually return SHUTDOWN
+     * rather than hanging or 403ing inconsistently.
+     */
+    @Test
+    @Timeout(60)
+    void extensionRegister_racedAgainstStop_eventuallyDeliversShutdown() throws Exception {
+        int iterations = 300;
+
+        for (int i = 0; i < iterations; i++) {
+            int freshPort = findFreePort();
+            RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
+            freshServer.start().get(5, TimeUnit.SECONDS);
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            try {
+                String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
+                // Race stop() against the extension's very first /event/next poll, which may
+                // land before or after stop() — either way SHUTDOWN must still be delivered.
+                CompletableFuture<HttpResponse<String>> asyncNext = client.sendAsync(
+                        HttpRequest.newBuilder()
+                                .uri(URI.create("http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
+                                .header("Lambda-Extension-Identifier", extensionId)
+                                .GET().build(),
+                        HttpResponse.BodyHandlers.ofString());
+                // Give the request time to actually connect and park before stop() closes
+                // the listening socket — see extensionShutdown_racedAgainstStop_isNeverOrphaned.
+                Thread.sleep(5);
+                freshServer.stop();
+
+                HttpResponse<String> response = asyncNext.get(5, TimeUnit.SECONDS);
+                assertEquals(200, response.statusCode(),
+                        "a registered extension must eventually see SHUTDOWN, never hang/403");
+                assertEquals("SHUTDOWN", new JsonObject(response.body()).getString("eventType"));
+            } finally {
+                freshServer.stop().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    /**
+     * handleExtensionFatalError racing stop()'s SHUTDOWN fan-out: no exception, no
+     * double-processing. The fatal-error POST completes before stop() begins tearing down
+     * the connection (dispatched synchronously, unlike the long-polling /event/next above),
+     * so the only race is stop()'s SHUTDOWN fan-out landing concurrently with the extension
+     * having just been removed from the map.
+     */
+    @Test
+    @Timeout(30)
+    void extensionFatalError_racedAgainstStop_noExceptionNoDoubleProcessing() throws Exception {
+        int iterations = 300;
+
+        for (int i = 0; i < iterations; i++) {
+            int freshPort = findFreePort();
+            RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
+            freshServer.start().get(5, TimeUnit.SECONDS);
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            try {
+                String extensionId = registerExtensionOn(client, freshPort, "failing-extension", "INVOKE", "SHUTDOWN");
+
+                HttpResponse<String> response = client.send(HttpRequest.newBuilder()
+                                .uri(URI.create(
+                                        "http://localhost:" + freshPort + "/2020-01-01/extension/init/error"))
+                                .header("Lambda-Extension-Identifier", extensionId)
+                                .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals(202, response.statusCode(), "fatal-error endpoint must not throw under the race");
+
+                // stop() runs immediately after — races its SHUTDOWN fan-out against the
+                // extension having just been removed by the fatal-error handler above.
+                freshServer.stop().get(5, TimeUnit.SECONDS);
+            } finally {
+                freshServer.stop().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    /**
+     * Regression guard against reintroducing worker-thread pinning: NEXT_PATH must stay
+     * non-blocking/event-loop-based, since the container's language-runtime bootstrap holds
+     * this long-poll open for its entire idle lifetime. Parking more concurrent /next polls
+     * than the default Quarkus worker pool (20 threads) must still succeed — this would fail
+     * or hang if a future change moved NEXT_PATH to a blockingHandler/wait() design.
+     */
+    @Test
+    @Timeout(30)
+    void manyConcurrentNextPollers_exceedingWorkerPoolSize_allParkAndComplete() throws Exception {
+        int serverCount = 30;
+        List<RuntimeApiServer> servers = new ArrayList<>();
+        List<Integer> ports = new ArrayList<>();
+        try {
+            for (int i = 0; i < serverCount; i++) {
+                int freshPort = findFreePort();
+                RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
+                freshServer.start().get(5, TimeUnit.SECONDS);
+                servers.add(freshServer);
+                ports.add(freshPort);
+            }
+
+            List<CompletableFuture<HttpResponse<String>>> pending = new ArrayList<>();
+            for (int freshPort : ports) {
+                pending.add(httpClient.sendAsync(HttpRequest.newBuilder()
+                                .uri(URI.create("http://localhost:" + freshPort + "/2018-06-01/runtime/invocation/next"))
+                                .GET().build(),
+                        HttpResponse.BodyHandlers.ofString()));
+            }
+
+            Thread.sleep(500);
+            for (CompletableFuture<HttpResponse<String>> f : pending) {
+                assertFalse(f.isDone(), "all pollers should be parked, none held on a blocking thread");
+            }
+
+            for (int i = 0; i < serverCount; i++) {
+                servers.get(i).enqueue(new PendingInvocation(
+                        "req-many-" + i, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                        "arn:aws:lambda:us-east-1:000000000000:function:test",
+                        new CompletableFuture<>()));
+            }
+
+            for (CompletableFuture<HttpResponse<String>> f : pending) {
+                assertEquals(200, f.get(5, TimeUnit.SECONDS).statusCode());
+            }
+        } finally {
+            for (RuntimeApiServer s : servers) {
+                s.stop().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private String registerExtensionOn(HttpClient client, int targetPort, String name, String... events)
+            throws Exception {
+        String eventsJson = String.join(",", java.util.Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
+        HttpResponse<String> response = client.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + targetPort + "/2020-01-01/extension/register"))
+                        .header("Lambda-Extension-Name", name)
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"events\":[" + eventsJson + "]}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode());
+        return response.headers().firstValue("Lambda-Extension-Identifier").orElseThrow();
     }
 
     private String registerExtension(String name, String... events) throws Exception {
