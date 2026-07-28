@@ -58,7 +58,13 @@ class RuntimeApiServerTest {
     void tearDown() throws Exception {
         server.stop().get(5, TimeUnit.SECONDS);
         scheduler.shutdownNow();
-        vertx.close();
+        httpClient.close();
+        // Await the close rather than firing it and moving on: Vertx.close() is asynchronous, so
+        // an unawaited call lets the next test's setUp() create a new Vertx and bind a port while
+        // this one's event loops and server sockets are still tearing down. Across a class with
+        // stress tests that stand up hundreds of servers, that backlog surfaces as BindException
+        // or a start() timeout in an unrelated test's setUp().
+        vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
     }
 
     @Test
@@ -594,13 +600,13 @@ class RuntimeApiServerTest {
         java.util.concurrent.atomic.AtomicInteger totalDelivered = new java.util.concurrent.atomic.AtomicInteger();
 
         for (int i = 0; i < iterations; i++) {
+            // A fresh client per iteration — the port may be reused from an earlier iteration, and
+            // a shared client's connection pool could otherwise hand back a stale pooled
+            // connection to that iteration's now-closed server.
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
-            // A fresh client per iteration — freshPort may reuse a port from an earlier
-            // iteration, and a shared client's connection pool could otherwise hand back a
-            // stale pooled connection to that iteration's now-closed server.
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
             try {
                 String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
 
@@ -639,6 +645,10 @@ class RuntimeApiServerTest {
                 }
             } finally {
                 freshServer.stop().get(5, TimeUnit.SECONDS);
+                // Each HttpClient owns a selector thread and connection pool; leaking one per
+                // iteration across hundreds of iterations starves the JVM and makes even an
+                // unrelated server's bind time out.
+                client.close();
             }
         }
 
@@ -702,10 +712,10 @@ class RuntimeApiServerTest {
         int iterations = 300;
 
         for (int i = 0; i < iterations; i++) {
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
             try {
                 String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
                 // Race stop() against the extension's very first /event/next poll, which may
@@ -727,6 +737,7 @@ class RuntimeApiServerTest {
                 assertEquals("SHUTDOWN", new JsonObject(response.body()).getString("eventType"));
             } finally {
                 freshServer.stop().get(5, TimeUnit.SECONDS);
+                client.close();
             }
         }
     }
@@ -744,10 +755,10 @@ class RuntimeApiServerTest {
         int iterations = 300;
 
         for (int i = 0; i < iterations; i++) {
+            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
             try {
                 String extensionId = registerExtensionOn(client, freshPort, "failing-extension", "INVOKE", "SHUTDOWN");
 
@@ -765,6 +776,7 @@ class RuntimeApiServerTest {
                 freshServer.stop().get(5, TimeUnit.SECONDS);
             } finally {
                 freshServer.stop().get(5, TimeUnit.SECONDS);
+                client.close();
             }
         }
     }
@@ -846,9 +858,48 @@ class RuntimeApiServerTest {
         return response.headers().firstValue("Lambda-Extension-Identifier").orElseThrow();
     }
 
+    /**
+     * Lowest port used by {@link #findFreePort()}. Deliberately below the OS ephemeral range
+     * (49152-65535 on macOS, 32768-60999 on typical Linux) — see {@link #findFreePort()}.
+     */
+    private static final int TEST_PORT_BASE = 20000;
+    private static final int TEST_PORT_RANGE = 10000;
+
+    /** Rotates across the range so consecutive calls don't retry a port still in TIME_WAIT. */
+    private static final java.util.concurrent.atomic.AtomicInteger NEXT_PORT_OFFSET =
+            new java.util.concurrent.atomic.AtomicInteger(
+                    java.util.concurrent.ThreadLocalRandom.current().nextInt(TEST_PORT_RANGE));
+
+    /**
+     * Returns a port that is free <em>and</em> outside the OS ephemeral range.
+     *
+     * <p>Binding port 0 (the obvious implementation) draws from the ephemeral range, which is
+     * exactly where the OS and background applications allocate their own listeners. Long-running
+     * desktop agents routinely hold stable ports in that range — on the machine this was diagnosed
+     * on, {@code LogiPlugin} (49200-49204), {@code rapportd} (56698, 63091-63092) and
+     * {@code CommCenter} (65000-65001) all sit inside it. The stress tests below perform well over
+     * a thousand port draws per run, so a collision is near-certain: the probe socket closes, the
+     * other process (or the OS) claims the port before Vert.x binds it, and the test's request is
+     * answered by a stranger — observed as a spurious {@code 501} from an unrelated HTTP daemon, or
+     * as a bind failure/start() timeout. Neither has anything to do with the concurrency under test.
+     *
+     * <p>Ports 20000-29999 sit below every common ephemeral range, so nothing else on the host is
+     * handing them out. The bind check still guards against a genuinely occupied port.
+     */
     private static int findFreePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
+        for (int attempt = 0; attempt < TEST_PORT_RANGE; attempt++) {
+            int candidate = TEST_PORT_BASE
+                    + Math.floorMod(NEXT_PORT_OFFSET.getAndIncrement(), TEST_PORT_RANGE);
+            try (ServerSocket socket = new ServerSocket()) {
+                // Without SO_REUSEADDR the probe leaves the port in TIME_WAIT, which would block
+                // the server that is about to bind it for real.
+                socket.setReuseAddress(true);
+                socket.bind(new InetSocketAddress("0.0.0.0", candidate));
+                return candidate;
+            } catch (IOException inUse) {
+                // Occupied — try the next port in the rotation.
+            }
         }
+        throw new IOException("no free port in " + TEST_PORT_BASE + "-" + (TEST_PORT_BASE + TEST_PORT_RANGE));
     }
 }
