@@ -110,6 +110,17 @@ class SesDkimSigningActionsIntegrationTest {
     }
 
     @Test
+    void putDkimSigningAttributes_blankIdentity_returns400() {
+        // A blank/whitespace identity is rejected with the same 400 "must be a valid domain" as an
+        // email-shaped one (verified against AWS), rather than falling through to a 404.
+        given().urlEncodingEnabled(false).contentType("application/json").header("Authorization", V2_AUTH)
+                .body("{\"SigningAttributesOrigin\":\"AWS_SES\"}")
+        .when().put("/v2/email/identities/%20/dkim/signing")
+        .then().statusCode(400).body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("The EmailIdentity value must be a valid domain."));
+    }
+
+    @Test
     void putDkimSigningAttributes_unknownIdentity_returns404() {
         given().contentType("application/json").header("Authorization", V2_AUTH)
                 .body("{\"SigningAttributesOrigin\":\"AWS_SES\"}")
