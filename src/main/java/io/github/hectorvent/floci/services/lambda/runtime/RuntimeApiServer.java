@@ -288,14 +288,6 @@ public class RuntimeApiServer {
         // header to equal the extension's own file name; floci does not validate that here
         // (the identifier it hands back is sufficient for the extension to poll /event/next).
         router.post(EXTENSION_REGISTER_PATH).handler(ctx -> {
-            // AWS makes an init/exit error terminal for the whole Extensions API, not just for
-            // runtime work: once the environment is condemned no further extension call succeeds.
-            // Registering a new extension into a container that is about to be retired would hand
-            // it an identifier that can never receive an event.
-            if (faulted) {
-                sendExtensionFaulted(ctx);
-                return;
-            }
             String name = ctx.request().getHeader(EXTENSION_NAME_HEADER);
             if (name == null || name.isBlank()) {
                 ctx.response().setStatusCode(400)
@@ -310,15 +302,32 @@ public class RuntimeApiServer {
             }
             String identifier = UUID.randomUUID().toString();
             RegisteredExtension extension = new RegisteredExtension(identifier, name, events);
+            boolean environmentFaulted;
             synchronized (lock) {
-                extensions.put(identifier, extension);
-                if (stopped && extension.isSubscribedTo(ExtensionEvent.Type.SHUTDOWN)) {
-                    // The server is already stopping — this extension will never see stop()'s
-                    // own SHUTDOWN fan-out (that already ran), so queue one now to preserve
-                    // "every registered extension eventually sees SHUTDOWN."
-                    extension.getPendingEvents().offer(
-                            ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN"));
+                // AWS makes an init/exit error terminal for the whole Extensions API, not just for
+                // runtime work: once the environment is condemned no further extension call
+                // succeeds. Registering into a container about to be retired would hand back an
+                // identifier that can never receive an event.
+                //
+                // Checked *inside* the lock, like every other guard on this flag:
+                // handleExtensionFatalError sets `faulted` under the lock, so a volatile read
+                // before acquiring it can be overtaken between the check and the put() below,
+                // registering into an environment condemned a moment later.
+                environmentFaulted = faulted;
+                if (!environmentFaulted) {
+                    extensions.put(identifier, extension);
+                    if (stopped && extension.isSubscribedTo(ExtensionEvent.Type.SHUTDOWN)) {
+                        // The server is already stopping — this extension will never see stop()'s
+                        // own SHUTDOWN fan-out (that already ran), so queue one now to preserve
+                        // "every registered extension eventually sees SHUTDOWN."
+                        extension.getPendingEvents().offer(
+                                ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN"));
+                    }
                 }
+            }
+            if (environmentFaulted) {
+                sendExtensionFaulted(ctx);
+                return;
             }
             LOG.infov("Extension registered: {0} ({1}), events={2}", name, identifier, events);
 
@@ -371,6 +380,15 @@ public class RuntimeApiServer {
                     // Checking `stopped` first would answer 204 and orphan the queued SHUTDOWN.
                     toDispatch = extension.getPendingEvents().poll();
                     if (toDispatch == null) {
+                        // Deliberate deviation: AWS documents only 200/403/500 here and never ends
+                        // the long-poll with an empty response. Floci answers 204 once the server
+                        // is stopping and there is genuinely nothing left to deliver, because the
+                        // alternative is holding the connection open while the listener is torn
+                        // down — the extension would see a dropped socket instead of a clean
+                        // close. Only reachable for an extension not subscribed to SHUTDOWN (a
+                        // subscribed one gets the real SHUTDOWN event from stop()'s fan-out, which
+                        // the poll above returns), so no extension that asked to be told about
+                        // shutdown learns about it this way.
                         if (stopped) {
                             send204 = true;
                         } else {
