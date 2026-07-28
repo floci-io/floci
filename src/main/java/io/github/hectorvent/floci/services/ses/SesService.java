@@ -779,9 +779,10 @@ public class SesService {
     public DkimSigningResult putDkimSigningAttributes(String identityValue, String origin,
                                                       String signingSelector, String nextKeyLength,
                                                       String region) {
-        // DKIM signing attributes are domain-level; AWS rejects an email-address identity here rather
-        // than mutating state that the email would just inherit back from its parent domain.
-        if (identityValue != null && identityValue.contains("@")) {
+        // DKIM signing attributes are domain-level; AWS rejects a missing/blank value or an
+        // email-address identity here (verified: all return the same 400 "must be a valid domain")
+        // rather than mutating state that the email would just inherit back from its parent domain.
+        if (identityValue == null || identityValue.isBlank() || identityValue.contains("@")) {
             throw new AwsException("BadRequestException",
                     "The EmailIdentity value must be a valid domain.", 400);
         }
