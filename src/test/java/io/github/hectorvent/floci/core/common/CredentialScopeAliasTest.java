@@ -36,6 +36,14 @@ class CredentialScopeAliasTest {
     }
 
     @Test
+    void iotJobsDataAliasNormalisesToIot() {
+        // The IoT Jobs Data Plane signs as iot-jobs-data, but its policy actions live under the
+        // iot: namespace (iot:DescribeJobExecution and peers in the Service Authorization
+        // Reference), so enforcement has to resolve it there rather than invent iot-jobs-data:.
+        assertEquals("iot", catalog.canonicalCredentialScope("iot-jobs-data"));
+    }
+
+    @Test
     void canonicalScopeIsUnchanged() {
         assertEquals("s3", catalog.canonicalCredentialScope("s3"));
         assertEquals("dynamodb", catalog.canonicalCredentialScope("dynamodb"));
@@ -68,7 +76,7 @@ class CredentialScopeAliasTest {
                 .filter(scope -> !scope.equals(catalog.canonicalCredentialScope(scope)))
                 .collect(Collectors.toMap(scope -> scope, catalog::canonicalCredentialScope));
 
-        assertEquals(Map.of("s3express", "s3"), rewritten);
+        assertEquals(Map.of("s3express", "s3", "iot-jobs-data", "iot"), rewritten);
     }
 
     @Test

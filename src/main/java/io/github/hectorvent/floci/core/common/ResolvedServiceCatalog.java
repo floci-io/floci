@@ -33,12 +33,16 @@ import java.util.Set;
 public class ResolvedServiceCatalog {
 
     /**
-     * Signing scopes that share another service's IAM namespace. S3 Express One Zone clients
-     * sign directory-bucket requests as {@code s3express} while the actions, ARNs and condition
-     * keys remain {@code s3}. Keep this minimal: every entry suppresses a distinct IAM namespace.
+     * Signing scopes that share another service's IAM namespace. S3 Express One Zone clients sign
+     * directory-bucket requests as {@code s3express} while the actions, ARNs and condition keys
+     * remain {@code s3}; the IoT Jobs Data Plane signs as {@code iot-jobs-data} while its actions
+     * are {@code iot:} ({@code iot:DescribeJobExecution} and peers in the Service Authorization
+     * Reference). Keep this minimal: every entry suppresses a distinct IAM namespace.
      */
     private static final java.util.Map<String, String> CREDENTIAL_SCOPE_ALIASES =
-            java.util.Map.of("s3express", "s3");
+            java.util.Map.of(
+                    "s3express", "s3",
+                    "iot-jobs-data", "iot");
 
     private final ServiceCatalog catalog;
 
