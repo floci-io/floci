@@ -1246,7 +1246,7 @@ public class ApiGatewayExecuteController {
         if (integrationType == null || integrationType.isEmpty()) integrationType = "AWS_PROXY";
 
         if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
-            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName);
+            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName, validatedJwtClaims);
         }
 
         String functionName = functionNameFromUri(integration.getIntegrationUri());
@@ -1282,7 +1282,8 @@ public class ApiGatewayExecuteController {
     private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,
                                           HttpHeaders headers, UriInfo uriInfo, byte[] body,
-                                          String apiId, String stageName) {
+                                          String apiId, String stageName,
+                                          Map<String, Object> validatedJwtClaims) {
         // CDK HttpAlbIntegration sets integrationUri to an ALB listener ARN. Resolve it
         // to the listener's bound localhost port so HttpProxyInvoker (which assumes a
         // concrete http(s) URL) can forward through the listener's data plane.
@@ -1315,14 +1316,10 @@ public class ApiGatewayExecuteController {
         }
         Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
 
-        Map<String, Object> claims = Map.of();
-        if ("JWT".equalsIgnoreCase(route.getAuthorizationType())) {
-            String token = extractBearerToken(headers);
-            if (token != null) {
-                Map<String, Object> parsed = parseAllJwtClaims(token);
-                if (parsed != null) claims = parsed;
-            }
-        }
+        // Same trust model as the AWS_PROXY path: only claims that dispatchV2 derived
+        // after successful enforceJwtAuthorizer are exposed to $context.authorizer.claims.*
+        // parameter mapping. A JWT route without a backing authorizer gets none.
+        Map<String, Object> claims = validatedJwtClaims != null ? validatedJwtClaims : Map.of();
 
         String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
@@ -1386,13 +1383,6 @@ public class ApiGatewayExecuteController {
         requestParameters.put("overwrite:header.Host", host);
         copy.setRequestParameters(requestParameters);
         return copy;
-    }
-
-    private static String extractBearerToken(HttpHeaders headers) {
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null) return null;
-        if (auth.startsWith("Bearer ")) return auth.substring("Bearer ".length()).trim();
-        return null;
     }
 
     /** Extracts ALL JWT claims as a Map<String,Object> for use as $context.authorizer.claims.X source values. */
