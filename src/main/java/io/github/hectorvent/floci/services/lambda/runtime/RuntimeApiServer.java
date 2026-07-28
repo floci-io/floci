@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Per-container HTTP server implementing the AWS Lambda Runtime API and, for
@@ -127,6 +128,18 @@ public class RuntimeApiServer {
     // rather than aborted mid-invoke. WarmPool performs the actual teardown afterwards.
     private volatile boolean faulted;
 
+    // Init-readiness barrier. ContainerLauncher launches extension binaries as detached `docker
+    // exec`s and returns immediately, so without this the first invocation can reach the runtime
+    // before an extension has called /extension/register — the adapter never sees that invoke and
+    // silently misses it. ContainerLauncher declares how many binaries it launched via
+    // expectExtensions(); the register handler counts each one down; awaitExtensionsRegistered()
+    // blocks the launch until they have all checked in (or the deadline passes).
+    //
+    // A CountDownLatch is level-triggered, so an await() that arrives after the last registration
+    // returns immediately rather than missing the signal — the latch is created before any
+    // extension can register, which is what makes that safe.
+    private volatile CountDownLatch extensionsRegistered;
+
     // Set by ContainerLauncher once it knows which function this server instance is for (the
     // factory creates the server generically, before that's known) — used only to populate the
     // Extensions API register response.
@@ -156,6 +169,34 @@ public class RuntimeApiServer {
      */
     public boolean isFaulted() {
         return faulted;
+    }
+
+    /**
+     * Declares how many extension binaries were launched for this container, arming the
+     * init-readiness barrier that {@link #awaitExtensionsRegistered(long)} waits on.
+     *
+     * <p>Must be called <em>before</em> the extension processes are started, so the latch exists
+     * before any of them can call {@code /extension/register}. A count of zero (the common case:
+     * no {@code /opt/extensions} directory) leaves the barrier permanently open.
+     */
+    public void expectExtensions(int count) {
+        extensionsRegistered = new CountDownLatch(Math.max(0, count));
+    }
+
+    /**
+     * Blocks until every extension declared via {@link #expectExtensions(int)} has registered, or
+     * the timeout elapses.
+     *
+     * @return true if all expected extensions registered; false if the wait timed out with some
+     *         still missing, in which case the container is still usable — it simply starts
+     *         serving invocations without the extensions that never checked in.
+     */
+    public boolean awaitExtensionsRegistered(long timeoutMs) throws InterruptedException {
+        CountDownLatch latch = extensionsRegistered;
+        if (latch == null) {
+            return true;
+        }
+        return latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
     }
 
     public CompletableFuture<Void> start() {
@@ -253,6 +294,13 @@ public class RuntimeApiServer {
                 }
             }
             LOG.infov("Extension registered: {0} ({1}), events={2}", name, identifier, events);
+
+            // Release this extension's slot in the init-readiness barrier so the launch can
+            // proceed once every expected extension has checked in.
+            CountDownLatch latch = extensionsRegistered;
+            if (latch != null) {
+                latch.countDown();
+            }
 
             JsonObject responseBody = new JsonObject()
                     .put("functionName", functionName)

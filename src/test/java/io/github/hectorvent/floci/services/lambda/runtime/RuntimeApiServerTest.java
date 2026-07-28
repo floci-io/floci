@@ -542,6 +542,70 @@ class RuntimeApiServerTest {
     }
 
     /**
+     * The init-readiness barrier: awaitExtensionsRegistered() must block until every expected
+     * extension has called /extension/register.
+     */
+    @Test
+    @Timeout(30)
+    void awaitExtensionsRegistered_blocksUntilAllExpectedExtensionsRegister() throws Exception {
+        server.expectExtensions(2);
+
+        CompletableFuture<Boolean> awaited = CompletableFuture.supplyAsync(() -> {
+            try {
+                return server.awaitExtensionsRegistered(10_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        });
+
+        registerExtension("first-extension", "INVOKE");
+        Thread.sleep(200);
+        assertFalse(awaited.isDone(), "must still be waiting while one extension has not registered");
+
+        registerExtension("second-extension", "INVOKE");
+        assertTrue(awaited.get(5, TimeUnit.SECONDS), "must unblock once all extensions registered");
+    }
+
+    /**
+     * The missed-signal case: registration completing *before* anyone waits must not strand the
+     * launch. A CountDownLatch is level-triggered, so a late await returns immediately — this
+     * pins that behaviour, since an edge-triggered signal here would hang the cold start.
+     */
+    @Test
+    @Timeout(30)
+    void awaitExtensionsRegistered_returnsImmediatelyWhenRegistrationAlreadyCompleted() throws Exception {
+        server.expectExtensions(1);
+        registerExtension("fast-extension", "INVOKE");
+
+        long start = System.currentTimeMillis();
+        assertTrue(server.awaitExtensionsRegistered(10_000));
+        assertTrue(System.currentTimeMillis() - start < 1000,
+                "an await arriving after registration must not wait");
+    }
+
+    /** A function with no extensions must not wait at all. */
+    @Test
+    @Timeout(30)
+    void awaitExtensionsRegistered_withNoExpectedExtensions_doesNotBlock() throws Exception {
+        server.expectExtensions(0);
+
+        long start = System.currentTimeMillis();
+        assertTrue(server.awaitExtensionsRegistered(10_000));
+        assertTrue(System.currentTimeMillis() - start < 1000, "zero extensions must not wait");
+    }
+
+    /** A never-registering extension must time out rather than block forever. */
+    @Test
+    @Timeout(30)
+    void awaitExtensionsRegistered_timesOutWhenExtensionNeverRegisters() throws Exception {
+        server.expectExtensions(1);
+
+        assertFalse(server.awaitExtensionsRegistered(300),
+                "a missing registration must report timeout, not hang");
+    }
+
+    /**
      * The behaviour abanna reported on PR #1773: "a later invoke can still be served after
      * init/error". A *new* invocation enqueued after the environment was condemned must not be
      * dispatched to the runtime — serving it would hide a failed adapter or security extension.
@@ -903,7 +967,13 @@ class RuntimeApiServerTest {
      * (49152-65535 on macOS, 32768-60999 on typical Linux) — see {@link #findFreePort()}.
      */
     private static final int TEST_PORT_BASE = 20000;
-    private static final int TEST_PORT_RANGE = 10000;
+    /**
+     * Wide enough that the rotation does not wrap back onto a port still in TIME_WAIT: one run of
+     * this class performs ~1600 port draws, and a closed listener's port stays unusable for tens of
+     * seconds afterwards. Running several test classes in the same JVM multiplies that count, which
+     * is when a narrower window started producing sporadic connect failures.
+     */
+    private static final int TEST_PORT_RANGE = 25000;
 
     /** Rotates across the range so consecutive calls don't retry a port still in TIME_WAIT. */
     private static final java.util.concurrent.atomic.AtomicInteger NEXT_PORT_OFFSET =

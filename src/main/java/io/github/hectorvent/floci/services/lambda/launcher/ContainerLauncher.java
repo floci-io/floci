@@ -339,7 +339,15 @@ public class ContainerLauncher {
         // (e.g. aws-lambda-web-adapter) never start without this. Best-effort: an extension
         // launch failure shouldn't fail the whole container launch, since a function with no
         // extensions is the common case and this must be a no-op for it.
-        launchExtensions(dockerClient, containerId, fn.getFunctionName());
+        launchExtensions(dockerClient, containerId, fn.getFunctionName(), runtimeApiServer);
+
+        // Init-readiness barrier: the execs above are detached, so without waiting here the caller
+        // could enqueue the first invocation before an extension has called /extension/register —
+        // the adapter would silently miss that invoke. Real AWS likewise holds the environment out
+        // of service until every extension has registered. A no-extensions function (the common
+        // case) does not wait at all; a timeout is non-fatal, since a container that serves
+        // invocations without a slow extension is strictly better than failing the launch.
+        awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
 
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
@@ -617,6 +625,14 @@ public class ContainerLauncher {
     private static final String EXTENSIONS_DIR = "/opt/extensions";
 
     /**
+     * How long a launch waits for extensions to call {@code /extension/register} before giving up
+     * and serving invocations without them. Real AWS allows extensions the function's full init
+     * budget (10s); this is deliberately shorter, since exceeding it here is non-fatal and the
+     * cost of the wait is paid on every cold start of a function that has extensions.
+     */
+    private static final long EXTENSION_REGISTRATION_TIMEOUT_MS = 5000;
+
+    /**
      * Discovers binaries under {@link #EXTENSIONS_DIR} inside the (already started) container and
      * launches each as a detached process — the piece of real AWS's init system (which starts every
      * registered extension alongside the runtime) that Floci otherwise has no equivalent for. Uses
@@ -629,8 +645,13 @@ public class ContainerLauncher {
      * must be a silent no-op, and a failure launching one extension must not prevent the container
      * (or other extensions) from running.
      */
-    private void launchExtensions(DockerClient dockerClient, String containerId, String functionName) {
+    private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,
+                                  RuntimeApiServer runtimeApiServer) {
         List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName);
+        // Arm the readiness barrier before starting any extension process, so the latch already
+        // exists when the first one calls /extension/register — otherwise a fast-registering
+        // extension could check in before there is anything to count it down.
+        runtimeApiServer.expectExtensions(extensionNames.size());
         for (String name : extensionNames) {
             try {
                 String path = EXTENSIONS_DIR + "/" + name;
@@ -657,6 +678,29 @@ public class ContainerLauncher {
                 LOG.warnv(e, "Failed to launch extension {0} for function {1}; continuing without it",
                         name, functionName);
             }
+        }
+    }
+
+    /**
+     * Waits for every launched extension to call {@code /extension/register} before the container
+     * is handed to the caller for its first invocation.
+     *
+     * <p>Best-effort by design: a timeout logs and proceeds rather than failing the launch. An
+     * extension that is slow or crashes on startup should degrade to "invocations run without it"
+     * — the same outcome as before this barrier existed — not take the whole function down. A
+     * genuinely broken extension reports {@code init/error} instead, which condemns the
+     * environment through {@code RuntimeApiServer}'s fault path.
+     */
+    private void awaitExtensionReadiness(RuntimeApiServer runtimeApiServer, String functionName) {
+        try {
+            if (!runtimeApiServer.awaitExtensionsRegistered(EXTENSION_REGISTRATION_TIMEOUT_MS)) {
+                LOG.warnv("Not all extensions for function {0} registered within {1}ms; "
+                                + "continuing without them",
+                        functionName, String.valueOf(EXTENSION_REGISTRATION_TIMEOUT_MS));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("Interrupted waiting for extensions of function {0} to register", functionName);
         }
     }
 

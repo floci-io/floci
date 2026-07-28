@@ -41,6 +41,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -48,6 +49,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -685,6 +687,88 @@ class ContainerLauncherTest {
         inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
         inOrder.verify(dockerClient).copyArchiveFromContainerCmd("container-123", "/opt/extensions");
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
+    }
+
+    /**
+     * The init-readiness barrier abanna asked for on PR #1773: extension processes are started as
+     * detached execs, so without waiting the caller could enqueue the first invocation before an
+     * extension had called /extension/register and the adapter would silently miss that invoke.
+     * The launch must arm the barrier with the discovered binary count *before* starting any exec
+     * (so a fast registration can't check in before there is a latch to count it down), and must
+     * not return until the extensions have registered.
+     */
+    @Test
+    void launchFunction_waitsForExtensionsToRegisterBeforeReturning() throws Exception {
+        stubExtensionDiscovery("lambda-adapter", "otel-collector");
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("barrier-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        // Registration is delayed: awaitExtensionsRegistered only reports success after a pause,
+        // standing in for extension processes that take a moment to start up and check in.
+        AtomicBoolean registrationComplete = new AtomicBoolean(false);
+        when(runtimeApiServer.awaitExtensionsRegistered(anyLong())).thenAnswer(inv -> {
+            Thread.sleep(150);
+            registrationComplete.set(true);
+            return true;
+        });
+
+        launcher.launch(fn);
+
+        assertTrue(registrationComplete.get(),
+                "launch() must not return before the extensions have registered");
+
+        // The barrier is armed with the number of binaries actually discovered, and armed before
+        // any extension process is started.
+        verify(runtimeApiServer).expectExtensions(2);
+        InOrder inOrder = inOrder(runtimeApiServer, dockerClient);
+        inOrder.verify(runtimeApiServer).expectExtensions(2);
+        inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
+        inOrder.verify(runtimeApiServer).awaitExtensionsRegistered(anyLong());
+    }
+
+    /**
+     * A slow or crashed extension must degrade to "invocations run without it", not fail the whole
+     * function launch — the same outcome as before the barrier existed.
+     */
+    @Test
+    void launchFunction_extensionRegistrationTimeout_doesNotFailLaunch() throws Exception {
+        stubExtensionDiscovery("never-registers");
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("timeout-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        when(runtimeApiServer.awaitExtensionsRegistered(anyLong())).thenReturn(false);
+
+        ContainerHandle handle = launcher.launch(fn);
+
+        assertNotNull(handle, "a registration timeout must not fail the launch");
+        assertEquals("container-123", handle.getContainerId());
+    }
+
+    /**
+     * The common case — no /opt/extensions directory — must not wait at all: the barrier is armed
+     * with zero and the launch proceeds immediately.
+     */
+    @Test
+    void launchFunction_noExtensions_armsBarrierWithZeroAndDoesNotBlock() throws Exception {
+        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class);
+        when(copyCmd.exec()).thenThrow(new NotFoundException("no such directory"));
+        when(dockerClient.copyArchiveFromContainerCmd("container-123", "/opt/extensions"))
+                .thenReturn(copyCmd);
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("no-extension-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        verify(runtimeApiServer).expectExtensions(0);
     }
 
     @Test
