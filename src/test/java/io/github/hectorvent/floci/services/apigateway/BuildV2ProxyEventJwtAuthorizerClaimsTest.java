@@ -84,6 +84,22 @@ class BuildV2ProxyEventJwtAuthorizerClaimsTest {
     }
 
     @Test
+    void nestedObjectClaimIsJsonStringified() throws Exception {
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("sub", "user-123");
+        claims.put("address", Map.of("country", "JP"));
+
+        String json = controller.buildV2ProxyEvent(
+                "GET", "/assets", "GET /assets", claims,
+                "abc123", "v1", headers, uriInfo, null, "req-map");
+        JsonNode claimsNode = new ObjectMapper().readTree(json)
+                .path("requestContext").path("authorizer").path("jwt").path("claims");
+
+        assertEquals("{\"country\":\"JP\"}", claimsNode.get("address").asText(),
+                "nested object claims fall back to JSON text, not Java toString ({country=JP})");
+    }
+
+    @Test
     void nullClaimsMapOmitsAuthorizer() throws Exception {
         String json = controller.buildV2ProxyEvent(
                 "GET", "/assets", "GET /assets", null,

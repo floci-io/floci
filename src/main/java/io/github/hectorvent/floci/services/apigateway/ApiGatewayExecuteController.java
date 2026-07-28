@@ -1805,6 +1805,10 @@ public class ApiGatewayExecuteController {
             String token = extractToken(authorizer, headers);
             return token != null ? parseAllJwtClaims(token) : null;
         } catch (AwsException e) {
+            // Unreachable in practice (enforceJwtAuthorizer just resolved the same authorizer),
+            // but if it ever fires the event silently loses its claims — leave a trace.
+            LOG.debugv("JWT claims extraction failed after enforcement: api {0}, authorizer {1}: {2}",
+                    apiId, route.getAuthorizerId(), e.getMessage());
             return null;
         }
     }
