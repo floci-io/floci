@@ -84,6 +84,9 @@ public class RuntimeApiServer {
     private static final String EXTENSION_EVENT_ID_HEADER = "Lambda-Extension-Event-Identifier";
     private static final String EXTENSION_ACCEPT_FEATURE_HEADER = "Lambda-Extension-Accept-Feature";
 
+    /** Required by AWS on both /extension/init/error and /extension/exit/error. */
+    private static final String EXTENSION_ERROR_TYPE_HEADER = "Lambda-Extension-Function-Error-Type";
+
     /** Opt-in feature that adds {@code accountId} to the register response. */
     private static final String ACCOUNT_ID_FEATURE = "accountId";
 
@@ -651,32 +654,63 @@ public class RuntimeApiServer {
 
     private void handleExtensionFatalError(RoutingContext ctx, String phase) {
         String identifier = ctx.request().getHeader(EXTENSION_ID_HEADER);
+        String errorType = ctx.request().getHeader(EXTENSION_ERROR_TYPE_HEADER);
+
+        // Validate before mutating anything. Retiring the execution environment is destructive and
+        // unrecoverable, so a malformed report must not trigger it — otherwise a caller that got
+        // the contract wrong silently kills a healthy container and the 202 tells them it worked.
+        // AWS requires Lambda-Extension-Function-Error-Type on both error endpoints, and rejects
+        // an unknown identifier rather than treating it as a fatal report.
+        if (identifier == null || identifier.isBlank()) {
+            ctx.response().setStatusCode(403)
+                    .putHeader("Content-Type", "application/json")
+                    .end("{\"errorMessage\":\"Unknown or missing Lambda-Extension-Identifier\"}");
+            return;
+        }
+        if (errorType == null || errorType.isBlank()) {
+            ctx.response().setStatusCode(400)
+                    .putHeader("Content-Type", "application/json")
+                    .end("{\"errorMessage\":\"Missing Lambda-Extension-Function-Error-Type header\"}");
+            return;
+        }
+
         RegisteredExtension removed;
         List<PendingInvocation> strandedInvocations;
         List<RoutingContext> strandedPollers;
         synchronized (lock) {
-            removed = identifier != null ? extensions.remove(identifier) : null;
-            // Condemn the environment regardless of whether the reporting extension was known: an
-            // unrecognised identifier still means some extension in this container has failed
-            // fatally, and serving further invocations from it would hide that failure. Set under
-            // the lock alongside the unregistration so both land as one atomic state change.
-            faulted = true;
+            removed = extensions.remove(identifier);
+            if (removed == null) {
+                // Unknown identifier: reject without condemning. Answered outside the lock below.
+                strandedInvocations = List.of();
+                strandedPollers = List.of();
+            } else {
+                // Set under the lock alongside the unregistration so both land as one atomic
+                // change.
+                faulted = true;
 
-            // Anything already queued or parked would otherwise wait forever, since the guards in
-            // enqueue()/NEXT_PATH now refuse to move work through a condemned environment. Drain
-            // both here so callers fail fast instead of hanging until the function timeout.
-            strandedInvocations = new ArrayList<>(pendingQueue);
-            pendingQueue.clear();
-            strandedPollers = new ArrayList<>(waitingContexts);
-            waitingContexts.clear();
+                // Anything already queued or parked would otherwise wait forever, since the guards
+                // in enqueue()/NEXT_PATH now refuse to move work through a condemned environment.
+                // Drain both here so callers fail fast instead of hanging until the function
+                // timeout.
+                strandedInvocations = new ArrayList<>(pendingQueue);
+                pendingQueue.clear();
+                strandedPollers = new ArrayList<>(waitingContexts);
+                waitingContexts.clear();
+            }
         }
-        if (removed != null) {
-            LOG.warnv("Extension {0} ({1}) reported {2} error on port {3}; retiring execution environment",
-                    removed.getName(), identifier, phase, String.valueOf(port));
-        } else {
-            LOG.warnv("Unknown extension reported {0} error on port {1}; retiring execution environment",
-                    phase, String.valueOf(port));
+
+        if (removed == null) {
+            LOG.warnv("Unknown extension identifier {0} reported {1} error on port {2}; ignoring",
+                    identifier, phase, String.valueOf(port));
+            ctx.response().setStatusCode(403)
+                    .putHeader("Content-Type", "application/json")
+                    .end("{\"errorMessage\":\"Unknown or missing Lambda-Extension-Identifier\"}");
+            return;
         }
+
+        LOG.warnv("Extension {0} ({1}) reported {2} error ({3}) on port {4}; "
+                        + "retiring execution environment",
+                removed.getName(), identifier, phase, errorType, String.valueOf(port));
 
         for (PendingInvocation stranded : strandedInvocations) {
             stranded.getResultFuture().complete(

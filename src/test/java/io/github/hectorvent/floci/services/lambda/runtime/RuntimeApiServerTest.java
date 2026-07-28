@@ -614,6 +614,7 @@ class RuntimeApiServerTest {
         HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/exit/error"))
                         .header("Lambda-Extension-Identifier", extensionId)
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.TestError")
                         .POST(HttpRequest.BodyPublishers.ofString(
                                 "{\"errorMessage\":\"crashed\",\"errorType\":\"Extension.Crash\"}"))
                         .build(),
@@ -755,6 +756,7 @@ class RuntimeApiServerTest {
         httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
                         .header("Lambda-Extension-Identifier", extensionId)
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.TestError")
                         .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad config\"}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
@@ -779,6 +781,110 @@ class RuntimeApiServerTest {
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(204, next.statusCode(),
                 "the runtime must not receive work from a condemned environment");
+    }
+
+    /**
+     * AWS requires {@code Lambda-Extension-Function-Error-Type} on both error endpoints. Retiring
+     * the environment is destructive and unrecoverable, so a report missing the required header
+     * must be rejected *before* anything is condemned — otherwise a caller that got the contract
+     * wrong silently kills a healthy container and the 202 tells them it worked.
+     */
+    @Test
+    @Timeout(30)
+    void extensionInitError_withoutErrorTypeHeader_isRejectedAndDoesNotFault() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(400, response.statusCode(),
+                "a report missing the required error-type header must be rejected");
+        assertFalse(server.isFaulted(),
+                "a malformed report must not condemn the execution environment");
+    }
+
+    /** The same requirement on exit/error — both endpoints carry it in AWS. */
+    @Test
+    @Timeout(30)
+    void extensionExitError_withoutErrorTypeHeader_isRejectedAndDoesNotFault() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/exit/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(400, response.statusCode());
+        assertFalse(server.isFaulted(),
+                "a malformed report must not condemn the execution environment");
+    }
+
+    /**
+     * An unknown identifier must be rejected rather than treated as a fatal report. This reverses
+     * an earlier deliberate choice here (condemn regardless, on the theory that *some* extension
+     * had failed): AWS validates the identifier first, and honouring an unrecognised one lets any
+     * unauthenticated caller retire a healthy container.
+     */
+    @Test
+    @Timeout(30)
+    void extensionInitError_withUnknownIdentifier_isRejectedAndDoesNotFault() throws Exception {
+        registerExtension("healthy-extension", "INVOKE");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
+                        .header("Lambda-Extension-Identifier", "not-a-real-id")
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.TestError")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(403, response.statusCode(),
+                "an unknown identifier must be rejected, not honoured as a fatal report");
+        assertFalse(server.isFaulted(),
+                "an unknown extension must not condemn the execution environment");
+    }
+
+    /** A missing identifier is rejected the same way, and likewise must not condemn. */
+    @Test
+    @Timeout(30)
+    void extensionInitError_withMissingIdentifier_isRejectedAndDoesNotFault() throws Exception {
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.TestError")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(403, response.statusCode());
+        assertFalse(server.isFaulted());
+    }
+
+    /**
+     * The positive path still works with both required headers present: the environment is
+     * condemned exactly as before. Guards against the validation above over-rejecting.
+     */
+    @Test
+    @Timeout(30)
+    void extensionInitError_withRequiredHeaders_faultsAsBefore() throws Exception {
+        String extensionId = registerExtension("failing-extension", "INVOKE");
+
+        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.BadConfig")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(202, response.statusCode());
+        assertTrue(server.isFaulted(),
+                "a well-formed report must still condemn the execution environment");
     }
 
     /**
@@ -856,6 +962,7 @@ class RuntimeApiServerTest {
         httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/exit/error"))
                         .header("Lambda-Extension-Identifier", extensionId)
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.TestError")
                         .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"crashed\"}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
@@ -1056,7 +1163,8 @@ class RuntimeApiServerTest {
                                 .uri(URI.create(
                                         "http://localhost:" + freshPort + "/2020-01-01/extension/init/error"))
                                 .header("Lambda-Extension-Identifier", extensionId)
-                                .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                                .header("Lambda-Extension-Function-Error-Type", "Extension.TestError")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
                                 .build(),
                         HttpResponse.BodyHandlers.ofString());
                 assertEquals(202, response.statusCode(), "fatal-error endpoint must not throw under the race");
@@ -1141,6 +1249,7 @@ class RuntimeApiServerTest {
         HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/init/error"))
                         .header("Lambda-Extension-Identifier", extensionId)
+                        .header("Lambda-Extension-Function-Error-Type", "Extension.TestError")
                         .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"bad config\"}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
