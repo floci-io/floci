@@ -22,6 +22,7 @@ import com.github.dockerjava.api.command.ExecStartCmd;
 import com.github.dockerjava.api.command.CopyArchiveFromContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -35,7 +36,10 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
+
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -50,6 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -653,6 +658,24 @@ class ContainerLauncherTest {
         return launchCmds;
     }
 
+    /** Overrides the default exec-start stub so the callback the launcher supplies is driven with a
+     *  real STDOUT {@link Frame} carrying {@code output}, exercising the frame-to-CloudWatch path
+     *  rather than only completing the callback. */
+    private void stubExecStartEmittingFrame(String output) {
+        lenient().when(dockerClient.execStartCmd(argThat(id -> id != null && id.startsWith("exec-launch-"))))
+                .thenAnswer(invocation -> {
+                    ExecStartCmd start = mock(ExecStartCmd.class);
+                    when(start.exec(any())).thenAnswer(startInvocation -> {
+                        @SuppressWarnings("unchecked")
+                        ResultCallback<Frame> cb = startInvocation.getArgument(0);
+                        cb.onNext(new Frame(StreamType.STDOUT, output.getBytes(StandardCharsets.UTF_8)));
+                        cb.onComplete();
+                        return cb;
+                    });
+                    return start;
+                });
+    }
+
     /** Extracts the single command-line argument each mock in {@code launchCmds} was called with
      *  via {@code withCmd(String...)}, in call order — the {@code /opt/extensions/<name>} path
      *  each discovered extension binary was launched with. */
@@ -686,6 +709,72 @@ class ContainerLauncherTest {
         InOrder inOrder = inOrder(lifecycleManager, dockerClient);
         inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
         inOrder.verify(dockerClient).copyArchiveFromContainerCmd("container-123", "/opt/extensions");
+        inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
+    }
+
+    /**
+     * Extension stdout/stderr must reach the function's CloudWatch log group. `docker logs` — and
+     * therefore ContainerLogStreamer.attach(), which uses logContainerCmd — only covers the
+     * container's PID 1 output, so an exec's stream never reaches the container log. Without
+     * explicit forwarding an observability extension's output is dropped entirely.
+     *
+     * <p>Uses a real ContainerLogStreamer over a mocked CloudWatchLogsService so the assertion
+     * covers the actual frame-to-log-event path rather than just that a mock was called.
+     */
+    @Test
+    void launchFunction_forwardsExtensionOutputToCloudWatchLogs() throws Exception {
+        CloudWatchLogsService cloudWatchLogs = mock(CloudWatchLogsService.class);
+        ContainerReachableEndpoint reachableEndpoint =
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+        ContainerLauncher launcherWithRealStreamer = new ContainerLauncher(
+                new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
+                lifecycleManager,
+                new ContainerLogStreamer(dockerClient, cloudWatchLogs),
+                imageResolver, runtimeApiServerFactory, dockerHostResolver, config,
+                ecrRegistryManager,
+                mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class),
+                new LaunchedContainerAwsEnv(reachableEndpoint));
+
+        stubExtensionDiscovery("otel-collector");
+        // Feed a real stdout frame through whatever callback the launcher hands to execStartCmd.
+        stubExecStartEmittingFrame("extension started on :8080\n");
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("observability-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcherWithRealStreamer.launch(fn);
+
+        // The frame became a CloudWatch log event in the function's own log group.
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(cloudWatchLogs, atLeastOnce()).putLogEvents(
+                eq("/aws/lambda/observability-fn"), anyString(), events.capture(), anyString());
+        assertTrue(events.getAllValues().stream()
+                        .flatMap(List::stream)
+                        .anyMatch(e -> "extension started on :8080".equals(e.get("message"))),
+                "extension stdout must be forwarded to the function's CloudWatch log group");
+    }
+
+    /**
+     * The log group and stream must exist before extensions are launched: they can log immediately,
+     * and putLogEvents against a missing stream is swallowed at debug level — silently losing
+     * exactly the early startup output this forwarding exists to capture.
+     */
+    @Test
+    void launchFunction_createsLogGroupBeforeLaunchingExtensions() throws Exception {
+        stubExtensionDiscovery("lambda-adapter");
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("ordering-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        InOrder inOrder = inOrder(logStreamer, dockerClient);
+        inOrder.verify(logStreamer).ensureLogGroupAndStream(
+                eq("/aws/lambda/ordering-fn"), anyString(), anyString());
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
     }
 

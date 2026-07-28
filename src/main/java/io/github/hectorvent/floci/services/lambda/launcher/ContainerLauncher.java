@@ -17,9 +17,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -333,13 +331,19 @@ public class ContainerLauncher {
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
 
+        // Extensions can log as soon as they start, which is before the container's own log stream
+        // is attached below. Create the group/stream up front so those early lines are not dropped
+        // by CloudWatch; the call is idempotent, so attach() repeating it is harmless.
+        LogDestination logDestination = new LogDestination(cwLogGroup, cwLogStream, lambdaRegion);
+        logStreamer.ensureLogGroupAndStream(cwLogGroup, cwLogStream, lambdaRegion);
+
         // Real AWS's runtime interface client discovers and launches every binary under
         // /opt/extensions/ as a sibling process to the main entrypoint before the runtime is
         // considered ready; Floci only runs the image's own ENTRYPOINT/CMD, so extensions
         // (e.g. aws-lambda-web-adapter) never start without this. Best-effort: an extension
         // launch failure shouldn't fail the whole container launch, since a function with no
         // extensions is the common case and this must be a no-op for it.
-        launchExtensions(dockerClient, containerId, fn.getFunctionName(), runtimeApiServer);
+        launchExtensions(dockerClient, containerId, fn.getFunctionName(), runtimeApiServer, logDestination);
 
         // Init-readiness barrier: the execs above are detached, so without waiting here the caller
         // could enqueue the first invocation before an extension has called /extension/register —
@@ -645,8 +649,11 @@ public class ContainerLauncher {
      * must be a silent no-op, and a failure launching one extension must not prevent the container
      * (or other extensions) from running.
      */
+    /** Where a container's output is sent: the CloudWatch log group/stream and its region. */
+    private record LogDestination(String logGroup, String logStream, String region) { }
+
     private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,
-                                  RuntimeApiServer runtimeApiServer) {
+                                  RuntimeApiServer runtimeApiServer, LogDestination logDestination) {
         List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName);
         // Arm the readiness barrier before starting any extension process, so the latch already
         // exists when the first one calls /extension/register — otherwise a fast-registering
@@ -661,17 +668,17 @@ public class ContainerLauncher {
                         .withAttachStderr(true);
                 String execId = create.exec().getId();
                 // Detached: an extension runs for the container's whole lifetime, so this must not
-                // block the launch waiting for it to exit. Its stdout/stderr piggybacks onto the same
-                // ContainerLogStreamer output as the main process via Vert.x's own frame draining below,
-                // rather than left completely undrained (which can backpressure/stall the exec).
-                dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        // Drained, not forwarded to CloudWatch: floci's ContainerLogStreamer already
-                        // tails the container's own PID-1 log stream for that; this only exists so the
-                        // exec's output pipe doesn't fill up and block the extension process.
-                    }
-                });
+                // block the launch waiting for it to exit.
+                //
+                // The callback forwards the exec's output to the function's CloudWatch log group,
+                // the same destination the container's PID 1 output goes to. That has to be done
+                // explicitly: `docker logs` only covers PID 1, so an exec's stream never reaches
+                // the container log and an observability extension's output would vanish entirely.
+                // Draining is also required in its own right — an unread exec pipe fills up and
+                // stalls the extension process.
+                dockerClient.execStartCmd(execId).exec(logStreamer.execLogCallback(
+                        logDestination.logGroup(), logDestination.logStream(), logDestination.region(),
+                        "lambda:" + functionName + ":" + name));
                 LOG.infov("Launched extension {0} for function {1} (container {2})",
                         name, functionName, containerId);
             } catch (Exception e) {
