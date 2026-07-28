@@ -677,12 +677,14 @@ public class RuntimeApiServer {
         RegisteredExtension removed;
         List<PendingInvocation> strandedInvocations;
         List<RoutingContext> strandedPollers;
+        List<RoutingContext> strandedExtensionPollers;
         synchronized (lock) {
             removed = extensions.remove(identifier);
             if (removed == null) {
                 // Unknown identifier: reject without condemning. Answered outside the lock below.
                 strandedInvocations = List.of();
                 strandedPollers = List.of();
+                strandedExtensionPollers = List.of();
             } else {
                 // Set under the lock alongside the unregistration so both land as one atomic
                 // change.
@@ -696,6 +698,19 @@ public class RuntimeApiServer {
                 pendingQueue.clear();
                 strandedPollers = new ArrayList<>(waitingContexts);
                 waitingContexts.clear();
+
+                // Sibling extensions parked on /event/next need the same treatment, and for the
+                // same reason: the faulted guard in that handler means nothing will ever wake
+                // them, so without this their long-poll stays open until stop() eventually runs
+                // — up to a full function timeout away. Mirrors the extensions.values() sweep in
+                // stop(); harmless with a single extension, but a second one hangs without it.
+                strandedExtensionPollers = new ArrayList<>();
+                for (RegisteredExtension ext : extensions.values()) {
+                    RoutingContext waitingCtx = ext.takeWaitingContext();
+                    if (waitingCtx != null) {
+                        strandedExtensionPollers.add(waitingCtx);
+                    }
+                }
             }
         }
 
@@ -720,6 +735,17 @@ public class RuntimeApiServer {
             vertx.runOnContext(v -> {
                 if (!poller.response().ended()) {
                     poller.response().setStatusCode(204).end();
+                }
+            });
+        }
+        // Reuses the same 500 that /event/next returns to any extension polling after a fault,
+        // rather than inventing a separate response for the already-parked case: AWS specifies
+        // that the environment is terminal but not what an open long-poll receives, so matching
+        // the behaviour we already ship is the conservative choice.
+        for (RoutingContext poller : strandedExtensionPollers) {
+            vertx.runOnContext(v -> {
+                if (!poller.response().ended()) {
+                    sendExtensionFaulted(poller);
                 }
             });
         }

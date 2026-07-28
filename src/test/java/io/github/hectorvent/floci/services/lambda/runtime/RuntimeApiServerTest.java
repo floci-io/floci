@@ -784,6 +784,35 @@ class RuntimeApiServerTest {
     }
 
     /**
+     * A sibling extension already parked on /event/next when another reports a fatal error must be
+     * released, not left hanging. The faulted guard in that handler means nothing will ever wake
+     * it, so without an explicit drain the long-poll stays open until stop() eventually runs — up
+     * to a full function timeout later. Harmless with one extension (the aws-lambda-web-adapter
+     * case), but a second one hangs.
+     *
+     * <p>The response is the same 500 that a *new* poll receives after a fault; AWS specifies the
+     * terminal state but not what an already-open long-poll gets, so this matches shipped
+     * behaviour rather than inventing a second convention.
+     */
+    @Test
+    @Timeout(30)
+    void extensionFatalError_releasesSiblingExtensionParkedOnEventNext() throws Exception {
+        String survivorId = registerExtension("surviving-extension", "INVOKE", "SHUTDOWN");
+        String failingId = registerExtension("failing-extension", "INVOKE");
+
+        // The survivor is parked on /event/next before the fault fires.
+        CompletableFuture<HttpResponse<String>> parked = pollExtensionEventNext(survivorId);
+        assertFalse(parked.isDone(), "sibling extension should be parked with no pending event");
+
+        reportExtensionInitError(failingId);
+
+        HttpResponse<String> response = parked.get(5, TimeUnit.SECONDS);
+        assertEquals(500, response.statusCode(),
+                "a parked sibling must be released when the environment is condemned");
+        assertTrue(response.body().contains("Extension.SandboxFaulted"));
+    }
+
+    /**
      * AWS requires {@code Lambda-Extension-Function-Error-Type} on both error endpoints. Retiring
      * the environment is destructive and unrecoverable, so a report missing the required header
      * must be rejected *before* anything is condemned — otherwise a caller that got the contract
