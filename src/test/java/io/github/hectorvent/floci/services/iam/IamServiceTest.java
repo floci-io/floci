@@ -611,6 +611,23 @@ class IamServiceTest {
                 "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole");
         assertEquals("AmazonRDSEnhancedMonitoringRole", rdsMonitoring.getPolicyName());
         assertEquals("/service-role/", rdsMonitoring.getPath());
+
+        IamPolicy bedrock = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
+        assertEquals("AmazonBedrockFullAccess", bedrock.getPolicyName());
+        assertEquals("/", bedrock.getPath());
+    }
+
+    @Test
+    void attachAmazonBedrockFullAccessToRole() {
+        // Regression: AmazonBedrockFullAccess was absent from the seed catalog, so
+        // AttachRolePolicy (the Terraform path — CloudFormation attaches inline and
+        // never calls it) 404'd with NoSuchEntity. Attaching it must now succeed.
+        iamService.createRole("BedrockRole", "/", "{}", null, 0, null);
+        iamService.attachRolePolicy("BedrockRole", "arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
+
+        List<String> attached = iamService.listAttachedRolePolicies("BedrockRole", null).stream()
+                .map(IamPolicy::getArn).toList();
+        assertTrue(attached.contains("arn:aws:iam::aws:policy/AmazonBedrockFullAccess"));
     }
 
     @Test

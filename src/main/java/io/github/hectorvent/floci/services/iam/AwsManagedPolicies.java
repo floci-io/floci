@@ -150,7 +150,11 @@ final class AwsManagedPolicies {
         new ManagedPolicyDef("AmazonDataZoneDomainExecutionRolePolicy", "/service-role/",
                 "Provides permissions for the Amazon DataZone domain execution role."),
 
-        // Amazon Bedrock execution role policy
+        // Amazon Bedrock policies
+        new ManagedPolicyDef("AmazonBedrockFullAccess", "/",
+                "Provides full access to Amazon Bedrock as well as limited access to related services."),
+        new ManagedPolicyDef("AmazonBedrockReadOnly", "/",
+                "Provides read-only access to Amazon Bedrock as well as limited access to related services."),
         new ManagedPolicyDef("AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy", "/",
                 "Provides Bedrock Model inference permissions to Bedrock agent core memory."),
 
