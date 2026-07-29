@@ -1439,8 +1439,14 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        DynamoDbReservedWords.check(expression, "UpdateExpression");
-        String remaining = expression.trim();
+        // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
+        // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
+        // comma-separated action parsing below work regardless of formatting. Normalize
+        // before the reserved-word check too: its function-call lookahead skips only
+        // literal spaces, so on a raw "if_not_exists\n(...)" it would read the function
+        // name as a bare identifier instead.
+        String remaining = expression.trim().replaceAll("\\s+", " ");
+        DynamoDbReservedWords.check(remaining, "UpdateExpression");
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
