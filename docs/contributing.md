@@ -2,6 +2,8 @@
 
 Floci is MIT licensed and welcomes contributions of all kinds.
 
+**Join us on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw)** — the fastest way to reach maintainers for questions, design tradeoffs, or feedback on an approach before you build it.
+
 ## Ways to Help 
 
 - **Bug reports** — open a [GitHub issue](https://github.com/floci-io/floci/issues/new?template=bug_report.md) with a minimal reproduction

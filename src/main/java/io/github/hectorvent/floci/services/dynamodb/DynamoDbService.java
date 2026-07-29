@@ -1439,8 +1439,14 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        DynamoDbReservedWords.check(expression, "UpdateExpression");
-        String remaining = expression.trim();
+        // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
+        // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
+        // comma-separated action parsing below work regardless of formatting. Normalize
+        // before the reserved-word check too: its function-call lookahead skips only
+        // literal spaces, so on a raw "if_not_exists\n(...)" it would read the function
+        // name as a bare identifier instead.
+        String remaining = expression.trim().replaceAll("\\s+", " ");
+        DynamoDbReservedWords.check(remaining, "UpdateExpression");
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -1586,16 +1592,22 @@ public class DynamoDbService {
                         String arg2 = inner.substring(commaPos + 1).trim();
                         JsonNode list1 = evaluateSetExpr(snapshot, arg1, exprAttrNames, exprAttrValues);
                         JsonNode list2 = evaluateSetExpr(snapshot, arg2, exprAttrNames, exprAttrValues);
-                        if (list1 != null && list2 != null && list1.has("L") && list2.has("L")) {
-                            com.fasterxml.jackson.databind.node.ArrayNode merged =
-                                    com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
-                            list1.get("L").forEach(merged::add);
-                            list2.get("L").forEach(merged::add);
-                            com.fasterxml.jackson.databind.node.ObjectNode result =
-                                    com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
-                            result.set("L", merged);
-                            item.set(attrName, result);
+                        if (list1 == null || list2 == null) {
+                            throw new AwsException("ValidationException",
+                                    "The provided expression refers to an attribute that does not exist in the item", 400);
                         }
+                        if (!list1.has("L") || !list2.has("L")) {
+                            throw new AwsException("ValidationException",
+                                    "An operand in the update expression has an incorrect data type", 400);
+                        }
+                        com.fasterxml.jackson.databind.node.ArrayNode merged =
+                                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
+                        list1.get("L").forEach(merged::add);
+                        list2.get("L").forEach(merged::add);
+                        com.fasterxml.jackson.databind.node.ObjectNode result =
+                                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+                        result.set("L", merged);
+                        item.set(attrName, result);
                     }
                 }
             } else if (valuePart.startsWith(":") && exprAttrValues != null) {
