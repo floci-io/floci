@@ -190,6 +190,12 @@ public class CloudWatchMetricsJsonHandler {
             if (a.getMetricName() != null) node.put("MetricName", a.getMetricName());
             if (a.getNamespace() != null) node.put("Namespace", a.getNamespace());
             if (a.getStatistic() != null) node.put("Statistic", a.getStatistic());
+            ArrayNode dimensions = node.putArray("Dimensions");
+            a.getDimensions().forEach(d -> {
+                ObjectNode dimNode = dimensions.addObject();
+                dimNode.put("Name", d.name());
+                dimNode.put("Value", d.value());
+            });
             node.put("Period", a.getPeriod());
             node.put("EvaluationPeriods", a.getEvaluationPeriods());
             node.put("Threshold", a.getThreshold());

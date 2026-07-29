@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -106,6 +109,12 @@ class CloudWatchMetricsJsonHandlerTest {
         putAlarmReq.put("AlarmName", "TestAlarm");
         putAlarmReq.put("MetricName", "M");
         putAlarmReq.put("Namespace", "NS");
+        putAlarmReq.putArray("AlarmActions").add("alarm-action");
+        putAlarmReq.putArray("OKActions").add("ok-action");
+        putAlarmReq.putArray("InsufficientDataActions").add("insufficient-action");
+        ArrayNode dimensions = putAlarmReq.putArray("Dimensions");
+        dimensions.addObject().put("Name", "period").put("Value", "60");
+        dimensions.addObject().put("Name", "count").put("Value", "2");
         Response putAlarmResp = handler.handle("PutMetricAlarm", putAlarmReq, REGION);
         assertEquals(200, putAlarmResp.getStatus());
 
@@ -126,10 +135,20 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals("ALARM", alarmData.get("StateValue").asText());
         assertEquals("Test reason", alarmData.get("StateReason").asText());
         assertEquals("{\"k\":\"v\"}", alarmData.get("StateReasonData").asText());
-        assertEquals(true, alarmData.path("AlarmActions").isArray());
-        assertEquals(true, alarmData.path("OKActions").isArray());
-        assertEquals(true, alarmData.path("InsufficientDataActions").isArray());
-        assertEquals(true, alarmData.path("StateUpdatedTimestamp").asLong() > 0);
+        assertTrue(alarmData.path("AlarmActions").isArray());
+        assertEquals("alarm-action", alarmData.path("AlarmActions").get(0).asText());
+        assertTrue(alarmData.path("OKActions").isArray());
+        assertEquals("ok-action", alarmData.path("OKActions").get(0).asText());
+        assertTrue(alarmData.path("InsufficientDataActions").isArray());
+        assertEquals("insufficient-action", alarmData.path("InsufficientDataActions").get(0).asText());
+        assertTrue(alarmData.path("StateUpdatedTimestamp").asLong() > 0);
+        assertTrue(alarmData.path("Dimensions").isArray());
+        JsonNode dimensionPeriod = alarmData.path("Dimensions").get(0);
+        assertEquals("period", dimensionPeriod.get("Name").asText());
+        assertEquals("60", dimensionPeriod.get("Value").asText());
+        JsonNode dimensionCount = alarmData.path("Dimensions").get(1);
+        assertEquals("count", dimensionCount.get("Name").asText());
+        assertEquals("2", dimensionCount.get("Value").asText());
     }
 
     @Test

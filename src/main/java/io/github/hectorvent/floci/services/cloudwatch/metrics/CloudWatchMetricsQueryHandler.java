@@ -407,11 +407,11 @@ public class CloudWatchMetricsQueryHandler {
     private void toAlarmXml(XmlBuilder xml, MetricAlarm a) {
         xml.start("member")
                 .elem("AlarmName", a.getAlarmName())
+                .elem("AlarmArn", a.getAlarmArn())
                 .elem("AlarmDescription", a.getAlarmDescription());
         xml.start("AlarmActions");
         a.getAlarmActions().forEach(act -> xml.elem("member", act));
         xml.end("AlarmActions")
-                .elem("AlarmArn", a.getAlarmArn())
                 .elem("AlarmConfigurationUpdatedTimestamp", Instant.ofEpochSecond(a.getAlarmConfigurationUpdatedTimestamp()).toString())
                 .elem("ActionsEnabled", String.valueOf(a.isActionsEnabled()));
 
