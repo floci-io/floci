@@ -26,8 +26,8 @@ import java.util.Set;
  * Local inspection endpoint for the Floci UI and test helpers.
  *
  * <p>The AWS-compatible Kinesis API remains the JSON 1.1 endpoint on {@code /};
- * these {@code _aws} paths are read-only convenience views over local emulator
- * state.
+ * these {@code /_aws} paths are read-only convenience views over local emulator
+ * state and do not follow AWS error-response conventions.
  */
 @Path("/_aws/kinesis")
 @Produces(MediaType.APPLICATION_JSON)
@@ -68,6 +68,11 @@ public class KinesisInspectionController {
         if (streamName == null || streamName.isBlank()) {
             return Response.status(400)
                     .entity(objectMapper.createObjectNode().put("message", "StreamName query parameter is required"))
+                    .build();
+        }
+        if (limit != null && limit <= 0) {
+            return Response.status(400)
+                    .entity(objectMapper.createObjectNode().put("message", "Limit must be greater than 0"))
                     .build();
         }
 

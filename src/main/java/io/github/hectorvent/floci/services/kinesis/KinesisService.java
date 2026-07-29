@@ -488,9 +488,20 @@ public class KinesisService {
 
     public record PeekedRecord(String shardId, KinesisRecord record) {}
 
+    /**
+     * Returns up to {@code limit} of the most-recent records across all (or one) shard.
+     * Records are returned in ascending arrival-timestamp order (oldest first).
+     *
+     * <p>With no pagination cursor, {@value MAX_INSPECTION_RECORD_LIMIT} is a hard ceiling
+     * on the total number of records reachable in a single call regardless of the {@code limit}
+     * parameter.
+     */
     public List<PeekedRecord> peekRecords(String streamName, String shardId, Integer limit, String region) {
         KinesisStream stream = resolveStream(streamName, region);
         int resolvedLimit = resolveInspectionRecordLimit(limit);
+        if (resolvedLimit == 0) {
+            return List.of();
+        }
 
         if (shardId != null && !shardId.isBlank()) {
             boolean exists = stream.getShards().stream().anyMatch(shard -> shard.getShardId().equals(shardId));
@@ -499,24 +510,35 @@ public class KinesisService {
             }
         }
 
-        return stream.getShards().stream()
+        Comparator<PeekedRecord> oldestFirst = Comparator.comparing(
+                peeked -> peeked.record().getApproximateArrivalTimestamp(),
+                Comparator.nullsFirst(Comparator.naturalOrder()));
+        PriorityQueue<PeekedRecord> newest = new PriorityQueue<>(oldestFirst);
+        stream.getShards().stream()
                 .filter(shard -> shardId == null || shardId.isBlank() || shard.getShardId().equals(shardId))
-                .flatMap(shard -> shard.getRecords().stream()
-                        .map(record -> new PeekedRecord(shard.getShardId(), record)))
+                .forEach(shard -> shard.getRecords().forEach(record -> {
+                    newest.add(new PeekedRecord(shard.getShardId(), record));
+                    if (newest.size() > resolvedLimit) {
+                        newest.poll();
+                    }
+                }));
+
+        return newest.stream()
                 .sorted(Comparator.comparing(peeked -> peeked.record().getApproximateArrivalTimestamp(),
                         Comparator.nullsLast(Comparator.naturalOrder())))
-                .limit(resolvedLimit)
                 .toList();
     }
 
+    /**
+     * Resolves the caller-supplied limit to a value in {@code [0, MAX_INSPECTION_RECORD_LIMIT]}.
+     * Both ends are clamped silently, consistent with the behaviour of
+     * {@link #getRecords} and {@link #getRecordsForAccount}.
+     */
     private int resolveInspectionRecordLimit(Integer limit) {
         if (limit == null) {
             return DEFAULT_INSPECTION_RECORD_LIMIT;
         }
-        if (limit <= 0) {
-            throw new AwsException("InvalidArgumentException", "Limit must be greater than 0", 400);
-        }
-        return Math.min(limit, MAX_INSPECTION_RECORD_LIMIT);
+        return Math.max(0, Math.min(limit, MAX_INSPECTION_RECORD_LIMIT));
     }
 
     /**

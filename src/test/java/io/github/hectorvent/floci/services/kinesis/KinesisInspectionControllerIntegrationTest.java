@@ -64,17 +64,35 @@ class KinesisInspectionControllerIntegrationTest {
     void recordsEndpointHonorsLimit() {
         String streamName = "ui-inspection-record-limit";
         createStream(streamName, 1);
-        putRecord(streamName, "b25l", "pk-1");
-        putRecord(streamName, "dHdv", "pk-2");
-        putRecord(streamName, "dGhyZWU=", "pk-3");
+        putRecord(streamName, "b25l", "pk-1");    // oldest
+        putRecord(streamName, "dHdv", "pk-2");    // middle
+        putRecord(streamName, "dGhyZWU=", "pk-3"); // newest
 
+        // Limit=2 should return the two NEWEST records (pk-2, pk-3) in
+        // ascending arrival-timestamp order, not the two oldest.
         given()
             .queryParam("StreamName", streamName)
             .queryParam("Limit", 2)
         .when().get("/_aws/kinesis/records")
         .then()
             .statusCode(200)
-            .body("records", hasSize(2));
+            .body("records", hasSize(2))
+            .body("records[0].PartitionKey", equalTo("pk-2"))
+            .body("records[1].PartitionKey", equalTo("pk-3"));
+    }
+
+    @Test
+    void recordsEndpointRejectsNonPositiveLimit() {
+        String streamName = "ui-inspection-record-limit-zero";
+        createStream(streamName, 1);
+
+        given()
+            .queryParam("StreamName", streamName)
+            .queryParam("Limit", 0)
+        .when().get("/_aws/kinesis/records")
+        .then()
+            .statusCode(400)
+            .body("message", equalTo("Limit must be greater than 0"));
     }
 
     @Test
