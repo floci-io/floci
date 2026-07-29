@@ -24,9 +24,54 @@ public class CloudControlJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "ListResources" -> listResources(request, region);
+            case "GetResource" -> getResource(request, region);
+            case "CreateResource" -> progressResponse(
+                    service.createResource(region, required(request, "TypeName"),
+                            request.path("DesiredState").asText(null)));
+            case "DeleteResource" -> progressResponse(
+                    service.deleteResource(region, required(request, "TypeName"), required(request, "Identifier")));
+            case "GetResourceRequestStatus" -> progressResponse(
+                    service.requestStatus(required(request, "RequestToken")));
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + action + " is not supported.", 400);
         };
+    }
+
+    private Response getResource(JsonNode request, String region) {
+        String typeName = required(request, "TypeName");
+        String identifier = required(request, "Identifier");
+        CloudControlService.ResourceDescription resource = service.getResource(region, typeName, identifier);
+        ObjectNode response = mapper.createObjectNode();
+        response.put("TypeName", typeName);
+        ObjectNode desc = response.putObject("ResourceDescription");
+        desc.put("Identifier", resource.identifier());
+        desc.put("Properties", resource.properties());
+        return Response.ok(response).build();
+    }
+
+    private Response progressResponse(CloudControlService.ProgressEvent event) {
+        ObjectNode response = mapper.createObjectNode();
+        ObjectNode pe = response.putObject("ProgressEvent");
+        pe.put("TypeName", event.typeName());
+        pe.put("Identifier", event.identifier());
+        pe.put("RequestToken", event.requestToken());
+        pe.put("Operation", event.operation());
+        pe.put("OperationStatus", event.operationStatus());
+        if (event.statusMessage() != null) {
+            pe.put("StatusMessage", event.statusMessage());
+        }
+        if (event.resourceModel() != null) {
+            pe.put("ResourceModel", event.resourceModel());
+        }
+        return Response.ok(response).build();
+    }
+
+    private String required(JsonNode request, String field) {
+        String value = request.path(field).asText(null);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("ValidationException", field + " is required.", 400);
+        }
+        return value;
     }
 
     private Response listResources(JsonNode request, String region) {

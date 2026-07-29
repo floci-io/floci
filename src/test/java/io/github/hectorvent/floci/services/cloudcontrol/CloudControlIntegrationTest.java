@@ -104,6 +104,43 @@ class CloudControlIntegrationTest {
         assertListed("AWS::IAM::Role", "CloudControlRole", "RoleName");
     }
 
+    @Test
+    void createResourceProvisionsViaCloudControlAndTokenRoundTrips() throws InterruptedException {
+        String ct = "application/x-amz-json-1.0";
+        // CreateResource AWS::EC2::VPC — Cloud Control is how Formae drives AWS. It is async:
+        // the call returns IN_PROGRESS + a request token immediately.
+        String token = given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.CreateResource")
+                .body("{\"TypeName\":\"AWS::EC2::VPC\",\"DesiredState\":\"{\\\"CidrBlock\\\":\\\"10.77.0.0/16\\\"}\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("ProgressEvent.RequestToken");
+
+        // Poll GetResourceRequestStatus until the async provision reaches SUCCESS.
+        String identifier = null;
+        for (int i = 0; i < 20 && identifier == null; i++) {
+            var pe = given()
+                    .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                    .contentType(ct)
+                    .header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus")
+                    .body("{\"RequestToken\":\"" + token + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract();
+            if ("SUCCESS".equals(pe.path("ProgressEvent.OperationStatus"))) {
+                identifier = pe.path("ProgressEvent.Identifier");
+            } else {
+                Thread.sleep(100);
+            }
+        }
+        assertThat(identifier, containsString("vpc-"));
+
+        // The created VPC is now visible on the read side.
+        assertListed("AWS::EC2::VPC", identifier, "VpcId", ct);
+    }
+
     private void assertListed(String typeName, String identifier, String propertyName) {
         assertListed(typeName, identifier, propertyName, "application/x-amz-json-1.1");
     }
