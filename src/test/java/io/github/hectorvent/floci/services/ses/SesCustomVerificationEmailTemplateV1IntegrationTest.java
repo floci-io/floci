@@ -143,7 +143,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void cleanup_deleteSharedTemplate() {
         query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-shared")
         .when().post("/").then().statusCode(200);
