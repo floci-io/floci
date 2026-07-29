@@ -928,6 +928,7 @@ public class LambdaService {
         functionName = fn.getFunctionName();
         int version = nextVersionNumber(region + "::" + functionName);
         LambdaFunction snapshot = new LambdaFunction();
+        snapshot.setAccountId(fn.getAccountId());
         snapshot.setFunctionName(fn.getFunctionName());
         snapshot.setVersion(String.valueOf(version));
         snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
