@@ -486,7 +486,9 @@ public class KinesisService {
         return response;
     }
 
-    public List<KinesisRecord> peekRecords(String streamName, String shardId, Integer limit, String region) {
+    public record PeekedRecord(String shardId, KinesisRecord record) {}
+
+    public List<PeekedRecord> peekRecords(String streamName, String shardId, Integer limit, String region) {
         KinesisStream stream = resolveStream(streamName, region);
         int resolvedLimit = resolveInspectionRecordLimit(limit);
 
@@ -499,8 +501,9 @@ public class KinesisService {
 
         return stream.getShards().stream()
                 .filter(shard -> shardId == null || shardId.isBlank() || shard.getShardId().equals(shardId))
-                .flatMap(shard -> shard.getRecords().stream())
-                .sorted(Comparator.comparing(KinesisRecord::getApproximateArrivalTimestamp,
+                .flatMap(shard -> shard.getRecords().stream()
+                        .map(record -> new PeekedRecord(shard.getShardId(), record)))
+                .sorted(Comparator.comparing(peeked -> peeked.record().getApproximateArrivalTimestamp(),
                         Comparator.nullsLast(Comparator.naturalOrder())))
                 .limit(resolvedLimit)
                 .toList();

@@ -72,10 +72,10 @@ public class KinesisInspectionController {
         }
 
         String region = regionResolver.resolveRegion(headers);
-        List<KinesisRecord> captured = kinesisService.peekRecords(streamName, shardId, limit, region);
+        List<KinesisService.PeekedRecord> captured = kinesisService.peekRecords(streamName, shardId, limit, region);
         ArrayNode records = objectMapper.createArrayNode();
-        for (KinesisRecord record : captured) {
-            records.add(recordNode(record));
+        for (KinesisService.PeekedRecord record : captured) {
+            records.add(recordNode(record.shardId(), record.record()));
         }
         ObjectNode result = objectMapper.createObjectNode();
         result.set("records", records);
@@ -143,8 +143,9 @@ public class KinesisInspectionController {
         return node;
     }
 
-    private ObjectNode recordNode(KinesisRecord record) {
+    private ObjectNode recordNode(String shardId, KinesisRecord record) {
         ObjectNode node = objectMapper.createObjectNode();
+        node.put("ShardId", shardId);
         node.put("SequenceNumber", record.getSequenceNumber());
         node.put("PartitionKey", record.getPartitionKey());
         byte[] data = record.getData();

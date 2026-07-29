@@ -48,6 +48,7 @@ class KinesisInspectionControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("records", hasSize(1))
+            .body("records[0].ShardId", equalTo("shardId-000000000000"))
             .body("records[0].PartitionKey", equalTo("pk"))
             .body("records[0].Data", equalTo("aGVsbG8="));
 

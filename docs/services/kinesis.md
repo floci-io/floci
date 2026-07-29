@@ -45,7 +45,7 @@ traffic should continue to use the JSON 1.1 Kinesis API on `/`.
 | Endpoint | Description |
 |---|---|
 | `GET /_aws/kinesis/streams` | List streams in the resolved region with shard, mode, tag, and record counts |
-| `GET /_aws/kinesis/records?StreamName=<name>` | Peek up to 100 stream records without consuming them |
+| `GET /_aws/kinesis/records?StreamName=<name>` | Peek up to 100 stream records with shard attribution without consuming them |
 | `GET /_aws/kinesis/records?StreamName=<name>&Limit=<n>` | Peek up to `n` records, capped at 1000 |
 | `GET /_aws/kinesis/records?StreamName=<name>&ShardId=<id>` | Peek records for one shard |
 
