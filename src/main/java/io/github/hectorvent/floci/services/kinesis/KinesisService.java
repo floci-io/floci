@@ -28,6 +28,8 @@ public class KinesisService {
             "IteratorAgeMilliseconds", "ALL");
     private static final Set<String> VALID_STREAM_MODES = Set.of("PROVISIONED", "ON_DEMAND");
     private static final String DEFAULT_STREAM_MODE = "PROVISIONED";
+    private static final int DEFAULT_INSPECTION_RECORD_LIMIT = 100;
+    private static final int MAX_INSPECTION_RECORD_LIMIT = 1000;
 
     private final StorageBackend<String, KinesisStream> store;
     private final StorageBackend<String, KinesisConsumer> consumerStore;
@@ -484,14 +486,34 @@ public class KinesisService {
         return response;
     }
 
-    public List<KinesisRecord> peekRecords(String streamName, String shardId, String region) {
+    public List<KinesisRecord> peekRecords(String streamName, String shardId, Integer limit, String region) {
         KinesisStream stream = resolveStream(streamName, region);
+        int resolvedLimit = resolveInspectionRecordLimit(limit);
+
+        if (shardId != null && !shardId.isBlank()) {
+            boolean exists = stream.getShards().stream().anyMatch(shard -> shard.getShardId().equals(shardId));
+            if (!exists) {
+                throw new AwsException("ResourceNotFoundException", "Shard " + shardId + " not found", 400);
+            }
+        }
+
         return stream.getShards().stream()
                 .filter(shard -> shardId == null || shardId.isBlank() || shard.getShardId().equals(shardId))
                 .flatMap(shard -> shard.getRecords().stream())
                 .sorted(Comparator.comparing(KinesisRecord::getApproximateArrivalTimestamp,
                         Comparator.nullsLast(Comparator.naturalOrder())))
+                .limit(resolvedLimit)
                 .toList();
+    }
+
+    private int resolveInspectionRecordLimit(Integer limit) {
+        if (limit == null) {
+            return DEFAULT_INSPECTION_RECORD_LIMIT;
+        }
+        if (limit <= 0) {
+            throw new AwsException("InvalidArgumentException", "Limit must be greater than 0", 400);
+        }
+        return Math.min(limit, MAX_INSPECTION_RECORD_LIMIT);
     }
 
     /**

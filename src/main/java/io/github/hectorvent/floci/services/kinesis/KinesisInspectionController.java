@@ -63,7 +63,8 @@ public class KinesisInspectionController {
     @Path("/records")
     public Response getRecords(@Context HttpHeaders headers,
                                @QueryParam("StreamName") String streamName,
-                               @QueryParam("ShardId") String shardId) {
+                               @QueryParam("ShardId") String shardId,
+                               @QueryParam("Limit") Integer limit) {
         if (streamName == null || streamName.isBlank()) {
             return Response.status(400)
                     .entity(objectMapper.createObjectNode().put("message", "StreamName query parameter is required"))
@@ -71,7 +72,7 @@ public class KinesisInspectionController {
         }
 
         String region = regionResolver.resolveRegion(headers);
-        List<KinesisRecord> captured = kinesisService.peekRecords(streamName, shardId, region);
+        List<KinesisRecord> captured = kinesisService.peekRecords(streamName, shardId, limit, region);
         ArrayNode records = objectMapper.createArrayNode();
         for (KinesisRecord record : captured) {
             records.add(recordNode(record));

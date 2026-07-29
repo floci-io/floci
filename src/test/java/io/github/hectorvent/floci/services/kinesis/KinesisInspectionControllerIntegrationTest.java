@@ -40,14 +40,7 @@ class KinesisInspectionControllerIntegrationTest {
         String streamName = "ui-inspection-records";
         createStream(streamName, 1);
 
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
-            .contentType(CONTENT_TYPE)
-            .body("""
-                {"StreamName": "ui-inspection-records", "Data": "aGVsbG8=", "PartitionKey": "pk"}
-                """)
-        .when().post("/")
-        .then().statusCode(200);
+        putRecord(streamName, "aGVsbG8=", "pk");
 
         given()
             .queryParam("StreamName", streamName)
@@ -67,6 +60,36 @@ class KinesisInspectionControllerIntegrationTest {
     }
 
     @Test
+    void recordsEndpointHonorsLimit() {
+        String streamName = "ui-inspection-record-limit";
+        createStream(streamName, 1);
+        putRecord(streamName, "b25l", "pk-1");
+        putRecord(streamName, "dHdv", "pk-2");
+        putRecord(streamName, "dGhyZWU=", "pk-3");
+
+        given()
+            .queryParam("StreamName", streamName)
+            .queryParam("Limit", 2)
+        .when().get("/_aws/kinesis/records")
+        .then()
+            .statusCode(200)
+            .body("records", hasSize(2));
+    }
+
+    @Test
+    void recordsEndpointRejectsUnknownShard() {
+        String streamName = "ui-inspection-unknown-shard";
+        createStream(streamName, 1);
+
+        given()
+            .queryParam("StreamName", streamName)
+            .queryParam("ShardId", "shardId-999999999999")
+        .when().get("/_aws/kinesis/records")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
     void recordsEndpointRequiresStreamName() {
         given()
         .when().get("/_aws/kinesis/records")
@@ -82,6 +105,17 @@ class KinesisInspectionControllerIntegrationTest {
             .body("""
                 {"StreamName": "%s", "ShardCount": %d}
                 """.formatted(streamName, shardCount))
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    private static void putRecord(String streamName, String data, String partitionKey) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"StreamName": "%s", "Data": "%s", "PartitionKey": "%s"}
+                """.formatted(streamName, data, partitionKey))
         .when().post("/")
         .then().statusCode(200);
     }
