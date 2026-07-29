@@ -1622,7 +1622,7 @@ public class CognitoService {
         String jti = extractJtiFromToken(accessToken);
 
         if (username == null || poolId == null || jti == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+            throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
         }
 
         validateTokenNotRevoked(jti, poolId, "access");
@@ -1632,13 +1632,14 @@ public class CognitoService {
 
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
-                    "Only email and phone_number attributes can be verified", 400);
+                    "Invalid attribute name. Only phone_number and email can be verified.", 400);
         }
 
         CognitoUser user = adminGetUser(poolId, username);
         if (blankToNull(user.getAttributes().get(attributeName)) == null) {
             throw new AwsException("InvalidParameterException",
-                    "User has no " + attributeName + " attribute set", 400);
+                    "Unable to verify attribute: " + attributeName + " no value set to verify",
+                    400);
         }
 
         VerificationCode.Purpose purpose = "email".equals(attributeName)
