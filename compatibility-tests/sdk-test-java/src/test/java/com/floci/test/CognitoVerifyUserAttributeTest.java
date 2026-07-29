@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityPr
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthFlowType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.CodeMismatchException;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.ExpiredCodeException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ExplicitAuthFlowsType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 
@@ -107,6 +108,7 @@ class CognitoVerifyUserAttributeTest {
                 .codeDeliveryDetails();
         assertThat(emailDelivery.attributeName()).isEqualTo("email");
         assertThat(emailDelivery.deliveryMediumAsString()).isEqualTo("EMAIL");
+        assertThat(emailDelivery.destination()).isEqualTo("v***@e***");
         String emailCode = fetchLatestSesVerificationCode(email);
 
         var phoneDelivery = cognito.getUserAttributeVerificationCode(b -> b
@@ -115,6 +117,7 @@ class CognitoVerifyUserAttributeTest {
                 .codeDeliveryDetails();
         assertThat(phoneDelivery.attributeName()).isEqualTo("phone_number");
         assertThat(phoneDelivery.deliveryMediumAsString()).isEqualTo("SMS");
+        assertThat(phoneDelivery.destination()).isEqualTo(maskedPhoneNumber(phoneNumber));
         String phoneCode = fetchLatestSnsVerificationCode(phoneNumber);
 
         assertThatThrownBy(() -> cognito.verifyUserAttribute(b -> b
@@ -140,7 +143,34 @@ class CognitoVerifyUserAttributeTest {
                 .accessToken(accessToken)
                 .attributeName("email")
                 .code(emailCode)))
-                .isInstanceOf(CodeMismatchException.class);
+                .isInstanceOfSatisfying(ExpiredCodeException.class,
+                        exception -> assertThat(exception.awsErrorDetails().errorMessage())
+                                .isEqualTo("Invalid code provided, please request a code again."));
+
+        clearInspectionEndpoint("/_aws/ses");
+        clearInspectionEndpoint("/_aws/sns");
+
+        cognito.getUserAttributeVerificationCode(b -> b
+                .accessToken(accessToken)
+                .attributeName("email"));
+        String repeatedEmailCode = fetchLatestSesVerificationCode(email);
+
+        cognito.getUserAttributeVerificationCode(b -> b
+                .accessToken(accessToken)
+                .attributeName("phone_number"));
+        String repeatedPhoneCode = fetchLatestSnsVerificationCode(phoneNumber);
+
+        cognito.verifyUserAttribute(b -> b
+                .accessToken(accessToken)
+                .attributeName("email")
+                .code(repeatedEmailCode));
+        cognito.verifyUserAttribute(b -> b
+                .accessToken(accessToken)
+                .attributeName("phone_number")
+                .code(repeatedPhoneCode));
+
+        assertThat(userAttribute(username, "email_verified")).isEqualTo("true");
+        assertThat(userAttribute(username, "phone_number_verified")).isEqualTo("true");
     }
 
     private String userAttribute(String username, String attributeName) {
@@ -200,5 +230,10 @@ class CognitoVerifyUserAttributeTest {
 
     private static String differentCode(String code) {
         return "000000".equals(code) ? "000001" : "000000";
+    }
+
+    private static String maskedPhoneNumber(String phoneNumber) {
+        return "+" + "*".repeat(phoneNumber.length() - 5)
+                + phoneNumber.substring(phoneNumber.length() - 4);
     }
 }

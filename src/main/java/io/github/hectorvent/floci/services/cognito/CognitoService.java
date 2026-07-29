@@ -1398,7 +1398,7 @@ public class CognitoService {
         String jti = extractJtiFromToken(accessToken);
 
         if (username == null || poolId == null || jti == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+            throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
         }
 
         validateTokenNotRevoked(jti, poolId, "access");
@@ -1408,7 +1408,7 @@ public class CognitoService {
 
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
-                    "Only email and phone_number attributes can be verified", 400);
+                    "Invalid attribute name. Only phone_number and email can be verified.", 400);
         }
 
         CognitoUser user = adminGetUser(poolId, username);
@@ -1416,7 +1416,10 @@ public class CognitoService {
         String destination = blankToNull(user.getAttributes().get(attributeName));
         if (destination == null) {
             throw new AwsException("InvalidParameterException",
-                    "User has no " + attributeName + " attribute set", 400);
+                    "email".equals(attributeName)
+                            ? "User does not have a valid registered email"
+                            : "User does not have a valid registered phone number",
+                    400);
         }
 
         String deliveryMedium = "email".equals(attributeName) ? "EMAIL" : "SMS";
@@ -1446,7 +1449,7 @@ public class CognitoService {
         String jti = extractJtiFromToken(accessToken);
 
         if (username == null || poolId == null || jti == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+            throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
         }
 
         validateTokenNotRevoked(jti, poolId, "access");
@@ -1456,13 +1459,14 @@ public class CognitoService {
 
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
-                    "Only email and phone_number attributes can be verified", 400);
+                    "Invalid attribute name. Only phone_number and email can be verified.", 400);
         }
 
         CognitoUser user = adminGetUser(poolId, username);
         if (blankToNull(user.getAttributes().get(attributeName)) == null) {
             throw new AwsException("InvalidParameterException",
-                    "User has no " + attributeName + " attribute set", 400);
+                    "Unable to verify attribute: " + attributeName + " no value set to verify",
+                    400);
         }
 
         VerificationCode.Purpose purpose = "email".equals(attributeName)
@@ -2678,32 +2682,19 @@ public class CognitoService {
         if (at <= 0 || at == email.length() - 1) {
             return "****";
         }
-        String local = email.substring(0, at);
-        String domain = email.substring(at + 1);
-        return maskSegment(local) + "@" + maskDomain(domain);
+        return email.charAt(0) + "***@" + email.charAt(at + 1) + "***";
     }
 
     private String maskPhoneNumber(String phoneNumber) {
         if (phoneNumber.length() <= 4) {
             return "*".repeat(phoneNumber.length());
         }
+        if (phoneNumber.charAt(0) == '+') {
+            return "+" + "*".repeat(Math.max(0, phoneNumber.length() - 5))
+                    + phoneNumber.substring(phoneNumber.length() - 4);
+        }
         return "*".repeat(phoneNumber.length() - 4)
                 + phoneNumber.substring(phoneNumber.length() - 4);
-    }
-
-    private String maskDomain(String domain) {
-        int dot = domain.lastIndexOf('.');
-        if (dot <= 0 || dot == domain.length() - 1) {
-            return maskSegment(domain);
-        }
-        return maskSegment(domain.substring(0, dot)) + domain.substring(dot);
-    }
-
-    private String maskSegment(String value) {
-        if (value.length() <= 1) {
-            return "*";
-        }
-        return value.charAt(0) + "*".repeat(Math.max(1, value.length() - 1));
     }
 
     private String blankToNull(String value) {

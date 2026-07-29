@@ -20,7 +20,6 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -111,8 +110,7 @@ class CognitoAttributeVerificationIntegrationTest {
                 .statusCode(200)
                 .body("CodeDeliveryDetails.AttributeName", equalTo("email"))
                 .body("CodeDeliveryDetails.DeliveryMedium", equalTo("EMAIL"))
-                .body("CodeDeliveryDetails.Destination", containsString("*"))
-                .body("CodeDeliveryDetails.Destination", containsString("@"));
+                .body("CodeDeliveryDetails.Destination", equalTo("v***@e***"));
 
         emailVerificationCode = fetchLatestSesVerificationCode(USERNAME);
     }
@@ -163,7 +161,8 @@ class CognitoAttributeVerificationIntegrationTest {
                 """.formatted(accessToken, emailVerificationCode))
                 .then()
                 .statusCode(400)
-                .body("__type", equalTo("CodeMismatchException"));
+                .body("__type", equalTo("ExpiredCodeException"))
+                .body("message", equalTo("Invalid code provided, please request a code again."));
     }
 
     @Test
@@ -177,7 +176,8 @@ class CognitoAttributeVerificationIntegrationTest {
                 """)
                 .then()
                 .statusCode(400)
-                .body("__type", equalTo("NotAuthorizedException"));
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Invalid Access Token"));
     }
 
     @Test
@@ -191,7 +191,9 @@ class CognitoAttributeVerificationIntegrationTest {
                 """.formatted(accessToken))
                 .then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterException"));
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo(
+                        "Invalid attribute name. Only phone_number and email can be verified."));
     }
 
     @Test
@@ -205,7 +207,8 @@ class CognitoAttributeVerificationIntegrationTest {
                 """.formatted(accessToken))
                 .then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterException"));
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("User does not have a valid registered phone number"));
     }
 
     @Test
@@ -273,7 +276,7 @@ class CognitoAttributeVerificationIntegrationTest {
                 .statusCode(200)
                 .body("CodeDeliveryDetails.AttributeName", equalTo("phone_number"))
                 .body("CodeDeliveryDetails.DeliveryMedium", equalTo("SMS"))
-                .body("CodeDeliveryDetails.Destination", containsString("*"));
+                .body("CodeDeliveryDetails.Destination", equalTo("+*******4567"));
         String phoneCode = fetchLatestSnsVerificationCode(phoneNumber);
 
         cognitoAction("VerifyUserAttribute", """
@@ -312,7 +315,26 @@ class CognitoAttributeVerificationIntegrationTest {
                 """.formatted(accessToken))
                 .then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterException"));
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo(
+                        "Invalid attribute name. Only phone_number and email can be verified."));
+    }
+
+    @Test
+    @Order(11)
+    void rejectsVerificationForAttributeWithoutValue() {
+        cognitoAction("VerifyUserAttribute", """
+                {
+                  "AccessToken": "%s",
+                  "AttributeName": "phone_number",
+                  "Code": "123456"
+                }
+                """.formatted(accessToken))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo(
+                        "Unable to verify attribute: phone_number no value set to verify"));
     }
 
     private static void clearInspectionEndpoint(String path) {
