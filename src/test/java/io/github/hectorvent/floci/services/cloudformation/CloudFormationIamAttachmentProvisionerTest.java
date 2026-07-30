@@ -190,6 +190,28 @@ class CloudFormationIamAttachmentProvisionerTest {
     }
 
     @Test
+    void managedPolicyExposesPolicyArnForGetAtt() {
+        // PolicyArn is the attribute CloudFormation documents for AWS::IAM::ManagedPolicy. Without
+        // it Fn::GetAtt does not resolve and the unresolved literal reaches the consuming resource.
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/test-policy";
+        IamPolicy policy = new IamPolicy();
+        policy.setArn(policyArn);
+        when(iamService.createPolicy("test-policy", "/", null, policyDocument(), Map.of()))
+                .thenReturn(policy);
+
+        StackResource result = provision("ManagedPolicy", "AWS::IAM::ManagedPolicy", """
+                {
+                  "ManagedPolicyName": "test-policy",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []}
+                }
+                """);
+
+        assertEquals(policyArn, result.getAttributes().get("PolicyArn"));
+        assertEquals(policyArn, result.getAttributes().get("Arn"));
+        assertEquals(policyArn, result.getPhysicalId());
+    }
+
+    @Test
     void cleanupFailureDoesNotMaskPrimaryFailureOrSkipDeletion() {
         IamRole role = role("cleanup-role");
         when(iamService.createRole("cleanup-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))

@@ -2155,7 +2155,13 @@ public class CloudFormationResourceProvisioner {
         var policy = iamService.createPolicy(policyName, "/", null, document, Map.of());
         r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
         r.setPhysicalId(policy.getArn());
+        // PolicyArn is the attribute CloudFormation documents for this type, and what a template
+        // written against AWS asks for. Without it Fn::GetAtt does not resolve and the unresolved
+        // literal reaches whatever consumed it — a role's ManagedPolicyArns, typically, which then
+        // fails with "policy does not exist" and rolls the stack back. "Arn" stays for callers
+        // already using it.
         r.getAttributes().put("Arn", policy.getArn());
+        r.getAttributes().put("PolicyArn", policy.getArn());
         r.getAttributes().put("ManagedPolicyRoleTargets", String.join("\n", roleNames));
 
         LinkedHashSet<String> attachedRoleNames = new LinkedHashSet<>();
