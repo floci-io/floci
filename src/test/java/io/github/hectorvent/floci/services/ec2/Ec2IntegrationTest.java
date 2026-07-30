@@ -1345,9 +1345,10 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("com.amazonaws.us-east-1.ecr.api"))
-            .body(containsString("com.amazonaws.us-east-1.s3"))
-            .body(containsString("<serviceType>Interface</serviceType>"))
+            .body(containsString(
+                "<serviceName>com.amazonaws.us-east-1.ecr.api</serviceName><serviceType><item><serviceType>Interface</serviceType>"))
+            .body(containsString(
+                "<serviceName>com.amazonaws.us-east-1.s3</serviceName><serviceType><item><serviceType>Gateway</serviceType>"))
             .body(containsString("us-east-1a"));
     }
 
