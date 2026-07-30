@@ -119,6 +119,9 @@ services:
     settings are currently control-plane metadata; the TCP relay does not yet implement those data-plane
     behaviors. `DefaultAuthScheme=IAM_AUTH` is supported for control-plane workflows, but a real-mode
     proxy using that scheme cannot register a target until backend IAM authentication is implemented.
+    Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
+    `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
+    matching the RDS API contract.
     DB proxies currently support `IPV4` for both endpoint and target connections; `IPV6` and `DUAL`
     endpoint networking require additional listener and Docker-network support.
 

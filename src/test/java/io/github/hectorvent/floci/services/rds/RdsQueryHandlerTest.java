@@ -1167,6 +1167,26 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void registerDbProxyTargets_defaultsOmittedTargetGroupName() {
+        DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
+        targetGroup.setDbProxyName("app-proxy");
+        when(service.registerDbProxyTargets(
+                "app-proxy", null, List.of(), List.of("instance1"), 0, 0, "us-west-2"))
+                .thenReturn(targetGroup);
+
+        MultivaluedMap<String, String> params = params();
+        params.add("DBProxyName", "app-proxy");
+        params.add("DBInstanceIdentifiers.member.1", "instance1");
+
+        Response response = handler.handle(
+                "RegisterDBProxyTargets", params, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        verify(service).registerDbProxyTargets(
+                "app-proxy", null, List.of(), List.of("instance1"), 0, 0, "us-west-2");
+    }
+
+    @Test
     void deregisterDbProxyTargetsMapsIdentifiersAndReturnsEmptyResult() {
         MultivaluedMap<String, String> p = params();
         p.add("DBProxyName", "app-proxy");
@@ -1179,6 +1199,20 @@ class RdsQueryHandlerTest {
         assertTrue(((String) response.getEntity()).contains("<DeregisterDBProxyTargetsResult>"));
         verify(service).deregisterDbProxyTargets("app-proxy", "default",
                 List.of(), List.of("instance1"), "us-west-2");
+    }
+
+    @Test
+    void deregisterDbProxyTargets_defaultsOmittedTargetGroupName() {
+        MultivaluedMap<String, String> params = params();
+        params.add("DBProxyName", "app-proxy");
+        params.add("DBClusterIdentifiers.member.1", "cluster1");
+
+        Response response = handler.handle(
+                "DeregisterDBProxyTargets", params, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        verify(service).deregisterDbProxyTargets(
+                "app-proxy", null, List.of("cluster1"), List.of(), "us-west-2");
     }
 
     @Test
@@ -1269,17 +1303,33 @@ class RdsQueryHandlerTest {
     }
 
     @Test
-    void proxyTargetActionsRequireTargetGroupName() {
-        for (String action : List.of(
-                "RegisterDBProxyTargets", "DeregisterDBProxyTargets",
-                "DescribeDBProxyTargets", "ModifyDBProxyTargetGroup")) {
-            MultivaluedMap<String, String> p = params();
-            p.add("DBProxyName", "app-proxy");
+    void modifyDbProxyTargetGroupRequiresTargetGroupName() {
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
 
-            Response response = handler.handle(action, p, "us-west-2");
+        Response response = handler.handle(
+                "ModifyDBProxyTargetGroup", p, "us-west-2");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("TargetGroupName"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void proxyTargetActionsRejectBlankTargetGroupName() {
+        for (String action : List.of(
+                "RegisterDBProxyTargets",
+                "DeregisterDBProxyTargets",
+                "DescribeDBProxyTargets")) {
+            MultivaluedMap<String, String> params = params();
+            params.add("DBProxyName", "app-proxy");
+            params.add("TargetGroupName", " ");
+
+            Response response = handler.handle(action, params, "us-west-2");
 
             assertEquals(400, response.getStatus(), action);
-            assertTrue(((String) response.getEntity()).contains("TargetGroupName"), action);
+            assertTrue(((String) response.getEntity())
+                    .contains("TargetGroupName must be at least 1 character"), action);
         }
         verifyNoInteractions(service);
     }
@@ -1302,6 +1352,23 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Type>RDS_INSTANCE</Type>"));
         assertTrue(body.contains("<RdsResourceId>inst1</RdsResourceId>"));
         verify(service).describeDbProxyTargets("app-proxy", "default", "us-west-2");
+    }
+
+    @Test
+    void describeDbProxyTargets_defaultsOmittedTargetGroupName() {
+        when(service.describeDbProxyTargets("app-proxy", null, "us-west-2"))
+                .thenReturn(List.of());
+
+        MultivaluedMap<String, String> params = params();
+        params.add("DBProxyName", "app-proxy");
+
+        Response response = handler.handle(
+                "DescribeDBProxyTargets", params, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity())
+                .contains("<DescribeDBProxyTargetsResult>"));
+        verify(service).describeDbProxyTargets("app-proxy", null, "us-west-2");
     }
 
     @Test

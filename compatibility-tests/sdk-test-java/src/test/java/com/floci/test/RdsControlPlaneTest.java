@@ -308,7 +308,6 @@ class RdsControlPlaneTest {
 
             var registerResponse = rds.registerDBProxyTargets(b -> b
                     .dbProxyName(targetProxyName)
-                    .targetGroupName("default")
                     .dbInstanceIdentifiers(targetInstanceName));
             registered = true;
             assertThat(registerResponse.dbProxyTargets()).singleElement().satisfies(target ->
@@ -316,20 +315,17 @@ class RdsControlPlaneTest {
                             instance.dbInstance().dbInstanceArn()));
 
             var described = rds.describeDBProxyTargets(b -> b
-                    .dbProxyName(targetProxyName)
-                    .targetGroupName("default"));
+                    .dbProxyName(targetProxyName));
             assertThat(described.targets()).singleElement().satisfies(target ->
                     assertInstanceProxyTarget(target, targetInstanceName,
                             instance.dbInstance().dbInstanceArn()));
 
             rds.deregisterDBProxyTargets(b -> b
                     .dbProxyName(targetProxyName)
-                    .targetGroupName("default")
                     .dbInstanceIdentifiers(targetInstanceName));
             registered = false;
             assertThat(rds.describeDBProxyTargets(b -> b
-                    .dbProxyName(targetProxyName)
-                    .targetGroupName("default")).targets()).isEmpty();
+                    .dbProxyName(targetProxyName)).targets()).isEmpty();
         } finally {
             if (registered) {
                 deregisterProxyTarget(rds, targetProxyName, targetInstanceName);

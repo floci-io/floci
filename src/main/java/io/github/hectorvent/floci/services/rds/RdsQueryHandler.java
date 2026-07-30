@@ -725,9 +725,7 @@ public class RdsQueryHandler {
     private Response handleRegisterDbProxyTargets(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
         String tgName = params.getFirst("TargetGroupName");
-        if (tgName == null || tgName.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TargetGroupName is required.", 400);
-        }
+        validateOptionalTargetGroupName(tgName);
         List<String> clusterIds = memberList(params, "DBClusterIdentifiers");
         List<String> instanceIds = memberList(params, "DBInstanceIdentifiers");
         DbProxyTargetGroup tg = service.registerDbProxyTargets(
@@ -742,9 +740,7 @@ public class RdsQueryHandler {
 
     private Response handleDeregisterDbProxyTargets(MultivaluedMap<String, String> params, String region) {
         String targetGroupName = params.getFirst("TargetGroupName");
-        if (targetGroupName == null || targetGroupName.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TargetGroupName is required.", 400);
-        }
+        validateOptionalTargetGroupName(targetGroupName);
         service.deregisterDbProxyTargets(params.getFirst("DBProxyName"), targetGroupName,
                 memberList(params, "DBClusterIdentifiers"), memberList(params, "DBInstanceIdentifiers"), region);
         return Response.ok(AwsQueryResponse.envelope("DeregisterDBProxyTargets", AwsNamespaces.RDS, "")).build();
@@ -797,15 +793,20 @@ public class RdsQueryHandler {
     private Response handleDescribeDbProxyTargets(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
         String tgName = params.getFirst("TargetGroupName");
-        if (tgName == null || tgName.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TargetGroupName is required.", 400);
-        }
+        validateOptionalTargetGroupName(tgName);
         XmlBuilder xml = new XmlBuilder().start("Targets");
         for (DbProxyTarget t : service.describeDbProxyTargets(name, tgName, region)) {
             xml.start("member").raw(dbProxyTargetInnerXml(t)).end("member");
         }
         xml.end("Targets");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBProxyTargets", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private void validateOptionalTargetGroupName(String targetGroupName) {
+        if (targetGroupName != null && targetGroupName.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "TargetGroupName must be at least 1 character.", 400);
+        }
     }
 
     private String dbProxyInnerXml(DbProxy p) {
