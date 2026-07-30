@@ -720,7 +720,9 @@ public class Ec2Service implements ContainerTeardown {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                ResolvedAmiImage dockerImage = amiImageResolver.resolveImage(imageId);
+                // A CreateImage AMI is not in the catalog, so resolve through its source.
+                ResolvedAmiImage dockerImage =
+                        amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -1691,13 +1693,63 @@ public class Ec2Service implements ContainerTeardown {
         return images;
     }
 
-    public Image createImage(String region, String instanceId, String name, String description) {
+    public Image createImage(String region, String instanceId, String name, String description,
+                             boolean noReboot) {
         ensureDefaultResources(region);
         if (instanceId == null || instanceId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
         }
-        getRequiredInstance(region, instanceId);
-        return registerImage(region, name, description, null, null, null);
+        Instance source = getRequiredInstance(region, instanceId);
+
+        // AWS reboots the source instance by default so the image is captured from a quiesced
+        // file system; NoReboot=true opts out and accepts the integrity risk.
+        if (!noReboot) {
+            rebootInstances(region, List.of(instanceId));
+        }
+
+        // The new AMI inherits what it was captured from rather than the registerImage defaults,
+        // so DescribeImages does not report a generic x86_64 / /dev/sda1 image with no devices.
+        Image sourceImage = findImageForCapture(region, source.getImageId());
+        Image image = registerImage(region, name, description,
+                sourceImage != null ? sourceImage.getArchitecture() : null,
+                sourceImage != null ? sourceImage.getRootDeviceName() : null,
+                sourceImage != null ? sourceImage.getBlockDeviceMappings() : null);
+
+        // Carry the launchable ancestor so RunInstances on this AMI starts the same guest instead
+        // of falling through to the catalog default.
+        image.setSourceImageId(resolveLaunchableImageId(region, source.getImageId()));
+        registeredImages.put(key(region, image.getImageId()), image);
+        return image;
+    }
+
+    /** The image a CreateImage source was launched from, whether catalog-backed or registered. */
+    private Image findImageForCapture(String region, String imageId) {
+        if (imageId == null || imageId.isBlank()) {
+            return null;
+        }
+        Image registered = registeredImages.get(key(region, imageId)).orElse(null);
+        if (registered != null) {
+            return registered;
+        }
+        return imageCatalog.findByIdOrAlias(imageId)
+                .map(Ec2ImageCatalog.CatalogImage::toImage)
+                .orElse(null);
+    }
+
+    /**
+     * Follows CreateImage ancestry back to an id the AMI resolver can map to a guest image.
+     * Images from RegisterImage have no source and stop the walk, as does a catalog id.
+     */
+    private String resolveLaunchableImageId(String region, String imageId) {
+        String current = imageId;
+        for (int hops = 0; hops < 16 && current != null; hops++) {
+            Image registered = registeredImages.get(key(region, current)).orElse(null);
+            if (registered == null || registered.getSourceImageId() == null) {
+                return current;
+            }
+            current = registered.getSourceImageId();
+        }
+        return current;
     }
 
     public Image registerImage(String region, String name, String description, String architecture,
