@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
+import io.github.hectorvent.floci.services.docdb.DocDbService;
+import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
+import io.github.hectorvent.floci.services.docdb.model.DocDbInstance;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
@@ -51,18 +54,23 @@ class SecretTargetAttachmentCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private SecretsManagerService secretsManagerService;
     private RdsService rdsService;
+    private DocDbService docDbService;
     private CloudFormationResourceProvisioner provisioner;
 
     @BeforeEach
     void setUp() {
         secretsManagerService = mock(SecretsManagerService.class);
         rdsService = mock(RdsService.class);
+        docDbService = mock(DocDbService.class);
+        when(secretsManagerService.claimTargetAttachment(any(), any(), any())).thenReturn(true);
+        when(secretsManagerService.canManageTargetAttachment(any(), any(), any())).thenReturn(true);
         provisioner = new CloudFormationResourceProvisioner(
                 null, null, null, null, null, null, null, null, secretsManagerService, null,
                 null, null, null, null, null, null,
                 mapper,
                 null, null, null, null, null, null, null,
                 rdsService, null, null, null, null, null, null,
+                docDbService,
                 new CloudFormationResourceRegistry(List.of()));
     }
 
@@ -80,6 +88,9 @@ class SecretTargetAttachmentCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", resource.getStatus());
         assertEquals(SECRET_ARN, resource.getPhysicalId());
         assertFalse(resource.getAttributes().containsKey("Arn"));
+        assertEquals(SECRET_ARN, resource.getAttributes().get("Id"));
+        assertEquals("stack/Attachment",
+                resource.getAttributes().get("__FlociSecretTargetOwner"));
 
         provisioner.delete(resource, REGION);
 
@@ -107,6 +118,8 @@ class SecretTargetAttachmentCfnProvisionerTest {
         assertFalse(detached.has("port"));
         assertFalse(detached.has("dbname"));
         assertFalse(detached.has("dbInstanceIdentifier"));
+        verify(secretsManagerService).releaseTargetAttachment(
+                SECRET_ARN, "stack/Attachment", REGION);
     }
 
     @Test
@@ -131,6 +144,56 @@ class SecretTargetAttachmentCfnProvisionerTest {
         assertEquals(3306, attached.path("port").asInt());
         assertEquals("orders", attached.path("dbname").asText());
         assertEquals("cluster", attached.path("dbClusterIdentifier").asText());
+        assertFalse(attached.has("dbInstanceIdentifier"));
+    }
+
+    @Test
+    void docDbInstanceAttachmentUsesMongoConnectionFields() throws Exception {
+        stubSecretValues("{\"username\":\"admin\",\"password\":\"secret\",\"ssl\":true}");
+        DocDbInstance instance = new DocDbInstance();
+        instance.setDbInstanceIdentifier("document-instance");
+        instance.setEndpoint("document.local");
+        instance.setPort(27017);
+        when(docDbService.getDbInstance("document-instance")).thenReturn(instance);
+
+        StackResource resource = provision(
+                properties("AWS::DocDB::DBInstance", "document-instance"));
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
+        verify(secretsManagerService).putSecretValue(
+                eq(SECRET_ARN), value.capture(), isNull(), isNull(), eq(REGION), isNull());
+        JsonNode attached = mapper.readTree(value.getValue());
+        assertEquals("mongo", attached.path("engine").asText());
+        assertEquals("document.local", attached.path("host").asText());
+        assertEquals(27017, attached.path("port").asInt());
+        assertEquals("document-instance", attached.path("dbInstanceIdentifier").asText());
+        assertTrue(attached.path("ssl").asBoolean());
+        assertFalse(attached.has("dbClusterIdentifier"));
+    }
+
+    @Test
+    void docDbClusterAttachmentUsesMongoConnectionFields() throws Exception {
+        stubSecretValues("{\"username\":\"admin\",\"password\":\"secret\",\"ssl\":true}");
+        DocDbCluster cluster = new DocDbCluster();
+        cluster.setDbClusterIdentifier("document-cluster");
+        cluster.setEndpoint("document-cluster.local");
+        cluster.setPort(27017);
+        when(docDbService.getDbCluster("document-cluster")).thenReturn(cluster);
+
+        StackResource resource = provision(
+                properties("AWS::DocDB::DBCluster", "document-cluster"));
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
+        verify(secretsManagerService).putSecretValue(
+                eq(SECRET_ARN), value.capture(), isNull(), isNull(), eq(REGION), isNull());
+        JsonNode attached = mapper.readTree(value.getValue());
+        assertEquals("mongo", attached.path("engine").asText());
+        assertEquals("document-cluster.local", attached.path("host").asText());
+        assertEquals(27017, attached.path("port").asInt());
+        assertEquals("document-cluster", attached.path("dbClusterIdentifier").asText());
+        assertTrue(attached.path("ssl").asBoolean());
         assertFalse(attached.has("dbInstanceIdentifier"));
     }
 
@@ -181,6 +244,43 @@ class SecretTargetAttachmentCfnProvisionerTest {
     }
 
     @Test
+    void changingTargetOnTheSameSecretUpdatesInPlace() throws Exception {
+        stubSecretValues("{\"username\":\"admin\",\"password\":\"secret\","
+                + "\"engine\":\"postgres\",\"host\":\"db.local\",\"port\":5432,"
+                + "\"dbname\":\"app\",\"dbInstanceIdentifier\":\"database\"}");
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("replacement-cluster");
+        cluster.setEngine(DatabaseEngine.POSTGRES);
+        cluster.setEndpoint(new DbEndpoint("replacement.local", 6432));
+        cluster.setDatabaseName("replacement");
+        when(rdsService.getDbCluster("replacement-cluster")).thenReturn(cluster);
+
+        StackResource resource = provision(
+                properties("AWS::RDS::DBCluster", "replacement-cluster"),
+                SECRET_ARN,
+                Map.of(
+                        "__FlociSecretTargetManagedKeys",
+                        "engine,host,port,dbname,dbInstanceIdentifier",
+                        "__FlociSecretTargetOwner",
+                        "stack/Attachment"));
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        assertEquals(SECRET_ARN, resource.getPhysicalId());
+        ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
+        verify(secretsManagerService).putSecretValue(
+                eq(SECRET_ARN), value.capture(), isNull(), isNull(), eq(REGION), isNull());
+        JsonNode updated = mapper.readTree(value.getValue());
+        assertEquals("replacement.local", updated.path("host").asText());
+        assertEquals(6432, updated.path("port").asInt());
+        assertEquals("replacement", updated.path("dbname").asText());
+        assertEquals("replacement-cluster",
+                updated.path("dbClusterIdentifier").asText());
+        assertFalse(updated.has("dbInstanceIdentifier"));
+        verify(secretsManagerService, never()).releaseTargetAttachment(
+                any(), any(), any());
+    }
+
+    @Test
     void legacyNamePhysicalIdResolvingToTheSameSecretIsNotDetached() {
         stubSecretValues("{\"username\":\"admin\",\"password\":\"secret\","
                 + "\"engine\":\"postgres\",\"host\":\"db.local\",\"port\":5432,"
@@ -195,6 +295,23 @@ class SecretTargetAttachmentCfnProvisionerTest {
         assertEquals(SECRET_ARN, resource.getPhysicalId());
         verify(secretsManagerService, never()).putSecretValue(
                 any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void failedLegacyUpdateReleasesTheClaimCreatedByThatAttempt() {
+        stubSecretValues("not-json");
+        when(rdsService.getDbInstance("database")).thenReturn(dbInstance());
+
+        StackResource resource = provision(
+                instanceProperties(),
+                SECRET_ARN,
+                Map.of("__FlociSecretTargetManagedKeys",
+                        "engine,host,port,dbname,dbInstanceIdentifier"));
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains("must be a JSON object"));
+        verify(secretsManagerService).releaseTargetAttachment(
+                SECRET_ARN, "stack/Attachment", REGION);
     }
 
     @Test
@@ -290,6 +407,50 @@ class SecretTargetAttachmentCfnProvisionerTest {
     }
 
     @Test
+    void failedPreviousDetachRestoresTheNewSecretAndReleasesItsClaim() throws Exception {
+        String oldArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:old-a1b2c3";
+        String newArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:new-d4e5f6";
+        String newOriginal = "{\"username\":\"new-user\",\"password\":\"new-password\"}";
+        ObjectNode properties = instanceProperties();
+        properties.put("SecretId", "new-secret");
+        when(rdsService.getDbInstance("database")).thenReturn(dbInstance());
+        when(secretsManagerService.describeSecret("new-secret", REGION)).thenReturn(secret(newArn));
+        when(secretsManagerService.describeSecret(oldArn, REGION)).thenReturn(secret(oldArn));
+        when(secretsManagerService.getSecretValue(newArn, null, null, REGION))
+                .thenReturn(secretVersion(newOriginal));
+        when(secretsManagerService.getSecretValue(oldArn, null, null, REGION))
+                .thenReturn(secretVersion("{\"username\":\"old-user\",\"password\":\"old-password\","
+                        + "\"engine\":\"mysql\",\"host\":\"old.local\",\"port\":3306,"
+                        + "\"dbInstanceIdentifier\":\"old-database\"}"));
+        AwsException denied = new AwsException("AccessDeniedException", "detach denied", 403);
+        when(secretsManagerService.putSecretValue(
+                eq(oldArn), any(), isNull(), isNull(), eq(REGION), isNull()))
+                .thenThrow(denied);
+
+        StackResource resource = provision(properties, oldArn,
+                Map.of(
+                        "__FlociSecretTargetManagedKeys",
+                        "engine,host,port,dbInstanceIdentifier",
+                        "__FlociSecretTargetOwner",
+                        "stack/Attachment"));
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertEquals("detach denied", resource.getStatusReason());
+        assertEquals(oldArn, resource.getPhysicalId());
+        ArgumentCaptor<String> newValues = ArgumentCaptor.forClass(String.class);
+        verify(secretsManagerService, times(2)).putSecretValue(
+                eq(newArn), newValues.capture(), isNull(), isNull(), eq(REGION), isNull());
+        assertEquals("postgres",
+                mapper.readTree(newValues.getAllValues().getFirst()).path("engine").asText());
+        assertEquals(mapper.readTree(newOriginal),
+                mapper.readTree(newValues.getAllValues().get(1)));
+        verify(secretsManagerService).releaseTargetAttachment(
+                newArn, "stack/Attachment", REGION);
+        verify(secretsManagerService, never()).releaseTargetAttachment(
+                oldArn, "stack/Attachment", REGION);
+    }
+
+    @Test
     void detachDoesNotCreateAnotherVersionWhenManagedFieldsAreAlreadyAbsent() {
         when(secretsManagerService.getSecretValue(SECRET_ARN, null, null, REGION))
                 .thenReturn(secretVersion("{\"username\":\"admin\",\"custom\":\"keep\"}"));
@@ -350,6 +511,22 @@ class SecretTargetAttachmentCfnProvisionerTest {
     }
 
     @Test
+    void detachSkipsASecretClaimedByAnotherAttachment() {
+        StackResource resource = attachmentResource();
+        when(secretsManagerService.canManageTargetAttachment(
+                SECRET_ARN, "stack/Attachment", REGION)).thenReturn(false);
+
+        assertDoesNotThrow(() -> provisioner.delete(resource, REGION));
+
+        verify(secretsManagerService, never()).getSecretValue(
+                any(), any(), any(), any());
+        verify(secretsManagerService, never()).putSecretValue(
+                any(), any(), any(), any(), any(), any());
+        verify(secretsManagerService, never()).releaseTargetAttachment(
+                any(), any(), any());
+    }
+
+    @Test
     void physicalIdOnlyDeleteRefusesToGuessWhichSecretFieldsWereManaged() {
         AwsException exception = assertThrows(AwsException.class, () -> provisioner.delete(
                 "AWS::SecretsManager::SecretTargetAttachment", SECRET_ARN, REGION));
@@ -390,14 +567,40 @@ class SecretTargetAttachmentCfnProvisionerTest {
                 any(), any(), any(), any(), any(), any());
     }
 
-    @Test
-    void unsupportedTargetTypeFailsExplicitly() {
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "AWS::Redshift::Cluster",
+            "AWS::RedshiftServerless::Namespace",
+            "AWS::DocDBElastic::Cluster"
+    })
+    void targetTypesWithoutBackingServicesFailExplicitly(String targetType) {
         stubSecretValues("{\"username\":\"admin\",\"password\":\"secret\"}");
 
-        StackResource resource = provision(properties("AWS::Redshift::Cluster", "warehouse"));
+        StackResource resource = provision(properties(targetType, "database"));
 
         assertEquals("CREATE_FAILED", resource.getStatus());
         assertTrue(resource.getStatusReason().contains("not supported by Floci"));
+        verify(secretsManagerService, never()).putSecretValue(
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aSecondAttachmentToTheSameSecretFailsBeforeReadingOrWritingItsValue() {
+        when(rdsService.getDbInstance("database")).thenReturn(dbInstance());
+        when(secretsManagerService.describeSecret(SECRET_ID, REGION)).thenReturn(secret(SECRET_ARN));
+        when(secretsManagerService.claimTargetAttachment(
+                SECRET_ARN, "stack/Attachment", REGION))
+                .thenThrow(new AwsException(
+                        "ResourceExistsException",
+                        "A target is already attached to secret " + SECRET_ARN + ".",
+                        400));
+
+        StackResource resource = provision(instanceProperties());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains("already attached"));
+        verify(secretsManagerService, never()).getSecretValue(
+                any(), any(), any(), any());
         verify(secretsManagerService, never()).putSecretValue(
                 any(), any(), any(), any(), any(), any());
     }
@@ -463,7 +666,9 @@ class SecretTargetAttachmentCfnProvisionerTest {
         resource.setPhysicalId(SECRET_ARN);
         resource.setAttributes(new java.util.HashMap<>(Map.of(
                 "__FlociSecretTargetManagedKeys",
-                "engine,host,port,dbname,dbInstanceIdentifier")));
+                "engine,host,port,dbname,dbInstanceIdentifier",
+                "__FlociSecretTargetOwner",
+                "stack/Attachment")));
         return resource;
     }
 

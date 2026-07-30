@@ -68,7 +68,10 @@ class CloudFormationSecretTargetAttachmentIntegrationTest {
                         }
                       },
                       "Outputs": {
-                        "AttachmentRef": {"Value": {"Ref": "Attachment"}}
+                        "AttachmentRef": {"Value": {"Ref": "Attachment"}},
+                        "AttachmentId": {
+                          "Value": {"Fn::GetAtt": ["Attachment", "Id"]}
+                        }
                       }
                     }
                     """.formatted(databaseId, secretName);
@@ -79,6 +82,7 @@ class CloudFormationSecretTargetAttachmentIntegrationTest {
             assertTrue(describeXml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
                     "stack should be CREATE_COMPLETE: " + describeXml);
             assertEquals(secretArn, outputValue(describeXml, "AttachmentRef"));
+            assertEquals(secretArn, outputValue(describeXml, "AttachmentId"));
 
             JsonNode attached = getSecretJson(secretName);
             assertEquals("admin", attached.path("username").asText());
@@ -236,6 +240,74 @@ class CloudFormationSecretTargetAttachmentIntegrationTest {
             assertFalse(rolledBack.has("host"));
             assertFalse(rolledBack.has("port"));
             assertFalse(rolledBack.has("dbname"));
+            assertFalse(rolledBack.has("dbInstanceIdentifier"));
+        } finally {
+            if (stackCreated) {
+                deleteStack(stackName);
+                awaitStackDeleted(stackName);
+            }
+            forceDeleteSecret(secretName);
+        }
+    }
+
+    @Test
+    void duplicateAttachmentToTheSameSecretFailsAndRollsBackTheFirstAttachment() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String secretName = "sta-duplicate-secret-" + suffix;
+        String databaseId = "sta-duplicate-database-" + suffix;
+        String stackName = "sta-duplicate-stack-" + suffix;
+        createSecret(secretName);
+        boolean stackCreated = false;
+
+        try {
+            String template = """
+                    {
+                      "Resources": {
+                        "Database": {
+                          "Type": "AWS::RDS::DBInstance",
+                          "Properties": {
+                            "DBInstanceIdentifier": "%s",
+                            "Engine": "postgres",
+                            "MasterUsername": "dbadmin",
+                            "MasterUserPassword": "database-password"
+                          }
+                        },
+                        "FirstAttachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        },
+                        "DuplicateAttachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "DependsOn": "FirstAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        }
+                      }
+                    }
+                    """.formatted(databaseId, secretName, secretName);
+
+            createStack(stackName, template);
+            stackCreated = true;
+            String describeXml = describeStack(stackName);
+            assertTrue(describeXml.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),
+                    "stack should be ROLLBACK_COMPLETE: " + describeXml);
+            assertTrue(describeXml.contains("already attached"),
+                    "stack should report the duplicate attachment: " + describeXml);
+
+            JsonNode rolledBack = getSecretJson(secretName);
+            assertEquals("admin", rolledBack.path("username").asText());
+            assertEquals("initial-password", rolledBack.path("password").asText());
+            assertEquals("keep", rolledBack.path("custom").asText());
+            assertFalse(rolledBack.has("engine"));
+            assertFalse(rolledBack.has("host"));
+            assertFalse(rolledBack.has("port"));
             assertFalse(rolledBack.has("dbInstanceIdentifier"));
         } finally {
             if (stackCreated) {

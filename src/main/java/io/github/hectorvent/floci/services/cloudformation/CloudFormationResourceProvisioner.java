@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
@@ -120,6 +121,7 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_NAME_MODE_EXPLICIT = "explicit";
     private static final String LAMBDA_NAME_MODE_GENERATED = "generated";
     private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
+    private static final String SECRET_TARGET_OWNER_ATTR = "__FlociSecretTargetOwner";
     private static final List<String> SECRET_TARGET_CONNECTION_KEYS = List.of(
             "engine", "host", "port", "dbname", "dbInstanceIdentifier", "dbClusterIdentifier");
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
@@ -168,6 +170,7 @@ public class CloudFormationResourceProvisioner {
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
     private final FirehoseService firehoseService;
+    private final DocDbService docDbService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
@@ -201,6 +204,7 @@ public class CloudFormationResourceProvisioner {
                                              CloudWatchMetricsService cloudWatchMetricsService,
                                              AutoScalingService autoScalingService,
                                              FirehoseService firehoseService,
+                                             DocDbService docDbService,
                                              CloudFormationResourceRegistry resourceRegistry) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
@@ -233,6 +237,7 @@ public class CloudFormationResourceProvisioner {
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
         this.firehoseService = firehoseService;
+        this.docDbService = docDbService;
         this.resourceRegistry = resourceRegistry;
     }
 
@@ -292,7 +297,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::KMS::Alias" -> provisionKmsAlias(resource, properties, engine, region);
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SecretsManager::SecretTargetAttachment" ->
-                        provisionSecretTargetAttachment(resource, properties, engine, region);
+                        provisionSecretTargetAttachment(resource, properties, engine, region, stackName);
                 case "AWS::CDK::Metadata" -> provisionCdkMetadata(resource);
                 case "AWS::S3::BucketPolicy" -> provisionS3BucketPolicy(resource, properties, engine);
                 case "AWS::ECR::Repository" -> provisionEcrRepository(resource, properties, engine, stackName, region);
@@ -2286,7 +2291,8 @@ public class CloudFormationResourceProvisioner {
 
     /** Provisions an AWS-compatible Secrets Manager database target attachment. */
     private void provisionSecretTargetAttachment(StackResource r, JsonNode props,
-                                                 CloudFormationTemplateEngine engine, String region) {
+                                                 CloudFormationTemplateEngine engine, String region,
+                                                 String stackName) {
         String secretId = requireSecretTargetProperty(props, "SecretId", engine);
         String targetId = requireSecretTargetProperty(props, "TargetId", engine);
         String targetType = requireSecretTargetProperty(props, "TargetType", engine);
@@ -2295,38 +2301,85 @@ public class CloudFormationResourceProvisioner {
 
         String previousSecretId = r.getPhysicalId();
         String previousManagedKeys = r.getAttributes().get(SECRET_TARGET_MANAGED_KEYS_ATTR);
+        String attachmentOwner = r.getAttributes().getOrDefault(
+                SECRET_TARGET_OWNER_ATTR, stackName + "/" + r.getLogicalId());
         String secretArn = secretsManagerService.describeSecret(secretId, region).getArn();
         String previousSecretArn = canonicalExistingSecretArn(previousSecretId, secretArn, region);
-        ObjectNode currentSecretJson = readSecretJsonObject(secretArn, region);
-        ObjectNode desiredSecretJson = currentSecretJson.deepCopy();
-        SECRET_TARGET_CONNECTION_KEYS.forEach(desiredSecretJson::remove);
-
-        List<String> managedKeys = new ArrayList<>();
-        addSecretTargetConnection(desiredSecretJson, managedKeys, connection);
-
+        boolean replacingSecret = previousSecretArn != null && !previousSecretArn.equals(secretArn);
+        boolean claimCreated = false;
+        boolean wroteNewSecret = false;
+        boolean detachedPreviousSecret = false;
+        ObjectNode currentSecretJson = null;
         SecretTargetMutation previousDetach = null;
-        if (previousSecretArn != null && !previousSecretArn.equals(secretArn)) {
-            previousDetach = prepareSecretTargetDetach(previousSecretArn, previousManagedKeys, region);
+
+        try {
+            claimCreated = secretsManagerService.claimTargetAttachment(
+                    secretArn, attachmentOwner, region);
+
+            currentSecretJson = readSecretJsonObject(secretArn, region);
+            ObjectNode desiredSecretJson = currentSecretJson.deepCopy();
+            SECRET_TARGET_CONNECTION_KEYS.forEach(desiredSecretJson::remove);
+
+            List<String> managedKeys = new ArrayList<>();
+            addSecretTargetConnection(desiredSecretJson, managedKeys, connection);
+
+            if (replacingSecret) {
+                previousDetach = prepareSecretTargetDetach(previousSecretArn, previousManagedKeys, region);
+            }
+            if (!desiredSecretJson.equals(currentSecretJson)) {
+                secretsManagerService.putSecretValue(
+                        secretArn, desiredSecretJson.toString(), null, null, region, null);
+                wroteNewSecret = true;
+            }
+            if (previousDetach != null) {
+                putSecretTargetMutation(previousDetach, region);
+                detachedPreviousSecret = true;
+            }
+            if (replacingSecret) {
+                secretsManagerService.releaseTargetAttachment(
+                        previousSecretArn, attachmentOwner, region);
+            }
+
+            r.setPhysicalId(secretArn);
+            r.getAttributes().remove("Arn");
+            r.getAttributes().put("Id", secretArn);
+            r.getAttributes().put(SECRET_TARGET_OWNER_ATTR, attachmentOwner);
+            r.getAttributes().put(SECRET_TARGET_MANAGED_KEYS_ATTR, String.join(",", managedKeys));
+        } catch (RuntimeException failure) {
+            if (detachedPreviousSecret && previousDetach != null) {
+                ObjectNode previousValue = previousDetach.originalValue();
+                attemptSecretTargetCleanup(failure, "restore previous secret " + previousSecretArn,
+                        () -> secretsManagerService.putSecretValue(
+                                previousSecretArn, previousValue.toString(),
+                                null, null, region, null));
+            }
+            if (wroteNewSecret && currentSecretJson != null) {
+                ObjectNode originalValue = currentSecretJson;
+                attemptSecretTargetCleanup(failure, "restore new secret " + secretArn,
+                        () -> secretsManagerService.putSecretValue(
+                                secretArn, originalValue.toString(),
+                                null, null, region, null));
+            }
+            if (claimCreated) {
+                attemptSecretTargetCleanup(failure, "release target attachment claim for " + secretArn,
+                        () -> secretsManagerService.releaseTargetAttachment(
+                                secretArn, attachmentOwner, region));
+            }
+            throw failure;
         }
-        if (!desiredSecretJson.equals(currentSecretJson)) {
-            secretsManagerService.putSecretValue(
-                    secretArn, desiredSecretJson.toString(), null, null, region, null);
-        }
-        if (previousDetach != null) {
-            putSecretTargetMutation(previousDetach, region);
-        }
-        r.setPhysicalId(secretArn);
-        r.getAttributes().remove("Arn");
-        r.getAttributes().put(SECRET_TARGET_MANAGED_KEYS_ATTR, String.join(",", managedKeys));
     }
 
     private static void validateSecretTargetType(String targetType) {
-        if (!"AWS::RDS::DBInstance".equals(targetType)
-                && !"AWS::RDS::DBCluster".equals(targetType)) {
+        if (!Set.of(
+                "AWS::RDS::DBInstance",
+                "AWS::RDS::DBCluster",
+                "AWS::DocDB::DBInstance",
+                "AWS::DocDB::DBCluster").contains(targetType)) {
             throw new AwsException("ValidationError",
                     "SecretTargetAttachment TargetType " + targetType
-                            + " is not supported by Floci; supported values are AWS::RDS::DBInstance"
-                            + " and AWS::RDS::DBCluster.", 400);
+                            + " is not supported by Floci; supported values are AWS::RDS::DBInstance,"
+                            + " AWS::RDS::DBCluster, AWS::DocDB::DBInstance,"
+                            + " and AWS::DocDB::DBCluster.", 400);
         }
     }
 
@@ -2386,6 +2439,8 @@ public class CloudFormationResourceProvisioner {
         return switch (targetType) {
             case "AWS::RDS::DBInstance" -> dbInstanceConnection(targetId);
             case "AWS::RDS::DBCluster" -> dbClusterConnection(targetId);
+            case "AWS::DocDB::DBInstance" -> docDbInstanceConnection(targetId);
+            case "AWS::DocDB::DBCluster" -> docDbClusterConnection(targetId);
             default -> throw new IllegalStateException("Validated target type was not handled: " + targetType);
         };
     }
@@ -2428,6 +2483,42 @@ public class CloudFormationResourceProvisioner {
                 cluster.getDbClusterIdentifier());
     }
 
+    private SecretTargetConnection docDbInstanceConnection(String targetId) {
+        var instance = docDbService.getDbInstance(targetId);
+        if (instance == null || instance.getEndpoint() == null
+                || instance.getEndpoint().isBlank()
+                || instance.getPort() <= 0
+                || instance.getDbInstanceIdentifier() == null
+                || instance.getDbInstanceIdentifier().isBlank()) {
+            throw incompleteSecretTarget(targetId);
+        }
+        return new SecretTargetConnection(
+                "mongo",
+                instance.getEndpoint(),
+                instance.getPort(),
+                null,
+                "dbInstanceIdentifier",
+                instance.getDbInstanceIdentifier());
+    }
+
+    private SecretTargetConnection docDbClusterConnection(String targetId) {
+        var cluster = docDbService.getDbCluster(targetId);
+        if (cluster == null || cluster.getEndpoint() == null
+                || cluster.getEndpoint().isBlank()
+                || cluster.getPort() <= 0
+                || cluster.getDbClusterIdentifier() == null
+                || cluster.getDbClusterIdentifier().isBlank()) {
+            throw incompleteSecretTarget(targetId);
+        }
+        return new SecretTargetConnection(
+                "mongo",
+                cluster.getEndpoint(),
+                cluster.getPort(),
+                null,
+                "dbClusterIdentifier",
+                cluster.getDbClusterIdentifier());
+    }
+
     private static void addSecretTargetConnection(ObjectNode secretJson, List<String> managedKeys,
                                                   SecretTargetConnection connection) {
         putSecretTargetField(secretJson, managedKeys, "engine", connection.engine());
@@ -2447,7 +2538,7 @@ public class CloudFormationResourceProvisioner {
                                           String identifierKey, String identifier) {
     }
 
-    private record SecretTargetMutation(String secretId, ObjectNode value) {
+    private record SecretTargetMutation(String secretId, ObjectNode originalValue, ObjectNode value) {
     }
 
     private static void putSecretTargetField(ObjectNode secretJson, List<String> managedKeys,
@@ -2470,8 +2561,18 @@ public class CloudFormationResourceProvisioner {
     }
 
     private void deleteSecretTargetAttachment(StackResource resource, String region) {
+        String attachmentOwner = resource.getAttributes().get(SECRET_TARGET_OWNER_ATTR);
+        if (!secretsManagerService.canManageTargetAttachment(
+                resource.getPhysicalId(), attachmentOwner, region)) {
+            LOG.warnv("Skipping SecretTargetAttachment detach because secret {0}"
+                            + " is owned by a different attachment",
+                    resource.getPhysicalId());
+            return;
+        }
         detachSecretTarget(resource.getPhysicalId(),
                 resource.getAttributes().get(SECRET_TARGET_MANAGED_KEYS_ATTR), region);
+        secretsManagerService.releaseTargetAttachment(
+                resource.getPhysicalId(), attachmentOwner, region);
     }
 
     private void detachSecretTarget(String secretId, String managedKeysAttribute, String region) {
@@ -2497,7 +2598,7 @@ public class CloudFormationResourceProvisioner {
             managedKeys.forEach(detachedSecretJson::remove);
             return detachedSecretJson.equals(currentSecretJson)
                     ? null
-                    : new SecretTargetMutation(secretId, detachedSecretJson);
+                    : new SecretTargetMutation(secretId, currentSecretJson, detachedSecretJson);
         } catch (AwsException e) {
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
@@ -2510,6 +2611,18 @@ public class CloudFormationResourceProvisioner {
     private void putSecretTargetMutation(SecretTargetMutation mutation, String region) {
         secretsManagerService.putSecretValue(
                 mutation.secretId(), mutation.value().toString(), null, null, region, null);
+    }
+
+    private void attemptSecretTargetCleanup(RuntimeException primaryFailure,
+                                            String description,
+                                            Runnable cleanup) {
+        try {
+            cleanup.run();
+        } catch (RuntimeException cleanupFailure) {
+            primaryFailure.addSuppressed(cleanupFailure);
+            LOG.warnv("SecretTargetAttachment rollback cleanup failed while attempting to {0}: {1}",
+                    description, cleanupFailure.getMessage());
+        }
     }
 
     private static List<String> managedSecretTargetKeys(String attribute) {
