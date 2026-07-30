@@ -151,9 +151,10 @@ Always implement the **real AWS wire protocol** — never invent custom endpoint
 
 1. Branch off `main`: `git checkout -b feature/my-feature`
 2. Open a PR targeting `main`.
-3. CI runs tests automatically — all checks must pass before merge.v
+3. CI runs tests automatically — all checks must pass before merge.
 4. Keep PRs focused — one feature or fix per PR.
 5. Reference any related issues in the PR description.
+6. Keep at most **5 open PRs** at a time. A bot leaves an advisory note and an `over-pr-limit` label on PRs opened beyond that — nothing gets closed or blocked, but please land or close your existing PRs before opening more.
 
 Docker images are never built on contributor PRs, so merging to `main` is always cheap.
 
@@ -187,10 +188,6 @@ git push origin release/1.1.x
 1. Fix on `main` via the normal PR process.
 2. Cherry-pick the merge commit onto the relevant `release/x.y.x` branch and push.
 3. If the bug only affects a release branch, open a PR directly against that branch.
-
-### Edge builds
-
-The `edge.yml` workflow publishes a JVM-only `floci/floci:edge` image from `main` every Monday at 00:00 UTC. It can also be triggered manually from the Actions tab.
 
 ## Testing Policy for Pull Requests
 
