@@ -175,6 +175,10 @@ public class ApiGatewayService {
 
         String customId = ReservedTags.extractOverrideApiId(tags);
         String apiId = customId != null ? customId : shortId(10);
+        if (apiStore.get(apiKey(region, apiId)).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "REST API with id '" + apiId + "' already exists", 409);
+        }
 
         RestApi api = new RestApi();
         api.setId(apiId);

@@ -24,6 +24,10 @@ override key to `TagResource` is rejected with `BadRequestException`.
 Values must be non-blank and must not contain whitespace, control characters, or `/`, `?`, `#`, since
 those would break the endpoint URL. An invalid value is rejected with `BadRequestException`.
 
+Creating a second API with an override ID that already exists in the region is rejected with
+`ConflictException` instead of overwriting the existing API, matching how KMS and Cognito treat
+duplicate override IDs.
+
 > [!NOTE]
 > API Gateway previously used a `_custom_id_` tag for this. It still works so existing setups keep
 > running, and it is now stripped from the returned tags the same way, but it is deprecated: prefer

@@ -375,6 +375,24 @@ class ApiGatewayV2IntegrationTest {
     }
 
     @Test @Order(103)
+    void createApi_duplicateOverrideId_isRejectedWithConflict() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"duplicate-override","protocolType":"HTTP","tags":{"floci:override-id":"MYV2OVERRIDE"}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(409)
+                .body("message", containsString("already exists"));
+        given()
+                .when().get("/v2/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("override-id-api"));
+    }
+
+    @Test @Order(104)
     void getApi_overrideId_resolvesById() {
         given()
                 .when().get("/v2/apis/MYV2CUSTOM")
@@ -383,7 +401,7 @@ class ApiGatewayV2IntegrationTest {
                 .body("apiId", equalTo("MYV2CUSTOM"));
     }
 
-    @Test @Order(104)
+    @Test @Order(105)
     void tagApi_withOverrideKey_isRejectedAfterCreation() {
         given()
                 .contentType(ContentType.JSON)
@@ -395,7 +413,7 @@ class ApiGatewayV2IntegrationTest {
                 .statusCode(400);
     }
 
-    @Test @Order(105)
+    @Test @Order(106)
     void tagApi_withDeprecatedCustomIdKey_isRejectedAfterCreation() {
         given()
                 .contentType(ContentType.JSON)
@@ -407,7 +425,7 @@ class ApiGatewayV2IntegrationTest {
                 .statusCode(400);
     }
 
-    @Test @Order(106)
+    @Test @Order(107)
     void deleteApis_customAndOverrideId() {
         given().when().delete("/v2/apis/MYV2CUSTOM").then().statusCode(204);
         given().when().delete("/v2/apis/MYV2OVERRIDE").then().statusCode(204);

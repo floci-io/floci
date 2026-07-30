@@ -85,9 +85,14 @@ public class ApiGatewayV2Service {
         @SuppressWarnings("unchecked")
         Map<String, String> tags = (Map<String, String>) request.get("tags");
         String overrideId = ReservedTags.extractOverrideApiId(tags);
+        String apiId = overrideId != null ? overrideId : shortId(10);
+        if (apiStore.get(apiKey(region, apiId)).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "API with id '" + apiId + "' already exists", 409);
+        }
 
         Api api = new Api();
-        api.setApiId(overrideId != null ? overrideId : shortId(10));
+        api.setApiId(apiId);
         api.setName(name);
         api.setProtocolType(protocolType);
         api.setCreatedDate(System.currentTimeMillis());

@@ -463,6 +463,26 @@ class ApiGatewayIntegrationTest {
     }
 
     @Test @Order(56)
+    void createRestApi_duplicateOverrideId_isRejectedWithConflict() {
+        String body = """
+                {"name":"duplicate-override-api","tags":{"floci:override-id":"MYOVERRIDEID"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(409)
+                .body("message", containsString("already exists"));
+        // The original API is untouched.
+        given()
+                .when().get("/restapis/MYOVERRIDEID")
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("override-id-api"));
+    }
+
+    @Test @Order(57)
     void getRestApi_flociOverrideId_resolvesById() {
         given()
                 .when().get("/restapis/MYOVERRIDEID")
