@@ -36,10 +36,42 @@ public class CloudControlService {
     private final IamService iamService;
     private final CloudFormationResourceProvisioner provisioner;
     private final ObjectMapper mapper;
+    /** How many finished request tokens to keep before evicting the oldest. */
+    private static final int MAX_RETAINED_REQUESTS = 1000;
+
+    /**
+     * Types whose delete needs state captured at create time — a custom resource's ServiceToken and
+     * properties, a nodegroup's cluster name, an inline policy's principals. Deleting one of these
+     * from type and identifier alone is a no-op, so Cloud Control must not report SUCCESS for it.
+     */
+    private static final java.util.Set<String> ATTRIBUTE_BACKED_DELETES =
+            java.util.Set.of("AWS::EKS::Nodegroup", "AWS::IAM::Policy");
+
     /** RequestToken → ProgressEvent. Cloud Control is async; clients poll by token. */
     private final Map<String, ProgressEvent> requests = new ConcurrentHashMap<>();
+    /** Token insertion order, so the map can be bounded without losing in-flight requests. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> requestOrder =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    /**
+     * What CreateResource provisioned, keyed by region/type/identifier. Carries the attributes the
+     * delete path needs and the model the read path returns for types outside {@link #listResources}.
+     * Entries are dropped when the resource is deleted.
+     */
+    private final Map<String, CreatedResource> created = new ConcurrentHashMap<>();
     private final java.util.concurrent.ExecutorService executor =
             java.util.concurrent.Executors.newFixedThreadPool(4);
+
+    @jakarta.annotation.PreDestroy
+    void shutdown() {
+        executor.shutdownNow();
+    }
+
+    /** Create-time state for a resource this service provisioned. */
+    private record CreatedResource(Map<String, String> attributes, String model) {}
+
+    private static String createdKey(String region, String typeName, String identifier) {
+        return region + "|" + typeName + "|" + identifier;
+    }
 
     @Inject
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
@@ -69,19 +101,26 @@ public class CloudControlService {
         }
         String token = UUID.randomUUID().toString();
         ProgressEvent pending = new ProgressEvent(typeName, null, token, "CREATE", "IN_PROGRESS", null, null);
-        requests.put(token, pending);
+        record(pending);
         executor.submit(() -> {
             try {
                 var resource = provisioner.provisionStandalone(typeName, props, region, ACCOUNT);
                 if (resource == null || resource.getPhysicalId() == null) {
-                    requests.put(token, pending.failed("CreateResource is not supported for " + typeName + "."));
+                    record(pending.failed("CreateResource is not supported for " + typeName + "."));
                 } else {
                     String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
-                    requests.put(token, new ProgressEvent(typeName, resource.getPhysicalId(),
+                    // Kept so GetResource can read back a type the read side does not list, and so
+                    // DeleteResource has the attributes its delete path needs.
+                    created.put(createdKey(region, typeName, resource.getPhysicalId()),
+                            new CreatedResource(
+                                    resource.getAttributes() == null
+                                            ? Map.of() : Map.copyOf(resource.getAttributes()),
+                                    model));
+                    record(new ProgressEvent(typeName, resource.getPhysicalId(),
                             token, "CREATE", "SUCCESS", null, model));
                 }
             } catch (Exception e) {
-                requests.put(token, pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
+                record(pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
             }
         });
         return pending;
@@ -125,7 +164,23 @@ public class CloudControlService {
 
     /** Cloud Control {@code DeleteResource}. Deletes are quick, so this stays synchronous. */
     public ProgressEvent deleteResource(String region, String typeName, String identifier) {
-        provisioner.deleteStandalone(typeName, identifier, region);
+        String key = createdKey(region, typeName, identifier);
+        CreatedResource state = created.get(key);
+        Map<String, String> attributes = state == null ? Map.of() : state.attributes();
+
+        boolean custom = typeName != null
+                && (typeName.startsWith("Custom::") || "AWS::CloudFormation::CustomResource".equals(typeName));
+        if (attributes.isEmpty() && (custom || ATTRIBUTE_BACKED_DELETES.contains(typeName))) {
+            // The delete would no-op. Reporting SUCCESS over a resource that is still there is the
+            // worse failure, so surface it instead.
+            return record(new ProgressEvent(typeName, identifier, UUID.randomUUID().toString(),
+                    "DELETE", "FAILED",
+                    "DeleteResource for " + typeName + " needs create-time state that Cloud Control does "
+                    + "not hold for " + identifier + ".", null));
+        }
+
+        provisioner.deleteStandalone(typeName, identifier, region, attributes);
+        created.remove(key);
         return record(new ProgressEvent(typeName, identifier,
                 UUID.randomUUID().toString(), "DELETE", "SUCCESS", null, null));
     }
@@ -147,12 +202,37 @@ public class CloudControlService {
                 return d;
             }
         }
+        // CreateResource provisions the whole CFN type set while the read side lists six types, so
+        // fall back to what the create recorded — otherwise a successful create is unreadable.
+        CreatedResource state = created.get(createdKey(region, typeName, identifier));
+        if (state != null) {
+            return new ResourceDescription(identifier, state.model());
+        }
         throw new AwsException("ResourceNotFoundException",
                 "Resource " + identifier + " of type " + typeName + " was not found.", 404);
     }
 
+    /**
+     * Stores a request's latest state, evicting the oldest finished tokens once the map grows past
+     * {@link #MAX_RETAINED_REQUESTS}. In-flight tokens are never evicted — a client still polling
+     * must not get RequestTokenNotFound.
+     */
     private ProgressEvent record(ProgressEvent event) {
-        requests.put(event.requestToken(), event);
+        if (requests.put(event.requestToken(), event) == null) {
+            requestOrder.add(event.requestToken());
+        }
+        while (requests.size() > MAX_RETAINED_REQUESTS) {
+            String oldest = requestOrder.poll();
+            if (oldest == null) {
+                break;
+            }
+            ProgressEvent existing = requests.get(oldest);
+            if (existing != null && "IN_PROGRESS".equals(existing.operationStatus())) {
+                requestOrder.add(oldest); // still running — keep it and move on
+                break;
+            }
+            requests.remove(oldest);
+        }
         return event;
     }
 

@@ -141,6 +141,68 @@ class CloudControlIntegrationTest {
         assertListed("AWS::EC2::VPC", identifier, "VpcId", ct);
     }
 
+    @Test
+    void getResourceReadsBackATypeTheReadSideDoesNotList() throws InterruptedException {
+        String ct = "application/x-amz-json-1.0";
+        // AWS::EC2::InternetGateway is provisionable but not one of the listed types, so before
+        // the create-time record existed this GetResource returned ResourceNotFoundException.
+        String token = given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.CreateResource")
+                .body("{\"TypeName\":\"AWS::EC2::InternetGateway\",\"DesiredState\":\"{}\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("ProgressEvent.RequestToken");
+
+        String identifier = awaitIdentifier(token, ct);
+        assertThat(identifier, containsString("igw-"));
+
+        String body = given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.GetResource")
+                .body("{\"TypeName\":\"AWS::EC2::InternetGateway\",\"Identifier\":\"" + identifier + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().asString();
+
+        assertThat(body, containsString(identifier));
+    }
+
+    @Test
+    void deleteResourceReportsFailureWhenItWouldSilentlyNoOp() {
+        String ct = "application/x-amz-json-1.0";
+        // An inline policy's delete needs the principals recorded at create time. Cloud Control
+        // never created this one, so the delete would do nothing — it must not report SUCCESS.
+        given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.DeleteResource")
+                .body("{\"TypeName\":\"AWS::IAM::Policy\",\"Identifier\":\"never-created\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("ProgressEvent.OperationStatus", org.hamcrest.Matchers.equalTo("FAILED"));
+    }
+
+    private String awaitIdentifier(String token, String ct) throws InterruptedException {
+        for (int i = 0; i < 20; i++) {
+            var pe = given()
+                    .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                    .contentType(ct)
+                    .header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus")
+                    .body("{\"RequestToken\":\"" + token + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract();
+            if ("SUCCESS".equals(pe.path("ProgressEvent.OperationStatus"))) {
+                return pe.path("ProgressEvent.Identifier");
+            }
+            Thread.sleep(100);
+        }
+        return null;
+    }
+
     private void assertListed(String typeName, String identifier, String propertyName) {
         assertListed(typeName, identifier, propertyName, "application/x-amz-json-1.1");
     }

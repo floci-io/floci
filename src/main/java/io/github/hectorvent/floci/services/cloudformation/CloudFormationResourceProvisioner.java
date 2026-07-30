@@ -414,10 +414,20 @@ public class CloudFormationResourceProvisioner {
 
     /** Delete a resource by type + physical id — the Cloud Control {@code DeleteResource} path. */
     public void deleteStandalone(String resourceType, String identifier, String region) {
+        deleteStandalone(resourceType, identifier, region, Map.of());
+    }
+
+    /**
+     * As above, with the attributes recorded when the resource was created. Custom resources, EKS
+     * nodegroups and IAM inline policies cannot be deleted from type and physical id alone, so
+     * without these their delete silently no-ops.
+     */
+    public void deleteStandalone(String resourceType, String identifier, String region,
+                                 Map<String, String> attributes) {
         StackResource resource = new StackResource();
         resource.setResourceType(resourceType);
         resource.setPhysicalId(identifier);
-        resource.setAttributes(new HashMap<>());
+        resource.setAttributes(new HashMap<>(attributes == null ? Map.of() : attributes));
         delete(resource, region);
     }
 
