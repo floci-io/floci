@@ -93,6 +93,17 @@ All other resource types are accepted without error and assigned a synthetic phy
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 
+## RDS Credential Dynamic References
+
+`AWS::RDS::DBInstance` and `AWS::RDS::DBCluster` resolve CloudFormation dynamic
+references in `MasterUsername` and `MasterUserPassword` during resource creation:
+
+- `secretsmanager` references support whole secret strings, JSON keys, version stages, and version IDs.
+- `ssm` references accept `String` and `StringList` parameters, using either the latest value or an explicit positive version.
+- `ssm-secure` references require a `SecureString` parameter and are supported only for `MasterUserPassword`, matching the AWS resource-property allowlist.
+
+Dynamic-reference expansion is currently scoped to these RDS credential properties.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace
