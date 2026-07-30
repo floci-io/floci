@@ -615,6 +615,10 @@ class IamServiceTest {
         IamPolicy bedrock = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
         assertEquals("AmazonBedrockFullAccess", bedrock.getPolicyName());
         assertEquals("/", bedrock.getPath());
+
+        IamPolicy bedrockReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockReadOnly");
+        assertEquals("AmazonBedrockReadOnly", bedrockReadOnly.getPolicyName());
+        assertEquals("/", bedrockReadOnly.getPath());
     }
 
     @Test

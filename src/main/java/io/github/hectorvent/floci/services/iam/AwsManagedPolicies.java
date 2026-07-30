@@ -152,9 +152,10 @@ final class AwsManagedPolicies {
 
         // Amazon Bedrock policies
         new ManagedPolicyDef("AmazonBedrockFullAccess", "/",
-                "Provides full access to Amazon Bedrock as well as limited access to related services."),
+                "Provides full access to Amazon Bedrock as well as limited access to related services "
+                + "that are required by it"),
         new ManagedPolicyDef("AmazonBedrockReadOnly", "/",
-                "Provides read-only access to Amazon Bedrock as well as limited access to related services."),
+                "Provides read only access to Amazon Bedrock"),
         new ManagedPolicyDef("AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy", "/",
                 "Provides Bedrock Model inference permissions to Bedrock agent core memory."),
 
