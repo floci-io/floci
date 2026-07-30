@@ -577,6 +577,29 @@ public class AutoScalingService {
         hooks.remove(hookKey(region, asgName, hookName));
     }
 
+    /**
+     * Deletes every hook with this name in the region, whichever group owns it. Callers that only
+     * hold the hook name use this — the CloudFormation delete path is keyed by physical id, and a
+     * lifecycle hook's physical id is its name, not its group.
+     */
+    public void deleteLifecycleHookByName(String region, String hookName) {
+        if (hookName == null) {
+            return;
+        }
+        List<String> keys = new ArrayList<>();
+        for (Map.Entry<String, LifecycleHook> entry : hooks.entrySet()) {
+            LifecycleHook hook = entry.getValue();
+            if (hook == null || !hookName.equals(hook.getLifecycleHookName())) {
+                continue;
+            }
+            if (region != null && !entry.getKey().startsWith(region + "::")) {
+                continue;
+            }
+            keys.add(entry.getKey());
+        }
+        keys.forEach(hooks::remove);
+    }
+
     public List<LifecycleHook> describeLifecycleHooks(String region, String asgName, List<String> hookNames) {
         requireGroup(region, asgName);
         List<LifecycleHook> result = hooks.values().stream()
