@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
@@ -18,7 +19,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -88,6 +91,75 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         verify(ec2).createLaunchTemplate(eq("us-east-1"),
                 org.mockito.ArgumentMatchers.matches("my-stack-Lt-[0-9a-f]{12}"),
                 isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull());
+    }
+
+    @Test
+    void updateWithTheSameNamePublishesAVersionInsteadOfANewTemplate() {
+        // Creating unconditionally hit InvalidLaunchTemplateName.AlreadyExistsException for an
+        // explicitly named template.
+        LaunchTemplate existing = template("lt-abc123");
+        existing.setLaunchTemplateName("my-lt");
+        when(ec2.describeLaunchTemplates(eq("us-east-1"), eq(List.of("lt-abc123")), eq(List.of()), any()))
+                .thenReturn(List.of(existing));
+        when(ec2.createLaunchTemplateVersion(eq("us-east-1"), eq("lt-abc123"), isNull(), isNull(),
+                eq("ami-updated"), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(template("lt-abc123"));
+
+        ObjectNode props = mapper.createObjectNode().put("LaunchTemplateName", "my-lt");
+        props.set("LaunchTemplateData", mapper.createObjectNode().put("ImageId", "ami-updated"));
+        StackResource r = resource("Lt");
+        r.setPhysicalId("lt-abc123");
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("lt-abc123", r.getPhysicalId());
+        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).deleteLaunchTemplate(any(), any(), any());
+    }
+
+    @Test
+    void updateOfAnUnnamedTemplateKeepsItsGeneratedName() {
+        // Regenerating the name on every update minted a second template and orphaned the first.
+        LaunchTemplate existing = template("lt-gen");
+        existing.setLaunchTemplateName("my-stack-Lt-0123456789ab");
+        when(ec2.describeLaunchTemplates(eq("us-east-1"), eq(List.of("lt-gen")), eq(List.of()), any()))
+                .thenReturn(List.of(existing));
+        when(ec2.createLaunchTemplateVersion(eq("us-east-1"), eq("lt-gen"), isNull(), isNull(),
+                any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(template("lt-gen"));
+
+        StackResource r = resource("Lt");
+        r.setPhysicalId("lt-gen");
+
+        provisioner.provision(r, mapper.createObjectNode(), ctx());
+
+        assertEquals("lt-gen", r.getPhysicalId());
+        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void renamingReplacesTheTemplateAndRemovesTheOldOne() {
+        LaunchTemplate existing = template("lt-old");
+        existing.setLaunchTemplateName("old-name");
+        when(ec2.describeLaunchTemplates(eq("us-east-1"), eq(List.of("lt-old")), eq(List.of()), any()))
+                .thenReturn(List.of(existing));
+        when(ec2.createLaunchTemplate(eq("us-east-1"), eq("new-name"), any(), any(), any(),
+                any(), any(), any(), any(), any(), any()))
+                .thenReturn(template("lt-new"));
+
+        StackResource r = resource("Lt");
+        r.setPhysicalId("lt-old");
+
+        provisioner.provision(r, mapper.createObjectNode().put("LaunchTemplateName", "new-name"), ctx());
+
+        assertEquals("lt-new", r.getPhysicalId());
+        // Created before the old one is dropped, so a failed create leaves the original intact.
+        InOrder order = inOrder(ec2);
+        order.verify(ec2).createLaunchTemplate(eq("us-east-1"), eq("new-name"), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+        order.verify(ec2).deleteLaunchTemplate("us-east-1", "lt-old", null);
     }
 
     @Test
