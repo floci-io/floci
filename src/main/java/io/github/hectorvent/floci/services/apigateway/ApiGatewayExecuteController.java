@@ -706,14 +706,19 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private void putSingleValueHeaders(ObjectNode event, HttpHeaders headers) {
+    // Package-private for unit testing (see ApiGatewayExecuteControllerTest).
+    void putSingleValueHeaders(ObjectNode event, HttpHeaders headers) {
         ObjectNode headersNode = event.putObject("headers");
         headers.getRequestHeaders().forEach((name, values) -> {
-            if (!values.isEmpty()) headersNode.put(name, values.get(0));
+            // AWS collapses duplicate request headers to the LAST value in the single-value `headers`
+            // map (multiValueHeaders keeps every value). Taking the first value diverged from AWS.
+            if (!values.isEmpty()) {
+                headersNode.put(name, values.get(values.size() - 1));
+            }
         });
     }
 
-    private void putMultiValueHeaders(ObjectNode event, HttpHeaders headers) {
+    void putMultiValueHeaders(ObjectNode event, HttpHeaders headers) {
         ObjectNode mvHeaders = event.putObject("multiValueHeaders");
         headers.getRequestHeaders().forEach((name, values) -> {
             ArrayNode arr = mvHeaders.putArray(name);
