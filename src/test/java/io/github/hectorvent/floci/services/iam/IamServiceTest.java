@@ -590,6 +590,12 @@ class IamServiceTest {
         assertTrue(admin.getPolicyId().startsWith("ANPA"));
         assertEquals("v1", admin.getDefaultVersionId());
 
+        // Attached by the roles `cdk bootstrap` creates; without it CDKToolkit rolls back.
+        IamPolicy cfnReadOnly = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess");
+        assertEquals("AWSCloudFormationReadOnlyAccess", cfnReadOnly.getPolicyName());
+        assertEquals("/", cfnReadOnly.getPath());
+
         IamPolicy lambda = iamService.getPolicy(
                 "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
         assertEquals("AWSLambdaBasicExecutionRole", lambda.getPolicyName());
