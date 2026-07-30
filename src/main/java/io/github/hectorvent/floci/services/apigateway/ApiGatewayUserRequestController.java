@@ -71,4 +71,13 @@ public class ApiGatewayUserRequestController {
                                 byte[] body) {
         return executeController.dispatch("PATCH", apiId, stageName, proxy, headers, uriInfo, body);
     }
+
+    @OPTIONS
+    @Path("/{proxy: .*}")
+    public Response handleOptions(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                  @PathParam("apiId") String apiId,
+                                  @PathParam("stageName") String stageName,
+                                  @PathParam("proxy") String proxy) {
+        return executeController.dispatch("OPTIONS", apiId, stageName, proxy, headers, uriInfo, null);
+    }
 }
