@@ -247,6 +247,18 @@ class S3MultipartIntegrationTest {
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"));
 
+        // Percent-encoded bucket/key separator: the AWS SDK for .NET encodes the whole
+        // copy source, so the header carries no literal slash.
+        given()
+            .header("x-amz-copy-source", BUCKET + "%2Fsource-for-copy.bin")
+            .header("x-amz-copy-source-range", "bytes=2-5")
+        .when()
+            .put("/" + BUCKET + "/copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=3")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CopyPartResult"))
+            .body(containsString("<ETag>"));
+
         // Complete the upload
         String completeXml = """
                 <CompleteMultipartUpload>
