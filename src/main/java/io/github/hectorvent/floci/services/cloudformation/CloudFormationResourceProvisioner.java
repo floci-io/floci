@@ -339,12 +339,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
-                case "AWS::EC2::NetworkAcl" ->
-                        provisionNetworkAcl(resource, properties, engine, region);
-                case "AWS::EC2::NetworkAclEntry" ->
-                        provisionNetworkAclEntry(resource, properties, engine, region);
-                case "AWS::EC2::SubnetNetworkAclAssociation" ->
-                        provisionSubnetNetworkAclAssociation(resource, properties, engine, region);
                 case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
                 case "AWS::EC2::SubnetRouteTableAssociation" ->
                         provisionSubnetRouteTableAssociation(resource, properties, engine, region);
@@ -622,53 +616,6 @@ public class CloudFormationResourceProvisioner {
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }
-    }
-
-    private void provisionNetworkAcl(StackResource r, JsonNode props,
-                                     CloudFormationTemplateEngine engine, String region) {
-        String vpcId = resolveOptional(props, "VpcId", engine);
-        var acl = ec2Service.createNetworkAcl(region, vpcId);
-        r.setPhysicalId(acl.getNetworkAclId());
-        r.getAttributes().put("Id", acl.getNetworkAclId());
-    }
-
-    private void provisionNetworkAclEntry(StackResource r, JsonNode props,
-                                          CloudFormationTemplateEngine engine, String region) {
-        String aclId = resolveOptional(props, "NetworkAclId", engine);
-        int ruleNumber = props != null ? props.path("RuleNumber").asInt(100) : 100;
-        boolean egress = props != null && props.path("Egress").asBoolean(false);
-        JsonNode portRange = props != null ? props.path("PortRange") : null;
-        Integer from = portRange != null && portRange.hasNonNull("From") ? portRange.get("From").asInt() : null;
-        Integer to = portRange != null && portRange.hasNonNull("To") ? portRange.get("To").asInt() : null;
-        String protocol = resolveOptional(props, "Protocol", engine);
-        ec2Service.createNetworkAclEntry(region, aclId, ruleNumber,
-                protocol != null ? protocol : "-1",
-                resolveOptional(props, "RuleAction", engine),
-                egress,
-                resolveOptional(props, "CidrBlock", engine),
-                from, to, false);
-        r.setPhysicalId(aclId + "|" + ruleNumber + "|" + (egress ? "egress" : "ingress"));
-    }
-
-    private void provisionSubnetNetworkAclAssociation(StackResource r, JsonNode props,
-                                                      CloudFormationTemplateEngine engine, String region) {
-        String subnetId = resolveOptional(props, "SubnetId", engine);
-        String aclId = resolveOptional(props, "NetworkAclId", engine);
-        // CFN semantics: move the subnet from its current (default) ACL onto the
-        // given one. Find the subnet's live association, then replace it.
-        String associationId = ec2Service.describeNetworkAcls(region, List.of(), Map.of()).stream()
-                .flatMap(acl -> acl.getAssociations().stream())
-                .filter(a -> subnetId != null && subnetId.equals(a.getSubnetId()))
-                .map(a -> a.getNetworkAclAssociationId())
-                .findFirst()
-                .orElse(null);
-        if (associationId == null) {
-            throw new IllegalStateException(
-                    "No network ACL association found for subnet " + subnetId);
-        }
-        var assoc = ec2Service.replaceNetworkAclAssociation(region, associationId, aclId);
-        r.setPhysicalId(assoc.getNetworkAclAssociationId());
-        r.getAttributes().put("AssociationId", assoc.getNetworkAclAssociationId());
     }
 
     private void provisionInternetGateway(StackResource r, String region) {

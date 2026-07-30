@@ -20,7 +20,7 @@ class CloudFormationNetworkAclIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
 
     @Test
-    void aclEntryAndSubnetAssociationProvision() {
+    void aclEntryAndSubnetAssociationProvision() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-nacl-stack-" + suffix;
 
@@ -99,6 +99,38 @@ class CloudFormationNetworkAclIntegrationTest {
             .body(containsString("<ruleNumber>100</ruleNumber>"))
             .body(containsString("deny"))
             .body(containsString(subnetId));
+
+        // Deleting the stack reverts the subnet to the default ACL and removes the custom one.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        awaitNetworkAclGone(aclId);
+    }
+
+    /** DeleteStack runs asynchronously; poll until the custom ACL disappears. */
+    private static void awaitNetworkAclGone(String aclId) throws InterruptedException {
+        for (int i = 0; i < 100; i++) {
+            String acls = given()
+                .formParam("Action", "DescribeNetworkAcls")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+            if (!acls.contains(aclId)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("Timed out waiting for network ACL " + aclId + " to be deleted");
     }
 
     private static String between(String haystack, String open, String close) {
