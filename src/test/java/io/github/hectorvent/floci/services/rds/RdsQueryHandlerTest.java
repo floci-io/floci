@@ -13,11 +13,14 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -161,6 +164,131 @@ class RdsQueryHandlerTest {
         handler.handle("DescribeDBClusters", p);
 
         verify(service).listDbClusters("mycluster");
+    }
+
+    @Test
+    void describeDbClusters_emitsServerlessV2ScalingConfiguration() {
+        DbCluster cluster = makeCluster("mycluster");
+        cluster.setServerlessV2MinCapacity(0.0);
+        cluster.setServerlessV2MaxCapacity(16.0);
+        cluster.setServerlessV2SecondsUntilAutoPause(600);
+        when(service.listDbClusters(null)).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ServerlessV2ScalingConfiguration>"), body);
+        assertTrue(body.contains("<MinCapacity>0.0</MinCapacity>"), body);
+        assertTrue(body.contains("<MaxCapacity>16.0</MaxCapacity>"), body);
+        assertTrue(body.contains("<SecondsUntilAutoPause>600</SecondsUntilAutoPause>"), body);
+    }
+
+    @Test
+    void describeDbClusters_omitsServerlessV2WhenUnset() {
+        when(service.listDbClusters(null)).thenReturn(List.of(makeCluster("mycluster")));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        String body = (String) response.getEntity();
+        assertFalse(body.contains("ServerlessV2ScalingConfiguration"),
+                "a provisioned (non-Serverless-v2) cluster must not emit the scaling block");
+    }
+
+    @Test
+    void describeDbClusters_omitsAutoPauseIntervalWhenMinimumIsNonzero() {
+        DbCluster cluster = makeCluster("mycluster");
+        cluster.setServerlessV2MinCapacity(0.5);
+        cluster.setServerlessV2MaxCapacity(16.0);
+        when(service.listDbClusters(null)).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ServerlessV2ScalingConfiguration>"), body);
+        assertFalse(body.contains("<SecondsUntilAutoPause>"), body);
+    }
+
+    @Test
+    void createDbCluster_parsesServerlessV2ScalingConfiguration() {
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBClusterIdentifier", "cluster1");
+        p.putSingle("Engine", "aurora-postgresql");
+        p.putSingle("ServerlessV2ScalingConfiguration.MinCapacity", "0");
+        p.putSingle("ServerlessV2ScalingConfiguration.MaxCapacity", "16");
+        p.putSingle("ServerlessV2ScalingConfiguration.SecondsUntilAutoPause", "600");
+
+        ArgumentCaptor<Double> min = ArgumentCaptor.forClass(Double.class);
+        ArgumentCaptor<Double> max = ArgumentCaptor.forClass(Double.class);
+        ArgumentCaptor<Integer> secondsUntilAutoPause = ArgumentCaptor.forClass(Integer.class);
+        when(service.createDbCluster(eq("cluster1"), any(), any(), any(), any(), any(), anyBoolean(),
+                any(), any(), any(), anyBoolean(), any(), min.capture(), max.capture(),
+                secondsUntilAutoPause.capture()))
+                .thenReturn(makeCluster("cluster1"));
+
+        handler.handle("CreateDBCluster", p);
+
+        assertEquals(0.0, min.getValue());
+        assertEquals(16.0, max.getValue());
+        assertEquals(600, secondsUntilAutoPause.getValue());
+    }
+
+    @Test
+    void modifyDbCluster_parsesAndReturnsServerlessV2ScalingConfiguration() {
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBClusterIdentifier", "cluster1");
+        p.putSingle("ServerlessV2ScalingConfiguration.MinCapacity", "0");
+        p.putSingle("ServerlessV2ScalingConfiguration.MaxCapacity", "32");
+        p.putSingle("ServerlessV2ScalingConfiguration.SecondsUntilAutoPause", "900");
+
+        DbCluster cluster = makeCluster("cluster1");
+        cluster.setServerlessV2MinCapacity(0.0);
+        cluster.setServerlessV2MaxCapacity(32.0);
+        cluster.setServerlessV2SecondsUntilAutoPause(900);
+        when(service.modifyDbCluster("cluster1", null, null, 0.0, 32.0, 900))
+                .thenReturn(cluster);
+
+        Response response = handler.handle("ModifyDBCluster", p);
+
+        verify(service).modifyDbCluster("cluster1", null, null, 0.0, 32.0, 900);
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<MinCapacity>0.0</MinCapacity>"), body);
+        assertTrue(body.contains("<MaxCapacity>32.0</MaxCapacity>"), body);
+        assertTrue(body.contains("<SecondsUntilAutoPause>900</SecondsUntilAutoPause>"), body);
+    }
+
+    @Test
+    void modifyDbCluster_forwardsPartialServerlessV2ScalingConfiguration() {
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBClusterIdentifier", "cluster1");
+        p.putSingle("ServerlessV2ScalingConfiguration.SecondsUntilAutoPause", "600");
+
+        DbCluster cluster = makeCluster("cluster1");
+        cluster.setServerlessV2MinCapacity(0.0);
+        cluster.setServerlessV2MaxCapacity(16.0);
+        cluster.setServerlessV2SecondsUntilAutoPause(600);
+        when(service.modifyDbCluster("cluster1", null, null, null, null, 600))
+                .thenReturn(cluster);
+
+        Response response = handler.handle("ModifyDBCluster", p);
+
+        assertEquals(200, response.getStatus());
+        verify(service).modifyDbCluster("cluster1", null, null, null, null, 600);
+    }
+
+    @Test
+    void createDbCluster_rejectsNonIntegerAutoPauseInterval() {
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBClusterIdentifier", "cluster1");
+        p.putSingle("Engine", "aurora-postgresql");
+        p.putSingle("ServerlessV2ScalingConfiguration.MinCapacity", "0");
+        p.putSingle("ServerlessV2ScalingConfiguration.MaxCapacity", "16");
+        p.putSingle("ServerlessV2ScalingConfiguration.SecondsUntilAutoPause", "300.5");
+
+        Response response = handler.handle("CreateDBCluster", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
+        verifyNoInteractions(service);
     }
 
     @Test
