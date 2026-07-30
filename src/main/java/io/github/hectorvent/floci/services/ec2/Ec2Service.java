@@ -2026,6 +2026,14 @@ public class Ec2Service implements ContainerTeardown {
                 || (owners.contains("self") && accountId.equals(image.getOwnerId()));
     }
 
+    /**
+     * Whether an image satisfies a DescribeImages filter set. Exposed so a synthesized lookup image
+     * can be checked against the request that produced it before being returned.
+     */
+    public boolean imageMatchesFilters(Image image, Map<String, List<String>> filters) {
+        return matchesRegisteredImageFilters(image, filters);
+    }
+
     private boolean matchesRegisteredImageFilters(Image image, Map<String, List<String>> filters) {
         if (filters == null || filters.isEmpty()) {
             return true;
