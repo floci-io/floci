@@ -2214,8 +2214,14 @@ public class Ec2QueryHandler {
         if (rule.getFromPort() != null) xml.elem("fromPort", String.valueOf(rule.getFromPort()));
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
-                .elem("cidrIpv6", rule.getCidrIpv6())
-                .elem("description", rule.getDescription())
+                .elem("cidrIpv6", rule.getCidrIpv6());
+        if (rule.getReferencedGroupId() != null) {
+            xml.start("referencedGroupInfo")
+                    .elem("groupId", rule.getReferencedGroupId())
+                    .elem("userId", rule.getGroupOwnerId())
+                    .end("referencedGroupInfo");
+        }
+        xml.elem("description", rule.getDescription())
                 .raw(tagSetXml(rule.getTags()));
         return xml.build();
     }
