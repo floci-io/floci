@@ -45,6 +45,7 @@ import software.amazon.awssdk.services.iam.model.ListAttachedRolePoliciesRequest
 import software.amazon.awssdk.services.iam.model.ListAttachedRolePoliciesResponse;
 import software.amazon.awssdk.services.iam.model.ListAttachedUserPoliciesRequest;
 import software.amazon.awssdk.services.iam.model.ListAttachedUserPoliciesResponse;
+import software.amazon.awssdk.services.iam.model.ListEntitiesForPolicyResponse;
 import software.amazon.awssdk.services.iam.model.ListGroupsForUserRequest;
 import software.amazon.awssdk.services.iam.model.ListGroupsForUserResponse;
 import software.amazon.awssdk.services.iam.model.ListInstanceProfilesResponse;
@@ -112,6 +113,13 @@ class IamTest {
                     iam.detachUserPolicy(DetachUserPolicyRequest.builder()
                             .userName(USER_NAME).policyArn(policyArn).build());
                 } catch (Exception ignored) {}
+                try {
+                    iam.detachGroupPolicy(request -> request
+                            .groupName(GROUP_NAME).policyArn(policyArn));
+                } catch (Exception cleanupError) {
+                    System.err.printf("Could not detach IAM test group policy during cleanup: %s%n",
+                            cleanupError.getMessage());
+                }
             }
             try {
                 iam.deleteRole(DeleteRoleRequest.builder().roleName(ROLE_NAME).build());
@@ -374,6 +382,32 @@ class IamTest {
 
         assertThat(response.attachedPolicies())
                 .anyMatch(p -> policyArn.equals(p.policyArn()));
+    }
+
+    @Test
+    @Order(100)
+    void listEntitiesForPolicy() {
+        Assumptions.assumeTrue(policyArn != null);
+
+        iam.attachGroupPolicy(request -> request
+                .groupName(GROUP_NAME).policyArn(policyArn));
+
+        ListEntitiesForPolicyResponse response = iam.listEntitiesForPolicy(request -> request
+                .policyArn(policyArn));
+
+        assertThat(response.policyRoles()).anySatisfy(role -> {
+            assertThat(role.roleName()).isEqualTo(ROLE_NAME);
+            assertThat(role.roleId()).isNotBlank();
+        });
+        assertThat(response.policyUsers()).anySatisfy(user -> {
+            assertThat(user.userName()).isEqualTo(USER_NAME);
+            assertThat(user.userId()).isNotBlank();
+        });
+        assertThat(response.policyGroups()).anySatisfy(group -> {
+            assertThat(group.groupName()).isEqualTo(GROUP_NAME);
+            assertThat(group.groupId()).isNotBlank();
+        });
+        assertThat(response.isTruncated()).isFalse();
     }
 
     @Test
