@@ -274,12 +274,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" ->
                         provisionDynamoTable(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
-                case "AWS::Lambda::Permission" ->
-                        provisionLambdaPermission(resource, properties, engine, region);
-                case "AWS::Lambda::Version" ->
-                        provisionLambdaVersion(resource, properties, engine, region);
-                case "AWS::Lambda::Alias" ->
-                        provisionLambdaAlias(resource, properties, engine, region);
                 case "AWS::Lambda::LayerVersion" ->
                         provisionLambdaLayerVersion(resource, properties, engine, region, stackName);
                 case "AWS::IAM::Role" -> provisionIamRole(resource, properties, engine, accountId, stackName);
@@ -622,44 +616,6 @@ public class CloudFormationResourceProvisioner {
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }
-    }
-
-    private void provisionLambdaPermission(StackResource r, JsonNode props,
-                                           CloudFormationTemplateEngine engine, String region) {
-        String functionName = resolveOptional(props, "FunctionName", engine);
-        java.util.Map<String, Object> request = new java.util.HashMap<>();
-        request.put("StatementId", r.getLogicalId());
-        request.put("Action", resolveOptional(props, "Action", engine));
-        request.put("Principal", resolveOptional(props, "Principal", engine));
-        String sourceArn = resolveOptional(props, "SourceArn", engine);
-        if (sourceArn != null && !sourceArn.isBlank()) request.put("SourceArn", sourceArn);
-        String sourceAccount = resolveOptional(props, "SourceAccount", engine);
-        if (sourceAccount != null && !sourceAccount.isBlank()) request.put("SourceAccount", sourceAccount);
-        lambdaService.addPermission(region, functionName, request);
-        r.setPhysicalId(r.getLogicalId());
-    }
-
-    private void provisionLambdaVersion(StackResource r, JsonNode props,
-                                        CloudFormationTemplateEngine engine, String region) {
-        String functionName = resolveOptional(props, "FunctionName", engine);
-        var version = lambdaService.publishVersion(region, functionName,
-                resolveOptional(props, "Description", engine));
-        // Ref on AWS::Lambda::Version is the version-qualified function ARN.
-        r.setPhysicalId(version.getFunctionArn());
-        r.getAttributes().put("Version", version.getVersion());
-        r.getAttributes().put("FunctionArn", version.getFunctionArn());
-    }
-
-    private void provisionLambdaAlias(StackResource r, JsonNode props,
-                                      CloudFormationTemplateEngine engine, String region) {
-        String functionName = resolveOptional(props, "FunctionName", engine);
-        String aliasName = resolveOptional(props, "Name", engine);
-        String functionVersion = resolveOptional(props, "FunctionVersion", engine);
-        var alias = lambdaService.createAlias(region, functionName, aliasName,
-                functionVersion != null ? functionVersion : "$LATEST",
-                resolveOptional(props, "Description", engine), null);
-        r.setPhysicalId(alias.getAliasArn());
-        r.getAttributes().put("AliasArn", alias.getAliasArn());
     }
 
     private void provisionInternetGateway(StackResource r, String region) {

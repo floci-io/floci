@@ -954,6 +954,21 @@ public class LambdaService {
         return functionStore.listVersions(region, fn.getFunctionName());
     }
 
+    /**
+     * Deletes a single published version of a function (DeleteFunction with a numeric qualifier),
+     * leaving {@code $LATEST} and every other version untouched. Deleting an already-gone version
+     * is a no-op; a missing function is a 404.
+     */
+    public void deleteVersion(String region, String functionName, String version) {
+        if (version == null || version.isBlank() || "$LATEST".equals(version)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Version must be a published version number, got: " + version, 400);
+        }
+        LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
+        functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        LOG.infov("Deleted version {0} of function {1}", version, fn.getFunctionName());
+    }
+
     // ──────────────────────────── Aliases ────────────────────────────
 
     public LambdaAlias createAlias(String region, String functionName, String aliasName,
