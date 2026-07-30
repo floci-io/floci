@@ -24,6 +24,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Event;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
@@ -489,6 +490,75 @@ public class S3Service implements Resettable {
         authorizeObjectRead(bucketName, key, versionId, action, authorization);
     }
 
+    public void authorizeAnonymousGetObject(String bucketName, String key) {
+        authorizeGetObject(bucketName, key, null, RequestAuthorization.unsigned());
+    }
+
+    public void authorizeCloudFrontOacGetObject(
+            String bucketName, String key, String distributionArn) {
+        authorizeCloudFrontGetObject(
+                bucketName,
+                key,
+                "Service",
+                "cloudfront.amazonaws.com",
+                Map.of("AWS:SourceArn", distributionArn),
+                null);
+    }
+
+    public void authorizeCloudFrontOaiGetObject(
+            String bucketName, String key, String originAccessIdentityId,
+            String canonicalUserId) {
+        authorizeCloudFrontGetObject(
+                bucketName,
+                key,
+                "AWS",
+                "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity "
+                        + originAccessIdentityId,
+                Map.of(),
+                canonicalUserId);
+    }
+
+    public void authorizeCloudFrontViewerGetObject(
+            String bucketName, String key, String viewerAuthorization) {
+        RequestAuthorization authorization =
+                S3RequestAuthorizationParser.parseIfRequired(
+                        enforceAuth, viewerAuthorization, new MultivaluedHashMap<>());
+        authorizeGetObject(bucketName, key, null, authorization);
+    }
+
+    private void authorizeCloudFrontGetObject(
+            String bucketName,
+            String key,
+            String principalType,
+            String principalValue,
+            Map<String, String> context,
+            String canonicalUserId) {
+        if (!enforceAuth) {
+            return;
+        }
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() ->
+                        new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        String resourceArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        S3PublicAccessEvaluator.PublicAccessDecision decision =
+                S3PublicAccessEvaluator.principalPolicyDecision(
+                        objectMapper,
+                        bucket.getPolicy(),
+                        principalType,
+                        principalValue,
+                        "s3:GetObject",
+                        resourceArn,
+                        context);
+        if (decision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+        if (decision == S3PublicAccessEvaluator.PublicAccessDecision.ALLOW
+                || canonicalUserObjectAclAllowsRead(bucketName, key, canonicalUserId)) {
+            return;
+        }
+        throw new AwsException("AccessDenied", "Access Denied", 403);
+    }
+
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
         String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
@@ -582,6 +652,27 @@ public class S3Service implements Resettable {
                 .filter(object -> !object.isDeleteMarker())
                 .map(S3Object::getAcl)
                 .map(S3AclPublicAccessEvaluator::aclAllowsPublicRead)
+                .orElse(false);
+    }
+
+    private boolean canonicalUserObjectAclAllowsRead(
+            String bucketName, String key, String canonicalUserId) {
+        if (canonicalUserId == null || canonicalUserId.isBlank()) {
+            return false;
+        }
+        return objectStore.get(objectKey(bucketName, key))
+                .filter(object -> !object.isDeleteMarker())
+                .map(S3Object::getAcl)
+                .map(acl -> {
+                    try {
+                        return S3AclPolicy.parse(acl).grants().stream()
+                                .anyMatch(grant ->
+                                        grant.allowsCanonicalUserRead(canonicalUserId));
+                    } catch (S3AclPolicy.AclParseException e) {
+                        LOG.debugv(e, "Failed to parse S3 ACL for CloudFront OAI access");
+                        return false;
+                    }
+                })
                 .orElse(false);
     }
 
