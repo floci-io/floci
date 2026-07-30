@@ -1347,8 +1347,12 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body(containsString(
                 "<serviceName>com.amazonaws.us-east-1.ecr.api</serviceName><serviceType><item><serviceType>Interface</serviceType>"))
+            // S3 carries both offerings, in that order.
             .body(containsString(
-                "<serviceName>com.amazonaws.us-east-1.s3</serviceName><serviceType><item><serviceType>Gateway</serviceType>"))
+                "<serviceName>com.amazonaws.us-east-1.s3</serviceName><serviceType>"
+                + "<item><serviceType>Gateway</serviceType></item>"
+                + "<item><serviceType>Interface</serviceType></item>"
+                + "</serviceType>"))
             .body(containsString("us-east-1a"));
     }
 

@@ -863,12 +863,18 @@ public class Ec2QueryHandler {
         }
         xml.end("serviceNameSet").start("serviceDetailSet");
         for (String full : fullNames) {
-            boolean s3 = full.endsWith(".s3");
+            // S3 is the one service with both offerings, and AWS reports both
+            // types on its single service detail. Everything else is Interface.
+            List<String> serviceTypes = full.endsWith(".s3")
+                    ? List.of("Gateway", "Interface")
+                    : List.of("Interface");
             xml.start("item")
                     .elem("serviceName", full)
-                    .start("serviceType").start("item")
-                        .elem("serviceType", s3 ? "Gateway" : "Interface")
-                    .end("item").end("serviceType")
+                    .start("serviceType");
+            for (String serviceType : serviceTypes) {
+                xml.start("item").elem("serviceType", serviceType).end("item");
+            }
+            xml.end("serviceType")
                     .start("availabilityZoneSet");
             for (String az : azNames) xml.elem("item", az);
             xml.end("availabilityZoneSet")
