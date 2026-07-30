@@ -1510,6 +1510,90 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
+    /**
+     * Removes a single rule by its SecurityGroupRuleId: the stored rule record, then the permission
+     * it describes on the owning group. CloudFormation deletes standalone
+     * {@code AWS::EC2::SecurityGroupIngress}/{@code Egress} resources through here — the
+     * by-permission revoke above matches on protocol and ports alone, so it would also strip the
+     * group's unrelated rules that happen to share them. Returns false when no such rule is
+     * recorded, and succeeds quietly when the group itself is already gone.
+     */
+    public boolean deleteSecurityGroupRule(String region, String securityGroupRuleId) {
+        ensureDefaultResources(region);
+        SecurityGroupRule rule = securityGroupRules.get(key(region, securityGroupRuleId)).orElse(null);
+        if (rule == null) {
+            return false;
+        }
+        securityGroupRules.delete(key(region, securityGroupRuleId));
+        String groupId = rule.getGroupId();
+        if (groupId == null) {
+            return true;
+        }
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = securityGroups.get(key(region, groupId)).orElse(null);
+            if (sg == null) {
+                return true;
+            }
+            List<IpPermission> next = new ArrayList<>(rule.isEgress()
+                    ? sg.getIpPermissionsEgress() : sg.getIpPermissions());
+            if (removeRecordedPermission(next, rule)) {
+                if (rule.isEgress()) {
+                    sg.setIpPermissionsEgress(next);
+                } else {
+                    sg.setIpPermissions(next);
+                }
+                securityGroups.put(key(region, groupId), sg);
+            }
+        }
+        if (!rule.isEgress()) {
+            reconcilePublishedPortsForGroup(region, groupId);
+        }
+        return true;
+    }
+
+    /**
+     * Drops the one permission a rule record describes, or just the one ip range within it when the
+     * permission carries several. Records hold protocol, ports and the ipv4 cidr, so a rule built
+     * from a peer group or an ipv6 cidr can only be matched on protocol and ports: those prefer a
+     * permission with no ipv4 ranges, which is the shape such a rule creates.
+     */
+    private boolean removeRecordedPermission(List<IpPermission> perms, SecurityGroupRule rule) {
+        IpPermission fallback = null;
+        for (IpPermission perm : perms) {
+            if (!Objects.equals(perm.getIpProtocol(), rule.getIpProtocol())
+                    || !Objects.equals(perm.getFromPort(), rule.getFromPort())
+                    || !Objects.equals(perm.getToPort(), rule.getToPort())) {
+                continue;
+            }
+            if (rule.getCidrIpv4() != null) {
+                IpRange match = perm.getIpRanges().stream()
+                        .filter(r -> rule.getCidrIpv4().equals(r.getCidrIp()))
+                        .findFirst().orElse(null);
+                if (match == null) {
+                    continue;
+                }
+                perm.getIpRanges().remove(match);
+                if (perm.getIpRanges().isEmpty() && perm.getIpv6Ranges().isEmpty()
+                        && perm.getUserIdGroupPairs().isEmpty()) {
+                    perms.remove(perm);
+                }
+                return true;
+            }
+            if (perm.getIpRanges().isEmpty()) {
+                perms.remove(perm);
+                return true;
+            }
+            if (fallback == null) {
+                fallback = perm;
+            }
+        }
+        if (fallback != null) {
+            perms.remove(fallback);
+            return true;
+        }
+        return false;
+    }
+
     private SecurityGroup getRequiredSecurityGroup(String region, String groupId) {
         SecurityGroup sg = securityGroups.get(key(region, groupId)).orElse(null);
         if (sg == null)

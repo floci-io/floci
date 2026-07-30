@@ -2689,7 +2689,8 @@ public class Ec2QueryHandler {
             xml.end("ipRanges")
                     .start("ipv6Ranges");
             for (Ipv6Range r : perm.getIpv6Ranges()) {
-                xml.start("item").elem("cidrIpv6", r.getCidrIpv6()).end("item");
+                xml.start("item").elem("cidrIpv6", r.getCidrIpv6())
+                        .elem("description", r.getDescription()).end("item");
             }
             xml.end("ipv6Ranges")
                     .start("groups");
