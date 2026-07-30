@@ -11,6 +11,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -92,6 +93,11 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
 
         Set<String> originalPolicyArns = new HashSet<>(role.getAttachedPolicyArns());
         LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
+        // What the inline policies looked like before this attempt, so a partial write can be put
+        // back. On an update that adopts an existing role these are the values to restore; for a
+        // name this attempt introduced there is no prior value and the policy is removed instead.
+        Map<String, String> originalInlinePolicies = new HashMap<>(role.getInlinePolicies());
+        LinkedHashSet<String> inlineWrittenByThisAttempt = new LinkedHashSet<>();
         try {
             for (String policyArn : managedPolicyArns) {
                 iamService.attachRolePolicy(resolvedRoleName, policyArn);
@@ -99,10 +105,51 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                     attachedByThisAttempt.add(policyArn);
                 }
             }
+
+            // Inline policies run inside the same protected block: a failure here used to leave
+            // the created role, its managed attachments and any earlier inline writes behind,
+            // because rollback only deletes resources that reached CREATE_COMPLETE.
+            if (props != null && props.has("Policies")) {
+                for (JsonNode policy : props.get("Policies")) {
+                    String declaredName = ctx.resolveOptional(policy, "PolicyName");
+                    final String policyName = declaredName == null || declaredName.isBlank()
+                            ? ctx.generatePhysicalName(r.getLogicalId() + "Policy", 128, false)
+                            : declaredName;
+                    JsonNode document = policy.get("PolicyDocument");
+                    if (document == null || document.isNull()) {
+                        // Skipping it and reporting CREATE_COMPLETE without the declared policy is
+                        // the same class of bug as #1952 itself.
+                        throw new AwsException("ValidationError",
+                                "Inline policy '" + policyName + "' on role " + resolvedRoleName
+                                + " has no PolicyDocument.", 400);
+                    }
+                    iamService.putRolePolicy(resolvedRoleName, policyName,
+                            ctx.engine().resolveNode(document).toString());
+                    inlineWrittenByThisAttempt.add(policyName);
+                }
+            }
         } catch (RuntimeException failure) {
+            boolean cleanupSucceeded = true;
+
+            List<String> inlineRollback = new ArrayList<>(inlineWrittenByThisAttempt);
+            Collections.reverse(inlineRollback);
+            for (String policyName : inlineRollback) {
+                String prior = originalInlinePolicies.get(policyName);
+                String cleanupDescription = (prior == null ? "remove" : "restore")
+                        + " inline policy " + policyName + " on role " + resolvedRoleName;
+                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription, () -> {
+                    if (prior == null) {
+                        iamService.deleteRolePolicy(resolvedRoleName, policyName);
+                    } else {
+                        iamService.putRolePolicy(resolvedRoleName, policyName, prior);
+                    }
+                })) {
+                    cleanupSucceeded = false;
+                }
+            }
+
             List<String> rollbackArns = new ArrayList<>(attachedByThisAttempt);
             Collections.reverse(rollbackArns);
-            boolean cleanupSucceeded = true;
             for (String policyArn : rollbackArns) {
                 String cleanupDescription = "detach policy " + policyArn + " from role " + resolvedRoleName;
                 if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
@@ -120,23 +167,6 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
             throw failure;
-        }
-
-        // Create inline policies if specified. Failures propagate: silently
-        // dropping a policy while reporting CREATE_COMPLETE is the bug (#1952).
-        if (props != null && props.has("Policies")) {
-            for (JsonNode policy : props.get("Policies")) {
-                String policyName = ctx.resolveOptional(policy, "PolicyName");
-                if (policyName == null || policyName.isBlank()) {
-                    policyName = ctx.generatePhysicalName(r.getLogicalId() + "Policy", 128, false);
-                }
-                JsonNode document = policy.get("PolicyDocument");
-                if (document == null || document.isNull()) {
-                    continue;
-                }
-                iamService.putRolePolicy(resolvedRoleName, policyName,
-                        ctx.engine().resolveNode(document).toString());
-            }
         }
     }
 

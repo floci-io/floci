@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -116,14 +117,80 @@ class IamRoleCfnProvisionerTest {
     }
 
     @Test
-    void inlinePolicyWithoutADocumentIsSkipped() {
+    void inlinePolicyWithoutADocumentFailsTheResource() {
+        // Skipping it reached CREATE_COMPLETE without the declared policy — the same class of
+        // bug as the silent drop this PR is about.
         stubCreate("app-role");
+        StackResource r = resource();
 
-        provisioner.provision(resource(), props("""
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
                 {"RoleName": "app-role", "Policies": [{"PolicyName": "no-document"}]}
-                """), ctx());
+                """), ctx()));
 
+        assertEquals("ValidationError", failure.getErrorCode());
         verify(iam, never()).putRolePolicy(anyString(), anyString(), anyString());
+        // The role this attempt created is cleaned up rather than left behind.
+        verify(iam).deleteRole("app-role");
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void inlinePolicyFailureRemovesTheRoleAndTheEarlierInlineWrites() {
+        stubCreate("app-role");
+        doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
+                .when(iam).putRolePolicy(eq("app-role"), eq("second"), anyString());
+        StackResource r = resource();
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [
+                    {"PolicyName": "first", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}},
+                    {"PolicyName": "second", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), ctx()));
+
+        // "first" was written by this attempt and had no prior value, so it is removed, and the
+        // role goes with it. Previously both survived a CREATE_FAILED.
+        verify(iam).deleteRolePolicy("app-role", "first");
+        verify(iam).deleteRole("app-role");
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void failedUpdateRestoresTheInlinePolicyItAlreadyOverwrote() {
+        // An update that adopts an existing role must not keep the permissions a half-applied
+        // attempt granted, and must not delete a role it did not create.
+        String priorDocument = "{\"Version\":\"2012-10-17\",\"Statement\":[\"prior\"]}";
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getInlinePolicies().put("first", priorDocument);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+        doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
+                .when(iam).putRolePolicy(eq("app-role"), eq("second"), anyString());
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [
+                    {"PolicyName": "first", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}},
+                    {"PolicyName": "second", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), ctx()));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).putRolePolicy("app-role", "first", EMPTY_TRUST);
+        order.verify(iam).putRolePolicy("app-role", "first", priorDocument);
+        verify(iam, never()).deleteRolePolicy(anyString(), anyString());
+        verify(iam, never()).deleteRole(anyString());
     }
 
     @Test
