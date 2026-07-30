@@ -203,6 +203,62 @@ class CloudControlIntegrationTest {
         return null;
     }
 
+    @Test
+    void listResourcesReportsAnInstancesRuntimeModel() {
+        // Cloud Control reports a resource's current model, not an echo of the desired state, so
+        // an instance has to carry what only the running resource knows — its addresses and the
+        // subnet it landed in. A caller that provisions through Cloud Control and reads back has
+        // no other route to them.
+        String instanceId = given()
+                .formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1")
+                .formParam("MaxCount", "1")
+                .header("Authorization", EC2_AUTH)
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        assertListed("AWS::EC2::Instance", instanceId, "InstanceType");
+
+        // Terminated rather than left running: Ec2IntegrationTest's DescribeNetworkInterfaces
+        // pagination tests assert that the final page carries no nextToken, and they share this
+        // emulator, so an extra live ENI breaks them. TerminateInstances only reaches
+        // shutting-down synchronously — the flip to terminated, which is what those tests filter
+        // on, happens on a background task, so wait for it rather than race it.
+        given()
+                .formParam("Action", "TerminateInstances")
+                .formParam("InstanceId.1", instanceId)
+                .header("Authorization", EC2_AUTH)
+                .when().post("/")
+                .then().statusCode(200);
+        awaitTerminated(instanceId);
+    }
+
+    private void awaitTerminated(String instanceId) {
+        for (int i = 0; i < 100; i++) {
+            String state = given()
+                    .formParam("Action", "DescribeInstances")
+                    .formParam("InstanceId.1", instanceId)
+                    .header("Authorization", EC2_AUTH)
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract().xmlPath()
+                    .getString("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name");
+            if ("terminated".equals(state)) {
+                return;
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted waiting for " + instanceId + " to terminate", e);
+            }
+        }
+        throw new AssertionError(instanceId + " did not reach terminated within 10s");
+    }
+
     private void assertListed(String typeName, String identifier, String propertyName) {
         assertListed(typeName, identifier, propertyName, "application/x-amz-json-1.1");
     }
