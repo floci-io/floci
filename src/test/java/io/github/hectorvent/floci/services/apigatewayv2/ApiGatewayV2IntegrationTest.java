@@ -330,4 +330,86 @@ class ApiGatewayV2IntegrationTest {
                 .then()
                 .statusCode(404);
     }
+
+    // ──────────────────────────── Override IDs ────────────────────────────
+
+    @Test @Order(100)
+    void createApi_deprecatedCustomIdTag_usesTagValueAsApiId() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"custom-id-api","protocolType":"HTTP","tags":{"_custom_id_":"MYV2CUSTOM","env":"test"}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("apiId", equalTo("MYV2CUSTOM"))
+                .body("tags._custom_id_", nullValue())
+                .body("tags.env", equalTo("test"));
+    }
+
+    @Test @Order(101)
+    void createApi_flociOverrideIdTag_usesTagValueAsApiId() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"override-id-api","protocolType":"HTTP","tags":{"floci:override-id":"MYV2OVERRIDE"}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("apiId", equalTo("MYV2OVERRIDE"))
+                .body("tags.'floci:override-id'", nullValue());
+    }
+
+    @Test @Order(102)
+    void createApi_blankOverrideId_isRejected() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"blank-override","protocolType":"HTTP","tags":{"floci:override-id":"  "}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test @Order(103)
+    void getApi_overrideId_resolvesById() {
+        given()
+                .when().get("/v2/apis/MYV2CUSTOM")
+                .then()
+                .statusCode(200)
+                .body("apiId", equalTo("MYV2CUSTOM"));
+    }
+
+    @Test @Order(104)
+    void tagApi_withOverrideKey_isRejectedAfterCreation() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"floci:override-id":"TOOLATE"}}
+                        """)
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test @Order(105)
+    void tagApi_withDeprecatedCustomIdKey_isRejectedAfterCreation() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"_custom_id_":"TOOLATE"}}
+                        """)
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test @Order(106)
+    void deleteApis_customAndOverrideId() {
+        given().when().delete("/v2/apis/MYV2CUSTOM").then().statusCode(204);
+        given().when().delete("/v2/apis/MYV2OVERRIDE").then().statusCode(204);
+    }
 }
