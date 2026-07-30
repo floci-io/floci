@@ -119,6 +119,91 @@ teardown() {
     [ "$name" = "Bob" ]
 }
 
+@test "DynamoDB: ADD resolves nested placeholder paths" {
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH \
+        --billing-mode PAY_PER_REQUEST >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    aws_cmd dynamodb put-item \
+        --table-name "$TABLE_NAME" \
+        --item '{"pk":{"S":"item-1"},"functionInvocationSummaries":{"M":{"ISA_10136":{"M":{"eventsAvailable":{"N":"0"}}}}}}' >/dev/null
+
+    run aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item-1"}}' \
+        --update-expression 'ADD #fis.#isa.#ea :one' \
+        --expression-attribute-names '{"#fis":"functionInvocationSummaries","#isa":"ISA_10136","#ea":"eventsAvailable"}' \
+        --expression-attribute-values '{":one":{"N":"1"}}'
+    assert_success
+
+    run aws_cmd dynamodb get-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item-1"}}'
+    assert_success
+    nested_counter=$(json_get "$output" '.Item.functionInvocationSummaries.M.ISA_10136.M.eventsAvailable.N')
+    [ "$nested_counter" = "1" ]
+    phantom_attribute=$(echo "$output" | jq '.Item | has("#fis.#isa.#ea")')
+    [ "$phantom_attribute" = "false" ]
+}
+
+@test "DynamoDB: DELETE resolves nested placeholder paths" {
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH \
+        --billing-mode PAY_PER_REQUEST >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    aws_cmd dynamodb put-item \
+        --table-name "$TABLE_NAME" \
+        --item '{"pk":{"S":"item-1"},"settings":{"M":{"labels":{"SS":["keep","drop"]}}}}' >/dev/null
+
+    run aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item-1"}}' \
+        --update-expression 'DELETE #settings.#labels :labels' \
+        --expression-attribute-names '{"#settings":"settings","#labels":"labels"}' \
+        --expression-attribute-values '{":labels":{"SS":["drop"]}}'
+    assert_success
+
+    run aws_cmd dynamodb get-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item-1"}}'
+    assert_success
+    labels=$(echo "$output" | jq -c '.Item.settings.M.labels.SS')
+    [ "$labels" = '["keep"]' ]
+    phantom_attribute=$(echo "$output" | jq '.Item | has("#settings.#labels")')
+    [ "$phantom_attribute" = "false" ]
+
+    run aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item-1"}}' \
+        --update-expression 'DELETE #settings.#labels :labels' \
+        --expression-attribute-names '{"#settings":"settings","#labels":"labels"}' \
+        --expression-attribute-values '{":labels":{"SS":["keep"]}}'
+    assert_success
+
+    run aws_cmd dynamodb get-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item-1"}}'
+    assert_success
+    nested_attribute=$(echo "$output" | jq '.Item.settings.M | has("labels")')
+    [ "$nested_attribute" = "false" ]
+
+    run aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"item-1"}}' \
+        --update-expression 'DELETE #settings.#labels :labels' \
+        --expression-attribute-names '{"#settings":"settings","#labels":"labels"}' \
+        --expression-attribute-values '{":labels":{"SS":["missing"]}}'
+    assert_success
+}
+
 @test "DynamoDB: scan table" {
     aws_cmd dynamodb create-table \
         --table-name "$TABLE_NAME" \

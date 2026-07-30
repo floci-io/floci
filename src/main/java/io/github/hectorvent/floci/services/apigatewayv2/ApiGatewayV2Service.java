@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -81,8 +82,17 @@ public class ApiGatewayV2Service {
             routeSelectionExpression = "${request.method} ${request.path}";
         }
 
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("tags");
+        String overrideId = ReservedTags.extractOverrideApiId(tags);
+        String apiId = overrideId != null ? overrideId : shortId(10);
+        if (apiStore.get(apiKey(region, apiId)).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "API with id '" + apiId + "' already exists", 409);
+        }
+
         Api api = new Api();
-        api.setApiId(shortId(10));
+        api.setApiId(apiId);
         api.setName(name);
         api.setProtocolType(protocolType);
         api.setCreatedDate(System.currentTimeMillis());
@@ -96,10 +106,8 @@ public class ApiGatewayV2Service {
             api.setApiEndpoint(String.format("https://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
         }
 
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = (Map<String, String>) request.get("tags");
         if (tags != null) {
-            api.setTags(tags);
+            api.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         }
 
         @SuppressWarnings("unchecked")
@@ -162,6 +170,7 @@ public class ApiGatewayV2Service {
         if (request.containsKey("tags")) {
             @SuppressWarnings("unchecked")
             Map<String, String> tags = (Map<String, String>) request.get("tags");
+            ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
             api.setTags(tags);
         }
         if (request.containsKey("corsConfiguration")) {
@@ -884,6 +893,7 @@ public class ApiGatewayV2Service {
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         String[] parsed = parseArn(resourceArn);
         String region = parsed[0];
         String apiId  = parsed[1];

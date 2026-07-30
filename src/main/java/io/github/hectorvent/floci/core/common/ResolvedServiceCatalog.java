@@ -32,6 +32,18 @@ import java.util.Set;
 @ApplicationScoped
 public class ResolvedServiceCatalog {
 
+    /**
+     * Signing scopes that share another service's IAM namespace. S3 Express One Zone clients sign
+     * directory-bucket requests as {@code s3express} while the actions, ARNs and condition keys
+     * remain {@code s3}; the IoT Jobs Data Plane signs as {@code iot-jobs-data} while its actions
+     * are {@code iot:} ({@code iot:DescribeJobExecution} and peers in the Service Authorization
+     * Reference). Keep this minimal: every entry suppresses a distinct IAM namespace.
+     */
+    private static final java.util.Map<String, String> CREDENTIAL_SCOPE_ALIASES =
+            java.util.Map.of(
+                    "s3express", "s3",
+                    "iot-jobs-data", "iot");
+
     private final ServiceCatalog catalog;
 
     @Inject
@@ -51,7 +63,8 @@ public class ResolvedServiceCatalog {
                         "s3", storageMode(config.storage().services().s3().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.S3, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
-                        Set.of(), Set.of("s3"), Set.of(), Set.of()),
+                        // s3express: directory-bucket (S3 Express One Zone) clients sign with it
+                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of()),
                 descriptor("dynamodb", "dynamodb", config.services().dynamodb().enabled(), true,
                         "dynamodb", storageMode(config.storage().services().dynamodb().mode(), config.storage().mode()),
                         config.storage().services().dynamodb().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -372,7 +385,11 @@ public class ResolvedServiceCatalog {
                 descriptor("iot", "iot", config.services().iot().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("iot", "execute-api"), Set.of(), Set.of(IotController.class)),
+                        // iot-jobs-data: the IoT Jobs Data Plane (GetPendingJobExecutions,
+                        // DescribeJobExecution, StartNextPendingJobExecution, UpdateJobExecution)
+                        // signs under its own name while IotController serves its /things/*/jobs routes
+                        Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
+                        Set.of(IotController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -398,6 +415,23 @@ public class ResolvedServiceCatalog {
 
     public Optional<ServiceDescriptor> byCredentialScope(String credentialScope) {
         return catalog.byCredentialScope(credentialScope);
+    }
+
+    /**
+     * Canonical IAM namespace for a credential scope. A service may answer requests signed
+     * under more than one scope (S3 also accepts {@code s3express}), but IAM action rules,
+     * resource ARNs and condition keys are all keyed by the canonical one — an alias left
+     * unnormalised resolves to no action, which the enforcement filter treats as ALLOW.
+     *
+     * <p>Deliberately an explicit table rather than something derived from the descriptor:
+     * a descriptor's external key is a routing key, not an IAM namespace. SES routes under
+     * {@code email} and Bedrock Runtime under {@code bedrock-runtime}, while their IAM
+     * namespaces are {@code ses:} and {@code bedrock:} — deriving from the external key would
+     * rewrite valid scopes onto prefixes AWS never issues, and silently skip enforcement for
+     * those services. Add an entry here only when two scopes genuinely share one namespace.
+     */
+    public String canonicalCredentialScope(String credentialScope) {
+        return CREDENTIAL_SCOPE_ALIASES.getOrDefault(credentialScope, credentialScope);
     }
 
     public Optional<ServiceDescriptor> byResourceClass(Class<?> resourceClass) {
