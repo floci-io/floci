@@ -40,6 +40,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -179,6 +180,9 @@ class ElbV2ServiceTest {
         assertTrue(reloadedRules.stream().anyMatch(candidate -> "10".equals(candidate.getPriority())));
         assertEquals("test", reloaded.describeTags(List.of(lbArn)).get(lbArn).get("env"));
         assertThrows(AwsException.class, () -> reloaded.deleteTargetGroup(REGION, tgArn));
+
+        // Data-plane and health-check startup is deliberately not part of construction (#1913).
+        reloaded.restorePersistedRuntime();
         verify(reloadedHealthChecker).startMonitoring(any(TargetGroup.class));
         ArgumentCaptor<List<TargetDescription>> targetsCaptor = ArgumentCaptor.captor();
         verify(reloadedHealthChecker).addTargets(eq(tgArn), targetsCaptor.capture(), any(TargetGroup.class));
@@ -193,7 +197,41 @@ class ElbV2ServiceTest {
     }
 
     @Test
-    void initializeStorageStartsPersistedListenersWithoutTargetGroups() {
+    void initializeStorageDoesNotTouchCollaborators() {
+        // #1913: ElbV2DataPlane.binding() calls back into this service, and during @PostConstruct the
+        // ApplicationScoped context has no instance yet — so CDI re-enters bean creation and recurses
+        // until the stack (or, before the storage dedupe in #1931, the heap) is gone. Nothing reachable
+        // from initializeStorage() may call an injected collaborator. A mock cannot reproduce the
+        // recursion, since it never calls back, so assert the absence of the interaction instead.
+        SharedStorageFactory storageFactory = new SharedStorageFactory();
+        ElbV2Service first = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        String lbArn = first.createLoadBalancer(
+                REGION, "recursion-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String tgArn = first.createTargetGroup(
+                REGION, "recursion-tg", "HTTP", "HTTP1", 8080, "vpc-a", "instance",
+                "HTTP", "traffic-port", true, "/health", 15, 5, 3, 2, "200",
+                "ipv4", Map.of()).getTargetGroupArn();
+        String listenerArn = first.createListener(
+                REGION, lbArn, "HTTP", 9090, null, List.of(),
+                List.of(forwardAction(tgArn)), List.of(), Map.of()).getListenerArn();
+
+        ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
+        ElbV2HealthChecker reloadedHealthChecker = mock(ElbV2HealthChecker.class);
+        ElbV2Service reloaded = serviceWithStorage(storageFactory, reloadedDataPlane, reloadedHealthChecker);
+
+        verifyNoInteractions(reloadedDataPlane, reloadedHealthChecker);
+
+        reloaded.restorePersistedRuntime();
+
+        ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
+        verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());
+        assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
+        verify(reloadedHealthChecker).startMonitoring(any(TargetGroup.class));
+    }
+
+    @Test
+    void restorePersistedRuntimeStartsPersistedListenersWithoutTargetGroups() {
         SharedStorageFactory storageFactory = new SharedStorageFactory();
         ElbV2Service first = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
         String lbArn = first.createLoadBalancer(
@@ -204,7 +242,8 @@ class ElbV2ServiceTest {
                 List.of(), List.of(), Map.of()).getListenerArn();
 
         ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
-        serviceWithStorage(storageFactory, reloadedDataPlane, mock(ElbV2HealthChecker.class));
+        ElbV2Service reloaded = serviceWithStorage(storageFactory, reloadedDataPlane, mock(ElbV2HealthChecker.class));
+        reloaded.restorePersistedRuntime();
 
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
         verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());

@@ -80,6 +80,7 @@ floci:
 
   protocols:
     strict-claiming: false
+    reject-unknown-service-scope: true
 
   docker:
     log-max-size: "10m"

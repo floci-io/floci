@@ -73,7 +73,8 @@ public class AthenaService {
             resolvedContext.setCatalog(DEFAULT_CATALOG);
         }
 
-        // Ensure output location has a trailing slash so floci-duck writes into the prefix
+        // AWS reports the result CSV object itself as the OutputLocation, not a
+        // directory prefix — the same key is written and returned to the client.
         String outputLocation = resolveOutputLocation(resultConfiguration, id);
         ResultConfiguration resolvedResult = new ResultConfiguration(outputLocation);
 
@@ -93,7 +94,7 @@ public class AthenaService {
         vertx.executeBlocking(() -> {
             String setupDdl = buildGlueDdl(database);
             ensureOutputBucket(outputLocation);
-            duckClient.execute(query, setupDdl, outputLocation + "results.csv");
+            duckClient.execute(query, setupDdl, outputLocation);
             return null;
         }).onSuccess(v -> {
             execution.getStatus().setState(QueryExecutionState.SUCCEEDED);
@@ -279,7 +280,7 @@ public class AthenaService {
         String base = (rc != null && rc.getOutputLocation() != null && !rc.getOutputLocation().isBlank())
                 ? rc.getOutputLocation()
                 : "s3://" + DEFAULT_OUTPUT_BUCKET + "/results/";
-        return base.endsWith("/") ? base + queryId + "/" : base + "/" + queryId + "/";
+        return base.endsWith("/") ? base + queryId + ".csv" : base + "/" + queryId + ".csv";
     }
 
     private WorkGroupConfiguration normalizeWorkGroupConfiguration(CreateWorkGroupConfigurationRequest configuration) {
