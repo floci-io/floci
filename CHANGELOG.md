@@ -9,9 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **cloudtrail:** new in-process service. Supports `CreateTrail`, `DescribeTrails`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors`, `GetEventSelectors`, `StartLogging`, `StopLogging`, `GetTrailStatus`, `LookupEvents`. S3 data events on hooked ops (`PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `ListObjects`, `GetObjectAcl`) are buffered per-trail and flushed as gzipped JSON log files into the destination bucket at AWS-shaped key paths (`AWSLogs/${account}/CloudTrail/${region}/yyyy/MM/dd/${file}.json.gz`) at a configurable cadence. IAM-enforcement denials emit matching `AccessDenied` records.
+- **apigateway:** support the reserved `floci:override-id` tag on `CreateRestApi` (v1) and `CreateApi` (v2) to pin the generated API ID, unifying custom IDs with the tag KMS and Cognito already use. Override keys are stripped from the returned tags, validated (non-blank, no whitespace/control characters and no `/`, `?`, `#`) and rejected on `TagResource` with `BadRequestException`, which is what both services declare. The older API-Gateway-specific `_custom_id_` tag still works as a deprecated fallback and is now stripped too; `floci:override-id` wins when both are present. Creating an API whose override ID already exists in the region is rejected with `ConflictException` (409) instead of overwriting the existing API ([#1593](https://github.com/floci-io/floci/pull/1593))
+
+### Changed
+
+- **apigateway:** `_custom_id_` is no longer persisted in the tags returned for a REST API. It was previously echoed back as a normal tag.
+
+## [1.5.34] - 2026-07-28
+
+### Added
+
+- **cloudtrail:** new in-process service. Supports `CreateTrail`, `DescribeTrails`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors`, `GetEventSelectors`, `StartLogging`, `StopLogging`, `GetTrailStatus`, `LookupEvents`. S3 data events on hooked ops (`PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `ListObjects`, `GetObjectAcl`) are buffered per-trail and flushed as gzipped JSON log files into the destination bucket at AWS-shaped key paths (`AWSLogs/${account}/CloudTrail/${region}/yyyy/MM/dd/${file}.json.gz`) at a configurable cadence. IAM-enforcement denials emit matching `AccessDenied` records ([#1460](https://github.com/floci-io/floci/pull/1460))
 - **iam:** seeded `AWSCloudTrail_FullAccess` and `AWSCloudTrail_ReadOnlyAccess` AWS managed policies.
 - **iam:** distinguish `s3:GetObjectAcl` / `s3:PutObjectAcl` / `s3:Get|Put|DeleteObjectTagging` from base S3 ops via `?acl` / `?tagging` query parameters when resolving an action for IAM enforcement.
+- **ses:** implement identity (sending authorization) policies for v1 and v2 ([#1750](https://github.com/floci-io/floci/pull/1750))
+- **stepfunctions:** support the HTTP invoke step ([#1503](https://github.com/floci-io/floci/pull/1503))
+- **stepfunctions:** implement the `States.JsonMerge` intrinsic ([#1662](https://github.com/floci-io/floci/pull/1662))
+- **eks:** add `eks.disable-cni` to start k3s without its bundled CNI, so a real CNI can be installed in its place ([#1793](https://github.com/floci-io/floci/pull/1793))
+
+### Fixed
+
+- **storage:** dedupe storage backends by resolved file path. Two components opening the same file each got an independent in-memory store, and on graceful shutdown the stale duplicate flushed last and overwrote persisted state ([#1931](https://github.com/floci-io/floci/pull/1931))
+- **elbv2:** move persisted-listener restore out of `@PostConstruct`. Restoring listeners during bean creation re-entered the CDI proxy and recursed until the process died, so after a restart with persisted listeners every ELBv2 operation failed ([#2015](https://github.com/floci-io/floci/pull/2015))
+- **core:** reject REST requests signed for a service Floci does not implement with `UnknownOperationException`, instead of letting them fall through to S3's path-style routes and return a misleading `NoSuchBucket` ([#1967](https://github.com/floci-io/floci/pull/1967))
+- **cloudformation:** model `AWS::IAM::Policy` as an inline policy so two stacks can reuse the same generated policy name; report failed rollback cleanup as `ROLLBACK_FAILED`, detach removed IAM inline-policy targets on stack updates, and migrate the legacy managed-policy representation during update or deletion ([#1800](https://github.com/floci-io/floci/pull/1800))
+- **core:** return 4xx client errors instead of 500 for malformed JSON-protocol input ([#1926](https://github.com/floci-io/floci/pull/1926))
+- **s3:** return 400 `MalformedXML` for an unparseable `PutObjectRetention` `RetainUntilDate` ([#1631](https://github.com/floci-io/floci/pull/1631))
+- **s3:** preserve literal question marks in copy source keys ([#1924](https://github.com/floci-io/floci/pull/1924))
+- **cognito:** build OIDC URLs from `effectiveBaseUrl` so `FLOCI_HOSTNAME` is honored ([#1929](https://github.com/floci-io/floci/pull/1929))
+- **cognito:** prefer phone delivery for signup verification ([#1839](https://github.com/floci-io/floci/pull/1839))
+- **dynamodb:** tokenize `UpdateExpression` whitespace-insensitively ([#1862](https://github.com/floci-io/floci/pull/1862))
+- **dynamodb:** throw `ValidationException` when a `list_append` operand is not a list type ([#1702](https://github.com/floci-io/floci/pull/1702))
+- **firehose:** return `ResourceInUseException` on a duplicate `CreateDeliveryStream` ([#1738](https://github.com/floci-io/floci/pull/1738))
+- **ec2:** apply the `cidr-block` filter in `DescribeSubnets` ([#1864](https://github.com/floci-io/floci/pull/1864))
+- **neptune:** throw the modeled `InsufficientStorageClusterCapacity` fault when the proxy-port range is exhausted, so SDK clients can map it to a typed exception ([#1879](https://github.com/floci-io/floci/pull/1879))
+
+### Changed
+
+- **ci:** attach provenance and SBOM attestations to the published images ([#2032](https://github.com/floci-io/floci/pull/2032))
 
 ## [1.5.33] - 2026-07-15
 

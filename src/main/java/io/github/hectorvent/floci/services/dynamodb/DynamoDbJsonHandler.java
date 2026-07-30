@@ -510,8 +510,10 @@ public class DynamoDbJsonHandler {
 
         // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
         if (updateExpression != null) {
-            // Pre-validate syntax: expression must start with a valid clause keyword
-            String ue = updateExpression.trim();
+            // Pre-validate syntax: expression must start with a valid clause keyword.
+            // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
+            // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
+            String ue = updateExpression.trim().replaceAll("\\s+", " ");
             if (!ue.isEmpty()) {
                 String upper = ue.toUpperCase();
                 if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {

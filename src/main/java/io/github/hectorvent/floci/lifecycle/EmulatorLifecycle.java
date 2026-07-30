@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerMan
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
@@ -75,6 +76,7 @@ public class EmulatorLifecycle {
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
     private final RdsService rdsService;
+    private final ElbV2Service elbV2Service;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -103,6 +105,7 @@ public class EmulatorLifecycle {
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
                              RdsService rdsService,
+                             ElbV2Service elbV2Service,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
@@ -130,6 +133,7 @@ public class EmulatorLifecycle {
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
         this.rdsService = rdsService;
+        this.elbV2Service = elbV2Service;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
@@ -173,6 +177,9 @@ public class EmulatorLifecycle {
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
+        if (config.services().elbv2().enabled()) {
+            elbV2Service.restorePersistedRuntime();
+        }
 
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.start().exceptionally(ex -> {
