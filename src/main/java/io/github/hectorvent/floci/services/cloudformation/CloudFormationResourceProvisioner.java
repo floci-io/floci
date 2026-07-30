@@ -339,8 +339,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
-                case "AWS::EC2::LaunchTemplate" ->
-                        provisionLaunchTemplate(resource, properties, engine, region, stackName);
                 case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
                 case "AWS::EC2::SubnetRouteTableAssociation" ->
                         provisionSubnetRouteTableAssociation(resource, properties, engine, region);
@@ -480,7 +478,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
             case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
-            case "AWS::EC2::LaunchTemplate" -> ec2Service.deleteLaunchTemplate(region, physicalId, null);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
             case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
             case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
@@ -625,42 +622,6 @@ public class CloudFormationResourceProvisioner {
         var igw = ec2Service.createInternetGateway(region);
         r.setPhysicalId(igw.getInternetGatewayId());
         r.getAttributes().put("InternetGatewayId", igw.getInternetGatewayId());
-    }
-
-    private void provisionLaunchTemplate(StackResource r, JsonNode props,
-                                         CloudFormationTemplateEngine engine, String region, String stackName) {
-        String name = resolveOptional(props, "LaunchTemplateName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-        String imageId = null;
-        String instanceType = null;
-        String keyName = null;
-        String encodedUserData = null;
-        String iamInstanceProfileArn = null;
-        List<String> securityGroupIds = null;
-        if (props != null && props.has("LaunchTemplateData")) {
-            JsonNode data = engine.resolveNode(props.get("LaunchTemplateData"));
-            imageId = data.path("ImageId").asText(null);
-            instanceType = data.path("InstanceType").asText(null);
-            keyName = data.path("KeyName").asText(null);
-            // CFN carries UserData already base64-encoded.
-            encodedUserData = data.path("UserData").asText(null);
-            JsonNode profile = data.path("IamInstanceProfile");
-            iamInstanceProfileArn = profile.path("Arn").asText(profile.path("Name").asText(null));
-            if (data.has("SecurityGroupIds")) {
-                securityGroupIds = new ArrayList<>();
-                for (JsonNode sg : data.get("SecurityGroupIds")) {
-                    securityGroupIds.add(sg.asText());
-                }
-            }
-        }
-        var lt = ec2Service.createLaunchTemplate(region, name, imageId, instanceType, keyName,
-                securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null);
-        r.setPhysicalId(lt.getLaunchTemplateId());
-        r.getAttributes().put("LaunchTemplateId", lt.getLaunchTemplateId());
-        r.getAttributes().put("LatestVersionNumber", lt.getLatestVersionNumber());
-        r.getAttributes().put("DefaultVersionNumber", lt.getDefaultVersionNumber());
     }
 
     private void provisionRouteTable(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
