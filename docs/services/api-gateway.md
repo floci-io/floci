@@ -148,6 +148,23 @@ curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 
 Both HTTP and WebSocket protocol types are fully supported, including the WebSocket data-plane (real connection handling, message routing, and the `@connections` management API).
 
+### HTTP API data-plane
+
+API Gateway v2 advertises HTTP APIs through Floci's local execute-api domain:
+
+```bash
+curl http://{apiId}.execute-api.localhost.floci.io:4566/{stageName}/{path}
+```
+
+When an API has a `$default` stage, callers may omit the stage segment:
+
+```bash
+curl http://{apiId}.execute-api.localhost.floci.io:4566/{path}
+```
+
+APIs created or updated with `disableExecuteApiEndpoint` reject requests to
+this default hostname with `403 Forbidden`.
+
 ### Supported Operations
 
 | Category | Operations |
