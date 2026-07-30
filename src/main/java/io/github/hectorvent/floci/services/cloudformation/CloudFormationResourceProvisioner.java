@@ -331,10 +331,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ECS::Cluster" -> provisionEcsCluster(resource, properties, engine, region, stackName);
-                case "AWS::ECS::CapacityProvider" ->
-                        provisionEcsCapacityProvider(resource, properties, engine, region, stackName);
-                case "AWS::ECS::ClusterCapacityProviderAssociations" ->
-                        provisionEcsCapacityAssociations(resource, properties, engine, region);
                 case "AWS::ECS::TaskDefinition" -> provisionEcsTaskDefinition(resource, properties, engine, region, stackName);
                 case "AWS::ECS::Service" -> provisionEcsService(resource, properties, engine, region, stackName);
                 case "AWS::ElasticLoadBalancingV2::LoadBalancer" ->
@@ -658,48 +654,6 @@ public class CloudFormationResourceProvisioner {
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }
-    }
-
-    private void provisionEcsCapacityProvider(StackResource r, JsonNode props,
-                                              CloudFormationTemplateEngine engine, String region,
-                                              String stackName) {
-        String name = resolveOptional(props, "Name", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
-        java.util.Map<String, Object> asgProvider = new java.util.HashMap<>();
-        JsonNode asg = props != null ? props.path("AutoScalingGroupProvider") : null;
-        if (asg != null && asg.isObject()) {
-            String asgArn = engine.resolve(asg.path("AutoScalingGroupArn"));
-            if (asgArn != null && !asgArn.isBlank()) asgProvider.put("autoScalingGroupArn", asgArn);
-        }
-        ecsService.createCapacityProvider(name, asgProvider, java.util.Map.of(), region);
-        r.setPhysicalId(name);
-    }
-
-    private void provisionEcsCapacityAssociations(StackResource r, JsonNode props,
-                                                  CloudFormationTemplateEngine engine, String region) {
-        String cluster = resolveOptional(props, "Cluster", engine);
-        List<String> providers = new ArrayList<>();
-        if (props != null && props.has("CapacityProviders")) {
-            for (JsonNode entry : props.get("CapacityProviders")) {
-                String id = engine.resolve(entry);
-                if (id != null && !id.isBlank()) providers.add(id);
-            }
-        }
-        List<java.util.Map<String, Object>> strategy = new ArrayList<>();
-        if (props != null && props.has("DefaultCapacityProviderStrategy")) {
-            for (JsonNode entry : props.get("DefaultCapacityProviderStrategy")) {
-                java.util.Map<String, Object> item = new java.util.HashMap<>();
-                String provider = engine.resolve(entry.path("CapacityProvider"));
-                if (provider != null) item.put("capacityProvider", provider);
-                if (entry.hasNonNull("Weight")) item.put("weight", entry.get("Weight").asInt());
-                if (entry.hasNonNull("Base")) item.put("base", entry.get("Base").asInt());
-                strategy.add(item);
-            }
-        }
-        ecsService.putClusterCapacityProviders(cluster, providers, strategy, region);
-        r.setPhysicalId(cluster);
     }
 
     private void provisionInternetGateway(StackResource r, String region) {
