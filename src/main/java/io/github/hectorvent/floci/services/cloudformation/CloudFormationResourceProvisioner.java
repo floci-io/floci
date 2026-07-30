@@ -4172,6 +4172,10 @@ public class CloudFormationResourceProvisioner {
         if (node != null && !node.isMissingNode() && !node.isNull()) {
             dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
             dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+            List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
+            if (!trustedKeyGroups.isEmpty()) {
+                dcb.setTrustedKeyGroups(trustedKeyGroups);
+            }
         }
         return dcb;
     }
@@ -4185,6 +4189,10 @@ public class CloudFormationResourceProvisioner {
                 cb.setPathPattern(cfnText(node, "PathPattern", engine));
                 cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
                 cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+                List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
+                if (!trustedKeyGroups.isEmpty()) {
+                    cb.setTrustedKeyGroups(trustedKeyGroups);
+                }
                 behaviors.add(cb);
             }
         }
