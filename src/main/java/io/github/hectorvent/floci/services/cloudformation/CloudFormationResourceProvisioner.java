@@ -335,7 +335,6 @@ public class CloudFormationResourceProvisioner {
                 // EC2 networking. These delegate to Ec2Service so the resources actually exist
                 // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
                 // fake physical id. Topological ordering guarantees parents are provisioned first.
-                case "AWS::EC2::VPC" -> provisionVpc(resource, properties, engine, region);
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
@@ -573,21 +572,6 @@ public class CloudFormationResourceProvisioner {
     // ELBv2 create-load-balancer, etc. resolve it). physicalId is set to the real EC2 id so
     // Ref/exports resolve to a real vpc-/subnet-/... id rather than a stub.
 
-    private void provisionVpc(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
-        String cidr = resolveOptional(props, "CidrBlock", engine);
-        var vpc = ec2Service.createVpc(region, cidr, false);
-        r.setPhysicalId(vpc.getVpcId());
-        r.getAttributes().put("VpcId", vpc.getVpcId());
-        if (vpc.getCidrBlock() != null) {
-            r.getAttributes().put("CidrBlock", vpc.getCidrBlock());
-        }
-        // Fn::GetAtt DefaultSecurityGroup — CDK's Custom::VpcRestrictDefaultSG handler
-        // depends on it resolving to the VPC's default security group id.
-        ec2Service.describeSecurityGroups(region, List.of(), List.of("default"), Map.of()).stream()
-                .filter(sg -> vpc.getVpcId().equals(sg.getVpcId()))
-                .findFirst()
-                .ifPresent(sg -> r.getAttributes().put("DefaultSecurityGroup", sg.getGroupId()));
-    }
 
     private void provisionSubnet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
         String vpcId = resolveOptional(props, "VpcId", engine);
