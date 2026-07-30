@@ -912,15 +912,38 @@ public class ApiGatewayExecuteController {
 
         // Dispatch to service.
         //
-        // A path-style integration URI (arn:...:{service}:path/...) carries no action: the
-        // rendered template body is the AWS query protocol (form-urlencoded,
+        // Lambda path-style integrations (arn:aws:apigateway:{region}:lambda:path/...) are
+        // handled specially: the function name is extracted from the URI and the rendered
+        // request template body is passed directly as the Lambda payload — just like
+        // AWS_PROXY, but with request/response VTL mapping applied.
+        //
+        // For other services: a path-style integration URI (arn:...:{service}:path/...) carries
+        // no action: the rendered template body is the AWS query protocol (form-urlencoded,
         // "Action=SendMessage&..."). Action-style URIs (arn:...:{service}:action/{Action})
         // carry the action in the URI and render a JSON body.
         Response serviceResponse;
         String errorType = null;
         String errorMessage = null;
         try {
-            if (target.action() == null) {
+            if ("lambda".equals(target.service())) {
+                String functionName = functionNameFromUri(integration.getUri());
+                if (functionName == null || functionName.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Cannot resolve Lambda function name from URI: " + integration.getUri(), 400);
+                }
+                byte[] payload = transformedBody != null ? transformedBody.getBytes(StandardCharsets.UTF_8) : new byte[0];
+                InvokeResult invokeResult = lambdaService.invoke(region, functionName, payload, InvocationType.RequestResponse);
+                String lambdaResponseBody = invokeResult.getPayload() != null
+                        ? new String(invokeResult.getPayload(), StandardCharsets.UTF_8) : "{}";
+                int lambdaStatus = invokeResult.getStatusCode() > 0 ? invokeResult.getStatusCode() : 200;
+                if (invokeResult.getFunctionError() != null) {
+                    errorType = invokeResult.getFunctionError();
+                    errorMessage = lambdaResponseBody;
+                }
+                serviceResponse = Response.status(lambdaStatus)
+                        .entity(lambdaResponseBody)
+                        .type(MediaType.APPLICATION_JSON).build();
+            } else if (target.action() == null) {
                 MultivaluedMap<String, String> formParams = parseFormUrlEncoded(transformedBody);
                 serviceResponse = serviceRouter.invokeQuery(target.service(), formParams, region);
             } else {
@@ -1045,13 +1068,18 @@ public class ApiGatewayExecuteController {
         }
 
         Response.ResponseBuilder rb = Response.status(finalStatus)
-                .entity(finalBody)
-                .type(MediaType.APPLICATION_JSON);
+                .entity(finalBody);
+
+        String contentType = null;
 
         // Apply $context.responseOverride header assignments.
         if (templateResult != null && !templateResult.headerOverrides().isEmpty()) {
             for (Map.Entry<String, String> hdr : templateResult.headerOverrides().entrySet()) {
-                rb.header(hdr.getKey(), hdr.getValue());
+                if ("Content-Type".equalsIgnoreCase(hdr.getKey())) {
+                    contentType = hdr.getValue();
+                } else {
+                    rb.header(hdr.getKey(), hdr.getValue());
+                }
             }
         }
 
@@ -1070,11 +1098,16 @@ public class ApiGatewayExecuteController {
                 String headerName = dest.substring("method.response.header.".length());
                 String headerValue = resolveResponseParameter(source, serviceResponseHeaders, responseBodyStr);
                 if (headerValue != null) {
-                    rb.header(headerName, headerValue);
+                    if ("Content-Type".equalsIgnoreCase(headerName)) {
+                        contentType = headerValue;
+                    } else {
+                        rb.header(headerName, headerValue);
+                    }
                 }
             }
         }
 
+        rb.type(contentType != null ? contentType : MediaType.APPLICATION_JSON);
         return rb.build();
     }
 
