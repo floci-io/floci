@@ -322,7 +322,12 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public EmulatorConfig.InitHooksConfig initHooks() { return null; }
             @Override
-            public ProtocolsConfig protocols() { return () -> false; }
+            public ProtocolsConfig protocols() {
+                return new ProtocolsConfig() {
+                    @Override public boolean strictClaiming() { return false; }
+                    @Override public boolean rejectUnknownServiceScope() { return true; }
+                };
+            }
             @Override
             public TlsConfig tls() {
                 return new TlsConfig() {

@@ -59,6 +59,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final IamConditionContextResolver conditionContextResolver;
     private final CloudTrailService cloudTrailService;
     private final CurrentVertxRequest currentVertxRequest;
+    private final ResolvedServiceCatalog catalog;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -70,7 +71,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 RequestContext requestContext,
                                 IamConditionContextResolver conditionContextResolver,
                                 CloudTrailService cloudTrailService,
-                                CurrentVertxRequest currentVertxRequest) {
+                                CurrentVertxRequest currentVertxRequest,
+                                ResolvedServiceCatalog catalog) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -81,6 +83,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.conditionContextResolver = conditionContextResolver;
         this.cloudTrailService = cloudTrailService;
         this.currentVertxRequest = currentVertxRequest;
+        this.catalog = catalog;
     }
 
     @Override
@@ -99,10 +102,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return; // root bypass
         }
 
-        String credentialScope = extractCredentialScope(auth);
-        if (credentialScope == null) {
+        String rawScope = extractCredentialScope(auth);
+        if (rawScope == null) {
             return;
         }
+        // Normalise signing aliases (s3express → s3) before anything keyed by scope runs:
+        // action rules, ARN building and condition keys all match the canonical name, so an
+        // alias would resolve to no action and be allowed through without any policy check.
+        String credentialScope = catalog.canonicalCredentialScope(rawScope);
 
         String action = actionRegistry.resolve(credentialScope, ctx);
         if (action == null) {
