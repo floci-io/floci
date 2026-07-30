@@ -1304,22 +1304,9 @@ public class DynamoDbService {
 
     public TableDefinition applyReplicaUpdates(String tableName, List<String> addRegions,
                                                List<String> removeRegions, List<String> updateRegions, String region) {
-        validateReplicaRegions(addRegions);
-        validateReplicaRegions(removeRegions);
-        validateReplicaRegions(updateRegions);
-        String canonicalTableName = canonicalTableName(region, tableName);
-        String storageKey = regionKey(region, canonicalTableName);
-        TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        TableDefinition table = validateReplicaUpdatesAndGetTable(
+                tableName, addRegions, removeRegions, updateRegions, region);
         List<String> replicas = new ArrayList<>(table.getReplicaRegions());
-        if (updateRegions != null) {
-            for (String replicaRegion : updateRegions) {
-                if (!replicas.contains(replicaRegion)) {
-                    throw new AwsException("ValidationException",
-                            "Replica " + replicaRegion + " does not exist", 400);
-                }
-            }
-        }
         if (removeRegions != null) {
             replicas.removeAll(removeRegions);
         }
@@ -1331,8 +1318,35 @@ public class DynamoDbService {
             }
         }
         table.setReplicaRegions(replicas);
-        tableStore.put(storageKey, table);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        tableStore.put(regionKey(region, canonicalTableName), table);
         LOG.infov("Updated replicas for table {0} in region {1}: {2}", canonicalTableName, region, replicas);
+        return table;
+    }
+
+    public void validateReplicaUpdates(String tableName, List<String> addRegions,
+                                       List<String> removeRegions, List<String> updateRegions, String region) {
+        validateReplicaUpdatesAndGetTable(tableName, addRegions, removeRegions, updateRegions, region);
+    }
+
+    private TableDefinition validateReplicaUpdatesAndGetTable(
+            String tableName, List<String> addRegions, List<String> removeRegions,
+            List<String> updateRegions, String region) {
+        validateReplicaRegions(addRegions);
+        validateReplicaRegions(removeRegions);
+        validateReplicaRegions(updateRegions);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        if (updateRegions != null) {
+            for (String replicaRegion : updateRegions) {
+                if (!table.getReplicaRegions().contains(replicaRegion)) {
+                    throw new AwsException("ValidationException",
+                            "Replica " + replicaRegion + " does not exist", 400);
+                }
+            }
+        }
         return table;
     }
 

@@ -1173,6 +1173,11 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
+            dynamoDbService.validateReplicaUpdates(
+                    tableName, addRegions, removeRegions, updateRegions, region);
+        }
+
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
                 gsiCreates, gsiDeletes, newAttrDefs, region);
 

@@ -140,6 +140,32 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
     }
 
     @Test
+    void updateTableRejectsMissingReplicaBeforeApplyingOtherChanges() {
+        String tableName = "gt-missing-replica-" + Long.toString(System.nanoTime(), 36);
+        createTable(tableName);
+
+        given()
+            .contentType(DDB_CONTENT_TYPE)
+            .header("Authorization", DDB_AUTH)
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .body("{\"TableName\":\"" + tableName + "\","
+                    + "\"DeletionProtectionEnabled\":true,"
+                    + "\"StreamSpecification\":{\"StreamEnabled\":true,"
+                    + "\"StreamViewType\":\"NEW_IMAGE\"},"
+                    + "\"ReplicaUpdates\":[{\"Update\":{\"RegionName\":\"eu-west-1\"}}]}")
+        .when().post("/").then().statusCode(400)
+            .body("__type", containsString("ValidationException"));
+
+        String table = ddb("DescribeTable", "{\"TableName\":\"" + tableName + "\"}");
+        assertTrue(table.contains("\"DeletionProtectionEnabled\":false"),
+                "rejected update must not partially mutate the table: " + table);
+        assertFalse(table.contains("\"LatestStreamArn\""),
+                "rejected update must not enable a stream: " + table);
+        assertFalse(table.contains("\"Replicas\""),
+                "rejected update must not add the missing replica: " + table);
+    }
+
+    @Test
     void updateTableReplicaUpdateValidatesRegionAndKeepsReplica() {
         String tableName = "gt-update-replica-" + Long.toString(System.nanoTime(), 36);
         createTable(tableName);
