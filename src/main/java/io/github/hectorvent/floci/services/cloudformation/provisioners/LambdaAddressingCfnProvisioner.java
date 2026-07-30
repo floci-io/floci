@@ -11,6 +11,7 @@ import jakarta.inject.Inject;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -87,19 +88,11 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
         String statementId = r.getLogicalId();
         // Stack updates re-provision every resource; drop the previous statement first so
         // AddPermission does not reject the duplicate Sid. The old physical id carries the
-        // function the statement was originally attached to.
-        String previous = r.getPhysicalId();
-        if (previous != null) {
-            int sep = previous.lastIndexOf('|');
-            if (sep > 0) {
-                try {
-                    lambdaService.removePermission(ctx.region(), previous.substring(0, sep),
-                            previous.substring(sep + 1));
-                } catch (AwsException ignored) {
-                    // statement or function already gone — nothing to replace
-                }
-            }
-        }
+        // function the statement was originally attached to. AddPermission rejects a duplicate
+        // Sid, so the new statement cannot simply be added first — instead the old one is
+        // captured before removal and put back if the replacement is rejected.
+        RemovedStatement removed = removePreviousStatement(r.getPhysicalId(), ctx.region());
+
         Map<String, Object> request = new HashMap<>();
         request.put("StatementId", statementId);
         request.put("Action", ctx.resolveOptional(props, "Action"));
@@ -108,8 +101,65 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
         if (sourceArn != null && !sourceArn.isBlank()) request.put("SourceArn", sourceArn);
         String sourceAccount = ctx.resolveOptional(props, "SourceAccount");
         if (sourceAccount != null && !sourceAccount.isBlank()) request.put("SourceAccount", sourceAccount);
-        lambdaService.addPermission(ctx.region(), functionName, request);
+        try {
+            lambdaService.addPermission(ctx.region(), functionName, request);
+        } catch (RuntimeException failure) {
+            // Without this the rejected update leaves the function with no statement at all, and
+            // rollback does not restore it: callers that could invoke before the update lose access.
+            if (removed != null) {
+                try {
+                    lambdaService.restorePermissionStatement(ctx.region(), removed.functionName(),
+                            removed.statement());
+                } catch (RuntimeException restoreFailure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+            throw failure;
+        }
         r.setPhysicalId(functionName + "|" + statementId);
+    }
+
+    /** A statement taken off a function so it can be put back if the replacement fails. */
+    private record RemovedStatement(String functionName, Map<String, Object> statement) {}
+
+    private RemovedStatement removePreviousStatement(String physicalId, String region) {
+        if (physicalId == null) {
+            return null;
+        }
+        int sep = physicalId.lastIndexOf('|');
+        if (sep <= 0) {
+            return null;
+        }
+        String functionName = physicalId.substring(0, sep);
+        String statementId = physicalId.substring(sep + 1);
+        Map<String, Object> statement = findStatement(region, functionName, statementId);
+        try {
+            lambdaService.removePermission(region, functionName, statementId);
+        } catch (AwsException ignored) {
+            // statement or function already gone — nothing to replace, nothing to restore
+            return null;
+        }
+        return statement == null ? null : new RemovedStatement(functionName, statement);
+    }
+
+    private Map<String, Object> findStatement(String region, String functionName, String statementId) {
+        try {
+            Object policy = lambdaService.getPolicy(region, functionName).get("policy");
+            if (policy instanceof Map<?, ?> policyMap
+                    && policyMap.get("Statement") instanceof List<?> statements) {
+                for (Object candidate : statements) {
+                    if (candidate instanceof Map<?, ?> statement
+                            && statementId.equals(statement.get("Sid"))) {
+                        Map<String, Object> copy = new LinkedHashMap<>();
+                        statement.forEach((k, v) -> copy.put(String.valueOf(k), v));
+                        return copy;
+                    }
+                }
+            }
+        } catch (AwsException ignored) {
+            // no policy on the function yet
+        }
+        return null;
     }
 
     private void provisionVersion(StackResource r, JsonNode props, ProvisionContext ctx) {

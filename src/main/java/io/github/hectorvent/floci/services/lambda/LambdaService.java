@@ -1462,6 +1462,22 @@ public class LambdaService {
         return Map.of("policy", policy, "revisionId", fn.getRevisionId());
     }
 
+    /**
+     * Puts a previously captured policy statement back. Used to compensate when a replacement fails
+     * after the original was removed: it takes the stored statement shape rather than an
+     * AddPermission request, so what goes back is exactly what came out.
+     */
+    public void restorePermissionStatement(String region, String functionName, Map<String, Object> statement) {
+        LambdaFunction fn = getFunction(region, functionName);
+        String statementId = (String) statement.get("Sid");
+        if (statementId != null) {
+            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")));
+        }
+        fn.getPolicies().add(statement);
+        functionStore.save(region, fn);
+        LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
+    }
+
     public void removePermission(String region, String functionName, String statementId) {
         LambdaFunction fn = getFunction(region, functionName);
         boolean removed = fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")));
