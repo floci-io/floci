@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -181,21 +182,25 @@ public class CloudFrontServingController {
         if (bucket == null) {
             return OriginResponse.error(502, "Could not determine S3 bucket for origin.");
         }
+        OriginResponse response;
         try {
             authorizeS3OriginRead(
                     distribution, origin, bucket, key, viewerAuthorization);
             if (includeBody) {
                 S3Object obj = s3Service.getObject(bucket, key);
                 byte[] data = obj.getData() != null ? obj.getData() : new byte[0];
-                return new OriginResponse(
+                response = new OriginResponse(
                         200, contentType(obj), data, data.length, s3ObjectHeaders(obj));
+            } else {
+                S3Object meta = s3Service.headObject(bucket, key);
+                response = new OriginResponse(
+                        200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
             }
-            S3Object meta = s3Service.headObject(bucket, key);
-            return new OriginResponse(
-                    200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
         } catch (AwsException e) {
-            return OriginResponse.error(e.getHttpStatus(), e.getMessage());
+            response = OriginResponse.error(e.getHttpStatus(), e.getMessage());
         }
+        return withS3CorsHeaders(
+                bucket, origin, includeBody ? "GET" : "HEAD", response);
     }
 
     private void authorizeS3OriginRead(
@@ -261,12 +266,27 @@ public class CloudFrontServingController {
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(target)
                     .timeout(Duration.ofSeconds(30));
+            // Origin custom headers: CloudFront adds these to every request it forwards to the origin
+            // (overriding any same-named viewer header), which is how a distribution restricts an origin
+            // to CloudFront-only traffic via a shared secret header.
+            Map<String, String> originHeaders = new LinkedHashMap<>();
+            List<Map<String, String>> customHeaders = origin.getCustomHeaders();
+            if (customHeaders != null) {
+                for (Map<String, String> header : customHeaders) {
+                    String name = header.get("HeaderName");
+                    String value = header.get("HeaderValue");
+                    if (name != null && value != null) {
+                        originHeaders.put(name, value);
+                    }
+                }
+            }
             if (includeBody) {
                 rb.GET();
             } else {
                 rb.method("HEAD", HttpRequest.BodyPublishers.noBody());
             }
-            HttpResponse<byte[]> resp = httpClient.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> resp = httpClient.send(
+                    rb.build(), originHeaders, HttpResponse.BodyHandlers.ofByteArray());
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             byte[] body = resp.body() != null ? resp.body() : new byte[0];
             long contentLength = includeBody ? body.length : responseContentLength(resp);
@@ -564,6 +584,91 @@ public class CloudFrontServingController {
                     putHeader(headers, "x-amz-meta-" + name, value));
         }
         return headers;
+    }
+
+    private OriginResponse withS3CorsHeaders(
+            String bucket, Origin origin, String method, OriginResponse response) {
+        String configuredOrigin = originCustomHeader(origin, "Origin");
+        if (configuredOrigin == null || configuredOrigin.isBlank()) {
+            return response;
+        }
+
+        Map<String, List<String>> headers = new LinkedHashMap<>(response.headers());
+        s3Service.evaluateCors(bucket, configuredOrigin, method, List.of()).ifPresent(cors -> {
+            putHeaderReplacing(headers, "Access-Control-Allow-Origin", cors.allowedOrigin());
+            putHeaderReplacing(
+                    headers,
+                    "Access-Control-Allow-Methods",
+                    String.join(", ", cors.allowedMethods()));
+            putHeaderReplacing(headers, "Access-Control-Allow-Credentials", "true");
+            if (cors.maxAgeSeconds() > 0) {
+                putHeaderReplacing(
+                        headers,
+                        "Access-Control-Max-Age",
+                        Integer.toString(cors.maxAgeSeconds()));
+            }
+            if (!cors.exposeHeaders().isEmpty()) {
+                putHeaderReplacing(
+                        headers,
+                        "Access-Control-Expose-Headers",
+                        String.join(", ", cors.exposeHeaders()));
+            }
+            mergeVary(
+                    headers,
+                    List.of(
+                            "Origin",
+                            "Access-Control-Request-Headers",
+                            "Access-Control-Request-Method"));
+        });
+        return new OriginResponse(
+                response.status(),
+                response.contentType(),
+                response.body(),
+                response.contentLength(),
+                headers);
+    }
+
+    private static String originCustomHeader(Origin origin, String requestedName) {
+        if (origin.getCustomHeaders() == null) {
+            return null;
+        }
+        for (Map<String, String> header : origin.getCustomHeaders()) {
+            String name = header.get("HeaderName");
+            if (name != null && name.equalsIgnoreCase(requestedName)) {
+                return header.get("HeaderValue");
+            }
+        }
+        return null;
+    }
+
+    private static void putHeaderReplacing(
+            Map<String, List<String>> headers, String name, String value) {
+        headers.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+        putHeader(headers, name, value);
+    }
+
+    private static void mergeVary(
+            Map<String, List<String>> headers, List<String> requiredTokens) {
+        String varyKey = headers.keySet().stream()
+                .filter(name -> "Vary".equalsIgnoreCase(name))
+                .findFirst()
+                .orElse("Vary");
+        List<String> tokens = new ArrayList<>();
+        headers.getOrDefault(varyKey, List.of()).stream()
+                .flatMap(value -> java.util.Arrays.stream(value.split(",")))
+                .map(String::trim)
+                .filter(token -> !token.isEmpty())
+                .forEach(token -> addCaseInsensitive(tokens, token));
+        for (String requiredToken : requiredTokens) {
+            addCaseInsensitive(tokens, requiredToken);
+        }
+        headers.put(varyKey, List.of(String.join(", ", tokens)));
+    }
+
+    private static void addCaseInsensitive(List<String> values, String candidate) {
+        if (values.stream().noneMatch(candidate::equalsIgnoreCase)) {
+            values.add(candidate);
+        }
     }
 
     private static void putHeader(Map<String, List<String>> headers, String name, String value) {

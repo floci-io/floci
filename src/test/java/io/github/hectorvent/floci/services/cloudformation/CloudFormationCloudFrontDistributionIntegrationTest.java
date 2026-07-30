@@ -68,6 +68,9 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
                               "Id": "s3-origin",
                               "DomainName": "%s.s3.us-east-1.amazonaws.com",
                               "OriginAccessControlId": "%s",
+                              "OriginCustomHeaders": [
+                                {"HeaderName": "X-Origin-Verify", "HeaderValue": "cfn-secret"}
+                              ],
                               "S3OriginConfig": { "OriginAccessIdentity": "" }
                             }
                           ],
@@ -116,6 +119,8 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         assertEquals(
                 oac.getId(),
                 provisioned.getConfig().getOrigins().getFirst().getOriginAccessControlId());
+        assertEquals(List.of(Map.of("HeaderName", "X-Origin-Verify", "HeaderValue", "cfn-secret")),
+                provisioned.getConfig().getOrigins().getFirst().getCustomHeaders());
 
         // The provisioned distribution is browsable: a request to its alias serves the S3 origin's
         // default root object.

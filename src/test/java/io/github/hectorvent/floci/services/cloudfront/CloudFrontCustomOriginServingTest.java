@@ -46,8 +46,11 @@ class CloudFrontCustomOriginServingTest {
     void omitsQueryByDefaultAndForwardsResponseHeadersAndHeadMetadata() throws Exception {
         AtomicReference<String> receivedQuery = new AtomicReference<>();
         AtomicReference<String> receivedPath = new AtomicReference<>();
+        AtomicReference<String> receivedCustomHeader = new AtomicReference<>();
+        AtomicReference<String> receivedExpectHeader = new AtomicReference<>();
         originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        originServer.createContext("/", exchange -> respond(exchange, receivedQuery, receivedPath));
+        originServer.createContext("/", exchange ->
+                respond(exchange, receivedQuery, receivedPath, receivedCustomHeader, receivedExpectHeader));
         originServer.start();
 
         Origin customOrigin = new Origin();
@@ -55,6 +58,11 @@ class CloudFrontCustomOriginServingTest {
         // The embedded port is deliberately wrong. CustomOriginConfig.HTTPPort is authoritative.
         customOrigin.setDomainName("127.0.0.1:1");
         customOrigin.setCustomOriginConfig(customOriginConfig(originServer.getAddress().getPort()));
+        customOrigin.setCustomHeaders(List.of(
+                new LinkedHashMap<>(Map.of(
+                        "HeaderName", "X-Origin-Verify", "HeaderValue", "shared-secret-42")),
+                new LinkedHashMap<>(Map.of(
+                        "HeaderName", "Expect", "HeaderValue", "100-continue"))));
 
         DistributionConfig config = new DistributionConfig();
         config.setEnabled(true);
@@ -79,6 +87,8 @@ class CloudFrontCustomOriginServingTest {
             .header("X-Origin-Header", equalTo("preserved"));
 
         assertNull(receivedQuery.get());
+        assertEquals("shared-secret-42", receivedCustomHeader.get());
+        assertEquals("100-continue", receivedExpectHeader.get());
 
         given()
             .urlEncodingEnabled(false)
@@ -101,9 +111,13 @@ class CloudFrontCustomOriginServingTest {
     }
 
     private static void respond(HttpExchange exchange, AtomicReference<String> receivedQuery,
-                                AtomicReference<String> receivedPath) throws IOException {
+                                AtomicReference<String> receivedPath,
+                                AtomicReference<String> receivedCustomHeader,
+                                AtomicReference<String> receivedExpectHeader) throws IOException {
         receivedQuery.set(exchange.getRequestURI().getRawQuery());
         receivedPath.set(exchange.getRequestURI().getRawPath());
+        receivedCustomHeader.set(exchange.getRequestHeaders().getFirst("X-Origin-Verify"));
+        receivedExpectHeader.set(exchange.getRequestHeaders().getFirst("Expect"));
         exchange.getResponseHeaders().add("Content-Type", "text/plain");
         exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "https://viewer.example");
         exchange.getResponseHeaders().add("Cache-Control", "public, max-age=60");

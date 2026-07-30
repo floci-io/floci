@@ -4145,6 +4145,17 @@ public class CloudFormationResourceProvisioner {
                 if (!originAccessControlId.isEmpty()) {
                     origin.setOriginAccessControlId(originAccessControlId);
                 }
+                JsonNode originCustomHeaders = node.path("OriginCustomHeaders");
+                if (originCustomHeaders.isArray()) {
+                    List<Map<String, String>> customHeaders = new ArrayList<>();
+                    for (JsonNode customHeader : originCustomHeaders) {
+                        Map<String, String> mapped = new LinkedHashMap<>();
+                        mapped.put("HeaderName", cfnText(customHeader, "HeaderName", engine));
+                        mapped.put("HeaderValue", cfnText(customHeader, "HeaderValue", engine));
+                        customHeaders.add(mapped);
+                    }
+                    origin.setCustomHeaders(customHeaders);
+                }
                 JsonNode s3 = node.path("S3OriginConfig");
                 JsonNode custom = node.path("CustomOriginConfig");
                 if (!custom.isMissingNode() && !custom.isNull()) {

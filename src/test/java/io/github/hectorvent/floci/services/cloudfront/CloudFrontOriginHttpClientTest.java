@@ -28,6 +28,7 @@ import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -136,6 +137,37 @@ class CloudFrontOriginHttpClientTest {
 
             assertEquals(302, response.statusCode());
             assertEquals(0, redirectedHits.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void originHeadersReplaceSameNamedRequestHeaders() throws Exception {
+        AtomicReference<List<String>> receivedValues = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            receivedValues.set(exchange.getRequestHeaders().get("X-Origin-Verify"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            HttpRequest request = HttpRequest.newBuilder(java.net.URI.create(
+                            "http://origin.invalid:" + server.getAddress().getPort() + "/"))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("X-Origin-Verify", "viewer-value")
+                    .GET()
+                    .build();
+
+            client.send(
+                    request,
+                    Map.of("X-Origin-Verify", "configured-value"),
+                    HttpResponse.BodyHandlers.ofByteArray());
+
+            assertEquals(List.of("configured-value"), receivedValues.get());
         } finally {
             server.stop(0);
         }
