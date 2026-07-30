@@ -423,6 +423,14 @@ public class CloudFormationResourceProvisioner {
             deleteManagedPolicy(resource);
             return;
         }
+        // Extracted provisioners get the whole resource, so the ones whose delete needs more than
+        // the physical id can read their create-time attributes instead of guessing. Placed after
+        // the special cases above so extracting one of those types later cannot silently bypass them.
+        CfnResourceProvisioner extractedForDelete = resourceRegistry.forType(resourceType).orElse(null);
+        if (extractedForDelete != null) {
+            extractedForDelete.delete(resource, region);
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 

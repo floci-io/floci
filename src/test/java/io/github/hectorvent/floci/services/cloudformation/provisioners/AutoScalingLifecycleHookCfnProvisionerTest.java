@@ -13,7 +13,9 @@ import java.util.HashMap;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -78,6 +80,44 @@ class AutoScalingLifecycleHookCfnProvisionerTest {
         assertTrue(r.getPhysicalId().length() <= 255);
         verify(autoScaling).putLifecycleHook("us-east-1", "the-asg", r.getPhysicalId(),
                 null, null, null, null, null, null);
+    }
+
+    @Test
+    void provisionRecordsTheOwningGroupForDelete() {
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("AutoScalingGroupName", "the-asg")
+                .put("LifecycleHookName", "the-hook");
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("the-asg", r.getAttributes().get("AutoScalingGroupName"));
+    }
+
+    @Test
+    void deleteScopesToTheOwningGroup() {
+        StackResource r = resource();
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("AutoScalingGroupName", "the-asg")
+                .put("LifecycleHookName", "the-hook"), ctx());
+
+        provisioner.delete(r, "us-east-1");
+
+        // Hook names are unique only within a group; the by-name form would also remove an
+        // identically named hook belonging to an unrelated Auto Scaling group.
+        verify(autoScaling).deleteLifecycleHook("us-east-1", "the-asg", "the-hook");
+        verify(autoScaling, never()).deleteLifecycleHookByName(anyString(), anyString());
+    }
+
+    @Test
+    void deleteFallsBackToTheNameWhenNoGroupWasRecorded() {
+        StackResource r = resource();
+        r.setPhysicalId("the-hook");
+
+        provisioner.delete(r, "us-east-1");
+
+        verify(autoScaling).deleteLifecycleHookByName("us-east-1", "the-hook");
+        verify(autoScaling, never()).deleteLifecycleHook(anyString(), anyString(), anyString());
     }
 
     @Test

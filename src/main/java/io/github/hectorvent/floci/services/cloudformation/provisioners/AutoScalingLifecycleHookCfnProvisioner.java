@@ -35,8 +35,13 @@ public class AutoScalingLifecycleHookCfnProvisioner implements CfnResourceProvis
         }
         Integer heartbeat = props != null && props.hasNonNull("HeartbeatTimeout")
                 ? props.get("HeartbeatTimeout").asInt() : null;
+        String asgName = ctx.resolveOptional(props, "AutoScalingGroupName");
+        // Recorded so delete can scope to the owning group: hook names are unique only within one.
+        if (asgName != null && !asgName.isBlank()) {
+            r.getAttributes().put("AutoScalingGroupName", asgName);
+        }
         autoScalingService.putLifecycleHook(ctx.region(),
-                ctx.resolveOptional(props, "AutoScalingGroupName"),
+                asgName,
                 hookName,
                 ctx.resolveOptional(props, "LifecycleTransition"),
                 ctx.resolveOptional(props, "NotificationTargetARN"),
@@ -48,9 +53,29 @@ public class AutoScalingLifecycleHookCfnProvisioner implements CfnResourceProvis
     }
 
     /**
-     * Deletes the hook by name. Hooks are stored per group, but this path only holds the physical
-     * id, so the lookup is by name within the region — otherwise a hook on a group that survives
-     * the stack (an adopted or externally created group) would linger after DeleteStack.
+     * Deletes the hook on the group that owns it. Hook names are unique only within an Auto Scaling
+     * group, so deleting by name alone takes out an identically named hook on an unrelated group
+     * and stops its lifecycle action.
+     */
+    @Override
+    public void delete(StackResource resource, String region) {
+        String hookName = resource.getPhysicalId();
+        if (hookName == null || hookName.isBlank()) {
+            return;
+        }
+        String asgName = resource.getAttributes() == null
+                ? null : resource.getAttributes().get("AutoScalingGroupName");
+        if (asgName != null && !asgName.isBlank()) {
+            autoScalingService.deleteLifecycleHook(region, asgName, hookName);
+            return;
+        }
+        delete(resource.getResourceType(), hookName, region);
+    }
+
+    /**
+     * Fallback for resources provisioned before the group was recorded. The hook still has to go —
+     * it may sit on a group that outlives the stack — but without the owner this can only match by
+     * name within the region.
      */
     @Override
     public void delete(String resourceType, String physicalId, String region) {
