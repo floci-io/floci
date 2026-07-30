@@ -48,6 +48,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * REST JSON controller for the AWS SES V2 API.
@@ -173,6 +174,85 @@ public class SesController {
         sesService.deleteIdentity(emailIdentity, region);
         LOG.infov("SES V2 DeleteEmailIdentity: {0}", emailIdentity);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    // ────────────────── Identity policies (sending authorization) ────────────────
+
+    @POST
+    @Path("/identities/{emailIdentity}/policies/{policyName}")
+    public Response createEmailIdentityPolicy(@Context HttpHeaders headers,
+                                              @PathParam("emailIdentity") String emailIdentity,
+                                              @PathParam("policyName") String policyName, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            String policy = readPolicyBody(body);
+            sesService.createEmailIdentityPolicy(emailIdentity, policyName, policy, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @PUT
+    @Path("/identities/{emailIdentity}/policies/{policyName}")
+    public Response updateEmailIdentityPolicy(@Context HttpHeaders headers,
+                                              @PathParam("emailIdentity") String emailIdentity,
+                                              @PathParam("policyName") String policyName, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            String policy = readPolicyBody(body);
+            sesService.updateEmailIdentityPolicy(emailIdentity, policyName, policy, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/identities/{emailIdentity}/policies")
+    public Response getEmailIdentityPolicies(@Context HttpHeaders headers,
+                                             @PathParam("emailIdentity") String emailIdentity) {
+        String region = regionResolver.resolveRegion(headers);
+        Map<String, String> policies = sesService.getEmailIdentityPolicies(emailIdentity, region);
+        ObjectNode result = objectMapper.createObjectNode();
+        ObjectNode policiesNode = result.putObject("Policies");
+        policies.forEach(policiesNode::put);
+        return Response.ok(result).build();
+    }
+
+    @DELETE
+    @Path("/identities/{emailIdentity}/policies/{policyName}")
+    public Response deleteEmailIdentityPolicy(@Context HttpHeaders headers,
+                                              @PathParam("emailIdentity") String emailIdentity,
+                                              @PathParam("policyName") String policyName) {
+        String region = regionResolver.resolveRegion(headers);
+        sesService.deleteEmailIdentityPolicy(emailIdentity, policyName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private String readPolicyBody(String body) throws com.fasterxml.jackson.core.JsonProcessingException {
+        if (body == null || body.isBlank()) {
+            throw new AwsException("BadRequestException", "Request body is required.", 400);
+        }
+        JsonNode request = objectMapper.readTree(body);
+        requireJsonObject(request);
+        JsonNode policyNode = request.path("Policy");
+        if (policyNode.isMissingNode() || policyNode.isNull()) {
+            // Verified against AWS: a missing/null required member is a Smithy validation error.
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'policy' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (!policyNode.isTextual()) {
+            // Policy is a String; AWS rejects a non-string with an empty-bodied 400. Don't coerce
+            // (asText would turn 123 into "123"); surface a serialization error instead.
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return policyNode.textValue();
     }
 
     // ──────────────────────── Identity DKIM ─────────────────────────
@@ -2116,7 +2196,7 @@ public class SesController {
 
     private static AwsException remapV1Exception(AwsException e) {
         return switch (e.getErrorCode()) {
-            case "InvalidParameterValue", "InvalidTemplate",
+            case "InvalidParameterValue", "InvalidTemplate", "ValidationError",
                  "InvalidRenderingParameter", "MissingRenderingAttribute" ->
                     new AwsException("BadRequestException", e.getMessage(), 400);
             case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist" ->
