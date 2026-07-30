@@ -5,6 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -45,8 +50,76 @@ public class CloudControlService {
             case "AWS::EC2::SecurityGroup" -> securityGroups(region);
             case "AWS::IAM::Role" -> roles();
             case "AWS::IAM::User" -> users();
+            case "AWS::EC2::Instance" -> instances(region);
+            case "AWS::EC2::LaunchTemplate" -> launchTemplates(region);
+            case "AWS::IAM::InstanceProfile" -> instanceProfiles();
             default -> List.of();
         };
+    }
+
+    /**
+     * Cloud Control reports a resource's current model, not an echo of what was asked for, so an
+     * instance has to carry the values only the running resource has — its addresses, its state,
+     * and the subnet and security groups it actually landed in. A caller that provisions through
+     * Cloud Control and then reads the resource back has no other way to reach them.
+     */
+    private List<ResourceDescription> instances(String region) {
+        List<ResourceDescription> resources = new ArrayList<>();
+        for (Reservation reservation : ec2Service.describeInstances(region, List.of(), Map.of())) {
+            for (Instance instance : reservation.getInstances()) {
+                ObjectNode properties = mapper.createObjectNode();
+                properties.put("InstanceId", instance.getInstanceId());
+                putIfPresent(properties, "ImageId", instance.getImageId());
+                putIfPresent(properties, "InstanceType", instance.getInstanceType());
+                putIfPresent(properties, "SubnetId", instance.getSubnetId());
+                putIfPresent(properties, "VpcId", instance.getVpcId());
+                putIfPresent(properties, "PrivateIp", instance.getPrivateIpAddress());
+                putIfPresent(properties, "PublicIp", instance.getPublicIpAddress());
+                putIfPresent(properties, "AvailabilityZone",
+                        instance.getPlacement() == null ? null : instance.getPlacement().getAvailabilityZone());
+                if (instance.getState() != null) {
+                    putIfPresent(properties, "State", instance.getState().getName());
+                }
+                if (instance.getSecurityGroups() != null && !instance.getSecurityGroups().isEmpty()) {
+                    var groups = properties.putArray("SecurityGroupIds");
+                    for (GroupIdentifier g : instance.getSecurityGroups()) {
+                        if (g.getGroupId() != null) groups.add(g.getGroupId());
+                    }
+                }
+                resources.add(new ResourceDescription(instance.getInstanceId(), propertiesString(properties)));
+            }
+        }
+        return resources;
+    }
+
+    private List<ResourceDescription> launchTemplates(String region) {
+        List<ResourceDescription> resources = new ArrayList<>();
+        for (LaunchTemplate lt : ec2Service.describeLaunchTemplates(region, List.of(), List.of(), Map.of())) {
+            ObjectNode properties = mapper.createObjectNode();
+            properties.put("LaunchTemplateId", lt.getLaunchTemplateId());
+            putIfPresent(properties, "LaunchTemplateName", lt.getLaunchTemplateName());
+            putIfPresent(properties, "LatestVersionNumber", lt.getLatestVersionNumber());
+            putIfPresent(properties, "DefaultVersionNumber", lt.getDefaultVersionNumber());
+            resources.add(new ResourceDescription(lt.getLaunchTemplateId(), propertiesString(properties)));
+        }
+        return resources;
+    }
+
+    private List<ResourceDescription> instanceProfiles() {
+        List<ResourceDescription> resources = new ArrayList<>();
+        for (InstanceProfile profile : iamService.listInstanceProfiles("/")) {
+            ObjectNode properties = mapper.createObjectNode();
+            properties.put("InstanceProfileName", profile.getInstanceProfileName());
+            putIfPresent(properties, "Arn", profile.getArn());
+            putIfPresent(properties, "Path", profile.getPath());
+            resources.add(new ResourceDescription(profile.getInstanceProfileName(), propertiesString(properties)));
+        }
+        return resources;
+    }
+
+    /** Cloud Control omits a property it has no value for rather than reporting a null. */
+    private static void putIfPresent(ObjectNode node, String name, String value) {
+        if (value != null && !value.isBlank()) node.put(name, value);
     }
 
     private List<ResourceDescription> s3Buckets() {

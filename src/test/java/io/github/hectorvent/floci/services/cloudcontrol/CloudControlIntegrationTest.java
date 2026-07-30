@@ -86,6 +86,26 @@ class CloudControlIntegrationTest {
         assertListed("AWS::IAM::Role", "CloudControlRole", "RoleName");
     }
 
+    @Test
+    void listResourcesReportsAnInstancesRuntimeModel() {
+        // Cloud Control reports a resource's current model, not an echo of the desired state, so
+        // an instance has to carry what only the running resource knows — its addresses and the
+        // subnet it landed in. A caller that provisions through Cloud Control and reads back has
+        // no other route to them.
+        String instanceId = given()
+                .formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1")
+                .formParam("MaxCount", "1")
+                .header("Authorization", EC2_AUTH)
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        assertListed("AWS::EC2::Instance", instanceId, "InstanceType");
+    }
+
     private void assertListed(String typeName, String identifier, String propertyName) {
         assertListed(typeName, identifier, propertyName, "application/x-amz-json-1.1");
     }
