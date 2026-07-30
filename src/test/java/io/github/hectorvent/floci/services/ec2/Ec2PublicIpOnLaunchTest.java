@@ -31,7 +31,9 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -66,11 +68,61 @@ class Ec2PublicIpOnLaunchTest {
                 "instance in a MapPublicIpOnLaunch subnet must be flagged for a public IP");
         assertFalse(inPrivate.isAssociatePublicIp(),
                 "instance in a private subnet must NOT be flagged for a public IP");
+
+        // The behavior #1984 is about, not just the flag: after the container
+        // manager's gate runs, a private-subnet instance reports no public
+        // address while a public-subnet one reports the host-reachable one.
+        applyContainerManagerPublicIpGate(inPublic);
+        applyContainerManagerPublicIpGate(inPrivate);
+        assertEquals("127.0.0.1", inPublic.getPublicIpAddress(),
+                "public-subnet instance must report the host-reachable public IP");
+        assertNull(inPrivate.getPublicIpAddress(),
+                "private-subnet instance must report no public IP");
+        assertNull(inPrivate.getPublicDnsName(),
+                "private-subnet instance must report no public DNS name");
+    }
+
+    @Test
+    void launchTimeOverrideBeatsSubnetDefaultBothDirections(@TempDir Path dir) {
+        Ec2Service ec2 = newService(dir);
+        Vpc vpc = ec2.createVpc(REGION, "10.0.0.0/16", false);
+
+        Subnet publicSubnet = ec2.createSubnet(REGION, vpc.getVpcId(), "10.0.0.0/24", REGION + "a");
+        ec2.modifySubnetAttribute(REGION, publicSubnet.getSubnetId(), "mapPublicIpOnLaunch", "true");
+        Subnet privateSubnet = ec2.createSubnet(REGION, vpc.getVpcId(), "10.0.1.0/24", REGION + "a");
+
+        // AWS precedence: the launch-time AssociatePublicIpAddress override wins
+        // over the subnet attribute in both directions.
+        Instance forcedOn = runOne(ec2, privateSubnet.getSubnetId(), Boolean.TRUE);
+        Instance forcedOff = runOne(ec2, publicSubnet.getSubnetId(), Boolean.FALSE);
+
+        assertTrue(forcedOn.isAssociatePublicIp(),
+                "launch-time true must force a public IP in a private subnet");
+        assertFalse(forcedOff.isAssociatePublicIp(),
+                "launch-time false must suppress the public IP in a public subnet");
+    }
+
+    /**
+     * Mirrors the gate in Ec2ContainerManager (launch(), the
+     * isAssociatePublicIp branch): public addresses are set only for flagged
+     * instances. The manager is mocked out here to keep Docker away, so the
+     * decision is replicated verbatim — if the branch there changes shape,
+     * update this too.
+     */
+    private static void applyContainerManagerPublicIpGate(Instance instance) {
+        if (instance.isAssociatePublicIp()) {
+            instance.setPublicIpAddress("127.0.0.1");
+            instance.setPublicDnsName("localhost");
+        }
     }
 
     private Instance runOne(Ec2Service ec2, String subnetId) {
+        return runOne(ec2, subnetId, null);
+    }
+
+    private Instance runOne(Ec2Service ec2, String subnetId, Boolean associatePublicIp) {
         Reservation r = ec2.runInstances(REGION, AMI, "t2.micro", 1, 1, null,
-                List.of(), subnetId, null, List.of(), null, null);
+                List.of(), subnetId, null, List.of(), null, null, associatePublicIp);
         return r.getInstances().get(0);
     }
 

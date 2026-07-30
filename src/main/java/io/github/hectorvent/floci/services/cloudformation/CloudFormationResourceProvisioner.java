@@ -942,8 +942,20 @@ public class CloudFormationResourceProvisioner {
             }
         }
 
+        // The launch-time public-IP override rides on the primary network
+        // interface spec; absent means the subnet's MapPublicIpOnLaunch default.
+        Boolean associatePublicIp = null;
+        var networkInterfaces = props.path("NetworkInterfaces");
+        if (networkInterfaces.isArray() && !networkInterfaces.isEmpty()) {
+            String assocRaw = engine.resolve(networkInterfaces.get(0).path("AssociatePublicIpAddress"));
+            if (assocRaw != null && !assocRaw.isBlank()) {
+                associatePublicIp = Boolean.parseBoolean(assocRaw);
+            }
+        }
+
         var reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
-                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfile);
+                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfile,
+                associatePublicIp);
         var instance = reservation.getInstances().get(0);
         r.setPhysicalId(instance.getInstanceId());
         r.getAttributes().put("InstanceId", instance.getInstanceId());

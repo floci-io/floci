@@ -403,6 +403,14 @@ public class Ec2QueryHandler {
         int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
+        // The launch-time public-IP override arrives on the primary network
+        // interface spec — the shape Terraform's associate_public_ip_address
+        // sends. Absent means "use the subnet's MapPublicIpOnLaunch default".
+        String assocParam = p.getFirst("NetworkInterface.1.AssociatePublicIpAddress");
+        Boolean associatePublicIp = assocParam == null ? null : Boolean.parseBoolean(assocParam);
+        if (subnetId == null) {
+            subnetId = p.getFirst("NetworkInterface.1.SubnetId");
+        }
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -449,7 +457,8 @@ public class Ec2QueryHandler {
         }
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
