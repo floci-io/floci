@@ -105,6 +105,46 @@ public final class CloudFrontRequestRouter {
     }
 
     /**
+     * Returns the {@code ResponseHeadersPolicyId} of the cache behavior that serves a normalized path,
+     * evaluating ordered behaviors first (first match wins) and the default behavior last, or
+     * {@code null} when the matched behavior references no response-headers policy.
+     */
+    public static String matchResponseHeadersPolicyId(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return behavior.getResponseHeadersPolicyId();
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        return dflt != null ? dflt.getResponseHeadersPolicyId() : null;
+    }
+
+    /**
+     * Returns the viewer HTTP methods accepted by the cache behavior that serves a normalized path.
+     * Legacy persisted configurations without an explicit list retain CloudFront's minimum
+     * GET/HEAD behavior.
+     */
+    public static List<String> matchAllowedMethods(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return allowedMethodsOrDefault(behavior.getAllowedMethods());
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        return allowedMethodsOrDefault(dflt != null ? dflt.getAllowedMethods() : null);
+    }
+
+    private static List<String> allowedMethodsOrDefault(List<String> methods) {
+        return methods == null || methods.isEmpty() ? List.of("GET", "HEAD") : methods;
+    }
+
+    /**
      * Matches a CloudFront path pattern against a normalized path. A leading {@code /} on either side is
      * ignored, {@code *} matches zero or more characters, {@code ?} matches exactly one, and matching is
      * case-sensitive. A {@code null}/blank or {@code *} pattern matches everything (the default behavior).

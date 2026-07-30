@@ -80,6 +80,32 @@ class CloudFrontManagementProtocolTest {
     }
 
     @Test
+    void responseHeadersPolicyListRejectsNonModeledTypeCasing() {
+        given()
+            .queryParam("Type", "MANAGED")
+        .when()
+            .get(API + "response-headers-policy")
+        .then()
+            .statusCode(400)
+            .body(hasXPath(
+                    "//*[local-name()='Code']/text()",
+                    equalTo("InvalidArgument")));
+    }
+
+    @Test
+    void responseHeadersPolicyListRejectsUnknownMarker() {
+        given()
+            .queryParam("Marker", "missing-marker")
+        .when()
+            .get(API + "response-headers-policy")
+        .then()
+            .statusCode(400)
+            .body(hasXPath(
+                    "//*[local-name()='Code']/text()",
+                    equalTo("InvalidArgument")));
+    }
+
+    @Test
     void createOriginAccessControlDoesNotDefaultRequiredConfiguration() {
         String body = """
                 <OriginAccessControlConfig

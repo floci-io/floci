@@ -41,11 +41,25 @@ import java.util.function.Function;
 public class CloudFrontService {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final int MAX_CUSTOM_RESPONSE_HEADERS_POLICIES = 20;
+    private static final int MAX_DISTRIBUTIONS_PER_RESPONSE_HEADERS_POLICY = 100;
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Set<String> OAC_ORIGIN_TYPES =
             Set.of("s3", "mediastore", "mediapackagev2", "lambda");
     private static final Set<String> OAC_SIGNING_BEHAVIORS =
             Set.of("always", "never", "no-override");
+    static final String MANAGED_CORS_AND_SECURITY_POLICY_ID =
+            "e61eb60c-9c35-4d20-a928-2b84e02af89c";
+    static final String MANAGED_CORS_PREFLIGHT_POLICY_ID =
+            "5cc3b908-e619-4b99-88e5-2cf7f45965bd";
+    static final String MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID =
+            "eaab4381-ed33-4a86-88ca-d9558dc6cd63";
+    static final String MANAGED_SECURITY_POLICY_ID =
+            "67f7725c-6f97-4210-82d7-5512b31e9d03";
+    static final String MANAGED_SIMPLE_CORS_POLICY_ID =
+            "60669652-455b-4ae9-85a4-c4c02393f86c";
+    private static final Map<String, ResponseHeadersPolicy> MANAGED_RESPONSE_HEADERS_POLICIES =
+            managedResponseHeadersPolicies();
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -111,6 +125,7 @@ public class CloudFrontService {
 
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
         ensureAliasesAvailable(dist.getConfig(), null);
+        validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
@@ -138,6 +153,7 @@ public class CloudFrontService {
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
         ensureAliasesAvailable(updated.getConfig(), id);
+        validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         updated.setId(id);
         updated.setArn(existing.getArn());
         updated.setDomainName(existing.getDomainName());
@@ -483,6 +499,12 @@ public class CloudFrontService {
     // ── Response Headers Policies ─────────────────────────────────────────────
 
     public synchronized ResponseHeadersPolicy createResponseHeadersPolicy(ResponseHeadersPolicy policy) {
+        ResponseHeadersPolicyValidator.validate(policy);
+        ensureResponseHeadersPolicyNameAvailable(policy.getName(), null);
+        if (rhpStore.scan(k -> true).size() >= MAX_CUSTOM_RESPONSE_HEADERS_POLICIES) {
+            throw new AwsException("TooManyResponseHeadersPolicies",
+                    "The maximum number of response headers policies has been reached.", 400);
+        }
         policy.setId(UUID.randomUUID().toString());
         policy.setEtag(UUID.randomUUID().toString());
         policy.setLastModifiedTime(Instant.now());
@@ -491,18 +513,22 @@ public class CloudFrontService {
     }
 
     public ResponseHeadersPolicy getResponseHeadersPolicy(String id) {
-        return rhpStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchResponseHeadersPolicy",
+        return rhpStore.get(id)
+                .or(() -> java.util.Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(id)))
+                .orElseThrow(() -> new AwsException("NoSuchResponseHeadersPolicy",
                         "The specified response headers policy does not exist.", 404));
     }
 
     public synchronized ResponseHeadersPolicy updateResponseHeadersPolicy(String id, String ifMatch,
                                                                            ResponseHeadersPolicy updated) {
         ResponseHeadersPolicy existing = getResponseHeadersPolicy(id);
+        rejectManagedResponseHeadersPolicyUpdate(id);
         if (!existing.getEtag().equals(ifMatch)) {
-            throw new AwsException("InvalidIfMatchVersion",
-                    "The If-Match version is missing or not valid for the resource.", 400);
+            throw new AwsException("PreconditionFailed",
+                    "The precondition in one or more of the request-header fields evaluated to false.", 412);
         }
+        ResponseHeadersPolicyValidator.validate(updated);
+        ensureResponseHeadersPolicyNameAvailable(updated.getName(), id);
         updated.setId(id);
         updated.setEtag(UUID.randomUUID().toString());
         updated.setLastModifiedTime(Instant.now());
@@ -512,24 +538,51 @@ public class CloudFrontService {
 
     public synchronized void deleteResponseHeadersPolicy(String id, String ifMatch) {
         ResponseHeadersPolicy existing = getResponseHeadersPolicy(id);
+        rejectManagedResponseHeadersPolicyDelete(id);
         if (!existing.getEtag().equals(ifMatch)) {
-            throw new AwsException("InvalidIfMatchVersion",
-                    "The If-Match version is missing or not valid for the resource.", 400);
+            throw new AwsException("PreconditionFailed",
+                    "The precondition in one or more of the request-header fields evaluated to false.", 412);
+        }
+        if (isResponseHeadersPolicyInUse(id)) {
+            throw new AwsException("ResponseHeadersPolicyInUse",
+                    "The response headers policy is attached to one or more distributions.", 409);
         }
         rhpStore.delete(id);
     }
 
     public List<ResponseHeadersPolicy> listResponseHeadersPolicies(String marker, int maxItems) {
-        List<ResponseHeadersPolicy> all = new ArrayList<>(rhpStore.scan(k -> true));
+        return listResponseHeadersPolicies(marker, maxItems, null);
+    }
+
+    public List<ResponseHeadersPolicy> listResponseHeadersPolicies(
+            String marker, int maxItems, String type) {
+        String normalizedType = type;
+        if (normalizedType != null
+                && !"custom".equals(normalizedType)
+                && !"managed".equals(normalizedType)) {
+            throw new AwsException("InvalidArgument",
+                    "Response headers policy Type must be managed or custom.", 400);
+        }
+        List<ResponseHeadersPolicy> all = new ArrayList<>();
+        if (!"managed".equals(normalizedType)) {
+            all.addAll(rhpStore.scan(k -> true));
+        }
+        if (!"custom".equals(normalizedType)) {
+            all.addAll(MANAGED_RESPONSE_HEADERS_POLICIES.values());
+        }
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
         if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
+            int idx = -1;
             for (int i = 0; i < all.size(); i++) {
                 if (all.get(i).getId().equals(marker)) {
                     idx = i + 1;
                     break;
                 }
+            }
+            if (idx < 0) {
+                throw new AwsException("InvalidArgument",
+                        "The specified marker is invalid.", 400);
             }
             all = all.subList(idx, all.size());
         }
@@ -537,6 +590,178 @@ public class CloudFrontService {
             return all.subList(0, maxItems);
         }
         return all;
+    }
+
+    static boolean isManagedResponseHeadersPolicy(String id) {
+        return MANAGED_RESPONSE_HEADERS_POLICIES.containsKey(id);
+    }
+
+    private void ensureResponseHeadersPolicyNameAvailable(String name, String excludedId) {
+        boolean duplicateCustom = rhpStore.scan(k -> true).stream()
+                .anyMatch(existing -> !existing.getId().equals(excludedId)
+                        && name.equals(existing.getName()));
+        boolean duplicateManaged = MANAGED_RESPONSE_HEADERS_POLICIES.values().stream()
+                .anyMatch(existing -> name.equals(existing.getName()));
+        if (duplicateCustom || duplicateManaged) {
+            throw new AwsException("ResponseHeadersPolicyAlreadyExists",
+                    "A response headers policy with this name already exists.", 409);
+        }
+    }
+
+    private static void rejectManagedResponseHeadersPolicyUpdate(String id) {
+        if (isManagedResponseHeadersPolicy(id)) {
+            throw new AwsException("IllegalUpdate",
+                    "AWS managed response headers policies cannot be updated.", 400);
+        }
+    }
+
+    private static void rejectManagedResponseHeadersPolicyDelete(String id) {
+        if (isManagedResponseHeadersPolicy(id)) {
+            throw new AwsException("IllegalDelete",
+                    "AWS managed response headers policies cannot be deleted.", 400);
+        }
+    }
+
+    private void validateResponseHeadersPolicyReferences(
+            DistributionConfig config, String excludedDistributionId) {
+        if (config == null) {
+            return;
+        }
+        Set<String> policyIds = new java.util.LinkedHashSet<>();
+        if (config.getDefaultCacheBehavior() != null) {
+            addResponseHeadersPolicyId(
+                    policyIds,
+                    config.getDefaultCacheBehavior().getResponseHeadersPolicyId());
+        }
+        if (config.getCacheBehaviors() != null) {
+            config.getCacheBehaviors().forEach(behavior ->
+                    addResponseHeadersPolicyId(
+                            policyIds, behavior.getResponseHeadersPolicyId()));
+        }
+        for (String policyId : policyIds) {
+            requireResponseHeadersPolicy(policyId);
+            long associatedDistributions = distStore.scan(k -> true).stream()
+                    .filter(distribution -> excludedDistributionId == null
+                            || !excludedDistributionId.equals(distribution.getId()))
+                    .filter(distribution -> usesResponseHeadersPolicy(
+                            distribution.getConfig(), policyId))
+                    .count();
+            if (associatedDistributions
+                    >= MAX_DISTRIBUTIONS_PER_RESPONSE_HEADERS_POLICY) {
+                throw new AwsException(
+                        "TooManyDistributionsAssociatedToResponseHeadersPolicy",
+                        "The maximum number of distributions have been associated with the "
+                                + "specified response headers policy.",
+                        400);
+            }
+        }
+    }
+
+    private static void addResponseHeadersPolicyId(
+            Set<String> policyIds, String policyId) {
+        if (policyId != null && !policyId.isBlank()) {
+            policyIds.add(policyId);
+        }
+    }
+
+    private void requireResponseHeadersPolicy(String policyId) {
+        if (policyId != null && !policyId.isBlank()) {
+            getResponseHeadersPolicy(policyId);
+        }
+    }
+
+    private boolean isResponseHeadersPolicyInUse(String id) {
+        return distStore.scan(k -> true).stream()
+                .map(Distribution::getConfig)
+                .anyMatch(config -> usesResponseHeadersPolicy(config, id));
+    }
+
+    private static boolean usesResponseHeadersPolicy(
+            DistributionConfig config, String id) {
+        if (config == null) {
+            return false;
+        }
+        boolean defaultUsesPolicy = config.getDefaultCacheBehavior() != null
+                && id.equals(config.getDefaultCacheBehavior().getResponseHeadersPolicyId());
+        boolean orderedUsesPolicy = config.getCacheBehaviors() != null
+                && config.getCacheBehaviors().stream().anyMatch(behavior ->
+                        id.equals(behavior.getResponseHeadersPolicyId()));
+        return defaultUsesPolicy || orderedUsesPolicy;
+    }
+
+    private static Map<String, ResponseHeadersPolicy> managedResponseHeadersPolicies() {
+        Map<String, Object> simpleCors = corsConfig(
+                List.of("*"), List.of(), List.of(), List.of(), null);
+        Map<String, Object> preflightCors = corsConfig(
+                List.of("*"),
+                List.of("GET", "HEAD", "PUT", "POST", "PATCH", "DELETE", "OPTIONS"),
+                List.of(), List.of("*"), null);
+        Map<String, Object> security = securityHeadersConfig();
+
+        Map<String, ResponseHeadersPolicy> policies = new LinkedHashMap<>();
+        policies.put(MANAGED_CORS_AND_SECURITY_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_CORS_AND_SECURITY_POLICY_ID, "Managed-CORS-and-SecurityHeadersPolicy",
+                "Allows all origins for simple CORS requests, and adds security headers",
+                Map.of("CorsConfig", simpleCors, "SecurityHeadersConfig", security)));
+        policies.put(MANAGED_CORS_PREFLIGHT_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_CORS_PREFLIGHT_POLICY_ID, "Managed-CORS-With-Preflight",
+                "Allows all origins for CORS requests, including preflight requests",
+                Map.of("CorsConfig", preflightCors)));
+        policies.put(MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID,
+                "Managed-CORS-with-preflight-and-SecurityHeadersPolicy",
+                "Allows all origins for CORS requests, including preflight requests, and adds security headers",
+                Map.of("CorsConfig", preflightCors, "SecurityHeadersConfig", security)));
+        policies.put(MANAGED_SECURITY_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_SECURITY_POLICY_ID, "Managed-SecurityHeadersPolicy",
+                "Adds a set of security headers to every response",
+                Map.of("SecurityHeadersConfig", security)));
+        policies.put(MANAGED_SIMPLE_CORS_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_SIMPLE_CORS_POLICY_ID, "Managed-SimpleCORS",
+                "Allows all origins for simple CORS requests",
+                Map.of("CorsConfig", simpleCors)));
+        return Map.copyOf(policies);
+    }
+
+    private static ResponseHeadersPolicy managedResponseHeadersPolicy(
+            String id, String name, String comment, Map<String, Object> config) {
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setId(id);
+        policy.setName(name);
+        policy.setComment(comment);
+        policy.setEtag("E23ZP02F085DFQ");
+        policy.setLastModifiedTime(Instant.EPOCH);
+        policy.setConfig(config);
+        return policy;
+    }
+
+    private static Map<String, Object> corsConfig(List<String> origins, List<String> methods,
+                                                   List<String> headers, List<String> exposeHeaders,
+                                                   Long maxAgeSeconds) {
+        Map<String, Object> cors = new LinkedHashMap<>();
+        cors.put("AccessControlAllowCredentials", "false");
+        cors.put("AccessControlAllowHeaders", headers);
+        cors.put("AccessControlAllowMethods", methods);
+        cors.put("AccessControlAllowOrigins", origins);
+        cors.put("AccessControlExposeHeaders", exposeHeaders);
+        if (maxAgeSeconds != null) {
+            cors.put("AccessControlMaxAgeSec", Long.toString(maxAgeSeconds));
+        }
+        cors.put("OriginOverride", "false");
+        return Map.copyOf(cors);
+    }
+
+    private static Map<String, Object> securityHeadersConfig() {
+        Map<String, Object> security = new LinkedHashMap<>();
+        security.put("ContentTypeOptions", Map.of("Override", "true"));
+        security.put("FrameOptions", Map.of("FrameOption", "SAMEORIGIN", "Override", "false"));
+        security.put("ReferrerPolicy", Map.of(
+                "ReferrerPolicy", "strict-origin-when-cross-origin", "Override", "false"));
+        security.put("StrictTransportSecurity", Map.of(
+                "AccessControlMaxAgeSec", "31536000", "Override", "false"));
+        security.put("XSSProtection", Map.of(
+                "Protection", "true", "ModeBlock", "true", "Override", "false"));
+        return Map.copyOf(security);
     }
 
     // ── Origin Access Control ─────────────────────────────────────────────────

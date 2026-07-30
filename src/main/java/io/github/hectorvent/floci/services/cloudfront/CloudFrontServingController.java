@@ -13,6 +13,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
+import jakarta.ws.rs.OPTIONS;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.core.Context;
@@ -29,8 +30,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -56,8 +59,8 @@ import java.util.Set;
  *       If the configured error page is itself missing, the received status is returned (no loop).</li>
  * </ul>
  *
- * <p>Viewer-protocol-policy and allowed-method enforcement are intentionally out of scope for this
- * layer: the emulator is HTTP-first and serves GET/HEAD regardless of scheme.
+ * <p>Viewer-protocol-policy enforcement is intentionally out of scope for this layer: the emulator
+ * is HTTP-first. GET/HEAD are served, and OPTIONS is served only when the matched behavior allows it.
  */
 @Path("/_cloudfront/{distId}")
 public class CloudFrontServingController {
@@ -66,6 +69,10 @@ public class CloudFrontServingController {
     private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
     private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME
             .withZone(ZoneOffset.UTC);
+    private static final Set<String> FORBIDDEN_POLICY_RESPONSE_HEADERS = Set.of(
+            "connection", "content-length", "keep-alive", "proxy-authenticate",
+            "proxy-authorization", "proxy-connection", "te", "trailer",
+            "transfer-encoding", "upgrade", "via");
     private static final Set<String> NON_FORWARDED_RESPONSE_HEADERS = Set.of(
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "via",
@@ -100,25 +107,57 @@ public class CloudFrontServingController {
     @Path("/{proxy:.*}")
     public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                         @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        String rawViewerPath = rawViewerPath(currentVertxRequest.getCurrent().request().uri());
+        var request = currentVertxRequest.getCurrent().request();
+        String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
-                uriInfo.getRequestUri().getScheme(), headers.getHeaderString("Host"),
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), true);
+                uriInfo.getRequestUri().getScheme(),
+                headers.getHeaderString("Host"),
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION),
+                request.getHeader("Origin"), "GET", null, null,
+                request.getHeader("Pragma"));
     }
 
     @HEAD
     @Path("/{proxy:.*}")
     public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                          @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        String rawViewerPath = rawViewerPath(currentVertxRequest.getCurrent().request().uri());
+        var request = currentVertxRequest.getCurrent().request();
+        String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
-                uriInfo.getRequestUri().getScheme(), headers.getHeaderString("Host"),
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), false);
+                uriInfo.getRequestUri().getScheme(),
+                headers.getHeaderString("Host"),
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION),
+                request.getHeader("Origin"), "HEAD", null, null,
+                request.getHeader("Pragma"));
+    }
+
+    @OPTIONS
+    @Path("/{proxy:.*}")
+    public Response options(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                            @Context HttpHeaders headers, @Context UriInfo uriInfo) {
+        var request = currentVertxRequest.getCurrent().request();
+        String rawViewerPath = rawViewerPath(request.uri());
+        return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
+                uriInfo.getRequestUri().getScheme(),
+                headers.getHeaderString("Host"),
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION),
+                request.getHeader("Origin"), "OPTIONS",
+                request.getHeader("Access-Control-Request-Method"),
+                request.getHeader("Access-Control-Request-Headers"),
+                request.getHeader("Pragma"));
     }
 
     private Response serve(String distId, String rawViewerPath, String decodedViewerPath,
-                           String viewerScheme, String viewerHost, String viewerAuthorization,
-                           boolean includeBody) {
+                           String viewerScheme, String viewerHost,
+                           String viewerAuthorization,
+                           String viewerOrigin, String method,
+                           String accessControlRequestMethod,
+                           String accessControlRequestHeaders,
+                           String pragma) {
+        boolean includeBody = !"HEAD".equals(method);
+        boolean preflightRequest = "OPTIONS".equals(method)
+                && viewerOrigin != null && !viewerOrigin.isBlank()
+                && accessControlRequestMethod != null && !accessControlRequestMethod.isBlank();
         Distribution dist = service.findByHost(viewerHost);
         if (dist == null || !distId.equals(dist.getId())) {
             return textError(404, "Distribution not found.");
@@ -133,24 +172,60 @@ public class CloudFrontServingController {
 
         String normalized = CloudFrontRequestRouter.normalizePath(decodedViewerPath);
 
+        if (!CloudFrontRequestRouter.matchAllowedMethods(config, normalized).contains(method)) {
+            return textError(403, "Invalid method.");
+        }
+
+        // The response-headers policy of the behavior that matches the request applies to the final
+        // response CloudFront returns to the viewer, including any custom-error page substituted below.
+        String policyId = CloudFrontRequestRouter.matchResponseHeadersPolicyId(config, normalized);
+        ResponseHeadersPolicyConfigCodec.Directives directives = responseHeaderDirectives(
+                policyId, viewerOrigin, preflightRequest, pragma);
+
         OriginResponse origin = route(dist, normalized, rawViewerPath, decodedViewerPath,
-                viewerScheme, viewerAuthorization, includeBody);
+                viewerScheme, viewerAuthorization, method, viewerOrigin,
+                accessControlRequestMethod, accessControlRequestHeaders);
 
         if (origin.status() >= 400) {
             Response fallback = applyCustomError(
-                    dist, origin, viewerScheme, viewerAuthorization, includeBody);
+                    dist, origin, viewerScheme, viewerAuthorization, includeBody, directives);
             if (fallback != null) {
                 return fallback;
             }
         }
-        return toResponse(origin, includeBody);
+        return toResponse(origin, includeBody, directives);
+    }
+
+    /** Resolves the response-headers policy for a behavior into the headers it contributes, if any. */
+    private ResponseHeadersPolicyConfigCodec.Directives responseHeaderDirectives(
+            String policyId, String viewerOrigin, boolean preflightRequest, String pragma) {
+        if (policyId == null || policyId.isBlank()) {
+            return null;
+        }
+        try {
+            return ResponseHeadersPolicyConfigCodec.directives(
+                    service.getResponseHeadersPolicy(policyId).getConfig(), viewerOrigin,
+                    preflightRequest, isManagedPreflightPolicy(policyId), pragma);
+        } catch (AwsException e) {
+            // New distribution writes reject dangling references. A persisted legacy record can still
+            // contain one, so keep serving it without policy headers but make the corruption visible.
+            LOG.warnv("Distribution references missing response headers policy {0}", policyId);
+            return null;
+        }
+    }
+
+    private static boolean isManagedPreflightPolicy(String policyId) {
+        return CloudFrontService.MANAGED_CORS_PREFLIGHT_POLICY_ID.equals(policyId)
+                || CloudFrontService.MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID.equals(policyId);
     }
 
     /** Selects an origin with the normalized path, then forwards the original viewer path. */
     private OriginResponse route(Distribution distribution, String normalized,
                                  String rawViewerPath, String decodedViewerPath,
                                  String viewerScheme, String viewerAuthorization,
-                                 boolean includeBody) {
+                                 String method, String viewerOrigin,
+                                 String accessControlRequestMethod,
+                                 String accessControlRequestHeaders) {
         DistributionConfig config = distribution.getConfig();
         String originId = CloudFrontRequestRouter.matchTargetOriginId(config, normalized);
         Origin origin = CloudFrontRequestRouter.findOrigin(config, originId);
@@ -158,17 +233,22 @@ public class CloudFrontServingController {
             return OriginResponse.error(502, "No origin matched the request.");
         }
         if (CloudFrontRequestRouter.isS3Origin(origin)) {
+            if ("OPTIONS".equals(method)) {
+                return fetchS3Preflight(origin, viewerOrigin, accessControlRequestMethod,
+                        accessControlRequestHeaders);
+            }
             String key = CloudFrontRequestRouter.resolveOriginKey(
                     origin.getOriginPath(), decodedViewerPath, config.getDefaultRootObject());
             return fetchFromS3(
-                    distribution, origin, key, viewerAuthorization, includeBody);
+                    distribution, origin, key, viewerAuthorization, !"HEAD".equals(method));
         }
         String forwardUri = CloudFrontRequestRouter.resolveForwardUri(
                 origin.getOriginPath(), rawViewerPath, config.getDefaultRootObject());
         // CloudFront forwards viewer query strings only when selected by a cache policy,
         // origin request policy, or legacy ForwardedValues configuration. Those policy
         // semantics are not modeled in the data plane yet, so the AWS default is to omit them.
-        return fetchFromCustomOrigin(origin, forwardUri, null, viewerScheme, includeBody);
+        return fetchFromCustomOrigin(origin, forwardUri, null, viewerScheme, method,
+                viewerOrigin, accessControlRequestMethod, accessControlRequestHeaders);
     }
 
     private OriginResponse fetchFromS3(
@@ -235,36 +315,58 @@ public class CloudFrontServingController {
         s3Service.authorizeAnonymousGetObject(bucket, key);
     }
 
-    private static String originAccessIdentityId(Origin origin) {
-        Map<String, String> config = origin.getS3OriginConfig();
-        String value = config != null ? config.get("OriginAccessIdentity") : null;
-        if (value == null || value.isBlank()) {
-            return null;
+    private OriginResponse fetchS3Preflight(Origin origin, String viewerOrigin,
+                                            String requestMethod, String requestHeaders) {
+        String bucket = CloudFrontRequestRouter.bucketFromS3Domain(origin.getDomainName());
+        if (bucket == null) {
+            return OriginResponse.error(502, "Could not determine S3 bucket for origin.");
         }
-        String normalized = value.startsWith("/") ? value.substring(1) : value;
-        String prefix = "origin-access-identity/cloudfront/";
-        if (!normalized.startsWith(prefix)
-                || normalized.length() == prefix.length()
-                || normalized.substring(prefix.length()).contains("/")) {
-            throw new AwsException(
-                    "InvalidArgument", "The S3 origin access identity is invalid.", 400);
+        if (viewerOrigin == null || viewerOrigin.isBlank()
+                || requestMethod == null || requestMethod.isBlank()) {
+            return OriginResponse.error(403, "This CORS request is not allowed.");
         }
-        return normalized.substring(prefix.length());
+        List<String> requestedHeaders = splitHeaderValues(requestHeaders);
+        return s3Service.evaluateCors(bucket, viewerOrigin, requestMethod, requestedHeaders)
+                .map(cors -> {
+                    Map<String, List<String>> headers = new LinkedHashMap<>();
+                    putHeader(headers, "Access-Control-Allow-Origin", cors.allowedOrigin());
+                    putHeader(headers, "Access-Control-Allow-Methods",
+                            String.join(", ", cors.allowedMethods()));
+                    if (cors.maxAgeSeconds() > 0) {
+                        putHeader(headers, "Access-Control-Max-Age",
+                                Integer.toString(cors.maxAgeSeconds()));
+                    }
+                    if (!cors.allowedHeaders().isEmpty()) {
+                        putHeader(headers, "Access-Control-Allow-Headers",
+                                String.join(", ", cors.allowedHeaders()));
+                    }
+                    if (!cors.exposeHeaders().isEmpty()) {
+                        putHeader(headers, "Access-Control-Expose-Headers",
+                                String.join(", ", cors.exposeHeaders()));
+                    }
+                    return new OriginResponse(200, null, new byte[0], 0, headers);
+                })
+                .orElseGet(() -> OriginResponse.error(403,
+                        "This CORS request is not allowed."));
     }
 
     /** Fetches from a custom (non-S3) origin. {@code forwardUri} already includes the origin path. */
     private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri, String rawQuery,
-                                                 String viewerScheme, boolean includeBody) {
+                                                 String viewerScheme, String method, String viewerOrigin,
+                                                 String accessControlRequestMethod,
+                                                 String accessControlRequestHeaders) {
+        boolean includeBody = !"HEAD".equals(method);
         try {
             URI target = buildCustomOriginUri(
                     origin, viewerScheme, forwardUri, rawQuery);
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(target)
                     .timeout(Duration.ofSeconds(30));
-            if (includeBody) {
-                rb.GET();
-            } else {
-                rb.method("HEAD", HttpRequest.BodyPublishers.noBody());
+            rb.method(method, HttpRequest.BodyPublishers.noBody());
+            if ("OPTIONS".equals(method)) {
+                addRequestHeader(rb, "Origin", viewerOrigin);
+                addRequestHeader(rb, "Access-Control-Request-Method", accessControlRequestMethod);
+                addRequestHeader(rb, "Access-Control-Request-Headers", accessControlRequestHeaders);
             }
             HttpResponse<byte[]> resp = httpClient.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
@@ -283,6 +385,23 @@ public class CloudFrontServingController {
                     safeOriginName(origin), e.getClass().getSimpleName());
             return OriginResponse.error(502, "Bad Gateway.");
         }
+    }
+
+    private static String originAccessIdentityId(Origin origin) {
+        Map<String, String> config = origin.getS3OriginConfig();
+        String value = config != null ? config.get("OriginAccessIdentity") : null;
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String normalized = value.startsWith("/") ? value.substring(1) : value;
+        String prefix = "origin-access-identity/cloudfront/";
+        if (!normalized.startsWith(prefix)
+                || normalized.length() == prefix.length()
+                || normalized.substring(prefix.length()).contains("/")) {
+            throw new AwsException(
+                    "InvalidArgument", "The S3 origin access identity is invalid.", 400);
+        }
+        return normalized.substring(prefix.length());
     }
 
     static boolean isBlockedOriginAddress(InetAddress address) {
@@ -456,7 +575,8 @@ public class CloudFrontServingController {
             OriginResponse origin,
             String viewerScheme,
             String viewerAuthorization,
-            boolean includeBody) {
+            boolean includeBody,
+            ResponseHeadersPolicyConfigCodec.Directives directives) {
         DistributionConfig config = distribution.getConfig();
         Map<String, Object> cer = matchCustomError(config, origin.status());
         if (cer == null) {
@@ -467,7 +587,7 @@ public class CloudFrontServingController {
         if (pagePath.isBlank()) {
             // ResponseCode override with no custom page: keep the origin body, change the status.
             return toResponse(new OriginResponse(responseCode, origin.contentType(), origin.body(),
-                    origin.contentLength(), origin.headers()), includeBody);
+                    origin.contentLength(), origin.headers()), includeBody, directives);
         }
 
         String errNormalized = CloudFrontRequestRouter.normalizePath(pagePath);
@@ -485,15 +605,16 @@ public class CloudFrontServingController {
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
             page = fetchFromCustomOrigin(
-                    errOrigin, forwardUri, null, viewerScheme, includeBody);
+                    errOrigin, forwardUri, null, viewerScheme,
+                    includeBody ? "GET" : "HEAD", null, null, null);
         }
         if (page.status() >= 400) {
             // Custom error page unavailable → return the status received from the error-page origin
             // (AWS behavior), without recursively applying custom error handling.
-            return toResponse(page, includeBody);
+            return toResponse(page, includeBody, directives);
         }
         return toResponse(new OriginResponse(responseCode, page.contentType(), page.body(),
-                page.contentLength(), page.headers()), includeBody);
+                page.contentLength(), page.headers()), includeBody, directives);
     }
 
     private Map<String, Object> matchCustomError(DistributionConfig config, int status) {
@@ -509,32 +630,132 @@ public class CloudFrontServingController {
         return null;
     }
 
-    private Response toResponse(OriginResponse origin, boolean includeBody) {
+    private Response toResponse(OriginResponse origin, boolean includeBody,
+                                ResponseHeadersPolicyConfigCodec.Directives directives) {
         Response.ResponseBuilder rb = Response.status(origin.status());
-        Set<String> excludedHeaders = new HashSet<>(NON_FORWARDED_RESPONSE_HEADERS);
+        HeaderCollection collected = collectResponseHeaders(origin, includeBody);
+        applyResponseHeadersPolicy(collected.headers(), directives, collected.forbiddenPolicyHeaders());
+        for (HeaderValues header : collected.headers().values()) {
+            if ("date".equalsIgnoreCase(header.name())) {
+                currentVertxRequest.getCurrent().response()
+                        .putHeader(header.name(), header.values());
+            } else {
+                header.values().forEach(value -> rb.header(header.name(), value));
+            }
+        }
+        if (includeBody && origin.body() != null) {
+            rb.entity(origin.body());
+        }
+        return rb.build();
+    }
+
+    /**
+     * Collects the origin's end-to-end response headers case-insensitively while preserving every
+     * value (notably multiple {@code Set-Cookie} fields). Hop-by-hop fields and every field named by
+     * the origin's {@code Connection} header stay out of the viewer response.
+     */
+    private static HeaderCollection collectResponseHeaders(OriginResponse origin, boolean includeBody) {
+        Set<String> excludedOriginHeaders = new HashSet<>(NON_FORWARDED_RESPONSE_HEADERS);
+        Set<String> forbiddenPolicyHeaders = new HashSet<>(FORBIDDEN_POLICY_RESPONSE_HEADERS);
         origin.headers().forEach((name, values) -> {
             if ("connection".equalsIgnoreCase(name)) {
                 values.forEach(value -> {
                     for (String token : value.split(",")) {
-                        excludedHeaders.add(token.trim().toLowerCase(Locale.ROOT));
+                        String normalized = normalizeHeaderName(token);
+                        if (!normalized.isEmpty()) {
+                            excludedOriginHeaders.add(normalized);
+                        }
                     }
                 });
             }
         });
+
+        Map<String, HeaderValues> headers = new LinkedHashMap<>();
         origin.headers().forEach((name, values) -> {
-            if (!excludedHeaders.contains(name.toLowerCase(Locale.ROOT))) {
-                values.forEach(value -> rb.header(name, value));
+            String normalized = normalizeHeaderName(name);
+            if (!normalized.isEmpty() && !excludedOriginHeaders.contains(normalized)) {
+                HeaderValues existing = headers.computeIfAbsent(normalized,
+                        ignored -> new HeaderValues(name, new ArrayList<>()));
+                existing.values().addAll(values);
             }
         });
         if (origin.contentType() != null) {
-            rb.type(origin.contentType());
+            setHeader(headers, "Content-Type", origin.contentType());
         }
-        if (includeBody && origin.body() != null) {
-            rb.entity(origin.body());
-        } else if (origin.contentLength() >= 0) {
-            rb.header("Content-Length", origin.contentLength());
+        if (!includeBody && origin.contentLength() >= 0) {
+            setHeader(headers, "Content-Length", Long.toString(origin.contentLength()));
         }
-        return rb.build();
+        return new HeaderCollection(headers, forbiddenPolicyHeaders);
+    }
+
+    /** Applies removals first, then policy additions with their origin-override semantics. */
+    private static void applyResponseHeadersPolicy(
+            Map<String, HeaderValues> headers,
+            ResponseHeadersPolicyConfigCodec.Directives directives,
+            Set<String> forbiddenPolicyHeaders) {
+        if (directives == null) {
+            return;
+        }
+        boolean replaceServer = false;
+        boolean replaceDate = false;
+        for (String name : directives.remove()) {
+            String normalized = normalizeHeaderName(name);
+            if (ResponseHeadersPolicyValidator.isForbiddenRemoval(normalized)) {
+                continue;
+            }
+            headers.remove(normalized);
+            replaceServer |= "server".equals(normalized);
+            replaceDate |= "date".equals(normalized);
+        }
+        boolean hasOriginCorsHeader = headers.keySet().stream()
+                .anyMatch(CloudFrontServingController::isCorsHeader);
+        for (ResponseHeadersPolicyConfigCodec.PolicyHeader header : directives.add()) {
+            String normalized = normalizeHeaderName(header.name());
+            if (normalized.isEmpty() || forbiddenPolicyHeaders.contains(normalized)) {
+                continue;
+            }
+            // OriginOverride=false is group-wide for CORS: if the origin supplied any CORS header,
+            // CloudFront keeps the origin's CORS response and adds none of the policy's CORS fields.
+            if (isCorsHeader(normalized) && !header.override() && hasOriginCorsHeader) {
+                continue;
+            }
+            if (header.override() || !headers.containsKey(normalized)) {
+                setHeader(headers, header.name(), header.value());
+            }
+        }
+        if (directives.serverTiming()) {
+            mergeServerTiming(headers);
+        }
+        if (replaceServer && !headers.containsKey("server")) {
+            setHeader(headers, "Server", "CloudFront");
+        }
+        if (replaceDate && !headers.containsKey("date")) {
+            setHeader(headers, "Date", HTTP_DATE.format(Instant.now()));
+        }
+    }
+
+    private static void mergeServerTiming(Map<String, HeaderValues> headers) {
+        String cloudFrontMetrics = "cdn-cache-miss,cdn-pop;desc=\"local\"";
+        HeaderValues origin = headers.get("server-timing");
+        if (origin == null || origin.values().isEmpty()) {
+            setHeader(headers, "Server-Timing", cloudFrontMetrics);
+            return;
+        }
+        setHeader(headers, "Server-Timing",
+                String.join(", ", origin.values()) + ", " + cloudFrontMetrics);
+    }
+
+    private static void setHeader(Map<String, HeaderValues> headers, String name, String value) {
+        headers.put(normalizeHeaderName(name),
+                new HeaderValues(name, new ArrayList<>(List.of(value == null ? "" : value))));
+    }
+
+    private static String normalizeHeaderName(String name) {
+        return name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean isCorsHeader(String name) {
+        return normalizeHeaderName(name).startsWith("access-control-");
     }
 
     private Response textError(int status, String message) {
@@ -572,6 +793,26 @@ public class CloudFrontServingController {
         }
     }
 
+    private static List<String> splitHeaderValues(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        for (String item : value.split(",")) {
+            String trimmed = item.trim();
+            if (!trimmed.isEmpty()) {
+                values.add(trimmed);
+            }
+        }
+        return values;
+    }
+
+    private static void addRequestHeader(HttpRequest.Builder request, String name, String value) {
+        if (value != null && !value.isBlank()) {
+            request.header(name, value);
+        }
+    }
+
     private static String str(Object value) {
         return value != null ? value.toString() : "";
     }
@@ -590,6 +831,13 @@ public class CloudFrontServingController {
             LOG.debugv("Ignoring non-integer CloudFront configuration value {0}: {1}", value, e.getMessage());
             return dflt;
         }
+    }
+
+    private record HeaderValues(String name, List<String> values) {
+    }
+
+    private record HeaderCollection(Map<String, HeaderValues> headers,
+                                    Set<String> forbiddenPolicyHeaders) {
     }
 
     /** The result of fetching from an origin, including end-to-end response headers. */
