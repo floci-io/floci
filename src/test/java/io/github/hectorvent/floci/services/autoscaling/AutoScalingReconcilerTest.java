@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -113,6 +114,51 @@ class AutoScalingReconcilerTest {
         assertEquals("development", tags.getValue().get(0).getValue());
         assertEquals("job-id", tags.getValue().get(1).getKey());
         assertEquals("2001", tags.getValue().get(1).getValue());
+    }
+
+    @Test
+    void scaleOutForwardsLaunchConfigurationAssociatePublicIpAddressBothDirections() {
+        // An LC that explicitly sets false must suppress the public IP even in a
+        // MapPublicIpOnLaunch subnet, so false has to reach runInstances as
+        // FALSE rather than null (null means "use the subnet default").
+        assertLaunchConfigurationForwards(Boolean.FALSE);
+        assertLaunchConfigurationForwards(Boolean.TRUE);
+        assertLaunchConfigurationForwards(null);
+    }
+
+    private void assertLaunchConfigurationForwards(Boolean associatePublicIp) {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(1);
+        asg.setLaunchConfigurationName("app-lc");
+
+        LaunchConfiguration lc = new LaunchConfiguration();
+        lc.setLaunchConfigurationName("app-lc");
+        lc.setImageId("ami-lc");
+        lc.setInstanceType("t3.micro");
+        lc.setAssociatePublicIpAddress(associatePublicIp);
+        when(asgService.describeLaunchConfigurations("us-east-1", List.of("app-lc")))
+                .thenReturn(List.of(lc));
+
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-lc-launched");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.runInstances(eq("us-east-1"), eq("ami-lc"), eq("t3.micro"),
+                eq(1), eq(1), eq(null), anyList(), eq(null), eq(null),
+                anyList(), eq(null), eq(null), eq(associatePublicIp))).thenReturn(reservation);
+
+        reconciler.reconcile(asg);
+
+        verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-lc"), eq("t3.micro"),
+                eq(1), eq(1), eq(null), anyList(), eq(null), eq(null),
+                anyList(), eq(null), eq(null), eq(associatePublicIp));
     }
 
     @Test

@@ -825,7 +825,11 @@ public class CloudFormationResourceProvisioner {
                 resolveStringList(props, "SecurityGroups", engine),
                 resolveOptional(props, "UserData", engine),
                 resolveOptional(props, "IamInstanceProfile", engine),
-                Boolean.parseBoolean(associatePublicIp));
+                // Absent in the template means the subnet default applies, so
+                // it stays null rather than collapsing to false.
+                associatePublicIp == null || associatePublicIp.isBlank()
+                        ? null
+                        : Boolean.parseBoolean(associatePublicIp));
         // Ref returns the launch configuration name.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());

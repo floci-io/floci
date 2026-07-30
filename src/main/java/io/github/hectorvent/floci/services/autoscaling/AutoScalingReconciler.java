@@ -415,10 +415,10 @@ public class AutoScalingReconciler {
                     null,
                     null,
                     null,
-                    // The LC model stores a primitive boolean, so an absent flag
-                    // and an explicit false are indistinguishable; only an
-                    // explicit true can be forwarded as a launch override.
-                    lc.isAssociatePublicIpAddress() ? Boolean.TRUE : null);
+                    // Forwarded as-is: an explicit false has to beat a public
+                    // subnet's MapPublicIpOnLaunch, and only null means
+                    // "fall back to the subnet default".
+                    lc.getAssociatePublicIpAddress());
         }
 
         LaunchTemplate launchTemplate = resolveLaunchTemplate(asg);

@@ -403,10 +403,15 @@ public class Ec2QueryHandler {
         int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
-        // The launch-time public-IP override arrives on the primary network
-        // interface spec — the shape Terraform's associate_public_ip_address
-        // sends. Absent means "use the subnet's MapPublicIpOnLaunch default".
+        // The launch-time public-IP override arrives either on the primary
+        // network interface spec (the shape Terraform's
+        // associate_public_ip_address sends) or as the legacy top-level
+        // parameter. AWS rejects both at once, so the interface spec wins when
+        // present. Absent means "use the subnet's MapPublicIpOnLaunch default".
         String assocParam = p.getFirst("NetworkInterface.1.AssociatePublicIpAddress");
+        if (assocParam == null) {
+            assocParam = p.getFirst("AssociatePublicIpAddress");
+        }
         Boolean associatePublicIp = assocParam == null ? null : Boolean.parseBoolean(assocParam);
         if (subnetId == null) {
             subnetId = p.getFirst("NetworkInterface.1.SubnetId");
