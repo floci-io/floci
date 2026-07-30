@@ -119,6 +119,7 @@ nav:
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
+    - SageMaker: services/sagemaker.md
     - CodeDeploy: services/codedeploy.md
     - CodePipeline: services/codepipeline.md
     - AWS Backup: services/backup.md
