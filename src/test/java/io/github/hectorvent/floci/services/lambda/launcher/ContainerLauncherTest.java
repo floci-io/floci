@@ -218,14 +218,16 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        verify(lifecycleManager).ensureSharedVolume("floci-efs-fsap-0123456789abcdef0",
+        String expectedVolumeName = "floci-efs-fsap-0123456789abcdef0-"
+                + "9d6eafd2aec94d4518a004f005725b4b3c673c1506436bb7368cfd5450fc0810";
+        verify(lifecycleManager).ensureSharedVolume(expectedVolumeName,
                 OptionalInt.empty(), OptionalInt.empty(), Optional.empty(), "busybox:stable");
         Mount mount = captureRealContainerSpec().mounts().stream()
                 .filter(candidate -> "/mnt/shared".equals(candidate.getTarget()))
                 .findFirst()
                 .orElseThrow();
         assertEquals(MountType.VOLUME, mount.getType());
-        assertEquals("floci-efs-fsap-0123456789abcdef0", mount.getSource());
+        assertEquals(expectedVolumeName, mount.getSource());
         assertTrue(!Boolean.TRUE.equals(mount.getReadOnly()));
     }
 

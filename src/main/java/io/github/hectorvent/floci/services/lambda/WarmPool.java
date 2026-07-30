@@ -41,9 +41,18 @@ public class WarmPool implements ContainerTeardown {
     private final ContainerLauncher containerLauncher;
     private final EmulatorConfig config;
     private final int maxPoolSizePerFunction;
-    private final ConcurrentHashMap<String, ArrayDeque<ContainerHandle>> pool = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, PoolState> poolStates = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ContainerHandle, Lease> activeLeases = new ConcurrentHashMap<>();
     private final ScheduledExecutorService evictionScheduler = Executors.newSingleThreadScheduledExecutor(
             r -> { Thread t = new Thread(r, "warm-pool-evictor"); t.setDaemon(true); return t; });
+
+    private static final class PoolState {
+        private final ArrayDeque<ContainerHandle> idle = new ArrayDeque<>();
+        private long epoch;
+    }
+
+    private record Lease(PoolState poolState, long epoch) {
+    }
 
     @Inject
     public WarmPool(ContainerLauncher containerLauncher, EmulatorConfig config) {
@@ -104,15 +113,20 @@ public class WarmPool implements ContainerTeardown {
     public ContainerHandle acquire(LambdaFunction fn) {
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
         ContainerHandle handle = null;
+        PoolState poolState = null;
+        long leaseEpoch = 0;
 
         if (!ephemeral) {
-            ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(fn.getFunctionName(), k -> new ArrayDeque<>());
+            poolState = poolStates.computeIfAbsent(fn.getFunctionName(), ignored -> new PoolState());
+            synchronized (poolState) {
+                leaseEpoch = poolState.epoch;
+            }
             // Skip pooled handles whose container died out-of-band — otherwise the
             // caller would wait the full Lambda function timeout.
             while (true) {
                 ContainerHandle candidate;
-                synchronized (queue) {
-                    candidate = queue.pollFirst();
+                synchronized (poolState) {
+                    candidate = poolState.idle.pollFirst();
                 }
                 if (candidate == null) {
                     break;
@@ -134,6 +148,9 @@ public class WarmPool implements ContainerTeardown {
         } else {
             LOG.debugv("Reusing warm container for function: {0}", fn.getFunctionName());
         }
+        if (!ephemeral) {
+            activeLeases.put(handle, new Lease(poolState, leaseEpoch));
+        }
         handle.setState(ContainerState.BUSY);
         return handle;
     }
@@ -144,6 +161,7 @@ public class WarmPool implements ContainerTeardown {
      * Otherwise it is returned to the warm pool.
      */
     public void release(ContainerHandle handle) {
+        Lease lease = activeLeases.remove(handle);
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
         if (ephemeral || handle.isHotReload()) {
             LOG.debugv("{0}: stopping container {1} after invocation",
@@ -152,17 +170,29 @@ public class WarmPool implements ContainerTeardown {
             return;
         }
 
-        handle.setState(ContainerState.WARM);
-        handle.touchLastUsed();
-        ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(handle.getFunctionName(), k -> new ArrayDeque<>());
+        if (lease == null) {
+            LOG.warnv("Container {0} for function {1} has no active warm-pool lease; stopping it",
+                    handle.getContainerId(), handle.getFunctionName());
+            stopQuietly(handle);
+            return;
+        }
+
+        boolean stale;
         boolean returned;
-        synchronized (queue) {
-            returned = queue.size() < maxPoolSizePerFunction;
+        synchronized (lease.poolState()) {
+            stale = lease.epoch() != lease.poolState().epoch;
+            returned = !stale && lease.poolState().idle.size() < maxPoolSizePerFunction;
             if (returned) {
-                queue.addFirst(handle);
+                handle.setState(ContainerState.WARM);
+                handle.touchLastUsed();
+                lease.poolState().idle.addFirst(handle);
             }
         }
-        if (returned) {
+        if (stale) {
+            LOG.debugv("Pool was invalidated while container {0} was busy; stopping it",
+                    handle.getContainerId());
+            stopQuietly(handle);
+        } else if (returned) {
             LOG.debugv("Released container back to pool for function: {0}", handle.getFunctionName());
         } else {
             LOG.debugv("Pool full for function {0}, stopping excess container", handle.getFunctionName());
@@ -186,6 +216,7 @@ public class WarmPool implements ContainerTeardown {
      * stop is needed — no pool bookkeeping required.
      */
     public void destroyHandle(ContainerHandle handle) {
+        activeLeases.remove(handle);
         LOG.debugv("Destroying timed-out container {0} for function {1}",
                 handle.getContainerId(), handle.getFunctionName());
         stopQuietly(handle);
@@ -196,21 +227,21 @@ public class WarmPool implements ContainerTeardown {
      * Called on function delete or code update.
      */
     public void drainFunction(String functionName) {
-        ArrayDeque<ContainerHandle> queue = pool.remove(functionName);
-        if (queue == null) {
-            return;
-        }
+        PoolState poolState = poolStates.computeIfAbsent(functionName, ignored -> new PoolState());
         List<ContainerHandle> toStop;
-        synchronized (queue) {
-            toStop = new ArrayList<>(queue);
-            queue.clear();
+        synchronized (poolState) {
+            poolState.epoch++;
+            toStop = new ArrayList<>(poolState.idle);
+            poolState.idle.clear();
         }
         LOG.infov("Draining {0} container(s) for function: {1}", toStop.size(), functionName);
         stopInParallel(toStop);
     }
 
     private void stopInParallel(List<ContainerHandle> handles) {
-        if (handles.isEmpty()) return;
+        if (handles.isEmpty()) {
+            return;
+        }
         int parallelism = Math.min(handles.size(), 16);
         ExecutorService pool = Executors.newFixedThreadPool(parallelism,
                 r -> { Thread t = new Thread(r, "warm-pool-drainer"); t.setDaemon(true); return t; });
@@ -232,23 +263,25 @@ public class WarmPool implements ContainerTeardown {
     }
 
     private void drainAll() {
-        for (String functionName : new ArrayList<>(pool.keySet())) {
+        for (String functionName : new ArrayList<>(poolStates.keySet())) {
             drainFunction(functionName);
         }
     }
 
     private void evictIdleContainers() {
-        if (config == null) return;
+        if (config == null) {
+            return;
+        }
         long idleTimeoutMs = config.services().lambda().containerIdleTimeoutSeconds() * 1000L;
         long now = System.currentTimeMillis();
 
-        for (var entry : pool.entrySet()) {
+        for (var entry : poolStates.entrySet()) {
             String functionName = entry.getKey();
-            ArrayDeque<ContainerHandle> queue = entry.getValue();
+            PoolState poolState = entry.getValue();
             List<ContainerHandle> toEvict = new ArrayList<>();
 
-            synchronized (queue) {
-                queue.removeIf(handle -> {
+            synchronized (poolState) {
+                poolState.idle.removeIf(handle -> {
                     if (handle.getState() == ContainerState.WARM
                             && (now - handle.getLastUsedMs()) >= idleTimeoutMs) {
                         toEvict.add(handle);
@@ -258,8 +291,7 @@ public class WarmPool implements ContainerTeardown {
                 });
             }
 
-            // Re-check that the queue is still registered to avoid double-stop with drainFunction.
-            if (!toEvict.isEmpty() && pool.get(functionName) == queue) {
+            if (!toEvict.isEmpty()) {
                 LOG.infov("Evicting {0} idle container(s) for function: {1}", toEvict.size(), functionName);
                 for (ContainerHandle handle : toEvict) {
                     stopQuietly(handle);

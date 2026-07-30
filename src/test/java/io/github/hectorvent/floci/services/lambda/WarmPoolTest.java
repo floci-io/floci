@@ -10,9 +10,16 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -221,5 +228,75 @@ class WarmPoolTest {
         verify(containerLauncher, times(2)).launch(any());
 
         pool.shutdown();
+    }
+
+    @Test
+    void releaseAfterDrainStopsStaleHandleAndColdStarts() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("updated-fn");
+        ContainerHandle stale = new ContainerHandle(
+                "cid-stale", "updated-fn", null, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle(
+                "cid-fresh", "updated-fn", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(stale, fresh);
+
+        ContainerHandle acquired = pool.acquire(fn);
+        pool.drainFunction("updated-fn");
+        pool.release(acquired);
+
+        verify(containerLauncher).stop(stale);
+        assertSame(fresh, pool.acquire(fn));
+        verify(containerLauncher, times(2)).launch(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void launchCrossingDrainIsNeverReturnedToPool() throws Exception {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("racing-fn");
+        ContainerHandle stale = new ContainerHandle(
+                "cid-racing-stale", "racing-fn", null, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle(
+                "cid-racing-fresh", "racing-fn", null, ContainerState.WARM);
+        CountDownLatch launchStarted = new CountDownLatch(1);
+        CountDownLatch finishLaunch = new CountDownLatch(1);
+        when(containerLauncher.launch(any()))
+                .thenAnswer(invocation -> {
+                    launchStarted.countDown();
+                    assertTrue(finishLaunch.await(5, TimeUnit.SECONDS));
+                    return stale;
+                })
+                .thenReturn(fresh);
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<ContainerHandle> acquisition = executor.submit(() -> pool.acquire(fn));
+            assertTrue(launchStarted.await(5, TimeUnit.SECONDS));
+
+            pool.drainFunction("racing-fn");
+            finishLaunch.countDown();
+            ContainerHandle acquired = acquisition.get(5, TimeUnit.SECONDS);
+            pool.release(acquired);
+
+            verify(containerLauncher).stop(stale);
+            ContainerHandle postDrain = pool.acquire(fn);
+            assertSame(fresh, postDrain);
+
+            when(containerLauncher.isAlive(fresh)).thenReturn(true);
+            pool.release(postDrain);
+            assertSame(fresh, pool.acquire(fn));
+            verify(containerLauncher, times(2)).launch(any());
+        } finally {
+            finishLaunch.countDown();
+            executor.shutdownNow();
+            pool.shutdown();
+        }
     }
 }
