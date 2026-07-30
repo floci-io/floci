@@ -639,6 +639,22 @@ public class S3Service implements Resettable {
         return getObjectMetadata(bucketName, key, versionId);
     }
 
+    /** Returns true when the (latest-version) object exists, without throwing on a miss. */
+    public boolean objectExists(String bucketName, String key) {
+        try {
+            getObjectMetadata(bucketName, key, null);
+            return true;
+        } catch (AwsException e) {
+            // Only a genuine miss means "does not exist"; surface any other storage error (e.g.
+            // NoSuchBucket) instead of masking it as absent, which would let callers act on a wrong
+            // answer (e.g. issue a website redirect that hides the real failure).
+            if ("NoSuchKey".equals(e.getErrorCode()) || "NoSuchVersion".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
+        }
+    }
+
     public InputStream openObjectStream(String bucketName, String key, String versionId) {
         getObjectMetadata(bucketName, key, versionId);
         if (inMemory) {
