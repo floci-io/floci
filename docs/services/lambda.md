@@ -254,6 +254,20 @@ No extra configuration or `cap_add` is needed — Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
 
+### File system configs
+
+`FileSystemConfigs` accepts one EFS access point and mounts it under the
+requested `/mnt/...` path for local Lambda containers. As on AWS, the function
+must include VPC subnet and security group configuration. The mounted path uses
+the same shared-volume initialization settings as ECS EFS volumes under
+`floci.storage.efs`.
+
+This configuration is supported through the Lambda API, `AWS::Lambda::Function`
+resources, and `AWS::Serverless::Function` resources.
+
+S3 Files access points are not currently emulated and are rejected instead of
+being mounted as an empty local volume.
+
 !!! note "Resolving public hostnames from Lambda"
     A Lambda whose handler reaches a public host (`fetch()`/HTTPS to e.g.
     `business-api.tiktok.com`) resolves it through Floci's embedded DNS. As a

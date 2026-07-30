@@ -60,6 +60,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.pipes.PipesService;
@@ -1436,6 +1437,8 @@ public class CloudFormationResourceProvisioner {
         configRequest.put("DeadLetterConfig", resolveMapOrDefault(props, "DeadLetterConfig", engine,
                 mapWithNullValue("TargetArn")));
         configRequest.put("VpcConfig", resolveMapOrDefault(props, "VpcConfig", engine, Map.of()));
+        configRequest.put("FileSystemConfigs",
+                resolveObjectListOrEmpty(props, "FileSystemConfigs", engine));
         putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
 
         createRequest.putAll(configRequest);
@@ -1639,6 +1642,12 @@ public class CloudFormationResourceProvisioner {
                         return true;
                     }
                 }
+                case "FileSystemConfigs" -> {
+                    if (!Objects.equals(normalizeForCompare(fileSystemConfigs(fn)),
+                            normalizeForCompare(desired))) {
+                        return true;
+                    }
+                }
                 case "ImageConfig" -> {
                     if (imageConfigurationChanged(fn, desired)) return true;
                 }
@@ -1666,6 +1675,22 @@ public class CloudFormationResourceProvisioner {
         }
         return map.containsKey("WorkingDirectory")
                 && !Objects.equals(fn.getImageConfigWorkingDirectory(), mapString(map, "WorkingDirectory"));
+    }
+
+    private static List<Map<String, String>> fileSystemConfigs(LambdaFunction fn) {
+        if (fn.getFileSystemConfigs() == null) {
+            return List.of();
+        }
+        return fn.getFileSystemConfigs().stream()
+                .map(CloudFormationResourceProvisioner::fileSystemConfig)
+                .toList();
+    }
+
+    private static Map<String, String> fileSystemConfig(LambdaFileSystemConfig config) {
+        Map<String, String> value = new LinkedHashMap<>();
+        value.put("Arn", config.getArn());
+        value.put("LocalMountPath", config.getLocalMountPath());
+        return value;
     }
 
     private static String sha256Base64(String zipFileBase64) {
@@ -1764,6 +1789,23 @@ public class CloudFormationResourceProvisioner {
         }
         List<String> values = new ArrayList<>();
         resolved.forEach(v -> values.add(v.asText()));
+        return values;
+    }
+
+    private List<Object> resolveObjectListOrEmpty(JsonNode props, String source,
+                                                  CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null) {
+            return List.of();
+        }
+        if (!resolved.isArray()) {
+            throw new AwsException("ValidationError", source + " must be a list", 400);
+        }
+        List<Object> values = new ArrayList<>();
+        resolved.forEach(value -> values.add(jsonNodeToValue(value)));
         return values;
     }
 

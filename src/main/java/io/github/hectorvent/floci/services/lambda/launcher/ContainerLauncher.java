@@ -241,6 +241,25 @@ public class ContainerLauncher {
             // enough that a shared volume's helper round-trip would only add cold-start latency.
         }
 
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            var efsCfg = config.storage().efs();
+            fn.getFileSystemConfigs().forEach(fileSystem -> {
+                String volumeName = efsVolumeName(fileSystem.getArn());
+                lifecycleManager.ensureSharedVolume(volumeName,
+                        efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
+                        efsCfg.initImage());
+                specBuilder.withNamedVolume(volumeName, fileSystem.getLocalMountPath(), false);
+            });
+            efsCfg.mountUser().ifPresent(user -> {
+                if (!user.matches("^\\d+(:\\d+)?$")) {
+                    throw new IllegalArgumentException(
+                            "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + user);
+                }
+                specBuilder.withUser(user);
+            });
+            efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
+        }
+
         // For Image package type use ImageConfig.Command/EntryPoint/WorkingDirectory if set, otherwise fall back to Handler (Zip-style)
         if ("Image".equals(fn.getPackageType())) {
             if (fn.getImageConfigEntryPoint() != null && !fn.getImageConfigEntryPoint().isEmpty()) {
@@ -526,6 +545,15 @@ public class ContainerLauncher {
         }
         String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
         return "floci-code-" + fname + "-" + h;
+    }
+
+    static String efsVolumeName(String accessPointArn) {
+        int separator = Math.max(accessPointArn.lastIndexOf('/'), accessPointArn.lastIndexOf(':'));
+        String resourceId = separator >= 0 ? accessPointArn.substring(separator + 1) : accessPointArn;
+        if (resourceId.isBlank()) {
+            throw new IllegalArgumentException("File system access point ARN must include a resource id");
+        }
+        return "floci-efs-" + resourceId;
     }
 
     /**

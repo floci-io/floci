@@ -883,6 +883,144 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void updateStack_lambdaFileSystemConfigUpdatesInPlace() {
+        String stackName = "cfn-lambda-efs-config-stack";
+        String functionName = "cfn-lambda-efs-config-func";
+        String accessPointArn =
+                "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", lambdaFileSystemTemplate(functionName, accessPointArn, true))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + functionName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.FileSystemConfigs[0].Arn", equalTo(accessPointArn))
+            .body("Configuration.FileSystemConfigs[0].LocalMountPath", equalTo("/mnt/shared"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", lambdaFileSystemTemplate(functionName, accessPointArn, false))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(firstPhysicalResourceId(resourceXml), equalTo(functionName));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + functionName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.FileSystemConfigs", nullValue());
+    }
+
+    @Test
+    void createStack_lambdaFileSystemConfigsMustBeAList() {
+        String stackName = "cfn-lambda-invalid-efs-config-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "cfn-lambda-invalid-efs-config",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                    "Code": {
+                      "ZipFile": "exports.handler = async () => ({ statusCode: 200 });"
+                    },
+                    "VpcConfig": {
+                      "SubnetIds": ["subnet-12345678"],
+                      "SecurityGroupIds": ["sg-12345678"]
+                    },
+                    "FileSystemConfigs": {
+                      "Arn": "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                      "LocalMountPath": "/mnt/shared"
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ROLLBACK_COMPLETE"))
+            .body(containsString("FileSystemConfigs must be a list"));
+    }
+
+    private static String lambdaFileSystemTemplate(String functionName, String accessPointArn,
+                                                   boolean includeFileSystem) {
+        String fileSystemConfig = includeFileSystem
+                ? """
+                    ,"FileSystemConfigs": [{
+                      "Arn": "%s",
+                      "LocalMountPath": "/mnt/shared"
+                    }]
+                  """.formatted(accessPointArn)
+                : "";
+        return """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                    "VpcConfig": {
+                      "SubnetIds": ["subnet-0123456789abcdef0"],
+                      "SecurityGroupIds": ["sg-0123456789abcdef0"]
+                    }
+                    %s
+                  }
+                }
+              }
+            }
+            """.formatted(functionName, fileSystemConfig);
+    }
+
+    @Test
     void createStack_kmsKeyWithOverrideTagUsesPinnedId() {
         String template = """
             {
