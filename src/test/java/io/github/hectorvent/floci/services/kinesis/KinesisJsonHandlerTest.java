@@ -405,4 +405,36 @@ class KinesisJsonHandlerTest {
         assertEquals(0, responseEntity(handler.handle("GetRecords", recReq, REGION))
                 .get("Records").size());
     }
+
+    @Test
+    void putRecordsKeepsMalformedDataAsPerRecordFailure() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        records.addObject().put("Data", "!!!not-base64!!!").put("PartitionKey", "pk2");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk3");
+
+        Response resp = handler.handle("PutRecords", req, REGION);
+        assertThat(resp.getStatus(), is(200));
+        ObjectNode body = responseEntity(resp);
+        assertEquals(1, body.get("FailedRecordCount").asInt());
+
+        ArrayNode results = (ArrayNode) body.get("Records");
+        assertThat(results.get(0).has("SequenceNumber"), is(true));
+        assertEquals("InternalFailure", results.get(1).get("ErrorCode").asText());
+        assertThat(results.get(2).has("SequenceNumber"), is(true));
+    }
+
+    @Test
+    void putRecordsRejectsUnknownStream() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "missing-stream");
+        req.putArray("Records").addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
 }
