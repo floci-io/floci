@@ -28,12 +28,15 @@ class ApiGatewayExecuteApiHostFilterTest {
         RecordingRequest request = new RecordingRequest(
                 "abc123.execute-api.localhost.floci.io:4566",
                 URI.create("http://abc123.execute-api.localhost.floci.io:4566/accounts?tenant=alpha"));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
 
-        new ApiGatewayExecuteApiHostFilter(lookup, new RegionResolver(REGION, "000000000000"))
+        new ApiGatewayExecuteApiHostFilter(
+                lookup, new RegionResolver(REGION, "000000000000"), routeContext)
                 .filter(request.context());
 
         assertEquals("/execute-api/abc123/$default/accounts", request.routedUri().getRawPath());
         assertEquals("tenant=alpha", request.routedUri().getQuery());
+        assertEquals(REGION, routeContext.httpApiRegion());
     }
 
     @Test
@@ -143,6 +146,23 @@ class ApiGatewayExecuteApiHostFilterTest {
                 .filter(request.context());
 
         assertNull(request.routedUri());
+    }
+
+    @Test
+    void doesNotMarkHttpRouteWhenNoStageMatches() {
+        FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
+        lookup.addApi(API_ID);
+        RecordingRequest request = new RecordingRequest(
+                "abc123.execute-api.localhost.floci.io",
+                URI.create("http://abc123.execute-api.localhost.floci.io/accounts"));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+
+        new ApiGatewayExecuteApiHostFilter(
+                lookup, new RegionResolver(REGION, "000000000000"), routeContext)
+                .filter(request.context());
+
+        assertNull(request.routedUri());
+        assertNull(routeContext.httpApiRegion());
     }
 
     @Test

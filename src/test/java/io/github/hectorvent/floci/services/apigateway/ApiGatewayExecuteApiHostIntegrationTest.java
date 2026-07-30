@@ -138,6 +138,108 @@ class ApiGatewayExecuteApiHostIntegrationTest {
 
     @Test
     @Order(6)
+    void createsRestApiWithSameIdentifier() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"rest-routing-collision","tags":{"floci:override-id":"%s"}}
+                        """.formatted(apiId))
+                .when().post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("id", equalTo(apiId));
+
+        String rootId = given()
+                .when().get("/restapis/" + apiId + "/resources")
+                .then()
+                .statusCode(200)
+                .extract().path("item[0].id");
+
+        String resourceId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"accounts\"}")
+                .when().post("/restapis/" + apiId + "/resources/" + rootId)
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"authorizationType\":\"NONE\"}")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"responseParameters\":{}}")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET/responses/200")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"type":"MOCK","requestTemplates":{"application/json":"{\\"statusCode\\":200}"}}
+                        """)
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET/integration")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "selectionPattern":"",
+                          "responseTemplates":{"application/json":"{\\"source\\":\\"rest\\"}"}
+                        }
+                        """)
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId
+                        + "/methods/GET/integration/responses/200")
+                .then()
+                .statusCode(201);
+
+        String deploymentId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"description\":\"routing collision regression\"}")
+                .when().post("/restapis/" + apiId + "/deployments")
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"stageName":"dev","deploymentId":"%s"}
+                        """.formatted(deploymentId))
+                .when().post("/restapis/" + apiId + "/stages")
+                .then()
+                .statusCode(201);
+    }
+
+    @Test
+    @Order(7)
+    void directPathPrefersRestApiWhenIdentifiersCollide() {
+        given()
+                .when().get("/execute-api/" + apiId + "/dev/accounts")
+                .then()
+                .statusCode(200)
+                .body("source", equalTo("rest"));
+    }
+
+    @Test
+    @Order(8)
+    void hostPathRetainsHttpApiRoutingWhenIdentifiersCollide() {
+        given()
+                .header("Host", apiId + ".execute-api.localhost.floci.io")
+                .when().get("/dev/accounts")
+                .then()
+                .statusCode(200)
+                .body("path", equalTo("/backend"));
+    }
+
+    @Test
+    @Order(9)
     void disabledExecuteApiEndpointReturnsForbiddenAndCanBeReenabled() {
         given()
                 .header("Authorization", AUTHORIZATION)

@@ -31,10 +31,12 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     private final ApiGatewayLookup apiGatewayLookup;
     private final RegionResolver regionResolver;
+    private final ApiGatewayExecuteRouteContext routeContext;
 
     @Inject
     public ApiGatewayExecuteApiHostFilter(ApiGatewayV2Service apiGatewayV2Service,
-                                          RegionResolver regionResolver) {
+                                          RegionResolver regionResolver,
+                                          ApiGatewayExecuteRouteContext routeContext) {
         this(new ApiGatewayLookup() {
             @Override
             public String resolveApiRegion(String preferredRegion, String apiId) {
@@ -55,12 +57,18 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             public void requireStage(String region, String apiId, String stageName) {
                 apiGatewayV2Service.getStage(region, apiId, stageName);
             }
-        }, regionResolver);
+        }, regionResolver, routeContext);
     }
 
     ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver) {
+        this(apiGatewayLookup, regionResolver, new ApiGatewayExecuteRouteContext());
+    }
+
+    ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver,
+                                   ApiGatewayExecuteRouteContext routeContext) {
         this.apiGatewayLookup = apiGatewayLookup;
         this.regionResolver = regionResolver;
+        this.routeContext = routeContext;
     }
 
     @Override
@@ -119,6 +127,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
                 .replacePath(newPath)
                 .buildFromEncoded();
         LOG.debugv("Execute API host routing: {0}{1} -> {2}", host, originalPath, newUri.getRawPath());
+        routeContext.routeToHttpApi(region);
         requestContext.setRequestUri(newUri);
     }
 
