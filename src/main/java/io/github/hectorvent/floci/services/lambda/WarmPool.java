@@ -14,7 +14,9 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -47,11 +49,11 @@ public class WarmPool implements ContainerTeardown {
             r -> { Thread t = new Thread(r, "warm-pool-evictor"); t.setDaemon(true); return t; });
 
     private static final class PoolState {
-        private final ArrayDeque<ContainerHandle> idle = new ArrayDeque<>();
+        private final Map<String, ArrayDeque<ContainerHandle>> idleByEnvironment = new HashMap<>();
         private long epoch;
     }
 
-    private record Lease(PoolState poolState, long epoch) {
+    private record Lease(PoolState poolState, long epoch, String environmentKey) {
     }
 
     @Inject
@@ -115,6 +117,7 @@ public class WarmPool implements ContainerTeardown {
         ContainerHandle handle = null;
         PoolState poolState = null;
         long leaseEpoch = 0;
+        String environmentKey = executionEnvironmentKey(fn);
 
         if (!ephemeral) {
             poolState = poolStates.computeIfAbsent(fn.getFunctionName(), ignored -> new PoolState());
@@ -126,7 +129,8 @@ public class WarmPool implements ContainerTeardown {
             while (true) {
                 ContainerHandle candidate;
                 synchronized (poolState) {
-                    candidate = poolState.idle.pollFirst();
+                    ArrayDeque<ContainerHandle> idle = poolState.idleByEnvironment.get(environmentKey);
+                    candidate = idle == null ? null : idle.pollFirst();
                 }
                 if (candidate == null) {
                     break;
@@ -149,7 +153,7 @@ public class WarmPool implements ContainerTeardown {
             LOG.debugv("Reusing warm container for function: {0}", fn.getFunctionName());
         }
         if (!ephemeral) {
-            activeLeases.put(handle, new Lease(poolState, leaseEpoch));
+            activeLeases.put(handle, new Lease(poolState, leaseEpoch, environmentKey));
         }
         handle.setState(ContainerState.BUSY);
         return handle;
@@ -181,11 +185,13 @@ public class WarmPool implements ContainerTeardown {
         boolean returned;
         synchronized (lease.poolState()) {
             stale = lease.epoch() != lease.poolState().epoch;
-            returned = !stale && lease.poolState().idle.size() < maxPoolSizePerFunction;
+            returned = !stale && idleSize(lease.poolState()) < maxPoolSizePerFunction;
             if (returned) {
                 handle.setState(ContainerState.WARM);
                 handle.touchLastUsed();
-                lease.poolState().idle.addFirst(handle);
+                lease.poolState().idleByEnvironment
+                        .computeIfAbsent(lease.environmentKey(), ignored -> new ArrayDeque<>())
+                        .addFirst(handle);
             }
         }
         if (stale) {
@@ -231,8 +237,9 @@ public class WarmPool implements ContainerTeardown {
         List<ContainerHandle> toStop;
         synchronized (poolState) {
             poolState.epoch++;
-            toStop = new ArrayList<>(poolState.idle);
-            poolState.idle.clear();
+            toStop = new ArrayList<>();
+            poolState.idleByEnvironment.values().forEach(toStop::addAll);
+            poolState.idleByEnvironment.clear();
         }
         LOG.infov("Draining {0} container(s) for function: {1}", toStop.size(), functionName);
         stopInParallel(toStop);
@@ -281,14 +288,17 @@ public class WarmPool implements ContainerTeardown {
             List<ContainerHandle> toEvict = new ArrayList<>();
 
             synchronized (poolState) {
-                poolState.idle.removeIf(handle -> {
-                    if (handle.getState() == ContainerState.WARM
-                            && (now - handle.getLastUsedMs()) >= idleTimeoutMs) {
-                        toEvict.add(handle);
-                        return true;
-                    }
-                    return false;
-                });
+                for (ArrayDeque<ContainerHandle> idle : poolState.idleByEnvironment.values()) {
+                    idle.removeIf(handle -> {
+                        if (handle.getState() == ContainerState.WARM
+                                && (now - handle.getLastUsedMs()) >= idleTimeoutMs) {
+                            toEvict.add(handle);
+                            return true;
+                        }
+                        return false;
+                    });
+                }
+                poolState.idleByEnvironment.values().removeIf(ArrayDeque::isEmpty);
             }
 
             if (!toEvict.isEmpty()) {
@@ -298,6 +308,22 @@ public class WarmPool implements ContainerTeardown {
                 }
             }
         }
+    }
+
+    private static String executionEnvironmentKey(LambdaFunction fn) {
+        String functionArn = fn.getFunctionArn();
+        if (functionArn != null && !functionArn.isBlank()) {
+            return functionArn;
+        }
+        return fn.getFunctionName() + ":" + fn.getVersion();
+    }
+
+    private static int idleSize(PoolState poolState) {
+        int size = 0;
+        for (ArrayDeque<ContainerHandle> idle : poolState.idleByEnvironment.values()) {
+            size += idle.size();
+        }
+        return size;
     }
 
     private void stopQuietly(ContainerHandle handle) {

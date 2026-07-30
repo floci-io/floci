@@ -165,6 +165,45 @@ class WarmPoolTest {
     }
 
     @Test
+    void versionsUseSeparateWarmPools() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction latest = mock(LambdaFunction.class);
+        LambdaFunction version = mock(LambdaFunction.class);
+        when(latest.getFunctionName()).thenReturn("versioned-fn");
+        when(version.getFunctionName()).thenReturn("versioned-fn");
+        when(latest.getFunctionArn())
+                .thenReturn("arn:aws:lambda:us-east-1:000000000000:function:versioned-fn");
+        when(version.getFunctionArn())
+                .thenReturn("arn:aws:lambda:us-east-1:000000000000:function:versioned-fn:1");
+
+        ContainerHandle latestHandle = new ContainerHandle(
+                "cid-latest", "versioned-fn", null, ContainerState.WARM);
+        ContainerHandle versionHandle = new ContainerHandle(
+                "cid-version", "versioned-fn", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(latestHandle, versionHandle);
+        when(containerLauncher.isAlive(latestHandle)).thenReturn(true);
+        when(containerLauncher.isAlive(versionHandle)).thenReturn(true);
+
+        pool.release(pool.acquire(latest));
+        ContainerHandle firstVersion = pool.acquire(version);
+        assertSame(versionHandle, firstVersion);
+        verify(containerLauncher, times(2)).launch(any());
+        pool.release(firstVersion);
+
+        ContainerHandle reacquiredLatest = pool.acquire(latest);
+        ContainerHandle reacquiredVersion = pool.acquire(version);
+        assertSame(latestHandle, reacquiredLatest);
+        assertSame(versionHandle, reacquiredVersion);
+        verify(containerLauncher, times(2)).launch(any());
+
+        pool.release(reacquiredLatest);
+        pool.release(reacquiredVersion);
+        pool.shutdown();
+    }
+
+    @Test
     void acquire_discardsDeadPooledHandleAndColdStarts() {
         WarmPool pool = buildPool();
         pool.init();
