@@ -590,6 +590,17 @@ class IamServiceTest {
         assertTrue(admin.getPolicyId().startsWith("ANPA"));
         assertEquals("v1", admin.getDefaultVersionId());
 
+        // Referenced by the roles `cdk bootstrap` and the aws-bench scenario stacks create.
+        // A missing entry surfaces as "Policy <arn> does not exist" on the consuming role,
+        // which rolls the whole stack back.
+        for (String name : new String[] {
+                "AWSCloudFormationReadOnlyAccess", "AmazonAthenaFullAccess",
+                "AmazonRedshiftFullAccess", "AmazonS3TablesReadOnlyAccess" }) {
+            IamPolicy seeded = iamService.getPolicy("arn:aws:iam::aws:policy/" + name);
+            assertEquals(name, seeded.getPolicyName());
+            assertEquals("/", seeded.getPath());
+        }
+
         IamPolicy lambda = iamService.getPolicy(
                 "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
         assertEquals("AWSLambdaBasicExecutionRole", lambda.getPolicyName());
