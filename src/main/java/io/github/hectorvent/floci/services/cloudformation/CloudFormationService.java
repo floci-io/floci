@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -628,7 +629,7 @@ public class CloudFormationService {
             boolean completed = "CREATE_COMPLETE".equals(resource.getStatus());
             boolean ownedFailedResource = "CREATE_FAILED".equals(resource.getStatus())
                     && "true".equals(resource.getAttributes().get(
-                            CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+                            CfnRollback.ROLLBACK_OWNED_ATTR));
             if (resource.getPhysicalId() == null || (!completed && !ownedFailedResource)) {
                 continue;
             }
