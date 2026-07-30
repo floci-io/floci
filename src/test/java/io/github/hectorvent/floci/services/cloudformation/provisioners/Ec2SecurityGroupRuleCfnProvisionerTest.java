@@ -219,7 +219,7 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
     }
 
     @Test
-    void updateRevokesThePreviousRuleBeforeReauthorizing() {
+    void updateAuthorizesTheNewRuleBeforeRevokingThePrevious() {
         when(ec2.authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-123"), anyList()))
                 .thenReturn(List.of(rule("sgr-new")));
         StackResource r = resource(INGRESS, "WebIngress");
@@ -234,9 +234,25 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         var order = inOrder(ec2);
-        order.verify(ec2).deleteSecurityGroupRule("us-east-1", "sgr-old");
         order.verify(ec2).authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-123"), anyList());
+        order.verify(ec2).deleteSecurityGroupRule("us-east-1", "sgr-old");
         assertEquals("sgr-new", r.getPhysicalId());
+    }
+
+    @Test
+    void aFailedUpdateLeavesThePreviousRuleInPlace() {
+        // Revoking first would leave the group with neither rule, and rollback keeps the old
+        // physical id without recreating its permission.
+        when(ec2.authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-123"), anyList()))
+                .thenThrow(new AwsException("InvalidPermission.Malformed", "bad rule", 400));
+        StackResource r = resource(INGRESS, "WebIngress");
+        r.setPhysicalId("sgr-old");
+        ObjectNode props = mapper.createObjectNode().put("GroupId", "sg-123").put("CidrIp", "10.0.0.0/16");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        verify(ec2, never()).deleteSecurityGroupRule(anyString(), anyString());
+        assertEquals("sgr-old", r.getPhysicalId());
     }
 
     @Test

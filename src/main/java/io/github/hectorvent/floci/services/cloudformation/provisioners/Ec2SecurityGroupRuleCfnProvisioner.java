@@ -62,18 +62,23 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
         IpPermission perm = toIpPermission(props, ctx.engine());
 
         // UpdateStack re-executes every resource with the physical id it got at create time, and the
-        // authorize APIs are append-only. Drop the rule the previous execution created first:
+        // authorize APIs are append-only, so the rule the previous execution created has to go:
         // otherwise an unchanged rule doubles up on the group, and a changed one leaves its old
         // permission behind. These resources are immutable in CloudFormation — every property change
-        // is a replacement — so revoke-then-authorize is the update semantics.
+        // is a replacement — so the update semantics are authorize-then-revoke.
+        //
+        // Authorize first, revoke second. The other order leaves the group with neither rule when
+        // the new authorization fails, and rollback keeps the old physical id without recreating
+        // its permission, so the stack settles as UPDATE_ROLLBACK_COMPLETE minus a valid rule.
         String previousRuleId = r.getPhysicalId();
-        if (previousRuleId != null && previousRuleId.startsWith("sgr-")) {
-            ec2Service.deleteSecurityGroupRule(ctx.region(), previousRuleId);
-        }
 
         List<SecurityGroupRule> rules = ingress
                 ? ec2Service.authorizeSecurityGroupIngress(ctx.region(), groupId, List.of(perm))
                 : ec2Service.authorizeSecurityGroupEgress(ctx.region(), groupId, List.of(perm));
+
+        if (previousRuleId != null && previousRuleId.startsWith("sgr-")) {
+            ec2Service.deleteSecurityGroupRule(ctx.region(), previousRuleId);
+        }
         // Ref and Fn::GetAtt Id both return the rule id, as they do in CloudFormation. The logical
         // id is only a fallback for the (unreachable in practice) case of no rule being recorded —
         // a null physical id would make the stack skip this resource on delete.

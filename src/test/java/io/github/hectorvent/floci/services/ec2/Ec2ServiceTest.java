@@ -11,6 +11,10 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -559,6 +563,102 @@ class Ec2ServiceTest {
 
         Volume detached = service.describeVolumes("us-east-1", List.of(rootVolumeId), Map.of()).getFirst();
         assertEquals("available", detached.getState());
+    }
+
+    @Test
+    void deletingAnIpv6RuleRevokesThatRangeAndNotAnotherOnTheSamePort() {
+        Ec2Service service = sgService();
+        String groupId = service.createSecurityGroup("us-east-1", "web", "web", null).getGroupId();
+        String first = onlyRuleId(service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                List.of(ipv6Permission("2001:db8:1::/64"))));
+        String second = onlyRuleId(service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                List.of(ipv6Permission("2001:db8:2::/64"))));
+
+        service.deleteSecurityGroupRule("us-east-1", second);
+
+        // The one that was asked for is gone and the other survives — protocol and ports are
+        // identical, so a match on those alone would have taken the wrong one.
+        assertEquals(List.of(first), ingressRuleIds(service, groupId));
+        List<String> cidrs = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst().getIpPermissions().stream()
+                .flatMap(p -> p.getIpv6Ranges().stream())
+                .map(Ipv6Range::getCidrIpv6).toList();
+        assertEquals(List.of("2001:db8:1::/64"), cidrs);
+    }
+
+    @Test
+    void deletingAPeerGroupRuleRevokesThatPeerAndNotAnotherOnTheSamePort() {
+        Ec2Service service = sgService();
+        String groupId = service.createSecurityGroup("us-east-1", "web", "web", null).getGroupId();
+        String first = onlyRuleId(service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                List.of(peerPermission("sg-peer-a"))));
+        String second = onlyRuleId(service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                List.of(peerPermission("sg-peer-b"))));
+
+        service.deleteSecurityGroupRule("us-east-1", second);
+
+        assertEquals(List.of(first), ingressRuleIds(service, groupId));
+        List<String> peers = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst().getIpPermissions().stream()
+                .flatMap(p -> p.getUserIdGroupPairs().stream())
+                .map(UserIdGroupPair::getGroupId).toList();
+        assertEquals(List.of("sg-peer-a"), peers);
+    }
+
+    @Test
+    void ruleRecordsCarryTheirPeerIdentity() {
+        Ec2Service service = sgService();
+        String groupId = service.createSecurityGroup("us-east-1", "web", "web", null).getGroupId();
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(peerPermission("sg-peer-a")));
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(ipv6Permission("2001:db8:1::/64")));
+
+        List<SecurityGroupRule> rules =
+                service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of());
+
+        assertEquals(1, rules.stream().filter(r -> "sg-peer-a".equals(r.getReferencedGroupId())).count());
+        assertEquals(1, rules.stream().filter(r -> "2001:db8:1::/64".equals(r.getCidrIpv6())).count());
+    }
+
+    /** Ingress only: createSecurityGroup seeds a default allow-all egress rule. */
+    private static List<String> ingressRuleIds(Ec2Service service, String groupId) {
+        return service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of())
+                .stream().filter(r -> !r.isEgress())
+                .map(SecurityGroupRule::getSecurityGroupRuleId).toList();
+    }
+
+    private static String onlyRuleId(List<SecurityGroupRule> rules) {
+        assertEquals(1, rules.size());
+        return rules.getFirst().getSecurityGroupRuleId();
+    }
+
+    private static IpPermission ipv6Permission(String cidr6) {
+        IpPermission perm = basePermission();
+        Ipv6Range range = new Ipv6Range();
+        range.setCidrIpv6(cidr6);
+        perm.getIpv6Ranges().add(range);
+        return perm;
+    }
+
+    private static IpPermission peerPermission(String peerGroupId) {
+        IpPermission perm = basePermission();
+        UserIdGroupPair pair = new UserIdGroupPair();
+        pair.setGroupId(peerGroupId);
+        perm.getUserIdGroupPairs().add(pair);
+        return perm;
+    }
+
+    private static IpPermission basePermission() {
+        IpPermission perm = new IpPermission();
+        perm.setIpProtocol("tcp");
+        perm.setFromPort(443);
+        perm.setToPort(443);
+        return perm;
+    }
+
+    private static Ec2Service sgService() {
+        return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
