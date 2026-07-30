@@ -162,6 +162,31 @@ class SesListManagementOptionsV2IntegrationTest {
     }
 
     @Test
+    @Order(8)
+    void unsubscribeEndpoint_get_rendersConfirmationWithoutOptingOut() {
+        String recipient = "lmo-get@floci.test";
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"EmailAddress\":\"" + recipient + "\",\"TopicPreferences\":["
+                        + "{\"TopicName\":\"Sports\",\"SubscriptionStatus\":\"OPT_IN\"}]}")
+        .when().post("/v2/email/contact-lists/" + LIST + "/contacts").then().statusCode(200);
+
+        // A browser click (GET) only renders a confirmation form; it must not opt the contact out,
+        // so a client or bot that prefetches the link cannot silently unsubscribe the contact.
+        given().header("Authorization", AUTH)
+                .queryParam("region", "us-west-2").queryParam("contactList", LIST)
+                .queryParam("topic", "Sports").queryParam("address", recipient)
+        .when().get("/_aws/ses/unsubscribe").then().statusCode(200)
+                .body(org.hamcrest.Matchers.containsString("<form method=\"post\""))
+                .body(org.hamcrest.Matchers.containsString("Unsubscribe"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/v2/email/contact-lists/" + LIST + "/contacts/" + recipient)
+        .then().statusCode(200)
+                .body("TopicPreferences.find { it.TopicName == 'Sports' }.SubscriptionStatus",
+                        equalTo("OPT_IN"));
+    }
+
+    @Test
     @Order(99)
     void cleanup_deleteContactList() {
         given().header("Authorization", AUTH)
