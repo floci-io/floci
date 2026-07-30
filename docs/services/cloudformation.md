@@ -71,7 +71,7 @@ cross-resource references.
 | Step Functions | `StateMachine` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool`, `UserPoolClient` |
-| EventBridge | `Events::Rule` |
+| EventBridge | `Events::Rule`, `Events::EventBus` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
@@ -83,6 +83,20 @@ cross-resource references.
 All other resource types are accepted without error and assigned a synthetic physical ID (with an
 `arn:aws:stub:::<logicalId>` ARN attribute), so templates with unsupported types still reach
 `CREATE_COMPLETE` rather than failing.
+
+## EventBridge Event Buses
+
+`AWS::Events::EventBus` creates a real custom EventBridge bus. `Name` is required, `Ref` returns
+the bus name, and `Fn::GetAtt` supports `Arn` and `Name`. `Description` and `Tags` are applied when
+the bus is created. Rules that reference the bus are removed before stack deletion.
+
+The current implementation is limited to custom buses with the `Name`, `Description`, and `Tags`
+properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, `LogConfig`, and `Policy`
+are rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change
+as resource replacement; Floci currently rejects that update until generic replacement handling
+is available. Changing `Description` or `Tags` during `UpdateStack` is also rejected until
+transactional resource rollback is available; this prevents a failed stack update from leaving the
+live bus in the rejected configuration.
 
 ## Lambda Stack Updates
 
