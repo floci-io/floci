@@ -41,7 +41,7 @@ public class RumService {
                     + "(?=^[a-zA-Z0-9.\\*-]{4,253}$)(?!.*\\.-)(?!.*-\\.)(?!.*\\.\\.)"
                     + "(?!.*[^.]{64,})^(\\*\\.)?(?![-.\\*])[^\\*]{1,}\\."
                     + "(\\*|(?!.*--)(?=.*[a-zA-Z])[^\\*]{1,}[^\\*-])$");
-    private static final Pattern TAG_KEY_PATTERN = Pattern.compile("(?!aws:)[a-zA-Z+\\-=._:/]+");
+    private static final Pattern TAG_KEY_PATTERN = Pattern.compile("(?!aws:)[a-zA-Z+-=._:/]+");
     private static final Pattern S3_URI_PATTERN = Pattern.compile(
             "s3://[a-z0-9][-.a-z0-9]{1,62}(?:/[-!_*'().a-z0-9A-Z]+(?:/[-!_*'().a-z0-9A-Z]+)*)?/?");
     private static final Set<String> TELEMETRIES = Set.of("errors", "performance", "http");

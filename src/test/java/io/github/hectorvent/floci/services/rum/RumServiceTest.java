@@ -155,6 +155,26 @@ class RumServiceTest {
     }
 
     @Test
+    void createAppMonitorAcceptsDigitInTagKey() throws Exception {
+        AppMonitor monitor = service.createAppMonitor(REGION, request("""
+                {"Name":"monitor","Domain":"example.com","Tags":{"env1":"test"}}
+                """));
+
+        assertEquals("test", monitor.getTags().get("env1"));
+    }
+
+    @Test
+    void createAppMonitorRejectsAwsReservedTagKey() throws Exception {
+        AwsException error = assertThrows(
+                AwsException.class,
+                () -> service.createAppMonitor(REGION, request("""
+                        {"Name":"monitor","Domain":"example.com","Tags":{"aws:team":"test"}}
+                        """)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
     void appMonitorConfigurationCanBeReloadedFromPersistentStorage(@TempDir Path tempDir) throws Exception {
         Path file = tempDir.resolve("rum.json");
         var firstStore = new PersistentStorage<String, AppMonitor>(
