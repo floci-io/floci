@@ -219,9 +219,11 @@ public class ContainerLauncher {
 
         specBuilder.withEmbeddedDns();
 
-        // Inject additional hosts entries into the container if present
+        // Inject extra hosts entries into the container if present. Split on the FIRST
+        // colon, mirroring docker --add-host: hostnames cannot contain colons, but IPv6
+        // addresses do (e.g. "db.internal:2001:db8::1").
         config.services().lambda().extraHosts().ifPresent(hosts -> hosts.forEach(entry -> {
-            int sep = entry.lastIndexOf(':');
+            int sep = entry.indexOf(':');
             if (sep <= 0 || sep == entry.length() - 1) {
                 LOG.warnv("Ignoring malformed lambda extra-hosts entry (expected hostname:ip): {0}", entry);
                 return;

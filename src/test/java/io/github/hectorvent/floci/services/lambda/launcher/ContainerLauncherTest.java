@@ -478,7 +478,9 @@ class ContainerLauncherTest {
     void launchFunction_appliesConfiguredExtraHosts_skippingMalformedEntries() throws Exception {
         EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
         when(lambda.extraHosts()).thenReturn(Optional.of(List.of(
-                "localhost:host-gateway", "db.internal:10.0.0.5", "malformed", ":9.9.9.9", "trailing:")));
+                "localhost:host-gateway", "db.internal:10.0.0.5",
+                "v6.internal:2001:db8::1", "v6end.internal:fd00::",
+                "malformed", ":9.9.9.9", "trailing:")));
 
         Path codePath = Files.createDirectory(tempDir.resolve("extra-hosts"));
 
@@ -495,7 +497,11 @@ class ContainerLauncherTest {
                 "configured hostname:host-gateway entry should be applied");
         assertTrue(extraHosts.contains("db.internal:10.0.0.5"),
                 "configured hostname:ip entry should be applied");
-        assertEquals(2, extraHosts.size(),
+        assertTrue(extraHosts.contains("v6.internal:2001:db8::1"),
+                "IPv6 addresses (containing colons) must survive the hostname/ip split");
+        assertTrue(extraHosts.contains("v6end.internal:fd00::"),
+                "IPv6 addresses ending in :: must not be classified as missing an ip");
+        assertEquals(4, extraHosts.size(),
                 "entries without a hostname and an ip must be skipped, not passed to Docker");
     }
 
