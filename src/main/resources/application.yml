@@ -338,6 +338,7 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: false
+      aws-faithful-private-ip: false
     ecs:
       enabled: true
       mock: false
