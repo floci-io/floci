@@ -1438,6 +1438,9 @@ public class S3Controller {
                 appendFilterRules(xml, ln.filterRules());
                 xml.end("CloudFunctionConfiguration");
             }
+            if (config.isEventBridgeEnabled()) {
+                xml.start("EventBridgeConfiguration").end("EventBridgeConfiguration");
+            }
             xml.end("NotificationConfiguration");
             return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
         } catch (AwsException e) {
