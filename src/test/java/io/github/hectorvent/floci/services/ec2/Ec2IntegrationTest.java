@@ -1251,7 +1251,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<vpnGatewaySet"))
+            .body("DescribeVpnGatewaysResponse.vpnGatewaySet.item.size()", equalTo(0))
             .body(not(containsString("UnsupportedOperation")));
     }
 
