@@ -1398,7 +1398,7 @@ public class CognitoService {
         String jti = extractJtiFromToken(accessToken);
 
         if (username == null || poolId == null || jti == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+            throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
         }
 
         validateTokenNotRevoked(jti, poolId, "access");
@@ -1408,7 +1408,7 @@ public class CognitoService {
 
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
-                    "Only email and phone_number attributes can be verified", 400);
+                    "Invalid attribute name. Only phone_number and email can be verified.", 400);
         }
 
         CognitoUser user = adminGetUser(poolId, username);
@@ -1416,7 +1416,10 @@ public class CognitoService {
         String destination = blankToNull(user.getAttributes().get(attributeName));
         if (destination == null) {
             throw new AwsException("InvalidParameterException",
-                    "User has no " + attributeName + " attribute set", 400);
+                    "email".equals(attributeName)
+                            ? "User does not have a valid registered email address"
+                            : "User does not have a valid registered phone number",
+                    400);
         }
 
         String deliveryMedium = "email".equals(attributeName) ? "EMAIL" : "SMS";
