@@ -2641,32 +2641,19 @@ public class CognitoService {
         if (at <= 0 || at == email.length() - 1) {
             return "****";
         }
-        String local = email.substring(0, at);
-        String domain = email.substring(at + 1);
-        return maskSegment(local) + "@" + maskDomain(domain);
+        return email.charAt(0) + "***@" + email.charAt(at + 1) + "***";
     }
 
     private String maskPhoneNumber(String phoneNumber) {
         if (phoneNumber.length() <= 4) {
             return "*".repeat(phoneNumber.length());
         }
+        if (phoneNumber.charAt(0) == '+') {
+            return "+" + "*".repeat(Math.max(0, phoneNumber.length() - 5))
+                    + phoneNumber.substring(phoneNumber.length() - 4);
+        }
         return "*".repeat(phoneNumber.length() - 4)
                 + phoneNumber.substring(phoneNumber.length() - 4);
-    }
-
-    private String maskDomain(String domain) {
-        int dot = domain.lastIndexOf('.');
-        if (dot <= 0 || dot == domain.length() - 1) {
-            return maskSegment(domain);
-        }
-        return maskSegment(domain.substring(0, dot)) + domain.substring(dot);
-    }
-
-    private String maskSegment(String value) {
-        if (value.length() <= 1) {
-            return "*";
-        }
-        return value.charAt(0) + "*".repeat(Math.max(1, value.length() - 1));
     }
 
     private String blankToNull(String value) {
