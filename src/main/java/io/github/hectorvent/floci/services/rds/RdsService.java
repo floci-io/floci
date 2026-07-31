@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -40,6 +41,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -67,6 +69,7 @@ public class RdsService implements Resettable {
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
     private final DockerHostResolver dockerHostResolver;
+    private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
@@ -79,7 +82,8 @@ public class RdsService implements Resettable {
                       EmulatorConfig config,
                       StorageFactory storageFactory,
                       SecretsManagerService secretsManagerService,
-                      DockerHostResolver dockerHostResolver) {
+                      DockerHostResolver dockerHostResolver,
+                      CurrentContainerNetworkResolver currentContainerNetworkResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -87,6 +91,7 @@ public class RdsService implements Resettable {
         this.config = config;
         this.secretsManagerService = secretsManagerService;
         this.dockerHostResolver = dockerHostResolver;
+        this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -111,7 +116,7 @@ public class RdsService implements Resettable {
                StorageBackend<String, DbSubnetGroup> subnetGroups) {
         this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
-                null, null);
+                null, null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -125,7 +130,8 @@ public class RdsService implements Resettable {
                StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
                StorageBackend<String, DbSubnetGroup> subnetGroups,
                SecretsManagerService secretsManagerService,
-               DockerHostResolver dockerHostResolver) {
+               DockerHostResolver dockerHostResolver,
+               CurrentContainerNetworkResolver currentContainerNetworkResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -133,6 +139,7 @@ public class RdsService implements Resettable {
         this.config = config;
         this.secretsManagerService = secretsManagerService;
         this.dockerHostResolver = dockerHostResolver;
+        this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.instances = instances;
         this.clusters = clusters;
         this.parameterGroups = parameterGroups;
@@ -327,7 +334,7 @@ public class RdsService implements Resettable {
             }
         }
 
-        DbEndpoint endpoint = new DbEndpoint(mock ? "localhost" : proxyEndpointHost(), proxyPort);
+        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
@@ -366,7 +373,8 @@ public class RdsService implements Resettable {
         }
 
         instances.put(id, instance);
-        LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
+        LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
+                id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
     }
 
@@ -682,7 +690,7 @@ public class RdsService implements Resettable {
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = allocateProxyPort();
-        DbEndpoint endpoint = new DbEndpoint(mock ? "localhost" : proxyEndpointHost(), proxyPort);
+        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
@@ -713,8 +721,8 @@ public class RdsService implements Resettable {
         }
 
         clusters.put(id, cluster);
-        LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint=localhost:{3}",
-                id, String.valueOf(mock), engine, String.valueOf(proxyPort));
+        LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
+                id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
         return cluster;
     }
 
@@ -1092,6 +1100,19 @@ public class RdsService implements Resettable {
         usedPorts.remove(port);
     }
 
+    private DbEndpoint proxyEndpoint(int proxyPort) {
+        Optional<String> endpointHost = config.services().rds().endpointHost()
+                .filter(host -> !host.isBlank());
+        if (endpointHost.isEmpty()) {
+            return new DbEndpoint(proxyEndpointHost(), proxyPort);
+        }
+
+        int endpointPort = currentContainerNetworkResolver == null
+                ? proxyPort
+                : currentContainerNetworkResolver.resolvePublishedPort(proxyPort).orElse(proxyPort);
+        return new DbEndpoint(endpointHost.get(), endpointPort);
+    }
+
     private String proxyEndpointHost() {
         return dockerHostResolver != null ? dockerHostResolver.resolve() : "localhost";
     }
@@ -1111,8 +1132,9 @@ public class RdsService implements Resettable {
             }
             int proxyPort = reserveOrAllocateProxyPort(cluster.getProxyPort());
             cluster.setProxyPort(proxyPort);
-            cluster.setEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
-            cluster.setReaderEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
+            DbEndpoint endpoint = proxyEndpoint(proxyPort);
+            cluster.setEndpoint(endpoint);
+            cluster.setReaderEndpoint(endpoint);
             if (cluster.getDockerVolumeName() == null) {
                 cluster.setDockerVolumeName(volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier()));
             }
@@ -1154,7 +1176,7 @@ public class RdsService implements Resettable {
             }
             int proxyPort = reserveOrAllocateProxyPort(instance.getProxyPort());
             instance.setProxyPort(proxyPort);
-            instance.setEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
+            instance.setEndpoint(proxyEndpoint(proxyPort));
             try {
                 String backendHost;
                 int backendPort;
