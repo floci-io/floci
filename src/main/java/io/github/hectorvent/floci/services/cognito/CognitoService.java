@@ -68,6 +68,8 @@ import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownR
 @ApplicationScoped
 public class CognitoService {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
+    private static final String COGNITO_PASSWORD_SYMBOLS =
+            "^$*.[]{}()?\"!@#%&/\\,><':;|_~`=+-";
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -2326,6 +2328,10 @@ public class CognitoService {
     }
 
     private void updateUserPassword(CognitoUser user, String password) {
+        UserPool pool = describeUserPool(user.getUserPoolId());
+        validatePasswordAgainstPolicy(pool, user, password);
+        String previousPasswordHash = user.getPasswordHash();
+        String passwordHash = hashPassword(password);
         String saltHex = CognitoSrpHelper.generateSalt();
         String verifierHex = CognitoSrpHelper.computeVerifier(
                 CognitoSrpHelper.extractPoolName(user.getUserPoolId()),
@@ -2333,9 +2339,84 @@ public class CognitoService {
                 password,
                 saltHex
         );
-        user.setPasswordHash(hashPassword(password));
+        user.setPasswordHash(passwordHash);
+        updatePasswordHistory(pool, user, previousPasswordHash);
         user.setSrpSalt(saltHex);
         user.setSrpVerifier(verifierHex);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void validatePasswordAgainstPolicy(UserPool pool, CognitoUser user, String password) {
+        Map<String, Object> policies = pool.getPolicies();
+        if (policies == null || !(policies.get("PasswordPolicy") instanceof Map<?, ?> rawPolicy)) {
+            return;
+        }
+
+        Map<String, Object> policy = (Map<String, Object>) rawPolicy;
+        boolean invalid = password == null
+                || password.length() < policyInt(policy, "MinimumLength")
+                || policyBoolean(policy, "RequireUppercase")
+                    && password.codePoints().noneMatch(Character::isUpperCase)
+                || policyBoolean(policy, "RequireLowercase")
+                    && password.codePoints().noneMatch(Character::isLowerCase)
+                || policyBoolean(policy, "RequireNumbers")
+                    && password.codePoints().noneMatch(Character::isDigit)
+                || policyBoolean(policy, "RequireSymbols")
+                    && password.codePoints().noneMatch(
+                            codePoint -> COGNITO_PASSWORD_SYMBOLS.indexOf(codePoint) >= 0);
+
+        String passwordHash = password == null ? "" : hashPassword(password);
+        int historySize = policyInt(policy, "PasswordHistorySize");
+        boolean reused = historySize > 0 && (passwordHash.equals(user.getPasswordHash())
+                || user.getPasswordHistory().stream().limit(historySize).anyMatch(passwordHash::equals));
+
+        if (invalid || reused) {
+            throw new AwsException(
+                    "InvalidPasswordException",
+                    "Password does not conform to the configured password policy.",
+                    400
+            );
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void updatePasswordHistory(UserPool pool, CognitoUser user, String previousPasswordHash) {
+        Map<String, Object> policies = pool.getPolicies();
+        if (policies == null || !(policies.get("PasswordPolicy") instanceof Map<?, ?> rawPolicy)) {
+            return;
+        }
+
+        int historySize = policyInt((Map<String, Object>) rawPolicy, "PasswordHistorySize");
+        if (historySize <= 0 || previousPasswordHash == null) {
+            return;
+        }
+
+        List<String> history = new ArrayList<>();
+        history.add(previousPasswordHash);
+        history.addAll(user.getPasswordHistory());
+        user.setPasswordHistory(history.stream().limit(historySize).toList());
+    }
+
+    private int policyInt(Map<String, Object> policy, String key) {
+        Object value = policy.get(key);
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value instanceof String stringValue) {
+            try {
+                return Integer.parseInt(stringValue);
+            } catch (NumberFormatException ignored) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    private boolean policyBoolean(Map<String, Object> policy, String key) {
+        Object value = policy.get(key);
+        return value instanceof Boolean booleanValue
+                ? booleanValue
+                : Boolean.parseBoolean(String.valueOf(value));
     }
 
     int getAccessTokenExpiresInSeconds(UserPoolClient client) {

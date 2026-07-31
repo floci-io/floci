@@ -67,6 +67,23 @@ class CognitoServiceTest {
         return pool;
     }
 
+    private UserPool createPoolWithStrictPasswordPolicy() {
+        return service.createUserPool(Map.of(
+                "PoolName", "StrictPasswordPool",
+                "Policies", Map.of(
+                        "PasswordPolicy", Map.of(
+                                "MinimumLength", 12,
+                                "RequireUppercase", true,
+                                "RequireLowercase", true,
+                                "RequireNumbers", true,
+                                "RequireSymbols", true,
+                                "PasswordHistorySize", 10,
+                                "TemporaryPasswordValidityDays", 2
+                        )
+                )
+        ), "us-east-1");
+    }
+
     @Test
     void createUserPoolWithFullConfig() {
         List<Map<String, Object>> schema = List.of(
@@ -90,6 +107,62 @@ class CognitoServiceTest {
         assertEquals(schema, pool.getSchemaAttributes());
         assertEquals(policies, pool.getPolicies());
         assertEquals(List.of("email"), pool.getUsernameAttributes());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "Short1!a",
+            "lowercase123!",
+            "UPPERCASE123!",
+            "NoNumbersHere!",
+            "NoSymbols1234",
+            "NoSymbols 123"
+    })
+    void signUpRejectsPasswordsThatDoNotMatchTheUserPoolPolicy(String password) {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "strict-client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.signUp(client.getClientId(), "alice@example.com", password, Map.of(
+                        "email", "alice@example.com",
+                        "phone_number", "+4915112345678"
+                )));
+
+        assertEquals("InvalidPasswordException", exception.getErrorCode());
+    }
+
+    @Test
+    void signUpAcceptsAPasswordThatMatchesTheUserPoolPolicy() {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "strict-client", false, false, List.of(), List.of());
+
+        CognitoUser user = service.signUp(
+                client.getClientId(),
+                "alice@example.com",
+                "ValidPassword1!",
+                Map.of("email", "alice@example.com", "phone_number", "+4915112345678")
+        );
+
+        assertEquals("alice@example.com", user.getUsername());
+    }
+
+    @Test
+    void passwordHistoryRejectsARecentlyUsedPassword() {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        service.adminCreateUser(
+                pool.getId(),
+                "alice",
+                Map.of("email", "alice@example.com"),
+                "InitialPass1!"
+        );
+        service.adminSetUserPassword(pool.getId(), "alice", "Replacement2!", true);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "InitialPass1!", true));
+
+        assertEquals("InvalidPasswordException", exception.getErrorCode());
     }
 
     @Test
