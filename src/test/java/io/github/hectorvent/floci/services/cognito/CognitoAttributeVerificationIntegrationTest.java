@@ -210,4 +210,57 @@ class CognitoAttributeVerificationIntegrationTest {
                 .body("CodeDeliveryDetails.DeliveryMedium", equalTo("SMS"))
                 .body("CodeDeliveryDetails.Destination", equalTo("+*******4567"));
     }
+
+    @Test
+    @Order(7)
+    void allowsFreshCodeForAlreadyVerifiedAttribute() throws Exception {
+        String username = "verify-already+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "email_verified", "Value": "true" }
+                  ]
+                }
+                """.formatted(poolId, username, username))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminSetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "Password": "%s",
+                  "Permanent": true
+                }
+                """.formatted(poolId, username, PASSWORD))
+                .then()
+                .statusCode(200);
+
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "%s"
+                  }
+                }
+                """.formatted(clientId, username, PASSWORD));
+        String token = auth.path("AuthenticationResult").path("AccessToken").asText();
+
+        // AWS allows issuing a code for an attribute that is already verified,
+        // as long as its value has not changed.
+        cognitoAction("GetUserAttributeVerificationCode", """
+                {
+                  "AccessToken": "%s",
+                  "AttributeName": "email"
+                }
+                """.formatted(token))
+                .then()
+                .statusCode(200)
+                .body("CodeDeliveryDetails.AttributeName", equalTo("email"));
+    }
 }
