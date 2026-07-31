@@ -71,6 +71,7 @@ class ContainerLauncherTest {
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
         when(lambda.dockerNetwork()).thenReturn(Optional.empty());
+        lenient().when(lambda.extraHosts()).thenReturn(Optional.empty());
         lenient().when(lambda.awsConfigPath()).thenReturn(Optional.empty());
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
@@ -471,6 +472,47 @@ class ContainerLauncherTest {
                 "AWS_SECRET_ACCESS_KEY should not be injected when awsConfigPath is set");
         assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")),
                 "AWS_SESSION_TOKEN should not be injected when awsConfigPath is set");
+    }
+
+    @Test
+    void launchFunction_appliesConfiguredExtraHosts_skippingMalformedEntries() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.extraHosts()).thenReturn(Optional.of(List.of(
+                "localhost:host-gateway", "db.internal:10.0.0.5", "malformed", ":9.9.9.9", "trailing:")));
+
+        Path codePath = Files.createDirectory(tempDir.resolve("extra-hosts"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("extra-hosts-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        List<String> extraHosts = captureRealContainerSpec().extraHosts();
+        assertTrue(extraHosts.contains("localhost:host-gateway"),
+                "configured hostname:host-gateway entry should be applied");
+        assertTrue(extraHosts.contains("db.internal:10.0.0.5"),
+                "configured hostname:ip entry should be applied");
+        assertEquals(2, extraHosts.size(),
+                "entries without a hostname and an ip must be skipped, not passed to Docker");
+    }
+
+    @Test
+    void launchFunction_noExtraHostsByDefault() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("no-extra-hosts"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("no-extra-hosts-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        assertTrue(captureRealContainerSpec().extraHosts().isEmpty(),
+                "no extra hosts when the config is unset (non-Linux host in this test)");
     }
 
     @Test

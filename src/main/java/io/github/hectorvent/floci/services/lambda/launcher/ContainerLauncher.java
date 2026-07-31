@@ -219,6 +219,16 @@ public class ContainerLauncher {
 
         specBuilder.withEmbeddedDns();
 
+        // Inject additional hosts entries into the container if present
+        config.services().lambda().extraHosts().ifPresent(hosts -> hosts.forEach(entry -> {
+            int sep = entry.lastIndexOf(':');
+            if (sep <= 0 || sep == entry.length() - 1) {
+                LOG.warnv("Ignoring malformed lambda extra-hosts entry (expected hostname:ip): {0}", entry);
+                return;
+            }
+            specBuilder.withExtraHost(entry.substring(0, sep), entry.substring(sep + 1));
+        }));
+
         // Whether /var/task is served from a shared read-only volume (large code) or copied
         // directly into this container (small code). Decided once here so both the spec (below)
         // and the create->start copy block agree.

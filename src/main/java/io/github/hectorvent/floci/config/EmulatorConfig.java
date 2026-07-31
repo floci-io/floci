@@ -1330,6 +1330,15 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
 
         /**
+         * Extra /etc/hosts entries added to every Lambda container, as "hostname:ip" pairs.
+         * The ip may be the literal "host-gateway" to map to the Docker host, mirroring
+         * {@code docker run --add-host hostname:host-gateway}.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS (comma-separated)
+         */
+        Optional<List<String>> extraHosts();
+
+        /**
          * Concurrent executions ceiling applied per region. AWS Lambda's
          * "account-level" concurrency is in fact a per-region quota (default 1000);
          * Floci mirrors that semantics and partitions counters by the region
