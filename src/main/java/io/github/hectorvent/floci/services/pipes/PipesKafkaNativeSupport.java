@@ -5,8 +5,6 @@ import org.apache.kafka.clients.consumer.CooperativeStickyAssignor;
 import org.apache.kafka.clients.consumer.RangeAssignor;
 import org.apache.kafka.common.metrics.JmxReporter;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
-import org.apache.kafka.common.utils.AppInfoParser;
-import org.apache.kafka.shaded.com.google.protobuf.ExtensionRegistry;
 
 /**
  * Registers the kafka-clients classes that GraalVM cannot discover statically.
@@ -17,10 +15,13 @@ import org.apache.kafka.shaded.com.google.protobuf.ExtensionRegistry;
  * consumer that cannot be constructed. {@link PipesPoller} logs that failure and moves on, leaving
  * a Kafka or MSK pipe reported as RUNNING while it delivers nothing.
  *
- * <p>{@code sasl.*} and {@code ssl.*} defaults are excluded deliberately. Floci connects over
- * PLAINTEXT so they are never instantiated, and registering {@code DefaultJwtValidator} aborts the
- * native build outright: its constructor references jose4j, an optional kafka-clients dependency
- * Floci does not ship. {@code PipesKafkaNativeSupportTest} guards both directions.
+ * <p>Every entry is config-resolved, and {@code PipesKafkaNativeSupportTest} derives its
+ * expectations the same way, so list and guard cannot drift. The tracing agent also reported
+ * {@code AppInfoParser.AppInfo}, {@code AppInfoParser.AppInfoMBean} and the shaded
+ * {@code ExtensionRegistry}; native pipes deliver without them, so they are omitted.
+ *
+ * <p>SASL and SSL defaults are excluded: Floci is PLAINTEXT-only, and {@code DefaultJwtValidator}
+ * fails the native build outright by referencing jose4j, an optional dependency Floci ships without.
  */
 @RegisterForReflection(targets = {
     // key.deserializer / value.deserializer — set explicitly by PipesKafkaConsumerManager
@@ -29,12 +30,7 @@ import org.apache.kafka.shaded.com.google.protobuf.ExtensionRegistry;
     RangeAssignor.class,
     CooperativeStickyAssignor.class,
     // metric.reporters — ConsumerConfig default
-    JmxReporter.class,
-    // MBean registered by AppInfoParser on consumer startup
-    AppInfoParser.AppInfo.class,
-    AppInfoParser.AppInfoMBean.class,
-    // shaded protobuf reached from the client telemetry reporter
-    ExtensionRegistry.class
+    JmxReporter.class
 })
 public class PipesKafkaNativeSupport {
 }

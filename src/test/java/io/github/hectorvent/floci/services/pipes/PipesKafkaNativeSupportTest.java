@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
@@ -17,11 +18,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Guards {@link PipesKafkaNativeSupport} against kafka-clients upgrades.
+ * Pins {@link PipesKafkaNativeSupport} to what {@code ConsumerConfig} resolves, in both directions:
+ * a newly resolved class must be registered, and nothing else may be.
  *
- * <p>A class missing from the registration only fails in native mode, and only as a swallowed
- * poller warning, so this asserts the registration against the config kafka-clients actually
- * resolves rather than against a hand-maintained list.
+ * <p>Scope: config-resolved classes only. Reflection always succeeds on the JVM, so a non-config
+ * lookup added by a future kafka-clients is only catchable by running a Kafka pipe against a
+ * native binary — no suite does that today.
  */
 class PipesKafkaNativeSupportTest {
 
@@ -31,7 +33,7 @@ class PipesKafkaNativeSupportTest {
     @Test
     @DisplayName("classes ConsumerConfig resolves reflectively are registered")
     void registrationCoversReflectivelyResolvedClasses() {
-        Set<String> missing = new TreeSet<>(resolvedClasses(TRANSPORT_SECURITY.negate()));
+        Set<String> missing = new TreeSet<>(expectedClassNames());
         missing.removeAll(registeredClassNames());
 
         assertTrue(missing.isEmpty(),
@@ -40,14 +42,26 @@ class PipesKafkaNativeSupportTest {
     }
 
     @Test
-    @DisplayName("SASL and SSL defaults stay unregistered so native-image never links jose4j")
-    void registrationExcludesTransportSecurityDefaults() {
-        Set<String> unexpected = new TreeSet<>(resolvedClasses(TRANSPORT_SECURITY));
-        unexpected.retainAll(registeredClassNames());
+    @DisplayName("nothing is registered that ConsumerConfig does not resolve")
+    void registrationContainsNothingUnjustified() {
+        Set<String> unexpected = new TreeSet<>(registeredClassNames());
+        unexpected.removeAll(expectedClassNames());
 
         assertTrue(unexpected.isEmpty(),
-                "Floci connects over PLAINTEXT and never instantiates these; registering them makes "
-                        + "native-image link optional dependencies and fail the build: " + unexpected);
+                "these are not config-resolved, so this test cannot guard them and they need a "
+                        + "native run to justify. SASL/SSL defaults in particular break the build — "
+                        + "DefaultJwtValidator drags in optional jose4j: " + unexpected);
+    }
+
+    /** Class-valued settings kafka-clients resolves, minus the transport security Floci never uses. */
+    private static Set<String> expectedClassNames() {
+        Set<String> classes = new TreeSet<>();
+        consumerConfigValues().forEach((key, value) -> {
+            if (TRANSPORT_SECURITY.negate().test(key)) {
+                collectClassNames(value, classes);
+            }
+        });
+        return classes;
     }
 
     private static Set<String> registeredClassNames() {
@@ -62,22 +76,26 @@ class PipesKafkaNativeSupportTest {
         return names;
     }
 
-    /** Class-valued settings kafka-clients resolves for the properties PipesKafkaConsumerManager sets. */
-    private static Set<String> resolvedClasses(Predicate<String> keyFilter) {
-        Set<String> classes = new TreeSet<>();
-        consumerConfigValues().forEach((key, value) -> {
-            if (keyFilter.test(key)) {
-                collectClassNames(value, classes);
-            }
-        });
-        return classes;
+    /**
+     * Mirrors {@code AbstractConfig.getConfiguredInstances}, which accepts a setting as either a
+     * {@code Class} or a class name — {@code metric.reporters} resolves to the latter. Values that
+     * do not name a class (bootstrap.servers, ssl.enabled.protocols) are not instantiable and so
+     * are not candidates.
+     */
+    private static void collectClassNames(Object value, Set<String> into) {
+        switch (value) {
+            case Class<?> type -> into.add(type.getName());
+            case Collection<?> collection -> collection.forEach(element -> collectClassNames(element, into));
+            case String name -> loadable(name).ifPresent(into::add);
+            case null, default -> { }
+        }
     }
 
-    private static void collectClassNames(Object value, Set<String> into) {
-        if (value instanceof Class<?> type) {
-            into.add(type.getName());
-        } else if (value instanceof Collection<?> collection) {
-            collection.forEach(element -> collectClassNames(element, into));
+    private static Optional<String> loadable(String className) {
+        try {
+            return Optional.of(Class.forName(className, false, ConsumerConfig.class.getClassLoader()).getName());
+        } catch (ClassNotFoundException | LinkageError e) {
+            return Optional.empty();
         }
     }
 
