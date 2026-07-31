@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
@@ -60,6 +63,7 @@ public class AwsJson11Controller {
     private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
 
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictBodyReader;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
     private final SsmJsonHandler ssmJsonHandler;
@@ -133,6 +137,7 @@ public class AwsJson11Controller {
                                LightsailJsonHandler lightsailJsonHandler,
                                CloudControlJsonHandler cloudControlJsonHandler) {
         this.objectMapper = objectMapper;
+        this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
@@ -193,8 +198,14 @@ public class AwsJson11Controller {
         String action = targetMatch.action();
         LOG.infov("AwsJson11Controller {0} action: {1}", serviceKey, action);
 
+        JsonNode request;
         try {
-            JsonNode request = objectMapper.readTree(body);
+            request = strictBodyReader.readTree(body);
+        } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+
+        try {
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {

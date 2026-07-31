@@ -80,6 +80,7 @@ floci:
 
   protocols:
     strict-claiming: false
+    reject-unknown-service-scope: true
 
   docker:
     log-max-size: "10m"
@@ -181,6 +182,7 @@ floci:
       enabled: true
     stepfunctions:
       enabled: true
+      allow-plaintext-http: true
     cloudformation:
       enabled: true
     acm:
