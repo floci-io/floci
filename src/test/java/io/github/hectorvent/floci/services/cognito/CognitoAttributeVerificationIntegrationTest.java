@@ -251,8 +251,6 @@ class CognitoAttributeVerificationIntegrationTest {
                 """.formatted(clientId, username, PASSWORD));
         String token = auth.path("AuthenticationResult").path("AccessToken").asText();
 
-        // AWS allows issuing a code for an attribute that is already verified,
-        // as long as its value has not changed.
         cognitoAction("GetUserAttributeVerificationCode", """
                 {
                   "AccessToken": "%s",
