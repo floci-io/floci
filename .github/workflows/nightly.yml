@@ -130,8 +130,11 @@ jobs:
           name: native-arm64
           path: native/arm64/
 
-      - name: Make binaries executable
-        run: chmod +x native/amd64/*-runner native/arm64/*-runner
+      - name: Stage binaries under a fixed name
+        run: |
+          for arch in amd64 arm64; do
+            mv native/$arch/*-runner native/$arch/application
+          done
 
       - name: Set created timestamp
         id: created

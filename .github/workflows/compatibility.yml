@@ -39,7 +39,7 @@ jobs:
       - name: Stage native binary for packaging
         run: |
           mkdir -p native/arm64
-          cp target/*-runner native/arm64/
+          cp target/*-runner native/arm64/application
           # include any sidecar .so the runtime image may need (matches nightly artifact set)
           cp target/*.so native/arm64/ 2>/dev/null || true
 
