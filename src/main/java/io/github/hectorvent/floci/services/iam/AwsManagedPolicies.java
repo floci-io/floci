@@ -66,8 +66,6 @@ final class AwsManagedPolicies {
                 "Provides root client access to an Amazon EFS file system."),
         // Attached by the roles `cdk bootstrap` creates, so without it the CDKToolkit stack
         // rolls back and no CDK app can be deployed.
-        new ManagedPolicyDef("AWSCloudFormationReadOnlyAccess", "/",
-                "Provides access to AWS CloudFormation via the AWS Management Console."),
         new ManagedPolicyDef("AmazonAthenaFullAccess", "/",
                 "Provide full access to Amazon Athena and scoped access to the dependencies "
                 + "needed to enable querying, writing results, and data management."),
