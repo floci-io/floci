@@ -12,6 +12,7 @@ public class ContainerHandle {
 
     private final String containerId;
     private final String functionName;
+    private final String functionVersion;
     private final RuntimeApiServer runtimeApiServer;
     private final long createdAt;
     private final boolean hotReload;
@@ -21,13 +22,19 @@ public class ContainerHandle {
 
     public ContainerHandle(String containerId, String functionName,
                            RuntimeApiServer runtimeApiServer, ContainerState state) {
-        this(containerId, functionName, runtimeApiServer, state, false);
+        this(containerId, functionName, "$LATEST", runtimeApiServer, state, false);
     }
 
     public ContainerHandle(String containerId, String functionName,
                            RuntimeApiServer runtimeApiServer, ContainerState state, boolean hotReload) {
+        this(containerId, functionName, "$LATEST", runtimeApiServer, state, hotReload);
+    }
+
+    public ContainerHandle(String containerId, String functionName, String functionVersion,
+                           RuntimeApiServer runtimeApiServer, ContainerState state, boolean hotReload) {
         this.containerId = containerId;
         this.functionName = functionName;
+        this.functionVersion = functionVersion == null ? "$LATEST" : functionVersion;
         this.runtimeApiServer = runtimeApiServer;
         this.state = state;
         this.hotReload = hotReload;
@@ -37,6 +44,7 @@ public class ContainerHandle {
 
     public String getContainerId() { return containerId; }
     public String getFunctionName() { return functionName; }
+    public String getFunctionVersion() { return functionVersion; }
     public boolean isHotReload() { return hotReload; }
     public RuntimeApiServer getRuntimeApiServer() { return runtimeApiServer; }
     public long getCreatedAt() { return createdAt; }

@@ -328,7 +328,8 @@ public class ContainerLauncher {
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
 
-        ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
+        ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), fn.getVersion(),
+                runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
         // Attach log streaming
         Closeable logHandle = logStreamer.attach(

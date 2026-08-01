@@ -177,10 +177,12 @@ class ContainerLauncherTest {
         fn.setRuntime("nodejs20.x");
         fn.setHandler("index.handler");
         fn.setCodeLocalPath(codePath.toString());
+        fn.setVersion("7");
 
-        launcher.launch(fn);
+        ContainerHandle handle = launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
+        assertEquals("7", handle.getFunctionVersion());
         // Small code is copied directly into /var/task (the fast path), NOT bind-mounted...
         assertTrue(spec.binds().isEmpty(), "Function should NOT have bind mounts");
         // ...and NOT served from a named volume (that's reserved for large code).

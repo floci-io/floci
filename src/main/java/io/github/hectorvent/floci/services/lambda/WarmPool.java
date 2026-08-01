@@ -23,7 +23,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Manages a pool of warm Lambda containers per function.
+ * Manages a pool of warm Lambda containers per function version.
  *
  * Two modes controlled by {@code emulator.services.lambda.ephemeral}:
  *  - {@code false} (default): containers are reused across invocations and evicted
@@ -106,7 +106,7 @@ public class WarmPool implements ContainerTeardown {
         ContainerHandle handle = null;
 
         if (!ephemeral) {
-            ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(fn.getFunctionName(), k -> new ArrayDeque<>());
+            ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(poolKey(fn), k -> new ArrayDeque<>());
             // Skip pooled handles whose container died out-of-band — otherwise the
             // caller would wait the full Lambda function timeout.
             while (true) {
@@ -154,7 +154,7 @@ public class WarmPool implements ContainerTeardown {
 
         handle.setState(ContainerState.WARM);
         handle.touchLastUsed();
-        ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(handle.getFunctionName(), k -> new ArrayDeque<>());
+        ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(poolKey(handle), k -> new ArrayDeque<>());
         boolean returned;
         synchronized (queue) {
             returned = queue.size() < maxPoolSizePerFunction;
@@ -177,7 +177,7 @@ public class WarmPool implements ContainerTeardown {
     public void pushCodeUpdate(LambdaFunction fn) {
         LOG.infov("Reactive S3 Sync: invalidating warm pool for function {0} to pick up new code",
                 fn.getFunctionName());
-        drainFunction(fn.getFunctionName());
+        drainFunctionVersion(fn.getFunctionName(), fn.getVersion());
     }
 
     /**
@@ -192,20 +192,32 @@ public class WarmPool implements ContainerTeardown {
     }
 
     /**
-     * Stops and removes all warm containers for the given function.
-     * Called on function delete or code update.
+     * Stops and removes all warm containers for every version of the given function.
+     * Called when a function is deleted.
      */
     public void drainFunction(String functionName) {
-        ArrayDeque<ContainerHandle> queue = pool.remove(functionName);
-        if (queue == null) {
-            return;
+        List<ContainerHandle> toStop = new ArrayList<>();
+        String prefix = functionName + "::";
+        for (String poolKey : new ArrayList<>(pool.keySet())) {
+            if (poolKey.startsWith(prefix)) {
+                toStop.addAll(removePool(poolKey));
+            }
         }
-        List<ContainerHandle> toStop;
-        synchronized (queue) {
-            toStop = new ArrayList<>(queue);
-            queue.clear();
-        }
+        if (toStop.isEmpty()) return;
         LOG.infov("Draining {0} container(s) for function: {1}", toStop.size(), functionName);
+        stopInParallel(toStop);
+    }
+
+    /**
+     * Stops and removes warm containers for one specified function version.
+     * Code and configuration updates use this to invalidate only the mutable
+     * {@code $LATEST} version without disrupting published versions.
+     */
+    public void drainFunctionVersion(String functionName, String functionVersion) {
+        List<ContainerHandle> toStop = removePool(poolKey(functionName, functionVersion));
+        if (toStop.isEmpty()) return;
+        LOG.infov("Draining {0} container(s) for function {1} version {2}",
+                toStop.size(), functionName, functionVersion == null ? "$LATEST" : functionVersion);
         stopInParallel(toStop);
     }
 
@@ -232,9 +244,11 @@ public class WarmPool implements ContainerTeardown {
     }
 
     private void drainAll() {
-        for (String functionName : new ArrayList<>(pool.keySet())) {
-            drainFunction(functionName);
+        List<ContainerHandle> toStop = new ArrayList<>();
+        for (String poolKey : new ArrayList<>(pool.keySet())) {
+            toStop.addAll(removePool(poolKey));
         }
+        stopInParallel(toStop);
     }
 
     private void evictIdleContainers() {
@@ -243,7 +257,7 @@ public class WarmPool implements ContainerTeardown {
         long now = System.currentTimeMillis();
 
         for (var entry : pool.entrySet()) {
-            String functionName = entry.getKey();
+            String poolKey = entry.getKey();
             ArrayDeque<ContainerHandle> queue = entry.getValue();
             List<ContainerHandle> toEvict = new ArrayList<>();
 
@@ -259,13 +273,37 @@ public class WarmPool implements ContainerTeardown {
             }
 
             // Re-check that the queue is still registered to avoid double-stop with drainFunction.
-            if (!toEvict.isEmpty() && pool.get(functionName) == queue) {
-                LOG.infov("Evicting {0} idle container(s) for function: {1}", toEvict.size(), functionName);
+            if (!toEvict.isEmpty() && pool.get(poolKey) == queue) {
+                LOG.infov("Evicting {0} idle container(s) for function: {1}", toEvict.size(), poolKey);
                 for (ContainerHandle handle : toEvict) {
                     stopQuietly(handle);
                 }
             }
         }
+    }
+
+    private List<ContainerHandle> removePool(String poolKey) {
+        ArrayDeque<ContainerHandle> queue = pool.remove(poolKey);
+        if (queue == null) {
+            return List.of();
+        }
+        synchronized (queue) {
+            List<ContainerHandle> handles = new ArrayList<>(queue);
+            queue.clear();
+            return handles;
+        }
+    }
+
+    private String poolKey(LambdaFunction fn) {
+        return poolKey(fn.getFunctionName(), fn.getVersion());
+    }
+
+    private String poolKey(ContainerHandle handle) {
+        return poolKey(handle.getFunctionName(), handle.getFunctionVersion());
+    }
+
+    private String poolKey(String functionName, String functionVersion) {
+        return functionName + "::" + (functionVersion == null ? "$LATEST" : functionVersion);
     }
 
     private void stopQuietly(ContainerHandle handle) {

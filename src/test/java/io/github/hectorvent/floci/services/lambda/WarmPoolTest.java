@@ -158,6 +158,87 @@ class WarmPoolTest {
     }
 
     @Test
+    void acquireDoesNotReuseWarmContainerAcrossVersions() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction latest = versionedFunction("versioned-fn", "$LATEST");
+        LambdaFunction versionOne = versionedFunction("versioned-fn", "1");
+        ContainerHandle latestHandle = new ContainerHandle("cid-latest", "versioned-fn", "$LATEST",
+                null, ContainerState.WARM, false);
+        ContainerHandle versionOneHandle = new ContainerHandle("cid-v1", "versioned-fn", "1",
+                null, ContainerState.WARM, false);
+        when(containerLauncher.launch(any())).thenReturn(latestHandle, versionOneHandle);
+
+        ContainerHandle acquiredLatest = pool.acquire(latest);
+        pool.release(acquiredLatest);
+
+        ContainerHandle acquiredVersionOne = pool.acquire(versionOne);
+
+        assertSame(versionOneHandle, acquiredVersionOne);
+        assertNotSame(latestHandle, acquiredVersionOne);
+        verify(containerLauncher, times(2)).launch(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void drainFunctionDrainsWarmContainersForEveryVersion() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction latest = versionedFunction("versioned-fn", "$LATEST");
+        LambdaFunction versionOne = versionedFunction("versioned-fn", "1");
+        ContainerHandle latestHandle = new ContainerHandle("cid-latest", "versioned-fn", "$LATEST",
+                null, ContainerState.WARM, false);
+        ContainerHandle versionOneHandle = new ContainerHandle("cid-v1", "versioned-fn", "1",
+                null, ContainerState.WARM, false);
+        when(containerLauncher.launch(any())).thenReturn(latestHandle, versionOneHandle);
+
+        pool.release(pool.acquire(latest));
+        pool.release(pool.acquire(versionOne));
+
+        pool.drainFunction("versioned-fn");
+
+        verify(containerLauncher).stop(latestHandle);
+        verify(containerLauncher).stop(versionOneHandle);
+        pool.shutdown();
+    }
+
+    @Test
+    void pushCodeUpdatePreservesOtherWarmVersions() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction latest = versionedFunction("versioned-fn", "$LATEST");
+        LambdaFunction versionOne = versionedFunction("versioned-fn", "1");
+        ContainerHandle latestHandle = new ContainerHandle("cid-latest", "versioned-fn", "$LATEST",
+                null, ContainerState.WARM, false);
+        ContainerHandle versionOneHandle = new ContainerHandle("cid-v1", "versioned-fn", "1",
+                null, ContainerState.WARM, false);
+        when(containerLauncher.launch(any())).thenReturn(latestHandle, versionOneHandle);
+        when(containerLauncher.isAlive(versionOneHandle)).thenReturn(true);
+
+        pool.release(pool.acquire(latest));
+        pool.release(pool.acquire(versionOne));
+
+        pool.pushCodeUpdate(latest);
+
+        verify(containerLauncher).stop(latestHandle);
+        verify(containerLauncher, never()).stop(versionOneHandle);
+        assertSame(versionOneHandle, pool.acquire(versionOne));
+        verify(containerLauncher, times(2)).launch(any());
+        pool.shutdown();
+    }
+
+    private LambdaFunction versionedFunction(String name, String version) {
+        LambdaFunction function = new LambdaFunction();
+        function.setFunctionName(name);
+        function.setVersion(version);
+        return function;
+    }
+
+    @Test
     void acquire_discardsDeadPooledHandleAndColdStarts() {
         WarmPool pool = buildPool();
         pool.init();

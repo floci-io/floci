@@ -345,6 +345,24 @@ class LambdaServiceTest {
     }
 
     @Test
+    void functionUpdatesDrainOnlyLatestWarmContainers() {
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService service = new LambdaService(
+                new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>()),
+                warmPool,
+                new CodeStore(Path.of("target/test-data/lambda-code")),
+                new ZipExtractor(),
+                new RegionResolver(REGION, "000000000000"));
+        service.createFunction(REGION, baseRequest("update-fn"));
+
+        service.updateFunctionCode(REGION, "update-fn", Map.of());
+        service.updateFunctionConfiguration(REGION, "update-fn", Map.of());
+
+        verify(warmPool, times(2)).drainFunctionVersion("update-fn", "$LATEST");
+        verify(warmPool, never()).drainFunction(anyString());
+    }
+
+    @Test
     void rehydrateConcurrency_restoresReservedFromStore() {
         // Simulate a persisted state: functions already live in the store
         // with reserved values before the limiter is populated.
