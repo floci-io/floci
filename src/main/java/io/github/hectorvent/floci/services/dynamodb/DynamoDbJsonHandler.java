@@ -570,6 +570,7 @@ public class DynamoDbJsonHandler {
     private void evaluateLegacyExpected(JsonNode existing, JsonNode expected, String conditionalOperator,
                                           String returnValuesOnConditionCheckFailure) {
         if (expected == null) return;
+        validateLegacyExpected(expected);
         boolean useOr = "OR".equals(conditionalOperator);
         boolean overall = !useOr;
         var fields = expected.fields();
@@ -579,10 +580,11 @@ public class DynamoDbJsonHandler {
             JsonNode condition = entry.getValue();
             JsonNode attrValue = existing != null ? existing.get(attrName) : null;
             boolean condResult;
-            if (condition.has("Exists")) {
-                boolean exists = condition.get("Exists").asBoolean();
-                condResult = exists ? attrValue != null : attrValue == null;
+            if (condition.has("Exists") && !condition.get("Exists").asBoolean()) {
+                condResult = attrValue == null;
             } else {
+                // Exists:true always carries a Value, so it evaluates as an attribute
+                // comparison exactly like a bare Value: must exist AND match.
                 condResult = dynamoDbService.matchesKeyConditionPublic(attrValue, normalizeLegacyCondition(condition));
             }
             if (useOr) overall = overall || condResult;
@@ -593,6 +595,46 @@ public class DynamoDbJsonHandler {
                 throw new ConditionalCheckFailedException(existing);
             } else {
                 throw new ConditionalCheckFailedException(null);
+            }
+        }
+    }
+
+    /**
+     * Validates every entry of a legacy Expected map before any condition is evaluated,
+     * matching the ExpectedAttributeValue rules documented by DynamoDB:
+     * <ul>
+     *   <li>{@code Exists: true} requires a {@code Value} — you cannot expect a value to exist
+     *       without saying which value.</li>
+     *   <li>{@code Exists: false} forbids a {@code Value} — you cannot expect an attribute to hold
+     *       a value while also expecting it to be absent.</li>
+     *   <li>{@code Exists} cannot be combined with the {@code ComparisonOperator} /
+     *       {@code AttributeValueList} form.</li>
+     * </ul>
+     */
+    private void validateLegacyExpected(JsonNode expected) {
+        var fields = expected.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            String attrName = entry.getKey();
+            JsonNode condition = entry.getValue();
+            if (!condition.has("Exists")) {
+                continue;
+            }
+            if (condition.has("ComparisonOperator") || condition.has("AttributeValueList")) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Exists cannot be used with "
+                                + "ComparisonOperator or AttributeValueList for Attribute: " + attrName, 400);
+            }
+            boolean exists = condition.get("Exists").asBoolean();
+            if (exists && !condition.has("Value")) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Value must be provided when "
+                                + "Exists is true for Attribute: " + attrName, 400);
+            }
+            if (!exists && condition.has("Value")) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Value cannot be used when "
+                                + "Exists is false for Attribute: " + attrName, 400);
             }
         }
     }

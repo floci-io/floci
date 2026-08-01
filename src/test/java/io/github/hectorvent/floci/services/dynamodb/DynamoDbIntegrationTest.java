@@ -1930,6 +1930,425 @@ given()
     }
 
     @Test
+    void updateItemLegacyExpectedExistsTrueComparesValue() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable4",
+                    "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "PK", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable4",
+                    "Item": {"PK": {"S": "k1"}, "VERSION": {"N": "5"}, "SESSION_DATA": {"S": "{}"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // A current expectation (stored VERSION == 5) is honoured → the write lands.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable4",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": true, "Value": {"N": "5"}}},
+                    "AttributeUpdates": {"VERSION": {"Action": "PUT", "Value": {"N": "6"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // A stale expectation (still claiming VERSION == 5, stored is 6) must be rejected.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable4",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": true, "Value": {"N": "5"}}},
+                    "AttributeUpdates": {"SESSION_DATA": {"Action": "DELETE"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // The stale write must not have taken effect.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable4",
+                    "Key": {"PK": {"S": "k1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.VERSION.N", equalTo("6"))
+            .body("Item.SESSION_DATA.S", equalTo("{}"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable4"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void putAndDeleteItemLegacyExpectedExistsTrueComparesValue() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable5",
+                    "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "PK", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable5",
+                    "Item": {"PK": {"S": "k1"}, "VERSION": {"N": "5"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // PutItem with a stale expectation → rejected.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable5",
+                    "Item": {"PK": {"S": "k1"}, "VERSION": {"N": "6"}},
+                    "Expected": {"VERSION": {"Exists": true, "Value": {"N": "4"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // DeleteItem with a stale expectation → rejected.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable5",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": true, "Value": {"N": "4"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // Neither write took effect.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable5",
+                    "Key": {"PK": {"S": "k1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.VERSION.N", equalTo("5"));
+
+        // DeleteItem with a matching expectation → succeeds.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable5",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": true, "Value": {"N": "5"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable5"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void legacyExpectedExistsFalseAndConditionalOperator() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable6",
+                    "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "PK", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable6",
+                    "Item": {"PK": {"S": "k1"}, "VERSION": {"N": "5"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Exists:false on a present attribute → rejected.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable6",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": false}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // Exists:false on an absent attribute → accepted.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable6",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"NOTE": {"Exists": false}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // AND (the default) requires every entry to hold — the second one does not.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable6",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {
+                        "VERSION": {"Exists": true, "Value": {"N": "5"}},
+                        "NOTE":    {"Exists": true, "Value": {"S": "other"}}
+                    },
+                    "AttributeUpdates": {"VERSION": {"Action": "PUT", "Value": {"N": "9"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // OR only requires one entry to hold.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable6",
+                    "Key": {"PK": {"S": "k1"}},
+                    "ConditionalOperator": "OR",
+                    "Expected": {
+                        "VERSION": {"Exists": true, "Value": {"N": "5"}},
+                        "NOTE":    {"Exists": true, "Value": {"S": "other"}}
+                    },
+                    "AttributeUpdates": {"VERSION": {"Action": "PUT", "Value": {"N": "9"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable6"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void legacyExpectedRejectsInvalidExistsCombinations() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable7",
+                    "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "PK", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Exists:true without a Value — nothing to compare against.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable7",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": true}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Value must be provided when Exists is true"));
+
+        // Exists:false alongside a Value — contradictory.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable7",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": false, "Value": {"N": "5"}}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Value cannot be used when Exists is false"));
+
+        // Exists mixed with the ComparisonOperator form.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable7",
+                    "Item": {"PK": {"S": "k1"}},
+                    "Expected": {
+                        "VERSION": {
+                            "Exists": true,
+                            "ComparisonOperator": "EQ",
+                            "AttributeValueList": [{"N": "5"}]
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Exists cannot be used with"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable7"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void updateAndDescribeContinuousBackups() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
