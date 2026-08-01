@@ -116,8 +116,11 @@ jobs:
           name: native-arm64
           path: native/arm64/
 
-      - name: Make binaries executable
-        run: chmod +x native/amd64/*-runner native/arm64/*-runner
+      - name: Stage binaries under a fixed name
+        run: |
+          for arch in amd64 arm64; do
+            mv native/$arch/*-runner native/$arch/application
+          done
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
@@ -135,6 +138,8 @@ jobs:
           file: docker/Dockerfile.native-package
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             floci/floci:${{ steps.version.outputs.version }}
             floci/floci:latest
@@ -159,6 +164,8 @@ jobs:
           file: docker/Dockerfile.compat
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             floci/floci:${{ steps.version.outputs.version }}-compat
             floci/floci:latest-compat

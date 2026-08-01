@@ -57,6 +57,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.StorageConfig storageConfig;
     @Mock private EmulatorConfig.ServicesConfig servicesConfig;
     @Mock private EmulatorConfig.Ec2ServiceConfig ec2ServiceConfig;
+    @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
     @Mock private ElastiCacheContainerManager elastiCacheContainerManager;
     @Mock private ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager;
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
@@ -69,6 +70,7 @@ class EmulatorLifecycleTest {
     @Mock private NeptuneProxyManager neptuneProxyManager;
     @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
     @Mock private RdsService rdsService;
+    @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -90,6 +92,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(config.services()).thenReturn(servicesConfig);
         Mockito.lenient().when(servicesConfig.ec2()).thenReturn(ec2ServiceConfig);
         Mockito.lenient().when(ec2ServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.elbv2()).thenReturn(elbv2ServiceConfig);
+        Mockito.lenient().when(elbv2ServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
         Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
 
@@ -99,7 +103,7 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, rdsService,
+                rabbitMqManager, rdsService, elbV2Service,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, containerTeardowns, persistentPathValidator);
@@ -127,6 +131,36 @@ class EmulatorLifecycleTest {
         inOrder.verify(initLifecycleState).markBootCompleted();
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(rdsService).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should restore ELBv2 persisted runtime after loading storage when elbv2 is enabled")
+    void shouldRestoreElbV2PersistedRuntimeAfterStorageLoad() {
+        // The restore has to happen after the bean is constructed, not from @PostConstruct, or
+        // ElbV2DataPlane's callback re-enters bean creation (#1913). Pin the ordering so the call
+        // cannot be dropped or moved back into construction unnoticed.
+        stubStorageConfig();
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, elbV2Service);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(elbV2Service).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should not restore ELBv2 persisted runtime when elbv2 is disabled")
+    void shouldNotRestoreElbV2PersistedRuntimeWhenDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        Mockito.verify(elbV2Service, Mockito.never()).restorePersistedRuntime();
     }
 
     @Test

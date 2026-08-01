@@ -2,6 +2,38 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+## Custom API IDs
+
+API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin
+one, pass the reserved `floci:override-id` tag on creation and Floci uses its value as the API ID. This
+works for both v1 (`CreateRestApi`) and v2 (`CreateApi`), and matches the tag other services such as KMS
+and Cognito already use.
+
+```bash
+aws apigateway create-rest-api \
+  --name my-api \
+  --tags '{"floci:override-id":"my-fixed-id","env":"test"}' \
+  --endpoint-url http://localhost:4566
+# the API is now reachable at the stable id "my-fixed-id"
+```
+
+The override key is consumed rather than stored, so it never appears in the tags the API returns. Any
+other tags in the same request are kept. Because an ID cannot change after creation, supplying either
+override key to `TagResource` is rejected with `BadRequestException`.
+
+Values must be non-blank and must not contain whitespace, control characters, or `/`, `?`, `#`, since
+those would break the endpoint URL. An invalid value is rejected with `BadRequestException`.
+
+Creating a second API with an override ID that already exists in the region is rejected with
+`ConflictException` instead of overwriting the existing API, matching how KMS and Cognito treat
+duplicate override IDs.
+
+> [!NOTE]
+> API Gateway previously used a `_custom_id_` tag for this. It still works so existing setups keep
+> running, and it is now stripped from the returned tags the same way, but it is deprecated: prefer
+> `floci:override-id`. If both are present, `floci:override-id` wins, which lets you set both during a
+> migration. The `_custom_id_` key is API Gateway specific and is not reserved for any other service.
+
 ## API Gateway v1 (REST APIs) {#v1}
 
 **Protocol:** REST JSON

@@ -10,6 +10,7 @@ import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -48,7 +49,8 @@ class CloudFormationEc2IntegrationTest {
                       "Properties": {
                         "VpcId": {"Ref": "Vpc"},
                         "CidrBlock": "10.0.1.0/24",
-                        "AvailabilityZone": "ap-southeast-2a"
+                        "AvailabilityZone": "ap-southeast-2a",
+                        "MapPublicIpOnLaunch": true
                       }
                     },
                     "Subnet2": {
@@ -107,6 +109,8 @@ class CloudFormationEc2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
+            .body("DescribeSubnetsResponse.subnetSet.item.find { it.availabilityZone == 'ap-southeast-2a' }.mapPublicIpOnLaunch",
+                    equalTo("true"))
             .extract().asString();
 
         for (String subnetId : exportedSubnetIds) {
