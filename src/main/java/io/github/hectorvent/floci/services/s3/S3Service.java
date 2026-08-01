@@ -1031,9 +1031,13 @@ public class S3Service implements Resettable {
         return bucket.getVersioningStatus();
     }
 
-    public record ListVersionsResult(List<S3Object> versions, boolean isTruncated, String nextKeyMarker) {}
+    public record ListVersionsResult(List<S3Object> versions, List<String> commonPrefixes, boolean isTruncated, String nextKeyMarker) {}
 
     public ListVersionsResult listObjectVersions(String bucketName, String prefix, int maxKeys, String keyMarker) {
+        return listObjectVersions(bucketName, prefix, null, maxKeys, keyMarker);
+    }
+
+    public ListVersionsResult listObjectVersions(String bucketName, String prefix, String delimiter, int maxKeys, String keyMarker) {
         ensureBucketExists(bucketName);
 
         String versionPrefix = bucketName + "/";
@@ -1052,6 +1056,27 @@ public class S3Service implements Resettable {
                 .filter(obj -> obj.getVersionId() == null)
                 .forEach(versions::add);
 
+        List<String> commonPrefixes = List.of();
+        if (delimiter != null && !delimiter.isEmpty()) {
+            Set<String> prefixSet = new LinkedHashSet<>();
+            List<S3Object> directVersions = new ArrayList<>();
+
+            for (S3Object obj : versions) {
+                String remainder = obj.getKey().substring(prefix != null ? prefix.length() : 0);
+                int delimIdx = remainder.indexOf(delimiter);
+                if (delimIdx >= 0) {
+                    String cp = (prefix != null ? prefix : "") + remainder.substring(0, delimIdx + delimiter.length());
+                    prefixSet.add(cp);
+                } else {
+                    directVersions.add(obj);
+                }
+            }
+
+            versions = directVersions;
+            commonPrefixes = new ArrayList<>(prefixSet);
+            Collections.sort(commonPrefixes);
+        }
+
         // Sort by key, then by lastModified descending
         versions.sort((a, b) -> {
             int keyCompare = a.getKey().compareTo(b.getKey());
@@ -1065,27 +1090,46 @@ public class S3Service implements Resettable {
             versions = versions.stream()
                     .filter(v -> v.getKey().compareTo(km) > 0)
                     .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+            commonPrefixes = commonPrefixes.stream()
+                    .filter(cp -> cp.compareTo(km) > 0)
+                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         }
 
         boolean isTruncated = false;
         String nextKeyMarker = null;
-        if (maxKeys > 0 && versions.size() > maxKeys) {
-            // Extend the cutoff to avoid splitting versions of the same key across pages.
-            // All versions of the same key must appear on the same page.
-            int cutoff = maxKeys;
-            String lastKey = versions.get(maxKeys - 1).getKey();
-            while (cutoff < versions.size() && versions.get(cutoff).getKey().equals(lastKey)) {
-                cutoff++;
+        if (maxKeys > 0) {
+            List<S3Object> limitedVersions = new ArrayList<>();
+            List<String> limitedPrefixes = new ArrayList<>();
+            int count = 0;
+            int vIdx = 0;
+            int cpIdx = 0;
+            String lastEmittedKey = null;
+
+            while (count < maxKeys && (vIdx < versions.size() || cpIdx < commonPrefixes.size())) {
+                String vKey = vIdx < versions.size() ? versions.get(vIdx).getKey() : null;
+                String cpKey = cpIdx < commonPrefixes.size() ? commonPrefixes.get(cpIdx) : null;
+
+                if (vKey != null && (cpKey == null || vKey.compareTo(cpKey) <= 0)) {
+                    String currentKey = vKey;
+                    while (vIdx < versions.size() && versions.get(vIdx).getKey().equals(currentKey)) {
+                        limitedVersions.add(versions.get(vIdx++));
+                    }
+                    lastEmittedKey = currentKey;
+                } else {
+                    limitedPrefixes.add(commonPrefixes.get(cpIdx++));
+                    lastEmittedKey = cpKey;
+                }
+                count++;
             }
-            isTruncated = cutoff < versions.size();
+
+            isTruncated = vIdx < versions.size() || cpIdx < commonPrefixes.size();
             if (isTruncated) {
-                // nextKeyMarker is used as an exclusive lower bound: next page gets key > nextKeyMarker.
-                // Set it to the last included key so the next page starts right after it.
-                nextKeyMarker = versions.get(cutoff - 1).getKey();
+                nextKeyMarker = lastEmittedKey;
             }
-            versions = new ArrayList<>(versions.subList(0, cutoff));
+            versions = limitedVersions;
+            commonPrefixes = limitedPrefixes;
         }
-        return new ListVersionsResult(versions, isTruncated, nextKeyMarker);
+        return new ListVersionsResult(versions, commonPrefixes, isTruncated, nextKeyMarker);
     }
 
     // --- Head Bucket / Bucket Location ---
