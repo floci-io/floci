@@ -1,15 +1,17 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import io.github.hectorvent.floci.services.msk.MskService;
+import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.Predicate;
@@ -18,21 +20,25 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Pins {@link PipesKafkaNativeSupport} to what {@code ConsumerConfig} resolves, in both directions:
- * a newly resolved class must be registered, and nothing else may be.
+ * Pins {@link PipesKafkaNativeSupport} to what {@code ConsumerConfig} resolves from
+ * {@link PipesKafkaConsumerManager#consumerProperties}, both ways: a newly resolved class must be
+ * registered, and nothing else may be. Reading that method rather than copying it means a new
+ * setting there is covered here too.
  *
  * <p>Scope: config-resolved classes only. Reflection always succeeds on the JVM, so a non-config
- * lookup added by a future kafka-clients is only catchable by running a Kafka pipe against a
- * native binary — no suite does that today.
+ * lookup from a future kafka-clients needs a Kafka pipe run against a native binary. The
+ * compatibility suite already runs against the native image; it has no Kafka source case yet.
  */
 class PipesKafkaNativeSupportTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final Predicate<String> TRANSPORT_SECURITY =
             key -> key.startsWith("sasl.") || key.startsWith("ssl.");
 
     @Test
     @DisplayName("classes ConsumerConfig resolves reflectively are registered")
-    void registrationCoversReflectivelyResolvedClasses() {
+    void registrationCoversReflectivelyResolvedClasses() throws Exception {
         Set<String> missing = new TreeSet<>(expectedClassNames());
         missing.removeAll(registeredClassNames());
 
@@ -43,7 +49,7 @@ class PipesKafkaNativeSupportTest {
 
     @Test
     @DisplayName("nothing is registered that ConsumerConfig does not resolve")
-    void registrationContainsNothingUnjustified() {
+    void registrationContainsNothingUnjustified() throws Exception {
         Set<String> unexpected = new TreeSet<>(registeredClassNames());
         unexpected.removeAll(expectedClassNames());
 
@@ -54,7 +60,7 @@ class PipesKafkaNativeSupportTest {
     }
 
     /** Class-valued settings kafka-clients resolves, minus the transport security Floci never uses. */
-    private static Set<String> expectedClassNames() {
+    private static Set<String> expectedClassNames() throws Exception {
         Set<String> classes = new TreeSet<>();
         consumerConfigValues().forEach((key, value) -> {
             if (TRANSPORT_SECURITY.negate().test(key)) {
@@ -77,10 +83,8 @@ class PipesKafkaNativeSupportTest {
     }
 
     /**
-     * Mirrors {@code AbstractConfig.getConfiguredInstances}, which accepts a setting as either a
-     * {@code Class} or a class name — {@code metric.reporters} resolves to the latter. Values that
-     * do not name a class (bootstrap.servers, ssl.enabled.protocols) are not instantiable and so
-     * are not candidates.
+     * Mirrors {@code AbstractConfig.getConfiguredInstances}: a setting may be a {@code Class} or a
+     * class name — {@code metric.reporters} is the latter. Values naming no class are not candidates.
      */
     private static void collectClassNames(Object value, Set<String> into) {
         switch (value) {
@@ -99,16 +103,20 @@ class PipesKafkaNativeSupportTest {
         }
     }
 
-    private static Map<String, ?> consumerConfigValues() {
-        Properties properties = new Properties();
-        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "floci-pipes-test");
-        properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "floci-pipes-test");
-        properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "100");
-        return new ConsumerConfig(properties).values();
+    private static Map<String, ?> consumerConfigValues() throws Exception {
+        PipesKafkaConsumerManager manager = new PipesKafkaConsumerManager(Mockito.mock(MskService.class));
+
+        Pipe pipe = new Pipe();
+        pipe.setName("native-support");
+        pipe.setSource("smk://localhost:9092");
+        pipe.setSourceParameters(MAPPER.readTree("""
+                {
+                  "SelfManagedKafkaParameters": {
+                    "TopicName": "orders"
+                  }
+                }
+                """));
+
+        return new ConsumerConfig(manager.consumerProperties(pipe)).values();
     }
 }
