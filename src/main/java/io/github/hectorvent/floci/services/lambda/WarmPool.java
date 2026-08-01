@@ -42,6 +42,21 @@ public class WarmPool implements ContainerTeardown {
     private final EmulatorConfig config;
     private final int maxPoolSizePerFunction;
     private final ConcurrentHashMap<String, ArrayDeque<ContainerHandle>> pool = new ConcurrentHashMap<>();
+    /**
+     * Per-function generation counter, bumped by {@link #drainFunction(String)}.
+     *
+     * <p>{@code pool} only holds idle containers: {@link #acquire} polls a handle off the queue,
+     * so a container serving an invocation is referenced solely by the invoking thread and is
+     * invisible to a drain. Without the generation check, {@link #release} would hand that
+     * container back for a function that has since been deleted (and, on a redeploy, recreated)
+     * and the next invoke would run the old code and old baked environment. A function under an
+     * event-source poller nearly always has a container checked out, so the drain nearly always
+     * misses it; an idle redeploy drains cleanly, which is what makes this hard to notice.
+     *
+     * <p>Comparing generations rather than stopping busy containers during the drain lets the
+     * in-flight invocation finish normally — it just never gets pooled again.
+     */
+    private final ConcurrentHashMap<String, Long> generations = new ConcurrentHashMap<>();
     private final ScheduledExecutorService evictionScheduler = Executors.newSingleThreadScheduledExecutor(
             r -> { Thread t = new Thread(r, "warm-pool-evictor"); t.setDaemon(true); return t; });
 
@@ -105,6 +120,13 @@ public class WarmPool implements ContainerTeardown {
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
         ContainerHandle handle = null;
 
+        // Sample before the container leaves the pool, not after: from pollFirst() onwards the
+        // handle is checked out and invisible to a drain, and what follows — the isAlive() probe,
+        // or a cold start — is a Docker round-trip wide enough for a delete to land in. Reading
+        // the generation afterwards would stamp the handle with the post-drain value and let
+        // release() pool it, which is the very bug this guards against.
+        long generation = currentGeneration(fn.getFunctionName());
+
         if (!ephemeral) {
             ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(fn.getFunctionName(), k -> new ArrayDeque<>());
             // Skip pooled handles whose container died out-of-band — otherwise the
@@ -135,7 +157,14 @@ public class WarmPool implements ContainerTeardown {
             LOG.debugv("Reusing warm container for function: {0}", fn.getFunctionName());
         }
         handle.setState(ContainerState.BUSY);
+        // Stamp the generation this container is valid for; release() drops it if a drain has
+        // bumped the function's generation in the meantime.
+        handle.setPoolGeneration(generation);
         return handle;
+    }
+
+    private long currentGeneration(String functionName) {
+        return generations.getOrDefault(functionName, 0L);
     }
 
     /**
@@ -148,6 +177,16 @@ public class WarmPool implements ContainerTeardown {
         if (ephemeral || handle.isHotReload()) {
             LOG.debugv("{0}: stopping container {1} after invocation",
                     handle.isHotReload() ? "Hot-reload" : "Ephemeral", handle.getContainerId());
+            stopQuietly(handle);
+            return;
+        }
+
+        // The function's containers were invalidated while this one was checked out (delete,
+        // redeploy, or code update), so it must not go back into the pool — it would serve the
+        // pre-invalidation code and environment to the next invoke.
+        if (handle.getPoolGeneration() != currentGeneration(handle.getFunctionName())) {
+            LOG.debugv("Discarding container {0} for function {1}: invalidated while in use",
+                    handle.getContainerId(), handle.getFunctionName());
             stopQuietly(handle);
             return;
         }
@@ -196,7 +235,17 @@ public class WarmPool implements ContainerTeardown {
      * Called on function delete or code update.
      */
     public void drainFunction(String functionName) {
+        // Detach the queue first, then bump — and bump unconditionally, before the empty-queue
+        // early return, since containers checked out right now are not in the queue and the
+        // generation is the only thing that keeps them from being pooled again on release.
+        //
+        // Order matters as much as unconditionality. Bumping first leaves a window where the
+        // generation has moved but the queue is still reachable, so an acquire sampling after the
+        // bump could still poll a pre-drain handle and stamp it valid. Detaching first means a
+        // concurrent acquire either finds a fresh empty deque (and cold-starts) or sampled its
+        // generation before the bump (and is discarded on release).
         ArrayDeque<ContainerHandle> queue = pool.remove(functionName);
+        generations.merge(functionName, 1L, Long::sum);
         if (queue == null) {
             return;
         }
