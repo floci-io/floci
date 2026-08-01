@@ -144,6 +144,10 @@ public class PipesKafkaConsumerManager {
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, resolveConsumerGroupId(pipe, params));
         properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "floci-pipes-" + UUID.randomUUID());
         properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(resolveBatchSize(pipe, 100)));
+        // On by default (KIP-714). Floci has no reason to push metrics to a user's broker, and it
+        // makes the shaded protobuf serializer reflectively reachable on a path no broker we test
+        // against exercises.
+        properties.put(ConsumerConfig.ENABLE_METRICS_PUSH_CONFIG, "false");
         return properties;
     }
 
