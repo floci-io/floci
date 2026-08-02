@@ -32,6 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -317,6 +319,8 @@ class MwaaServiceTest {
     class RealModeLifecycle {
 
         private PortAllocator portAllocator;
+        private MwaaEnvironmentManager environmentManager;
+        private MwaaProxyManager proxyManager;
         private MwaaService realModeService;
 
         @BeforeEach
@@ -358,8 +362,8 @@ class MwaaServiceTest {
 
             RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
             S3Service s3Service = Mockito.mock(S3Service.class);
-            MwaaEnvironmentManager environmentManager = Mockito.mock(MwaaEnvironmentManager.class);
-            MwaaProxyManager proxyManager = Mockito.mock(MwaaProxyManager.class);
+            environmentManager = Mockito.mock(MwaaEnvironmentManager.class);
+            proxyManager = Mockito.mock(MwaaProxyManager.class);
             portAllocator = Mockito.mock(PortAllocator.class);
             when(portAllocator.allocate(8700, 8799)).thenReturn(8701);
 
@@ -376,6 +380,23 @@ class MwaaServiceTest {
             realModeService.deleteEnvironment("real-env");
 
             verify(portAllocator).release(8701);
+        }
+
+        @Test
+        void proxyStartupFailureRollsBackTheAllocatedPortAndAnyStartedContainers() {
+            // Containers start fine; only the proxy bind fails (e.g. the port got taken out from
+            // under us between allocate() and bind()). The port must not leak, and whatever
+            // startEnvironment() already started must get torn down, not orphaned.
+            Mockito.doThrow(new RuntimeException("bind failed"))
+                    .when(proxyManager).startProxy(any(), anyInt(), any(), anyInt(), any(), any());
+
+            Environment environment = realModeService.createEnvironment("failed-proxy-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+            assertEquals(EnvironmentStatus.CREATE_FAILED, environment.getStatus());
+            verify(portAllocator).release(8701);
+            verify(environmentManager).stopEnvironment(environment);
+            verify(proxyManager).stopProxy("failed-proxy-env");
         }
     }
 }

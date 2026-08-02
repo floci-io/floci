@@ -141,10 +141,16 @@ public class MwaaService implements TagHandler {
             environment.setStatus(EnvironmentStatus.AVAILABLE);
             environment.setWebserverUrl(buildWebserverUrl(config.services().mwaa().proxyBasePort()));
         } else {
+            // proxyPort/provisioned tracked outside the try so the finally block below knows exactly
+            // how far setup got, mirroring NeptuneService.createDbCluster's rollback shape: a partial
+            // failure must never leak the reserved port or leave orphaned Postgres/Airflow containers
+            // behind — regardless of which of the three steps below actually failed.
+            int proxyPort = -1;
+            boolean provisioned = false;
             try {
                 byte[] startupScriptContent = fetchStartupScript(environment);
                 environmentManager.startEnvironment(environment, version, startupScriptContent);
-                int proxyPort = portAllocator.allocate(
+                proxyPort = portAllocator.allocate(
                         config.services().mwaa().proxyBasePort(), config.services().mwaa().proxyMaxPort());
                 environment.setProxyPort(proxyPort);
                 environment.setWebserverUrl(buildWebserverUrl(proxyPort));
@@ -153,14 +159,46 @@ public class MwaaService implements TagHandler {
                         environment.getAirflowInternalHost(), environment.getAirflowInternalPort(),
                         this::isValidCliToken,
                         cliCommand -> environmentManager.runAirflowCli(airflowContainerId, cliCommand));
+                provisioned = true;
             } catch (Exception e) {
                 LOG.errorv(e, "Failed to start MWAA environment {0}", name);
                 environment.setStatus(EnvironmentStatus.CREATE_FAILED);
+            } finally {
+                if (!provisioned) {
+                    rollbackFailedCreate(environment, proxyPort);
+                }
             }
         }
 
         storage.put(name, environment);
         return environment;
+    }
+
+    /**
+     * Best-effort teardown for a create that didn't fully provision — stops the proxy (a no-op if it
+     * never started, since {@link MwaaProxyManager#stopProxy} just finds nothing registered),
+     * stops any containers {@code environmentManager.startEnvironment} did manage to start before
+     * failing ({@link MwaaEnvironmentManager#stopEnvironment} null-checks each container id, so it's
+     * safe even when only Postgres — or nothing — started), and always releases the reserved proxy
+     * port. Mirrors {@code NeptuneService.rollbackDbCluster}.
+     */
+    private void rollbackFailedCreate(Environment environment, int proxyPort) {
+        try {
+            proxyManager.stopProxy(environment.getName());
+        } catch (Exception e) {
+            LOG.warnv("Error stopping proxy while rolling back failed MWAA environment {0}: {1}",
+                    environment.getName(), e.getMessage());
+        }
+        try {
+            environmentManager.stopEnvironment(environment);
+        } catch (Exception e) {
+            LOG.warnv("Error stopping containers while rolling back failed MWAA environment {0}: {1}",
+                    environment.getName(), e.getMessage());
+        } finally {
+            if (proxyPort >= 0) {
+                portAllocator.release(proxyPort);
+            }
+        }
     }
 
     public Environment getEnvironment(String name) {
