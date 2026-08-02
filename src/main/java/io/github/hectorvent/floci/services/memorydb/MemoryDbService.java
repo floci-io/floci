@@ -496,12 +496,24 @@ public class MemoryDbService {
 
     private void rollbackBackend(String name, MemoryDbContainerHandle handle, int proxyPort) {
         try {
-            proxyManager.stopProxy(name);
-            if (handle != null) {
-                containerManager.stop(handle);
+            try {
+                // The proxy only starts after the container is ready, so a null handle means it
+                // never started — nothing to stop.
+                if (handle != null) {
+                    proxyManager.stopProxy(name);
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping proxy for MemoryDB cluster {0}: {1}", name, e.getMessage());
             }
-        } catch (RuntimeException e) {
-            LOG.warnv("Error rolling back MemoryDB cluster {0}: {1}", name, e.getMessage());
+            try {
+                // Stop by name, not handle: a readiness timeout in containerManager.start() throws
+                // after the container was created and registered but before the handle is returned,
+                // so cleaning up by handle here would miss (and orphan) it. stopByClusterName is
+                // idempotent, so it's safe when the container never started.
+                containerManager.stopByClusterName(name);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping container for MemoryDB cluster {0}: {1}", name, e.getMessage());
+            }
         } finally {
             releaseProxyPort(proxyPort);
         }

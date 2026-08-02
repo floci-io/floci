@@ -30,8 +30,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -39,13 +43,14 @@ class MemoryDbServiceTest {
 
     private MemoryDbService service;
     private MemoryDbContainerManager containerManager;
+    private MemoryDbProxyManager proxyManager;
     private SigV4Validator sigV4Validator;
     private EmulatorConfig.MemoryDbServiceConfig mdbConfig;
 
     @BeforeEach
     void setUp() {
         containerManager = mock(MemoryDbContainerManager.class);
-        MemoryDbProxyManager proxyManager = mock(MemoryDbProxyManager.class);
+        proxyManager = mock(MemoryDbProxyManager.class);
         sigV4Validator = mock(SigV4Validator.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -340,6 +345,70 @@ class MemoryDbServiceTest {
         second.setAclName("open-access");
         Cluster created = service.createCluster(second, "us-east-1");
         assertEquals(ClusterStatus.AVAILABLE, created.getStatus());
+    }
+
+    @Test
+    void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
+        MemoryDbContainerHandle handle = new MemoryDbContainerHandle("cid", "c1", "localhost", 6379);
+        when(containerManager.start(anyString(), anyString())).thenReturn(handle);
+
+        // Proxy startup blows up after the port is reserved and the container is started.
+        doThrow(new RuntimeException("proxy boom"))
+                .when(proxyManager).startProxy(eq("c1"), anyBoolean(), anyInt(), anyString(), anyInt(), any());
+
+        Cluster spec = new Cluster();
+        spec.setName("c1");
+        spec.setAclName("open-access");
+
+        // The original failure must propagate to the caller (we clean up, then rethrow).
+        assertThrows(RuntimeException.class, () -> service.createCluster(spec, "us-east-1"));
+
+        // Rollback stopped the proxy and the already-started container (by name).
+        verify(proxyManager).stopProxy("c1");
+        verify(containerManager).stopByClusterName("c1");
+
+        // The reserved proxy port was released: a subsequent successful create reuses the base port
+        // instead of skipping to the next one (which is what a leak would cause).
+        doNothing().when(proxyManager)
+                .startProxy(anyString(), anyBoolean(), anyInt(), anyString(), anyInt(), any());
+        Cluster second = new Cluster();
+        second.setName("c2");
+        second.setAclName("open-access");
+        Cluster recovered = service.createCluster(second, "us-east-1");
+        assertEquals(16400, recovered.getProxyPort(),
+                "Port from the failed create must be released so the next cluster reuses it");
+    }
+
+    @Test
+    void failedContainerStartupCleansUpContainerByNameAndReleasesPort() {
+        // containerManager.start(...) throws — this models both a container that never started
+        // and (crucially) a readiness timeout, where start() created + registered the container
+        // before throwing, so no handle ever reaches the service.
+        doThrow(new RuntimeException("readiness boom"))
+                .when(containerManager).start(eq("c1"), anyString());
+
+        Cluster spec = new Cluster();
+        spec.setName("c1");
+        spec.setAclName("open-access");
+
+        // The original failure must propagate to the caller (we clean up, then rethrow).
+        assertThrows(RuntimeException.class, () -> service.createCluster(spec, "us-east-1"));
+
+        // No handle returned, so the proxy never started and must not be stopped...
+        verify(proxyManager, never()).stopProxy(anyString());
+        // ...but the container must still be cleaned up by name, since start() may have created
+        // and registered it before failing. Cleaning up by handle here would orphan it.
+        verify(containerManager).stopByClusterName("c1");
+
+        // The reserved proxy port was still released: a subsequent successful create reuses the base port.
+        when(containerManager.start(anyString(), anyString()))
+                .thenReturn(new MemoryDbContainerHandle("cid", "c2", "localhost", 6379));
+        Cluster second = new Cluster();
+        second.setName("c2");
+        second.setAclName("open-access");
+        Cluster recovered = service.createCluster(second, "us-east-1");
+        assertEquals(16400, recovered.getProxyPort(),
+                "Port from the failed create must be released so the next cluster reuses it");
     }
 
     @Test
