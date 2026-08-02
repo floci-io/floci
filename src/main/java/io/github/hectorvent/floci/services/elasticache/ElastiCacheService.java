@@ -61,12 +61,8 @@ public class ElastiCacheService {
             throw new AwsException("ReplicationGroupAlreadyExistsFault",
                     "Replication group " + groupId + " already exists.", 400);
         }
-        // Claim the id for the duration of provisioning, not just against the persisted store:
-        // groups.put(...) only happens on success, so two concurrent creates for the same
-        // not-yet-persisted id would otherwise both pass the check above and race on the same
-        // activeContainers entry in the container manager. Held until this method returns or
-        // throws (rollback included), so a handle-less rollback's by-id container lookup can
-        // never observe a container started by a second, still-in-flight request for this id.
+        // Claim the id for the whole provisioning attempt so a concurrent create can't race
+        // ahead and be stopped by this request's handle-less rollback fallback.
         if (!provisioningGroupIds.add(groupId)) {
             throw new AwsException("ReplicationGroupAlreadyExistsFault",
                     "Replication group " + groupId + " is already being created.", 400);
@@ -120,16 +116,9 @@ public class ElastiCacheService {
         }
         try {
             if (handle != null) {
-                // We have the exact handle from this request's start() call, so stop by it
-                // directly. Falling back to stopByGroupId here instead would look up whatever
-                // is currently registered for groupId, which could be a different container
-                // if an overlapping create for the same id raced ahead of this rollback.
                 containerManager.stop(handle);
             } else {
-                // No handle: a readiness timeout in containerManager.start() throws after the
-                // container was created and registered but before the handle is returned, so
-                // cleaning up by handle here isn't possible. stopByGroupId is idempotent, so
-                // it's safe when the container never started.
+                // No handle: a readiness timeout throws before start() can return one.
                 containerManager.stopByGroupId(groupId);
             }
         } catch (RuntimeException e) {

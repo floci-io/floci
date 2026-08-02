@@ -122,10 +122,7 @@ class ElastiCacheServiceTest {
         assertThrows(RuntimeException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
 
-        // Rollback stopped the proxy and the already-started container. Stopped by the exact
-        // handle from this request, not by id: a concurrent create for the same group id could
-        // have raced ahead and overwritten the registered container, and looking it up by id
-        // here would risk stopping that other request's container instead of this one's.
+        // Rollback stops by the exact handle, not a fresh by-id lookup.
         verify(proxyManager).stopProxy("grp");
         verify(containerManager).stop(handle);
         verify(containerManager, never()).stopByGroupId(anyString());
@@ -142,20 +139,14 @@ class ElastiCacheServiceTest {
 
     @Test
     void failedContainerStartupCleansUpContainerByIdAndReleasesPort() {
-        // containerManager.start(...) throws — this models both a container that never started
-        // and (crucially) a readiness timeout, where start() created + registered the container
-        // before throwing, so no handle ever reaches the service.
+        // Models a readiness timeout: start() throws without ever returning a handle.
         doThrow(new RuntimeException("readiness boom"))
                 .when(containerManager).start(eq("grp"), anyString());
 
-        // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
 
-        // No handle returned, so the proxy never started and must not be stopped...
         verify(proxyManager, never()).stopProxy(anyString());
-        // ...but the container must still be cleaned up by id, since start() may have created and
-        // registered it before failing. Cleaning up by handle here would orphan it.
         verify(containerManager).stopByGroupId("grp");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
@@ -169,13 +160,6 @@ class ElastiCacheServiceTest {
 
     @Test
     void concurrentCreateForSameGroupIdIsRejectedWhileFirstIsProvisioning() throws InterruptedException {
-        // Regression test for a race flagged in review: a readiness-timeout rollback cleans up
-        // by group id (no handle available), which only reads whatever containerManager
-        // currently has registered for that id. Without a provisioning guard, a second request
-        // for the SAME id could start its own container in the window between the first
-        // request's failure and its rollback, overwrite the shared registration, and have ITS
-        // container stopped instead. Closing the race means the second request must never be
-        // allowed to reach containerManager.start() while the first is still in flight.
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
         when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
@@ -189,8 +173,6 @@ class ElastiCacheServiceTest {
         firstRequest.start();
         assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "first request never reached container start");
 
-        // The first request is now blocked inside containerManager.start(). A second, concurrent
-        // create for the same id must be rejected immediately rather than racing ahead.
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
         assertEquals("ReplicationGroupAlreadyExistsFault", ex.jsonType());
@@ -200,7 +182,6 @@ class ElastiCacheServiceTest {
         releaseLatch.countDown();
         firstRequest.join(5000);
 
-        // Once the first request finishes (successfully, here), the id is free again.
         assertEquals("grp", service.getReplicationGroup("grp").getReplicationGroupId());
     }
 }
