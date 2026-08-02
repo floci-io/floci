@@ -225,6 +225,9 @@ floci:
       enabled: true
       mock: true
       ecr-registry-mirror: true
+    mwaa:
+      enabled: true
+      mock: true
     pipes:
       enabled: true
     elbv2:
