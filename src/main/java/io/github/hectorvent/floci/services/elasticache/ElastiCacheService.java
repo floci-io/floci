@@ -104,11 +104,19 @@ public class ElastiCacheService {
             LOG.warnv("Error stopping proxy for replication group {0}: {1}", groupId, e.getMessage());
         }
         try {
-            // Stop by id, not handle: a readiness timeout in containerManager.start() throws
-            // after the container was created and registered but before the handle is returned,
-            // so cleaning up by handle here would miss (and orphan) it. stopByGroupId is
-            // idempotent, so it's safe when the container never started.
-            containerManager.stopByGroupId(groupId);
+            if (handle != null) {
+                // We have the exact handle from this request's start() call, so stop by it
+                // directly. Falling back to stopByGroupId here instead would look up whatever
+                // is currently registered for groupId, which could be a different container
+                // if an overlapping create for the same id raced ahead of this rollback.
+                containerManager.stop(handle);
+            } else {
+                // No handle: a readiness timeout in containerManager.start() throws after the
+                // container was created and registered but before the handle is returned, so
+                // cleaning up by handle here isn't possible. stopByGroupId is idempotent, so
+                // it's safe when the container never started.
+                containerManager.stopByGroupId(groupId);
+            }
         } catch (RuntimeException e) {
             LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
         } finally {
