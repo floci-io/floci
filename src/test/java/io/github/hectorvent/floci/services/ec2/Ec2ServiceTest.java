@@ -85,6 +85,21 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createSubnetRejectsBlankVpcIdInsteadOfNotFound() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createSubnet(
+                "us-east-1", "   ", "10.0.1.0/24", null));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The request must contain the parameter VpcId", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
     void runInstancesStoresArchitectureFromImageCatalog() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
