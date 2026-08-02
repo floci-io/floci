@@ -1302,6 +1302,9 @@ public class Ec2Service implements ContainerTeardown {
     // ─── Subnets ───────────────────────────────────────────────────────────────
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
+        if (vpcId == null || vpcId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
+        }
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
 
