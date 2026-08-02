@@ -119,9 +119,9 @@ class ElastiCacheServiceTest {
         assertThrows(RuntimeException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
 
-        // Rollback stopped the proxy and the already-started container.
+        // Rollback stopped the proxy and the already-started container (by id).
         verify(proxyManager).stopProxy("grp");
-        verify(containerManager).stop(handle);
+        verify(containerManager).stopByGroupId("grp");
 
         // The reserved proxy port was released: a subsequent successful create reuses the base port
         // instead of skipping to the next one (which is what a leak would cause).
@@ -134,18 +134,22 @@ class ElastiCacheServiceTest {
     }
 
     @Test
-    void failedContainerStartReleasesPortWithoutTouchingProxyOrContainer() {
-        // Container start blows up before any handle exists.
-        doThrow(new RuntimeException("container boom"))
+    void failedContainerStartupCleansUpContainerByIdAndReleasesPort() {
+        // containerManager.start(...) throws — this models both a container that never started
+        // and (crucially) a readiness timeout, where start() created + registered the container
+        // before throwing, so no handle ever reaches the service.
+        doThrow(new RuntimeException("readiness boom"))
                 .when(containerManager).start(eq("grp"), anyString());
 
         // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
 
-        // No container started and no proxy started, so rollback must not call either stop.
+        // No handle returned, so the proxy never started and must not be stopped...
         verify(proxyManager, never()).stopProxy(anyString());
-        verify(containerManager, never()).stop(any());
+        // ...but the container must still be cleaned up by id, since start() may have created and
+        // registered it before failing. Cleaning up by handle here would orphan it.
+        verify(containerManager).stopByGroupId("grp");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
         when(containerManager.start(anyString(), anyString()))
