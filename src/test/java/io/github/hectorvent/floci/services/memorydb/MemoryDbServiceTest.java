@@ -363,9 +363,13 @@ class MemoryDbServiceTest {
         // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class, () -> service.createCluster(spec, "us-east-1"));
 
-        // Rollback stopped the proxy and the already-started container (by name).
+        // Rollback stopped the proxy and the already-started container. Stopped by the exact
+        // handle from this request, not by name: a concurrent create for the same cluster name
+        // could have raced ahead and overwritten the registered container, and looking it up by
+        // name here would risk stopping that other request's container instead of this one's.
         verify(proxyManager).stopProxy("c1");
-        verify(containerManager).stopByClusterName("c1");
+        verify(containerManager).stop(handle);
+        verify(containerManager, never()).stopByClusterName(anyString());
 
         // The reserved proxy port was released: a subsequent successful create reuses the base port
         // instead of skipping to the next one (which is what a leak would cause).

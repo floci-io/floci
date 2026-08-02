@@ -506,11 +506,20 @@ public class MemoryDbService {
                 LOG.warnv("Error stopping proxy for MemoryDB cluster {0}: {1}", name, e.getMessage());
             }
             try {
-                // Stop by name, not handle: a readiness timeout in containerManager.start() throws
-                // after the container was created and registered but before the handle is returned,
-                // so cleaning up by handle here would miss (and orphan) it. stopByClusterName is
-                // idempotent, so it's safe when the container never started.
-                containerManager.stopByClusterName(name);
+                if (handle != null) {
+                    // We have the exact handle from this request's start() call, so stop by it
+                    // directly. Falling back to stopByClusterName here instead would look up
+                    // whatever is currently registered for name, which could be a different
+                    // container if an overlapping create for the same name raced ahead of this
+                    // rollback.
+                    containerManager.stop(handle);
+                } else {
+                    // No handle: a readiness timeout in containerManager.start() throws after the
+                    // container was created and registered but before the handle is returned, so
+                    // cleaning up by handle here isn't possible. stopByClusterName is idempotent,
+                    // so it's safe when the container never started.
+                    containerManager.stopByClusterName(name);
+                }
             } catch (RuntimeException e) {
                 LOG.warnv("Error stopping container for MemoryDB cluster {0}: {1}", name, e.getMessage());
             }
