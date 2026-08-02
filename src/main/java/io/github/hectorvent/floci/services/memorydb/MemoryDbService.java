@@ -65,6 +65,7 @@ public class MemoryDbService {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
+    private final Set<String> provisioningClusterNames = ConcurrentHashMap.newKeySet();
 
     @Inject
     public MemoryDbService(MemoryDbContainerManager containerManager,
@@ -97,40 +98,50 @@ public class MemoryDbService {
             throw new AwsException("ClusterAlreadyExistsFault",
                     "Cluster with specified name already exists.", 400);
         }
-
-        String aclName = spec.getAclName();
-        if (aclName == null || aclName.isBlank()) {
-            throw new AwsException("InvalidParameterValueException", "ACLName is required.", 400);
-        }
-        requireAclExists(aclName);
-        boolean authRequired = isAuthRequired(aclName);
-
-        Cluster cluster = new Cluster();
-        cluster.setName(name);
-        cluster.setDescription(spec.getDescription());
-        cluster.setStatus(ClusterStatus.AVAILABLE);
-        cluster.setNodeType(spec.getNodeType() != null ? spec.getNodeType() : "db.t4g.small");
-        cluster.setNumberOfShards(spec.getNumberOfShards() > 0 ? spec.getNumberOfShards() : 1);
-        cluster.setEngine(spec.getEngine() != null ? spec.getEngine() : DEFAULT_ENGINE);
-        cluster.setEngineVersion(spec.getEngineVersion() != null ? spec.getEngineVersion() : DEFAULT_ENGINE_VERSION);
-        cluster.setAclName(aclName);
-        cluster.setTlsEnabled(spec.isTlsEnabled());
-        cluster.setArn(buildArn(region, "cluster", name));
-        cluster.setCreatedAt(Instant.now());
-        cluster.setTags(spec.getTags());
-
-        if (config.services().memorydb().mock()) {
-            LOG.infov("Creating MemoryDB cluster {0} in mock mode (no container)", name);
-            cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), REDIS_PORT));
-        } else {
-            startBackend(cluster, authRequired);
+        // Claim the name for the whole provisioning attempt so a concurrent create can't race
+        // ahead and be stopped by this request's handle-less rollback fallback.
+        if (!provisioningClusterNames.add(name)) {
+            throw new AwsException("ClusterAlreadyExistsFault",
+                    "Cluster " + name + " is already being created.", 400);
         }
 
-        clusters.put(name, cluster);
-        LOG.infov("MemoryDB cluster {0} created (acl={1}, authRequired={2}), endpoint={3}:{4}",
-                name, aclName, String.valueOf(authRequired), cluster.getClusterEndpoint().address(),
-                String.valueOf(cluster.getClusterEndpoint().port()));
-        return cluster;
+        try {
+            String aclName = spec.getAclName();
+            if (aclName == null || aclName.isBlank()) {
+                throw new AwsException("InvalidParameterValueException", "ACLName is required.", 400);
+            }
+            requireAclExists(aclName);
+            boolean authRequired = isAuthRequired(aclName);
+
+            Cluster cluster = new Cluster();
+            cluster.setName(name);
+            cluster.setDescription(spec.getDescription());
+            cluster.setStatus(ClusterStatus.AVAILABLE);
+            cluster.setNodeType(spec.getNodeType() != null ? spec.getNodeType() : "db.t4g.small");
+            cluster.setNumberOfShards(spec.getNumberOfShards() > 0 ? spec.getNumberOfShards() : 1);
+            cluster.setEngine(spec.getEngine() != null ? spec.getEngine() : DEFAULT_ENGINE);
+            cluster.setEngineVersion(spec.getEngineVersion() != null ? spec.getEngineVersion() : DEFAULT_ENGINE_VERSION);
+            cluster.setAclName(aclName);
+            cluster.setTlsEnabled(spec.isTlsEnabled());
+            cluster.setArn(buildArn(region, "cluster", name));
+            cluster.setCreatedAt(Instant.now());
+            cluster.setTags(spec.getTags());
+
+            if (config.services().memorydb().mock()) {
+                LOG.infov("Creating MemoryDB cluster {0} in mock mode (no container)", name);
+                cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), REDIS_PORT));
+            } else {
+                startBackend(cluster, authRequired);
+            }
+
+            clusters.put(name, cluster);
+            LOG.infov("MemoryDB cluster {0} created (acl={1}, authRequired={2}), endpoint={3}:{4}",
+                    name, aclName, String.valueOf(authRequired), cluster.getClusterEndpoint().address(),
+                    String.valueOf(cluster.getClusterEndpoint().port()));
+            return cluster;
+        } finally {
+            provisioningClusterNames.remove(name);
+        }
     }
 
     public Cluster getCluster(String name) {

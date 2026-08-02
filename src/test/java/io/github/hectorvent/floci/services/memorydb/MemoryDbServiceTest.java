@@ -21,6 +21,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -428,5 +430,37 @@ class MemoryDbServiceTest {
         assertEquals("localhost", created.getClusterEndpoint().address());
         assertEquals(6379, created.getClusterEndpoint().port());
         verifyNoInteractions(containerManager);
+    }
+
+    @Test
+    void concurrentCreateForSameNameIsRejectedWhileFirstIsProvisioning() throws InterruptedException {
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new MemoryDbContainerHandle("cid", "c1", "localhost", 6379);
+        });
+
+        Cluster spec = new Cluster();
+        spec.setName("c1");
+        spec.setAclName("open-access");
+
+        Thread firstRequest = new Thread(() -> service.createCluster(spec, "us-east-1"));
+        firstRequest.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "first request never reached container start");
+
+        Cluster spec2 = new Cluster();
+        spec2.setName("c1");
+        spec2.setAclName("open-access");
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(spec2, "us-east-1"));
+        assertEquals("ClusterAlreadyExistsFault", ex.jsonType());
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).stopByClusterName(anyString());
+
+        releaseLatch.countDown();
+        firstRequest.join(5000);
+
+        assertEquals(ClusterStatus.AVAILABLE, service.getCluster("c1").getStatus());
     }
 }
