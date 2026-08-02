@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -162,5 +165,42 @@ class ElastiCacheServiceTest {
                 service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null);
         assertEquals(16379, recovered.getProxyPort(),
                 "Port from the failed create must be released so the next group reuses it");
+    }
+
+    @Test
+    void concurrentCreateForSameGroupIdIsRejectedWhileFirstIsProvisioning() throws InterruptedException {
+        // Regression test for a race flagged in review: a readiness-timeout rollback cleans up
+        // by group id (no handle available), which only reads whatever containerManager
+        // currently has registered for that id. Without a provisioning guard, a second request
+        // for the SAME id could start its own container in the window between the first
+        // request's failure and its rollback, overwrite the shared registration, and have ITS
+        // container stopped instead. Closing the race means the second request must never be
+        // allowed to reach containerManager.start() while the first is still in flight.
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
+        });
+
+        Thread firstRequest = new Thread(() ->
+                service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
+        firstRequest.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "first request never reached container start");
+
+        // The first request is now blocked inside containerManager.start(). A second, concurrent
+        // create for the same id must be rejected immediately rather than racing ahead.
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
+        assertEquals("ReplicationGroupAlreadyExistsFault", ex.jsonType());
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).stopByGroupId(anyString());
+
+        releaseLatch.countDown();
+        firstRequest.join(5000);
+
+        // Once the first request finishes (successfully, here), the id is free again.
+        assertEquals("grp", service.getReplicationGroup("grp").getReplicationGroupId());
     }
 }
