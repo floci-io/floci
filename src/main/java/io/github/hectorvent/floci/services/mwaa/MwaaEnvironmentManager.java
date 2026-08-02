@@ -189,10 +189,22 @@ public class MwaaEnvironmentManager {
             // sudo line in a script copied from AWS's own docs would hang/fail. Granted unconditionally
             // (not only when a startup script is configured), matching that it's a baseline capability
             // of the environment on real MWAA, not something tied to having a script at all.
+            // Best-effort: absence of sudo access doesn't mean requested configuration was silently
+            // skipped, just that "sudo" lines in a startup script won't work.
             copyFileIntoContainer(containerId, "/etc/sudoers.d", "floci-airflow-nopasswd",
                     (CONTAINER_OS_USER + " ALL=(ALL) NOPASSWD:ALL\n").getBytes(StandardCharsets.UTF_8));
             if (startupScriptContent != null && startupScriptContent.length > 0) {
-                copyFileIntoContainer(containerId, "/", "startup.sh", startupScriptContent);
+                // Unlike the sudoers grant (best-effort infra) or DAG-file sync (a bad DAG must never
+                // fail the environment), a *configured* startup script is the user's explicit request —
+                // if injection fails, the entrypoint's "if [ -f /startup.sh ]" guard would just silently
+                // skip it and the environment would reach AVAILABLE without ever having applied the
+                // requested setup. Hard-fail instead, matching real MWAA gating environment creation on
+                // startup-script failure.
+                if (!copyFileIntoContainer(containerId, "/", "startup.sh", startupScriptContent)) {
+                    throw new IllegalStateException(
+                            "Could not inject the configured startup script into MWAA container "
+                                    + containerId + " for environment " + environment.getName());
+                }
             }
             info = lifecycleManager.startCreated(containerId, spec);
         } catch (Exception e) {
@@ -441,9 +453,14 @@ public class MwaaEnvironmentManager {
         return inspect.getNetworkSettings().getIpAddress();
     }
 
-    private void copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content) {
+    /**
+     * @return {@code true} on success, {@code false} on failure (logged as a warning either way).
+     *         Callers for whom a missing file is tolerable (DAG sync, the sudoers grant) can ignore
+     *         the result; callers for whom it isn't (the configured startup script) must check it.
+     */
+    private boolean copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content) {
         if (containerId == null) {
-            return;
+            return false;
         }
         try {
             lifecycleManager.getDockerClient()
@@ -451,8 +468,10 @@ public class MwaaEnvironmentManager {
                     .withTarInputStream(new ByteArrayInputStream(tarSingleFile(relativePath, content)))
                     .withRemotePath(remoteDir)
                     .exec();
+            return true;
         } catch (Exception e) {
             LOG.warnv("Could not copy {0} into MWAA container {1}: {2}", relativePath, containerId, e.getMessage());
+            return false;
         }
     }
 

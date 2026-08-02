@@ -248,6 +248,10 @@ public class MwaaService implements TagHandler {
         if (!config.services().mwaa().mock()) {
             proxyManager.stopProxy(name);
             environmentManager.stopEnvironment(environment);
+            // Mirrors how Lambda/MSK/EC2/ECR release their allocated ports on cleanup — otherwise
+            // repeated create/delete cycles exhaust the configured proxy port range even though no
+            // MWAA proxy is actually running anymore.
+            portAllocator.release(environment.getProxyPort());
         }
         cliTokensByEnvironment.remove(name);
         dagSyncState.remove(name);

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.mwaa;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -11,9 +12,11 @@ import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import io.github.hectorvent.floci.services.mwaa.model.EnvironmentStatus;
 import io.github.hectorvent.floci.services.mwaa.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.mwaa.model.UpdateEnvironmentRequest;
+import io.github.hectorvent.floci.services.mwaa.proxy.MwaaProxyManager;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -29,6 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class MwaaServiceTest {
 
@@ -304,5 +309,73 @@ class MwaaServiceTest {
         assertTrue(mwaaService.isValidCliToken("cli-token-env", token));
         assertFalse(mwaaService.isValidCliToken("cli-token-env", "not-a-real-token"));
         assertFalse(mwaaService.isValidCliToken("other-env", token));
+    }
+
+    /** Exercises the real (non-mock) create/delete path — the outer class's {@code mwaaService}
+     *  always runs with {@code mock=true}, which never touches {@code PortAllocator} at all. */
+    @Nested
+    class RealModeLifecycle {
+
+        private PortAllocator portAllocator;
+        private MwaaService realModeService;
+
+        @BeforeEach
+        void setUpRealMode() {
+            StorageFactory storageFactory = new StorageFactory(null, null) {
+                @Override
+                public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+                        TypeReference<Map<String, V>> typeReference) {
+                    return new InMemoryStorage<>();
+                }
+            };
+
+            EmulatorConfig.MwaaServiceConfig mwaaConfig = proxy(EmulatorConfig.MwaaServiceConfig.class,
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "enabled" -> true;
+                        case "mock" -> false;
+                        case "supportedVersions" -> List.of("2.10.5", "2.9.3", "2.8.4");
+                        case "defaultVersion" -> "2.10.5";
+                        case "proxyBasePort" -> 8700;
+                        case "proxyMaxPort" -> 8799;
+                        case "dagSyncIntervalSeconds" -> 30;
+                        default -> defaultValue(method);
+                    });
+            EmulatorConfig.ServicesConfig servicesConfig = proxy(EmulatorConfig.ServicesConfig.class,
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "mwaa" -> mwaaConfig;
+                        default -> defaultValue(method);
+                    });
+            EmulatorConfig.TlsConfig tlsConfig = proxy(EmulatorConfig.TlsConfig.class,
+                    (proxy, method, args) -> defaultValue(method));
+            EmulatorConfig config = proxy(EmulatorConfig.class, (proxy, method, args) -> switch (method.getName()) {
+                case "services" -> servicesConfig;
+                case "tls" -> tlsConfig;
+                case "defaultRegion" -> "us-east-1";
+                case "defaultAccountId" -> "000000000000";
+                case "hostname" -> Optional.empty();
+                default -> defaultValue(method);
+            });
+
+            RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+            S3Service s3Service = Mockito.mock(S3Service.class);
+            MwaaEnvironmentManager environmentManager = Mockito.mock(MwaaEnvironmentManager.class);
+            MwaaProxyManager proxyManager = Mockito.mock(MwaaProxyManager.class);
+            portAllocator = Mockito.mock(PortAllocator.class);
+            when(portAllocator.allocate(8700, 8799)).thenReturn(8701);
+
+            realModeService = new MwaaService(storageFactory, config, regionResolver,
+                    environmentManager, proxyManager, portAllocator, s3Service);
+        }
+
+        @Test
+        void deletingAnEnvironmentReleasesItsProxyPort() {
+            Environment environment = realModeService.createEnvironment("real-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            assertEquals(8701, environment.getProxyPort());
+
+            realModeService.deleteEnvironment("real-env");
+
+            verify(portAllocator).release(8701);
+        }
     }
 }

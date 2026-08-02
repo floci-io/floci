@@ -26,10 +26,12 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -160,14 +162,10 @@ class MwaaEnvironmentManagerTest {
                 "the startup script must run before migration, matching real MWAA's ordering");
     }
 
-    @Test
-    void startupScriptContentStillReachesCreateThenStartSequencing() {
-        // copyFileIntoContainer's own docker-client interaction isn't mocked here (it degrades to a
-        // logged warning on failure, never rethrows) — this test's job is just to prove supplying
-        // startup script bytes doesn't change the create -> inject -> start call sequence or break it.
-        ContainerSpec spec = startAirflowAndCaptureSpec(false, "export FOO=bar\n".getBytes());
-        assertEquals("apache/airflow:2.10.5-python3.12", spec.image());
-    }
+    // Coverage for supplying startup-script bytes now lives in the ContainerFileInjection nested
+    // class below, where the DockerClient is actually mocked — the copy must succeed for the
+    // create -> inject -> start sequence to continue (see startupScriptInjectionFailurePreventsThe-
+    // ContainerFromStarting for the failure path this class didn't previously test).
 
     @Test
     void namedVolumesMountDagsAndLogs() {
@@ -264,6 +262,23 @@ class MwaaEnvironmentManagerTest {
             verify(copyCmd).withRemotePath("/etc/sudoers.d");
             verify(copyCmd).withRemotePath("/");
             verify(copyCmd, times(2)).exec();
+        }
+
+        @Test
+        void startupScriptInjectionFailurePreventsTheContainerFromStarting() {
+            // Shared copyCmd mock, so this also makes the (best-effort) sudoers-grant copy fail —
+            // that alone must not abort anything; only the configured-startup-script failure should.
+            when(copyCmd.exec()).thenThrow(new RuntimeException("docker cp failed"));
+            when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+
+            Environment environment = new Environment();
+            environment.setName("my-env");
+
+            assertThrows(IllegalStateException.class, () -> manager.startAirflowContainer(
+                    environment, "2.10.5", "172.18.0.9", "db-secret-pw", "export FOO=bar\n".getBytes()));
+
+            verify(lifecycleManager).removeIfExists("airflow-container-id");
+            verify(lifecycleManager, never()).startCreated(anyString(), any());
         }
     }
 }
