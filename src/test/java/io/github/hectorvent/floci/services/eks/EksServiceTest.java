@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -56,7 +57,8 @@ class EksServiceTest {
         EksClusterManager clusterManager = null;
         Ec2Service ec2Service = null;
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        eksService = new EksService(storageFactory, config, regionResolver, clusterManager, ec2Service);
+        eksService = new EksService(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()));
     }
 
     private EmulatorConfig testConfig() {
@@ -202,7 +204,8 @@ class EksServiceTest {
             }
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service());
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service(),
+                new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of("subnet-1", "subnet-2"));
@@ -228,7 +231,8 @@ class EksServiceTest {
             }
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service());
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service(),
+                new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
@@ -261,7 +265,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                realEc2Service());
+                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
@@ -290,7 +294,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                realEc2Service());
+                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of("subnet-default-a"));
@@ -336,7 +340,7 @@ class EksServiceTest {
         // The request is for eu-west-2, where that subnet does not exist.
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                ec2Service);
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(usEastOnlySubnet));

@@ -11,7 +11,9 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
@@ -53,11 +55,13 @@ public class EksService implements TagHandler {
     private final RegionResolver regionResolver;
     private final EksClusterManager clusterManager;
     private final Ec2Service ec2Service;
+    private final EksOidcService oidcService;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
-            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service) {
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -71,6 +75,7 @@ public class EksService implements TagHandler {
         this.regionResolver = regionResolver;
         this.clusterManager = clusterManager;
         this.ec2Service = ec2Service;
+        this.oidcService = oidcService;
     }
 
     @PostConstruct
@@ -119,6 +124,10 @@ public class EksService implements TagHandler {
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
+        String issuer = oidcService.newIssuerUrl(region);
+        cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        oidcService.ensureKey(name, issuer);
+
         if (config.services().eks().mock()) {
             cluster.setStatus(ClusterStatus.ACTIVE);
             cluster.setEndpoint("https://localhost:" + config.services().eks().apiServerBasePort());
@@ -157,6 +166,7 @@ public class EksService implements TagHandler {
             clusterManager.stopCluster(cluster);
         }
         storage.delete(name);
+        oidcService.deleteKey(name);
         return cluster;
     }
 
