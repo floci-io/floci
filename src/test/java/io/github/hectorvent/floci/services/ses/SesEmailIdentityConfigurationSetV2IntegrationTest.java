@@ -350,8 +350,10 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     @Test
     @Order(14)
     void createEmailIdentity_withEmptyConfigurationSet_createsWithoutDefault() {
-        // Only the empty string means "no default configuration set" (consistent with the
-        // PutEmailIdentityConfigurationSetAttributes path); AWS stores it verbatim.
+        // Floci treats an empty-string ConfigurationSetName as "no default configuration set"
+        // (consistent with the PutEmailIdentityConfigurationSetAttributes path). This is a deliberate
+        // deviation from AWS, which stores "" verbatim and echoes it back; Floci keeps the two paths
+        // aligned instead.
         String id = "cs-attr-emptycs@floci.test";
         given().contentType("application/json").header("Authorization", SES_AUTH)
                 .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"\"}")
