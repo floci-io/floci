@@ -274,6 +274,12 @@ public class RuntimeApiServer {
                     toDispatch = pendingQueue.poll();
                     if (toDispatch == null) {
                         waitingContexts.add(ctx);
+                    } else {
+                        // Move from pendingQueue into inFlight under the same lock: without
+                        // this, a concurrent quiesce() sweeps pendingQueue (empty) and
+                        // inFlight (empty) between the poll here and sendInvocation()'s
+                        // inFlight.put(). The invocation would then never complete.
+                        inFlight.put(toDispatch.getRequestId(), toDispatch);
                     }
                 }
             }
@@ -683,6 +689,14 @@ public class RuntimeApiServer {
                 waitingCtxForInvocation = waitingContexts.poll();
                 if (waitingCtxForInvocation == null) {
                     pendingQueue.offer(invocation);
+                } else {
+                    // Track this invocation as in-flight *inside the lock*, before we release it
+                    // and hand off to Vert.x. Without this, a concurrent quiesce() runs its
+                    // pendingQueue+inFlight sweep between the poll above and sendInvocation()
+                    // (which is what would put it in inFlight otherwise), and the invocation
+                    // never gets completed with ContainerStopped — the caller hangs to the
+                    // function's deadline.
+                    inFlight.put(invocation.getRequestId(), invocation);
                 }
             }
         }
