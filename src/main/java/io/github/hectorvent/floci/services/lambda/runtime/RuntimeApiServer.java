@@ -286,7 +286,17 @@ public class RuntimeApiServer {
             if (faultedNow) {
                 ctx.response().setStatusCode(204).end();
             } else if (toDispatch != null) {
-                sendInvocation(ctx, toDispatch);
+                // Re-check under the lock: quiesce() may have swept between our lock release
+                // above and here, completing this invocation with ContainerStopped. Delivering
+                // it now would run the handler for a container that's being torn down and
+                // silently discard its /response.
+                boolean alreadyHandled;
+                synchronized (lock) {
+                    alreadyHandled = stopped && inFlight.get(toDispatch.getRequestId()) == null;
+                }
+                if (!alreadyHandled) {
+                    sendInvocation(ctx, toDispatch);
+                }
             }
             // else: parked — enqueue() or the httpServer close will dispatch/end this ctx.
         });
@@ -714,14 +724,27 @@ public class RuntimeApiServer {
         if (waitingCtxForInvocation != null) {
             final RoutingContext waitingCtx = waitingCtxForInvocation;
             vertx.runOnContext(v -> {
-                if (!waitingCtx.response().ended()) {
-                    sendInvocation(waitingCtx, invocation);
-                } else {
-                    // Connection closed between park and dispatch — re-queue.
-                    synchronized (lock) {
+                boolean alreadyHandled;
+                boolean shouldRequeue;
+                synchronized (lock) {
+                    // If quiesce() ran while this dispatch was scheduled, it swept inFlight
+                    // and completed the caller's future with ContainerStopped. Delivering the
+                    // invocation to the runtime now would run the handler for a container
+                    // that's being torn down and silently discard its /response, so the caller
+                    // sees an error even though the function's side effects happened.
+                    alreadyHandled = stopped && inFlight.get(invocation.getRequestId()) == null;
+                    shouldRequeue = !alreadyHandled && waitingCtx.response().ended() && !stopped;
+                    if (shouldRequeue) {
                         pendingQueue.offer(invocation);
                     }
                 }
+                if (alreadyHandled) {
+                    return;
+                }
+                if (!waitingCtx.response().ended()) {
+                    sendInvocation(waitingCtx, invocation);
+                }
+                // else: shouldRequeue handled re-queue under lock; nothing to do here.
             });
         }
         return invocation.getResultFuture();
