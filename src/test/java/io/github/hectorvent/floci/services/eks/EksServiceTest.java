@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -46,7 +47,8 @@ class EksServiceTest {
         EmulatorConfig config = testConfig();
         EksClusterManager clusterManager = null;
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        eksService = new EksService(storageFactory, config, regionResolver, clusterManager);
+        eksService = new EksService(storageFactory, config, regionResolver, clusterManager,
+                new EksOidcService(storageFactory, new ObjectMapper()));
     }
 
     private EmulatorConfig testConfig() {
