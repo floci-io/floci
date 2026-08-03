@@ -161,6 +161,45 @@ class WebIdentityTrustPolicyEvaluatorTest {
     }
 
     @Test
+    void stringLikeComparisonIsCaseSensitive() {
+        // StringLike must not fold case either, or a pattern scoped to one namespace would admit a
+        // differently-cased one. The literal part of the pattern is what matters here.
+        String policy = """
+                {"Statement":[{"Effect":"Allow","Principal":{"Federated":"%s"},
+                "Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringLike":{
+                "%s:sub":"system:serviceaccount:My-Namespace:*"}}}]}"""
+                .formatted(PROVIDER_ARN, PREFIX);
+        assertFalse(allows(policy, claims(SUBJECT)));
+    }
+
+    @Test
+    void stringNotLikeComparisonIsCaseSensitive() {
+        // The claim differs from the pattern only by case, so it does NOT match, so StringNotLike
+        // is satisfied and the statement allows.
+        String policy = """
+                {"Statement":[{"Effect":"Allow","Principal":{"Federated":"%s"},
+                "Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringNotLike":{
+                "%s:sub":"system:serviceaccount:MY-NAMESPACE:*"}}}]}"""
+                .formatted(PROVIDER_ARN, PREFIX);
+        assertTrue(allows(policy, claims(SUBJECT)));
+    }
+
+    @Test
+    void caseSensitiveGlobHandlesWildcardsAndQuestionMarks() {
+        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", "abc"));
+        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", "ABC"));
+        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("a*", "abcdef"));
+        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("*f", "abcdef"));
+        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("a*e?", "abcdef"));
+        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("**abc**", "xxabcyy"));
+        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("*", ""));
+        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("a?c", "ac"));
+        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", "abcd"));
+        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive(null, "abc"));
+        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", null));
+    }
+
+    @Test
     void allowsFederatedPrincipalWithoutConditions() {
         String policy = """
                 {"Statement":[{"Effect":"Allow","Principal":{"Federated":"%s"},

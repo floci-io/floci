@@ -80,8 +80,30 @@ public class EksService implements TagHandler {
 
     @PostConstruct
     public void init() {
+        backfillOidcIdentities();
         if (!config.services().eks().mock()) {
             startReadinessPoller();
+        }
+    }
+
+    /**
+     * Gives clusters persisted before IRSA support an OIDC issuer and signing key. Without this,
+     * a cluster restored from {@code eks-clusters.json} would report no
+     * {@code identity.oidc.issuer}, and token minting and the JWKS routes would fail for it until
+     * it was recreated.
+     */
+    private void backfillOidcIdentities() {
+        for (Cluster cluster : allClusters()) {
+            if (cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
+                    && cluster.getIdentity().getOidc().getIssuer() != null) {
+                oidcService.ensureKey(cluster.getName(), cluster.getIdentity().getOidc().getIssuer());
+                continue;
+            }
+            String issuer = oidcService.newIssuerUrl(config.defaultRegion());
+            cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+            oidcService.ensureKey(cluster.getName(), issuer);
+            storage.put(cluster.getName(), cluster);
+            LOG.infov("Backfilled IRSA OIDC issuer for existing EKS cluster {0}", cluster.getName());
         }
     }
 
