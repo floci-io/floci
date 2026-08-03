@@ -247,6 +247,77 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(15)
+    void stopCompletesInvocationHandedToParkedPollerBeforeDispatchRuns() throws Exception {
+        // Race: enqueue() takes the lock, polls a parked ctx off waitingContexts, releases
+        // the lock, and schedules sendInvocation() on the Vert.x context. If quiesce() gets
+        // the lock in between, its pendingQueue+inFlight sweep must still see the invocation
+        // — otherwise the invocation escapes both queues and the caller hangs to the deadline.
+        //
+        // Enqueue must record the invocation in inFlight under the same lock as it polls the
+        // parked ctx. This test forces the ordering by using a parked poller (server-side
+        // context sits in waitingContexts; client-side goroutine holds the socket open) and
+        // stopping *before* awaiting the client-side response.
+        HttpRequest parkedRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        CompletableFuture<HttpResponse<String>> parkedResponse =
+                httpClient.sendAsync(parkedRequest, HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(300); // let the ctx park server-side
+        assertFalse(parkedResponse.isDone(), "GET /next should be parked, not returned");
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-race", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        // Enqueue returns synchronously once the ctx has been polled and the invocation
+        // recorded — the actual sendInvocation() runs later on the Vert.x context.
+        server.enqueue(invocation);
+
+        // Stop *before* the client-side response has time to arrive. Under the fixed
+        // ordering, quiesce()'s inFlight sweep must complete this invocation's future.
+        server.stop();
+        InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertNotNull(result);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+    }
+
+    @Test
+    @Timeout(15)
+    void stopCompletesInvocationPolledFromQueueBeforeDispatchRuns() throws Exception {
+        // Symmetric race on the NEXT_PATH side: an invocation sits in pendingQueue with no
+        // parked ctx yet. A /next arrives, takes the lock, polls the invocation, releases
+        // the lock, and schedules sendInvocation(). If quiesce() gets the lock in between,
+        // the invocation must not escape both queues.
+        //
+        // NEXT_PATH must record the invocation in inFlight under the same lock as it polls
+        // from pendingQueue. Force the ordering by (a) enqueueing without a parked poller,
+        // then (b) firing the /next request without awaiting its response before stop().
+        PendingInvocation invocation = new PendingInvocation(
+                "req-race-nextpath", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        HttpRequest nextRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        CompletableFuture<HttpResponse<String>> nextResponse =
+                httpClient.sendAsync(nextRequest, HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(200); // let NEXT_PATH's handler take the lock and record inFlight
+
+        server.stop();
+        InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertNotNull(result);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+
+        // Suppress unused-var — client side is expected to receive its 200 (or a close) here.
+        try { nextResponse.get(2, TimeUnit.SECONDS); } catch (Exception ignored) { }
+    }
+
+    @Test
+    @Timeout(15)
     void closeTerminatesParkedPollerWithoutResponse() throws Exception {
         // GET /next on a background thread — parks in waitingContexts (no thread held).
         HttpRequest request = HttpRequest.newBuilder()
