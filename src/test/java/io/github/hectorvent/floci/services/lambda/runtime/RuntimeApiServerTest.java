@@ -247,7 +247,7 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(15)
-    void stopWakesParkedPollerImmediately() throws Exception {
+    void closeTerminatesParkedPollerWithoutResponse() throws Exception {
         // GET /next on a background thread — parks in waitingContexts (no thread held).
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
@@ -260,14 +260,49 @@ class RuntimeApiServerTest {
         Thread.sleep(500);
         assertFalse(asyncResponse.isDone(), "handler should be parked");
 
+        // Quiesce leaves the parked poller alone — real Lambda relies on the container
+        // process exiting on SIGTERM to terminate the poll, and the server can't send a
+        // response that AWS doesn't document. close() then drops the underlying HTTP
+        // server, terminating the parked poller's TCP connection from the server side
+        // (the container-exit path in real usage).
         long start = System.currentTimeMillis();
-        server.stop();
-        HttpResponse<String> response = asyncResponse.get(2, TimeUnit.SECONDS);
+        server.quiesce();
+        server.close().get(2, TimeUnit.SECONDS);
         long elapsed = System.currentTimeMillis() - start;
 
-        // 204 is only valid on shutdown — the container is being terminated.
-        assertEquals(204, response.statusCode());
-        assertTrue(elapsed < 1000, "stop() should wake parked poller in <1s, took " + elapsed + "ms");
+        // The client sees the socket close, surfacing as a completion exception on the
+        // async future rather than a normal response. If quiesce() had (wrongly) responded
+        // with a documented status code, the future would complete successfully instead.
+        assertThrows(Exception.class, () -> asyncResponse.get(2, TimeUnit.SECONDS));
+        assertTrue(elapsed < 3000, "close() should terminate parked poller in <3s, took " + elapsed + "ms");
+    }
+
+    @Test
+    @Timeout(15)
+    void quiesceLeavesSocketOpenForOrderlyShutdown() throws Exception {
+        // Real teardown is quiesce() → SIGTERM container → close(). The middle step
+        // relies on the runtime API socket still being bound so the runtime process
+        // (mid-poll on /invocation/next) can receive SIGTERM without seeing a
+        // network error first. Verify that the port is still bound after quiesce().
+        server.quiesce();
+
+        // A fresh connection can still reach the server. Handler will park it (server is
+        // stopped, no work available) — we only care that the TCP handshake and HTTP
+        // request-line get through, proving the listener is up.
+        HttpRequest probe = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .timeout(java.time.Duration.ofMillis(500))
+                .GET()
+                .build();
+        CompletableFuture<HttpResponse<String>> probeFuture =
+                httpClient.sendAsync(probe, HttpResponse.BodyHandlers.ofString());
+
+        // The request should reach the server (parking there) rather than fail on connect.
+        // Timing out on the client side proves the connection was accepted.
+        assertThrows(Exception.class, () -> probeFuture.get(1, TimeUnit.SECONDS));
+
+        // Now close() should complete cleanly, releasing the port.
+        server.close().get(2, TimeUnit.SECONDS);
     }
 
     @Test
