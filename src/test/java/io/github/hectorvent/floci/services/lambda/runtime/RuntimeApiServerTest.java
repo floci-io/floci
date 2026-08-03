@@ -318,6 +318,58 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(15)
+    void quiesceSuppressesDeferredDispatchToParkedPoller() throws Exception {
+        // After quiesce() completes an invocation's future with ContainerStopped, a
+        // still-pending deferred sendInvocation() must NOT deliver the invocation to the
+        // parked poller. Otherwise the runtime processes it (side effects, /response POST),
+        // but the caller has already been told ContainerStopped and the response is silently
+        // discarded — the caller thinks the invocation failed while it actually succeeded.
+        //
+        // The client-side parked GET must therefore complete via socket close (from
+        // close()), NOT via a 200 with the invocation payload.
+        HttpRequest parkedRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        CompletableFuture<HttpResponse<String>> parkedResponse =
+                httpClient.sendAsync(parkedRequest, HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(300); // let the ctx park server-side
+        assertFalse(parkedResponse.isDone());
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-suppress", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        // Stop immediately. The deferred sendInvocation may or may not have run before
+        // quiesce() reaches inFlight — the guard we care about is the one *after* quiesce.
+        server.stop().get(2, TimeUnit.SECONDS);
+
+        // The invocation's future completes with ContainerStopped either way.
+        InvokeResult result = invocation.getResultFuture().get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+
+        // Crucial assertion: the parked poller must NOT have received a 200 with the
+        // invocation payload. If it did, the runtime would have executed the handler
+        // and the /response would have been silently discarded (the caller already saw
+        // ContainerStopped). Either a network exception (close() dropped the socket) or
+        // a non-200 status is acceptable — anything but a delivered 200.
+        try {
+            HttpResponse<String> response = parkedResponse.get(2, TimeUnit.SECONDS);
+            assertFalse(response.statusCode() == 200
+                    && "req-suppress".equals(response.headers()
+                            .firstValue("Lambda-Runtime-Aws-Request-Id").orElse("")),
+                    "parked poller must not receive the invocation after quiesce; got "
+                            + response.statusCode() + " with request-id header "
+                            + response.headers().firstValue("Lambda-Runtime-Aws-Request-Id"));
+        } catch (Exception expected) {
+            // socket close from close() — this is the expected shape.
+        }
+    }
+
+    @Test
+    @Timeout(15)
     void closeTerminatesParkedPollerWithoutResponse() throws Exception {
         // GET /next on a background thread — parks in waitingContexts (no thread held).
         HttpRequest request = HttpRequest.newBuilder()
