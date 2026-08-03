@@ -396,17 +396,35 @@ public class ContainerLauncher {
         LOG.infov("Stopping container {0}", handle.getContainerId());
         handle.setState(ContainerState.STOPPED);
 
+        RuntimeApiServer server = handle.getRuntimeApiServer();
+
+        // Quiesce first: stop accepting new work, notify extensions, complete pending
+        // invocations. Existing runtime pollers on /invocation/next stay parked.
+        server.quiesce();
+
+        // Then SIGTERM the container. The runtime library's default SIGTERM handler exits
+        // the process while the runtime API socket is still up, matching real AWS Lambda's
+        // shutdown flow. Grace window follows AWS's documented Shutdown-phase limits:
+        // 2s when at least one extension is registered, else the runtime's own 300ms
+        // sub-budget. Docker's timeout is expressed in whole seconds, so 300ms rounds
+        // up to 1s — still an order of magnitude tighter than the pre-fix default.
+        int stopTimeoutSeconds = server.hasRegisteredExtensions() ? 2 : 1;
+        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream(),
+                stopTimeoutSeconds);
+
+        // Only now close the runtime API socket. Any pollers that were still parked when
+        // the container exited get terminated by their end of the connection closing;
+        // this call releases the port for reuse.
         try {
-            handle.getRuntimeApiServer().stop().get(5, TimeUnit.SECONDS);
+            server.close().get(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException e) {
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
         } finally {
-            runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            runtimeApiServerFactory.release(server);
         }
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
     }
 
     /**
