@@ -170,6 +170,20 @@ class EksIrsaEndToEndIntegrationTest {
 
     @Test
     @Order(7)
+    void rejectsUnsignedTokenNamingAFlociIssuer() {
+        // An unsigned "header.payload." token must not slip through the opaque-token path: its
+        // issuer is one Floci hosts, so it has to be validated and rejected, not accepted.
+        String token = mintToken(NAMESPACE, SERVICE_ACCOUNT, null);
+        String[] parts = token.split("\\.", -1);
+
+        assumeRole(parts[0] + "." + parts[1] + ".")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidIdentityToken"));
+    }
+
+    @Test
+    @Order(8)
     void opaqueThirdPartyTokenRemainsAccepted() {
         // Compatibility guarantee: Floci cannot adjudicate an issuer it does not host, so the
         // historical permissive behaviour is preserved rather than failing the call.
@@ -181,7 +195,7 @@ class EksIrsaEndToEndIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void jwksAndDiscoveryEndpointsServeTheSigningKey() {
         given()
         .when()
@@ -203,7 +217,7 @@ class EksIrsaEndToEndIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void mintRejectsMissingServiceAccount() {
         given()
             .contentType(JSON)
@@ -215,7 +229,7 @@ class EksIrsaEndToEndIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void mintRejectsUnknownCluster() {
         given()
             .contentType(JSON)
@@ -227,7 +241,7 @@ class EksIrsaEndToEndIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void deletingClusterDropsSigningKey() {
         given().when().delete("/clusters/" + CLUSTER).then().statusCode(200);
 

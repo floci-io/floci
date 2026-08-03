@@ -6,7 +6,10 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
+import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
@@ -149,6 +152,81 @@ class EksServiceTest {
         assertTrue(cluster.getArn().contains("test-cluster"));
         assertEquals("1.29", cluster.getVersion());
         assertNotNull(cluster.getCreatedAt());
+    }
+
+    @Test
+    void createClusterAssignsOidcIssuerAndKey() {
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("oidc-cluster");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+
+        Cluster cluster = eksService.createCluster(req);
+
+        assertNotNull(cluster.getIdentity());
+        assertNotNull(cluster.getIdentity().getOidc());
+        assertTrue(cluster.getIdentity().getOidc().getIssuer()
+                .matches("https://oidc\\.eks\\.us-east-1\\.amazonaws\\.com/id/[A-F0-9]{32}"));
+    }
+
+    @Test
+    void initBackfillsOidcIdentityForClustersPersistedBeforeIrsaSupport() {
+        // A cluster restored from storage without an identity — what an upgrade looks like — must
+        // gain an issuer and key on startup, or minting and the JWKS routes stay broken for it.
+        StorageBackend<String, Cluster> clusterStore = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> keyStore = new InMemoryStorage<>();
+
+        Cluster legacy = new Cluster();
+        legacy.setName("legacy-cluster");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        clusterStore.put("legacy-cluster", legacy);
+        assertNull(legacy.getIdentity());
+
+        EksOidcService oidcService = new EksOidcService(
+                fixedStorageFactory(keyStore), new ObjectMapper());
+        EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, oidcService);
+        restarted.init();
+
+        Cluster migrated = restarted.describeCluster("legacy-cluster");
+        assertNotNull(migrated.getIdentity());
+        String issuer = migrated.getIdentity().getOidc().getIssuer();
+        assertTrue(issuer.matches("https://oidc\\.eks\\.us-east-1\\.amazonaws\\.com/id/[A-F0-9]{32}"));
+        assertTrue(oidcService.findVerificationKey(issuer).isPresent());
+    }
+
+    @Test
+    void initLeavesAnExistingOidcIssuerUnchanged() {
+        StorageBackend<String, Cluster> clusterStore = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> keyStore = new InMemoryStorage<>();
+
+        String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/ABCDEF0123456789ABCDEF0123456789";
+        Cluster existing = new Cluster();
+        existing.setName("existing-cluster");
+        existing.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        clusterStore.put("existing-cluster", existing);
+
+        EksOidcService oidcService = new EksOidcService(
+                fixedStorageFactory(keyStore), new ObjectMapper());
+        EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, oidcService);
+        restarted.init();
+
+        // The issuer a trust policy was written against must survive a restart, and its key must
+        // be present so previously minted tokens still verify.
+        assertEquals(issuer,
+                restarted.describeCluster("existing-cluster").getIdentity().getOidc().getIssuer());
+        assertTrue(oidcService.findVerificationKey(issuer).isPresent());
+    }
+
+    @SuppressWarnings("unchecked")
+    private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {
+        return new StorageFactory(null, null) {
+            @Override
+            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return (StorageBackend<String, V>) backend;
+            }
+        };
     }
 
     @Test

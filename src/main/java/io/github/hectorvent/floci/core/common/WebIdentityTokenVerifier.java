@@ -1,11 +1,5 @@
 package io.github.hectorvent.floci.core.common;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
-
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -16,6 +10,14 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
+
+import org.jboss.logging.Logger;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 
 /**
  * Verifies RS256-signed web-identity JWTs against a Floci-known OIDC issuer.
@@ -166,7 +168,10 @@ public class WebIdentityTokenVerifier {
         if (token == null || token.isBlank()) {
             return Optional.empty();
         }
-        String[] parts = token.split("\\.");
+        // Limit -1 for the same reason as verify(): without it an unsigned "header.payload." token
+        // splits into two parts, so its issuer would go unseen and the caller would treat a token
+        // that names a Floci issuer as opaque, skipping validation entirely.
+        String[] parts = token.split("\\.", -1);
         return parts.length == 3 ? decodeJson(parts[1]) : Optional.empty();
     }
 

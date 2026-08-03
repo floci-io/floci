@@ -203,18 +203,60 @@ public class WebIdentityTrustPolicyEvaluator {
         }
 
         return switch (operator) {
-            // Condition keys are case-insensitive; their *values* are not.
             case "StringEquals" -> actual.stream().anyMatch(expectedValues::contains);
             case "StringNotEquals" -> actual.stream().noneMatch(expectedValues::contains);
             case "StringLike" -> actual.stream().anyMatch(
-                    a -> expectedValues.stream().anyMatch(e -> IamPolicyEvaluator.globMatches(e, a)));
+                    a -> expectedValues.stream().anyMatch(e -> globMatchesCaseSensitive(e, a)));
             case "StringNotLike" -> actual.stream().noneMatch(
-                    a -> expectedValues.stream().anyMatch(e -> IamPolicyEvaluator.globMatches(e, a)));
+                    a -> expectedValues.stream().anyMatch(e -> globMatchesCaseSensitive(e, a)));
             default -> {
                 LOG.debugv("Unsupported web-identity trust policy condition operator: {0}", operator);
                 yield false;
             }
         };
+    }
+
+    /**
+     * Glob matching over {@code *} and {@code ?} that preserves case, unlike
+     * {@link IamPolicyEvaluator#globMatches} which lowercases both operands. A {@code StringLike}
+     * constraint on {@code oidc:sub} must not admit a service account differing only in case, so it
+     * needs the same case sensitivity as the {@code StringEquals} branch above.
+     */
+    static boolean globMatchesCaseSensitive(String pattern, String value) {
+        if (pattern == null || value == null) {
+            return false;
+        }
+        return globMatchesHelper(pattern, value, 0, 0);
+    }
+
+    private static boolean globMatchesHelper(String pattern, String value, int pi, int vi) {
+        while (pi < pattern.length()) {
+            char p = pattern.charAt(pi);
+            if (p == '*') {
+                // Collapse consecutive stars, then try every split point for the remainder.
+                while (pi + 1 < pattern.length() && pattern.charAt(pi + 1) == '*') {
+                    pi++;
+                }
+                if (pi == pattern.length() - 1) {
+                    return true;
+                }
+                for (int i = vi; i <= value.length(); i++) {
+                    if (globMatchesHelper(pattern, value, pi + 1, i)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if (vi >= value.length()) {
+                return false;
+            }
+            if (p != '?' && p != value.charAt(vi)) {
+                return false;
+            }
+            pi++;
+            vi++;
+        }
+        return vi == value.length();
     }
 
     /**

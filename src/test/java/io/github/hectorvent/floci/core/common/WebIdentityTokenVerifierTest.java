@@ -104,6 +104,20 @@ class WebIdentityTokenVerifierTest {
     }
 
     @Test
+    void peekIssuerSeesTheIssuerOfAnUnsignedToken() {
+        // Regression guard: an unsigned "header.payload." token must not read as opaque. If its
+        // issuer went unseen, the caller would skip validation for a token naming a Floci issuer
+        // and hand out credentials for an unsigned JWT.
+        String header = base64Url("{\"alg\":\"none\",\"typ\":\"JWT\"}");
+        String payload = base64Url("{\"iss\":\"" + ISSUER + "\","
+                + "\"aud\":[\"" + EksOidcService.STS_AUDIENCE + "\"],"
+                + "\"sub\":\"system:serviceaccount:my-namespace:my-service-account\","
+                + "\"exp\":" + (System.currentTimeMillis() / 1000 + 3600) + "}");
+
+        assertEquals(ISSUER, verifier.peekIssuer(header + "." + payload + ".").orElseThrow());
+    }
+
+    @Test
     void rejectsTamperedPayload() {
         String token = mint("my-namespace", "my-service-account", null, null);
         String[] parts = token.split("\\.", -1);
