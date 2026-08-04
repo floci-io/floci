@@ -2283,7 +2283,8 @@ given()
                     "Item": {
                         "PK": {"S": "k1"},
                         "TAGS": {"SS": ["alpha", "beta"]},
-                        "ITEMS": {"L": [{"N": "1"}, {"S": "two"}]}
+                        "ITEMS": {"L": [{"N": "1"}, {"S": "two"}]},
+                        "SCORES": {"NS": ["1", "2.5"]}
                     }
                 }
                 """)
@@ -2327,6 +2328,41 @@ given()
         .then()
             .statusCode(400)
             .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // A number set with different members must not satisfy the condition.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"SCORES": {"Exists": true, "Value": {"NS": ["1", "3.5"]}}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // Number set members compare numerically, so trailing zeros still match.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"SCORES": {"Exists": true, "Value": {"NS": ["1.0", "2.50"]}}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "numeric"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
 
         // Set equality is order-independent, so the same members in another order matches.
         given()
