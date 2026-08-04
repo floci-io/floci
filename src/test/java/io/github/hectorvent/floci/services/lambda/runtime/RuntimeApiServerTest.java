@@ -318,6 +318,48 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(15)
+    void quiesceAtomicallyClearsInFlightWithStopped() throws Exception {
+        // The dispatch guards in enqueue()'s deferred callback and NEXT_PATH read
+        // `stopped` under the server lock and act on it. Their correctness depends on
+        // an invariant: once quiesce() releases its lock, `stopped=true` implies
+        // inFlight is empty. If quiesce() cleared inFlight *outside* the lock, a
+        // dispatch could observe stopped=true while an inFlight entry it's about to
+        // deliver was still present — the guard would let the delivery through,
+        // quiesce would then complete the future with ContainerStopped, and the
+        // runtime's /response would be silently discarded.
+        //
+        // Put entries in inFlight via full enqueue → /next round trips (matches the
+        // real code path), then call quiesce and assert all their futures completed.
+        List<PendingInvocation> invocations = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            PendingInvocation inv = new PendingInvocation(
+                    "req-atomic-" + i, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                    "arn:aws:lambda:us-east-1:000000000000:function:test",
+                    new CompletableFuture<>());
+            server.enqueue(inv);
+            invocations.add(inv);
+            HttpResponse<String> resp = httpClient.send(HttpRequest.newBuilder()
+                            .uri(URI.create("http://localhost:" + port
+                                    + "/2018-06-01/runtime/invocation/next"))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, resp.statusCode());
+        }
+
+        server.quiesce();
+
+        // quiesce() sets stopped=true AND clears inFlight in the same synchronized
+        // block, so both observations are atomic. Every invocation must be completed.
+        for (PendingInvocation inv : invocations) {
+            InvokeResult result = inv.getResultFuture().get(2, TimeUnit.SECONDS);
+            assertEquals("Unhandled", result.getFunctionError(),
+                    "invocation " + inv.getRequestId() + " must be completed by quiesce");
+            assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+        }
+    }
+
+    @Test
+    @Timeout(15)
     void quiesceSuppressesDeferredDispatchToParkedPoller() throws Exception {
         // After quiesce() completes an invocation's future with ContainerStopped, a
         // still-pending deferred sendInvocation() must NOT deliver the invocation to the
