@@ -362,6 +362,44 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(21)
+    void createBucketAppliesTagsFromCreateBucketConfiguration() {
+        String bucket = "tagged-at-create-bucket";
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <Tags>
+                        <Tag>
+                            <Key>owner</Key>
+                            <Value>data-team</Value>
+                        </Tag>
+                    </Tags>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucket + "?tagging")
+        .then()
+            .statusCode(200)
+            .body(containsString("owner"))
+            .body(containsString("data-team"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
     @Order(20)
     void headBucketReturnsStoredRegionForLocationConstraintBucket() {
         String bucket = "eu-head-bucket";
