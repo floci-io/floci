@@ -87,7 +87,14 @@ public class SesController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = objectMapper.readTree(body);
-            String emailIdentity = request.path("EmailIdentity").asText(null);
+            JsonNode emailIdentityNode = request.path("EmailIdentity");
+            if (!emailIdentityNode.isMissingNode() && !emailIdentityNode.isNull()
+                    && !emailIdentityNode.isTextual()) {
+                // A non-string EmailIdentity is rejected rather than coerced (asText would turn 123
+                // into "123"), the same as ConfigurationSetName below.
+                throw new AwsException("SerializationException", null, 400);
+            }
+            String emailIdentity = emailIdentityNode.asText(null);
             if (emailIdentity == null || emailIdentity.isBlank()) {
                 throw new AwsException("BadRequestException", "EmailIdentity is required.", 400);
             }

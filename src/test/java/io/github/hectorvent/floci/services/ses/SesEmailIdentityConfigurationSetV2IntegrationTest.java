@@ -378,6 +378,19 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
         .when().get("/v2/email/identities/" + id).then().statusCode(404);
     }
 
+    @Test
+    @Order(16)
+    void createEmailIdentity_withNonStringEmailIdentity_returns400() {
+        // EmailIdentity is a string; a non-string must be rejected (not coerced into "123"), the same
+        // as a non-string ConfigurationSetName.
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":123}")
+        .when().post("/v2/email/identities").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/123").then().statusCode(404);
+    }
+
     private void drainQueue() {
         for (int i = 0; i < 5; i++) {
             Response r = given().contentType(JSON_10).header("Authorization", SQS_AUTH)
