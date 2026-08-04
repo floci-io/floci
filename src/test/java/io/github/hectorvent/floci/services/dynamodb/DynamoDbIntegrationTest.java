@@ -2587,7 +2587,8 @@ given()
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", containsString("Value must be provided when Exists is true"));
+            .body("message", equalTo("1 validation error detected: One or more parameter values were invalid: "
+                    + "Value must be provided when Exists is true for Attribute: VERSION"));
 
         // Exists:false alongside a Value — contradictory.
         given()
@@ -2606,7 +2607,8 @@ given()
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", containsString("Value cannot be used when Exists is false"));
+            .body("message", equalTo("1 validation error detected: One or more parameter values were invalid: "
+                    + "Value cannot be used when Exists is false for Attribute: VERSION"));
 
         // Exists mixed with the ComparisonOperator form.
         given()
@@ -2630,7 +2632,68 @@ given()
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", containsString("Exists cannot be used with"));
+            .body("message", equalTo("1 validation error detected: One or more parameter values were invalid: "
+                    + "Exists and ComparisonOperator cannot be used together for Attribute: VERSION"));
+
+        // AttributeValueList is only meaningful with a ComparisonOperator, whether or not
+        // Exists is present — and that check takes precedence over the Exists rules.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable7",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"Exists": true, "AttributeValueList": [{"N": "5"}]}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: One or more parameter values were invalid: "
+                    + "AttributeValueList can only be used with a ComparisonOperator for Attribute: VERSION"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable7",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {"AttributeValueList": [{"N": "5"}]}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: One or more parameter values were invalid: "
+                    + "AttributeValueList can only be used with a ComparisonOperator for Attribute: VERSION"));
+
+        // An entry with neither Exists nor Value still needs a Value, reported as "Exists is null".
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable7",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"VERSION": {}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: One or more parameter values were invalid: "
+                    + "Value must be provided when Exists is null for Attribute: VERSION"));
 
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")

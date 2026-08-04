@@ -600,16 +600,18 @@ public class DynamoDbJsonHandler {
     }
 
     /**
-     * Validates every entry of a legacy Expected map before any condition is evaluated,
-     * matching the ExpectedAttributeValue rules documented by DynamoDB:
+     * Validates every entry of a legacy Expected map before any condition is evaluated.
+     * The rules and their precedence mirror ExpectedAttributeValue:
      * <ul>
-     *   <li>{@code Exists: true} requires a {@code Value} — you cannot expect a value to exist
-     *       without saying which value.</li>
-     *   <li>{@code Exists: false} forbids a {@code Value} — you cannot expect an attribute to hold
-     *       a value while also expecting it to be absent.</li>
-     *   <li>{@code Exists} cannot be combined with the {@code ComparisonOperator} /
-     *       {@code AttributeValueList} form.</li>
+     *   <li>{@code AttributeValueList} is only meaningful alongside a {@code ComparisonOperator}.</li>
+     *   <li>{@code Exists} cannot be combined with a {@code ComparisonOperator} — they are
+     *       alternative forms.</li>
+     *   <li>Without a {@code ComparisonOperator}, a {@code Value} is required unless
+     *       {@code Exists: false} asks for plain absence.</li>
+     *   <li>{@code Exists: false} forbids a {@code Value} — an attribute cannot be expected to
+     *       hold a value while also being expected to be absent.</li>
      * </ul>
+     * DynamoDB reports only the first offending entry, so validation stops at the first error.
      */
     private void validateLegacyExpected(JsonNode expected) {
         var fields = expected.fields();
@@ -617,26 +619,33 @@ public class DynamoDbJsonHandler {
             var entry = fields.next();
             String attrName = entry.getKey();
             JsonNode condition = entry.getValue();
-            if (!condition.has("Exists")) {
-                continue;
+            boolean hasComparisonOperator = condition.has("ComparisonOperator");
+            boolean hasExists = condition.has("Exists");
+            boolean hasValue = condition.has("Value");
+
+            if (condition.has("AttributeValueList") && !hasComparisonOperator) {
+                throw legacyExpectedValidationError(
+                        "AttributeValueList can only be used with a ComparisonOperator for Attribute: " + attrName);
             }
-            if (condition.has("ComparisonOperator") || condition.has("AttributeValueList")) {
-                throw new AwsException("ValidationException",
-                        "One or more parameter values were invalid: Exists cannot be used with "
-                                + "ComparisonOperator or AttributeValueList for Attribute: " + attrName, 400);
+            if (hasExists && hasComparisonOperator) {
+                throw legacyExpectedValidationError(
+                        "Exists and ComparisonOperator cannot be used together for Attribute: " + attrName);
             }
-            boolean exists = condition.get("Exists").asBoolean();
-            if (exists && !condition.has("Value")) {
-                throw new AwsException("ValidationException",
-                        "One or more parameter values were invalid: Value must be provided when "
-                                + "Exists is true for Attribute: " + attrName, 400);
+            boolean expectsValue = !hasExists || condition.get("Exists").asBoolean();
+            if (!hasComparisonOperator && expectsValue && !hasValue) {
+                throw legacyExpectedValidationError("Value must be provided when Exists is "
+                        + (hasExists ? "true" : "null") + " for Attribute: " + attrName);
             }
-            if (!exists && condition.has("Value")) {
-                throw new AwsException("ValidationException",
-                        "One or more parameter values were invalid: Value cannot be used when "
-                                + "Exists is false for Attribute: " + attrName, 400);
+            if (!expectsValue && hasValue) {
+                throw legacyExpectedValidationError(
+                        "Value cannot be used when Exists is false for Attribute: " + attrName);
             }
         }
+    }
+
+    private AwsException legacyExpectedValidationError(String detail) {
+        return new AwsException("ValidationException",
+                "1 validation error detected: One or more parameter values were invalid: " + detail, 400);
     }
 
     /**
