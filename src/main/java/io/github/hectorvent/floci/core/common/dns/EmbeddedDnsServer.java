@@ -66,7 +66,7 @@ public class EmbeddedDnsServer {
     // NOT cover "*.X" (e.g. "localhost.floci.io" does NOT resolve bare "*.floci.io").
     //   localhost.localstack.cloud → localhost.localstack.cloud, *.localhost.localstack.cloud
     //   localhost.floci.io         → localhost.floci.io, *.localhost.floci.io
-    static final List<String> BUILTIN_SUFFIXES = List.of(DEFAULT_SUFFIX, LOCALSTACK_SUFFIX);
+    public static final List<String> BUILTIN_SUFFIXES = List.of(DEFAULT_SUFFIX, LOCALSTACK_SUFFIX);
 
     private volatile String serverIp;
     private final SequencedSet<String> suffixes = new LinkedHashSet<>();
