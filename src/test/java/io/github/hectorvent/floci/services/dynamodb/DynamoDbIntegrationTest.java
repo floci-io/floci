@@ -2257,6 +2257,122 @@ given()
     }
 
     @Test
+    void legacyExpectedComparesCollectionValues() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "PK", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Item": {
+                        "PK": {"S": "k1"},
+                        "TAGS": {"SS": ["alpha", "beta"]},
+                        "ITEMS": {"L": [{"N": "1"}, {"S": "two"}]}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // A string set that differs from the stored one must not satisfy the condition.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"TAGS": {"Exists": true, "Value": {"SS": ["alpha", "gamma"]}}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // A list that differs from the stored one must not satisfy the condition.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"ITEMS": {"Exists": true, "Value": {"L": [{"N": "1"}, {"S": "three"}]}}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
+        // Set equality is order-independent, so the same members in another order matches.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {"TAGS": {"Exists": true, "Value": {"SS": ["beta", "alpha"]}}},
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "matched"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.NOTE.S", equalTo("matched"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable8"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void legacyExpectedRejectsInvalidExistsCombinations() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
