@@ -15,6 +15,10 @@ name: Release Cut
 # Maven note: the exec plugin invokes `mvn versions:set`; ubuntu-latest ships
 # a system mvn, which is sufficient for that goal.
 #
+# The toolchain is pinned: .github/release-tooling/package-lock.json is the
+# only source of the semantic-release dependency tree (npm ci --ignore-scripts),
+# so the job that holds the write PAT never resolves mutable versions.
+#
 # Required secrets: GH_TOKEN
 
 on:
@@ -27,6 +31,12 @@ on:
 
 permissions:
   contents: write
+
+# Serialize release cuts: a second dispatch queues behind the first instead of
+# racing it to the same version/tag. No cancel-in-progress — never kill a
+# mid-flight release.
+concurrency:
+  group: release-cut
 
 jobs:
   release:
@@ -51,10 +61,10 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install semantic-release plugins
-        run: npm install --no-save @semantic-release/changelog @semantic-release/exec @semantic-release/git
+      - name: Install the pinned release toolchain
+        run: npm ci --prefix .github/release-tooling --ignore-scripts
 
       - name: Run semantic-release
-        run: npx semantic-release@24 ${{ inputs.dry-run && '--dry-run' || '' }}
+        run: ./.github/release-tooling/node_modules/.bin/semantic-release ${{ inputs.dry-run && '--dry-run' || '' }}
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
