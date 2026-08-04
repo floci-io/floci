@@ -216,16 +216,7 @@ public class EventBridgeHandler {
                         input.isEmpty() ? null : input,
                         inputPath.isEmpty() ? null : inputPath
                 );
-                JsonNode transformerNode = t.path("InputTransformer");
-                if (!transformerNode.isMissingNode() && transformerNode.isObject()) {
-                    Map<String, String> pathsMap = new HashMap<>();
-                    JsonNode pathsNode = transformerNode.path("InputPathsMap");
-                    if (pathsNode.isObject()) {
-                        pathsNode.fields().forEachRemaining(e -> pathsMap.put(e.getKey(), e.getValue().asText()));
-                    }
-                    String template = transformerNode.path("InputTemplate").asText(null);
-                    target.setInputTransformer(new InputTransformer(pathsMap, template));
-                }
+                target.setInputTransformer(InputTransformer.fromJson(t.path("InputTransformer")));
                 JsonNode sqsParamsNode = t.path("SqsParameters");
                 if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
                     String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);

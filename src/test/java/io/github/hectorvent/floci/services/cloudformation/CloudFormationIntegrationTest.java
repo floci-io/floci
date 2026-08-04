@@ -6923,4 +6923,88 @@ class CloudFormationIntegrationTest {
                 .body("endpointConfiguration.vpcEndpointIds", contains("vpce-12345678"));
     }
 
+    @Test
+    void createStack_eventBridgeRuleWithInputTransformer_deliversTransformedBodyToSqs() {
+        String template = """
+            {
+              "Resources": {
+                "TargetQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": { "QueueName": "cfn-it-transform-queue" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-it-transform-rule",
+                    "EventPattern": { "source": ["cfn.transform.test"] },
+                    "Targets": [
+                      {
+                        "Id": "T0",
+                        "Arn": { "Fn::GetAtt": ["TargetQueue", "Arn"] },
+                        "InputTransformer": {
+                          "InputPathsMap": { "e": "$.detail.eventName" },
+                          "InputTemplate": "{\\"e\\":<e>}"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-it-transform-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-it-transform-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The transformer survived CFN provisioning.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-it-transform-rule\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Targets[0].InputTransformer.InputTemplate", equalTo("{\"e\":<e>}"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.PutEvents")
+            .body("""
+                {"Entries":[{"Source":"cfn.transform.test","DetailType":"t",
+                 "Detail":"{\\"eventName\\":\\"site.created\\"}"}]}
+                """)
+        .when().post("/")
+        .then().statusCode(200).body("FailedEntryCount", equalTo(0));
+
+        String getUrlXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "cfn-it-transform-queue")
+        .when().post("/")
+        .then().statusCode(200).extract().body().asString();
+        String queueUrl = getUrlXml.substring(
+                getUrlXml.indexOf("<QueueUrl>") + "<QueueUrl>".length(),
+                getUrlXml.indexOf("</QueueUrl>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("{&quot;e&quot;:&quot;site.created&quot;}"));
+    }
+
 }

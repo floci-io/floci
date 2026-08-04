@@ -236,4 +236,53 @@ class EventBridgeInvokerTest {
         InputTransformer transformer = new InputTransformer(Map.of(), null);
         assertEquals(eventJson, invoker.applyInputTransformer(transformer, eventJson));
     }
+
+    @Test
+    void applyInputTransformer_valuePosition_stringIsQuoted() {
+        String event = "{\"detail\":{\"eventName\":\"site.created\"}}";
+        InputTransformer t = new InputTransformer(
+                java.util.Map.of("e", "$.detail.eventName"), "{\"e\":<e>}");
+        assertEquals("{\"e\":\"site.created\"}", invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputTransformer_valuePosition_objectNumberBoolAsIs() {
+        String event = "{\"detail\":{\"count\":42,\"ok\":true,\"payload\":{\"id\":\"abc\"}}}";
+        InputTransformer t = new InputTransformer(
+                java.util.Map.of("c", "$.detail.count", "o", "$.detail.ok", "p", "$.detail.payload"),
+                "{\"c\":<c>,\"o\":<o>,\"p\":<p>}");
+        assertEquals("{\"c\":42,\"o\":true,\"p\":{\"id\":\"abc\"}}", invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputTransformer_valuePosition_missingIsEmpty() {
+        String event = "{\"detail\":{}}";
+        InputTransformer t = new InputTransformer(
+                java.util.Map.of("e", "$.detail.nope"), "prefix:<e>:suffix");
+        assertEquals("prefix::suffix", invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputTransformer_insideString_interpolatesRaw() {
+        String event = "{\"detail\":{\"user\":\"alice\",\"eventName\":\"site.created\"}}";
+        InputTransformer t = new InputTransformer(
+                java.util.Map.of("user", "$.detail.user", "e", "$.detail.eventName"),
+                "\"<user> did <e>\"");
+        assertEquals("\"alice did site.created\"", invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputTransformer_quotedWholeToken_rawBetweenQuotes() {
+        String event = "{\"detail\":{\"eventName\":\"site.created\"}}";
+        InputTransformer t = new InputTransformer(
+                java.util.Map.of("e", "$.detail.eventName"), "{\"e\":\"<e>\"}");
+        assertEquals("{\"e\":\"site.created\"}", invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputTransformer_unknownVarLeftLiteral() {
+        String event = "{\"detail\":{}}";
+        InputTransformer t = new InputTransformer(java.util.Map.of(), "{\"x\":<unknown>}");
+        assertEquals("{\"x\":<unknown>}", invoker.applyInputTransformer(t, event));
+    }
 }
