@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -8,8 +10,17 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Wire-protocol regression for floci-io/floci#1675: a Query against an index whose sort key is
@@ -165,5 +176,108 @@ class DynamoDbCompositeSortKeyQueryIntegrationTest {
             .body("Items[0].createdAt.S", equalTo("2026-07-14T00:00:03Z"))
             .body("Items[1].createdAt.S", equalTo("2026-07-14T00:00:02Z"))
             .body("Items[2].createdAt.S", equalTo("2026-07-14T00:00:01Z"));
+    }
+
+    /**
+     * A paginated Query over a composite-sort-key index must surface a LastEvaluatedKey that carries
+     * EVERY sort-key component, not just the first RANGE attribute. Emitting only {@code state}
+     * (identical across these rows) loses composite key identity: the cursor no longer pins the row
+     * it stopped on. This is the regression from PR review comment r3710297799 — pre-fix the cursor
+     * omitted {@code createdAt}.
+     */
+    @Test
+    @Order(5)
+    void paginatedQueryEmitsFullCompositeCursor() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "IndexName": "%s",
+                    "KeyConditionExpression": "%s",
+                    "ExpressionAttributeNames": {"#st": "state"},
+                    "ExpressionAttributeValues": %s,
+                    "ScanIndexForward": true,
+                    "Limit": 1
+                }
+                """.formatted(TABLE, INDEX, KEY_CONDITION, EXPRESSION_ATTRIBUTE_VALUES))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Count", equalTo(1))
+            // First ascending row by the full composite key is createdAt=:01 (requestId b).
+            .body("Items[0].createdAt.S", equalTo("2026-07-14T00:00:01Z"))
+            // Cursor pins that exact row: index keys (both components), plus the base-table key.
+            .body("LastEvaluatedKey.memberName.S", equalTo("alice"))
+            .body("LastEvaluatedKey.state.S", equalTo("ACTIVE"))
+            .body("LastEvaluatedKey.createdAt.S", equalTo("2026-07-14T00:00:01Z"))
+            .body("LastEvaluatedKey.requestId.S", notNullValue());
+    }
+
+    /**
+     * Walking every page with Limit=1 must return all three rows in full composite order, each
+     * exactly once, with the cursor advancing on every page (no repeat, no skip).
+     */
+    @Test
+    @Order(6)
+    void paginatedQueryWalksAllRowsExactlyOnceInCompositeOrder() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        List<String> collected = new ArrayList<>();
+        Set<String> seenCursors = new HashSet<>();
+        JsonNode exclusiveStartKey = null;
+        int pages = 0;
+
+        do {
+            String startClause = exclusiveStartKey == null
+                ? ""
+                : ",\n\"ExclusiveStartKey\": " + mapper.writeValueAsString(exclusiveStartKey);
+            String body = """
+                {
+                    "TableName": "%s",
+                    "IndexName": "%s",
+                    "KeyConditionExpression": "%s",
+                    "ExpressionAttributeNames": {"#st": "state"},
+                    "ExpressionAttributeValues": %s,
+                    "ScanIndexForward": true,
+                    "Limit": 1%s
+                }
+                """.formatted(TABLE, INDEX, KEY_CONDITION, EXPRESSION_ATTRIBUTE_VALUES, startClause);
+
+            String responseBody = given()
+                .header("X-Amz-Target", "DynamoDB_20120810.Query")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body(body)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+
+            JsonNode root = mapper.readTree(responseBody);
+            pages++;
+            for (JsonNode item : root.path("Items")) {
+                collected.add(item.path("createdAt").path("S").asText());
+            }
+
+            JsonNode lek = root.path("LastEvaluatedKey");
+            if (lek.isMissingNode() || lek.isNull()) {
+                exclusiveStartKey = null;
+            } else {
+                assertNotNull(lek.get("createdAt"),
+                        "LastEvaluatedKey missing composite component createdAt: " + lek);
+                String cursor = lek.toString();
+                assertTrue(seenCursors.add(cursor),
+                        "LastEvaluatedKey repeated — pagination did not advance: " + cursor);
+                exclusiveStartKey = lek;
+            }
+        } while (exclusiveStartKey != null && pages < 10);
+
+        assertEquals(List.of(
+                "2026-07-14T00:00:01Z",
+                "2026-07-14T00:00:02Z",
+                "2026-07-14T00:00:03Z"), collected,
+                "Expected all rows once, in full composite order");
     }
 }
