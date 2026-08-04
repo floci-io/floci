@@ -93,8 +93,9 @@ public class SesController {
             if (emailIdentity == null || emailIdentity.isBlank()) {
                 throw new AwsException("BadRequestException", "EmailIdentity is required.", 400);
             }
-            // ConfigurationSetName is a String; AWS rejects a non-string with a 400 (empty body).
-            // Don't coerce via asText (which would turn 123 into "123").
+            // ConfigurationSetName must be a String; AWS rejects a non-string, so reject it here too
+            // rather than coercing via asText (which would turn 123 into "123"). Floci surfaces this
+            // as a 400 SerializationException, rendered as a JSON error body by AwsExceptionMapper.
             JsonNode configSetNode = request.path("ConfigurationSetName");
             String configurationSetName = null;
             if (!configSetNode.isMissingNode() && !configSetNode.isNull()) {
