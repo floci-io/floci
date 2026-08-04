@@ -109,6 +109,7 @@ nav:
     - ECR: services/ecr.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
     - EKS: services/eks.md
+    - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
     - Lightsail: services/lightsail.md

@@ -157,6 +157,8 @@ class MwaaServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> mwaaService.createEnvironment("dup-env", createRequest("arn:aws:s3:::my-bucket", "dags")));
         assertEquals(400, ex.getHttpStatus());
+        // CreateEnvironment's botocore model declares no "already exists" shape.
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 
     @Test

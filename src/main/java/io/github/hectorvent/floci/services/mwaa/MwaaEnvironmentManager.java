@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -93,7 +94,7 @@ public class MwaaEnvironmentManager {
         String dbPassword = generateSecret(24);
         environment.setDbPassword(dbPassword);
 
-        String dbContainerName = dbContainerName(name);
+        String dbContainerName = dbContainerName(config, name);
         String dbVolume = dbContainerName;
         lifecycleManager.removeIfExists(dbContainerName);
         lifecycleManager.ensureVolume(dbVolume);
@@ -128,7 +129,7 @@ public class MwaaEnvironmentManager {
     void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
                                byte[] startupScriptContent) {
         String name = environment.getName();
-        String airflowContainerName = airflowContainerName(name);
+        String airflowContainerName = airflowContainerName(config, name);
         String dagsVolume = airflowContainerName + "-dags";
         String logsVolume = airflowContainerName + "-logs";
 
@@ -284,8 +285,8 @@ public class MwaaEnvironmentManager {
         if (environment.getDbContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
         }
-        String airflowContainerName = airflowContainerName(name);
-        lifecycleManager.removeVolume(dbContainerName(name));
+        String airflowContainerName = airflowContainerName(config, name);
+        lifecycleManager.removeVolume(dbContainerName(config, name));
         lifecycleManager.removeVolume(airflowContainerName + "-dags");
         lifecycleManager.removeVolume(airflowContainerName + "-logs");
         LOG.infov("Stopped MWAA containers for environment {0}", name);
@@ -332,12 +333,16 @@ public class MwaaEnvironmentManager {
         return execInContainer(airflowContainerId, new String[]{"sh", "-c", "airflow " + cliCommand});
     }
 
-    static String dbContainerName(String environmentName) {
-        return "floci-mwaa-" + environmentName + "-db";
+    /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
+     *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
+     *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
+     *  that as "no namespace configured" and returns the base name unchanged. */
+    static String dbContainerName(EmulatorConfig config, String environmentName) {
+        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentName + "-db");
     }
 
-    static String airflowContainerName(String environmentName) {
-        return "floci-mwaa-" + environmentName + "-airflow";
+    static String airflowContainerName(EmulatorConfig config, String environmentName) {
+        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentName + "-airflow");
     }
 
     /**

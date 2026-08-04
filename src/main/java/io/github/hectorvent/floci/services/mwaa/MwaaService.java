@@ -102,7 +102,10 @@ public class MwaaService implements TagHandler {
             throw new AwsException("ValidationException", "Environment name is required", 400);
         }
         if (storage.get(name).isPresent()) {
-            throw new AwsException("ResourceAlreadyExistsException",
+            // CreateEnvironment's botocore model declares only ServiceUnavailableException,
+            // ValidationException, and InternalServerException — no "already exists" shape — so an
+            // SDK client can't map a ResourceAlreadyExistsException here.
+            throw new AwsException("ValidationException",
                     "Environment already exists: " + name, 400);
         }
 
