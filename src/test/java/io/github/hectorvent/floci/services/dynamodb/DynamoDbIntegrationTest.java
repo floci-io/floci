@@ -2364,6 +2364,51 @@ given()
         .then()
             .statusCode(200);
 
+        // NE is the inverse: a set that differs from the stored one satisfies the condition.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {
+                        "TAGS": {
+                            "ComparisonOperator": "NE",
+                            "AttributeValueList": [{"SS": ["alpha", "gamma"]}]
+                        }
+                    },
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "differs"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // ...and a set equal to the stored one does not.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable8",
+                    "Key": {"PK": {"S": "k1"}},
+                    "Expected": {
+                        "TAGS": {
+                            "ComparisonOperator": "NE",
+                            "AttributeValueList": [{"SS": ["beta", "alpha"]}]
+                        }
+                    },
+                    "AttributeUpdates": {"NOTE": {"Action": "PUT", "Value": {"S": "x"}}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+
         // Set equality is order-independent, so the same members in another order matches.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")

@@ -2438,9 +2438,10 @@ public class DynamoDbService {
                 yield attributeValuesEqual(attrValue, compareAttr);
             }
             case "NE" -> {
-                if (attrValue == null) yield true;
-                if (actual == null || compareValue == null) yield true;
-                yield !actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield true;
+                }
+                yield !attributeValuesEqual(attrValue, compareAttr);
             }
             case "NULL" -> attrValue == null;
             case "NOT_NULL" -> attrValue != null;
