@@ -45,6 +45,7 @@ public class CloudWatchLogsHandler {
             case "FilterLogEvents" -> handleFilterLogEvents(request, region);
             case "PutRetentionPolicy" -> handlePutRetentionPolicy(request, region);
             case "DeleteRetentionPolicy" -> handleDeleteRetentionPolicy(request, region);
+            case "PutLogGroupDeletionProtection" -> handlePutLogGroupDeletionProtection(request, region);
             case "TagLogGroup" -> handleTagLogGroup(request, region);
             case "UntagLogGroup" -> handleUntagLogGroup(request, region);
             case "ListTagsLogGroup" -> handleListTagsLogGroup(request, region);
@@ -76,6 +77,20 @@ public class CloudWatchLogsHandler {
     private Response handleDeleteLogGroup(JsonNode request, String region) {
         String name = request.path("logGroupName").asText();
         logsService.deleteLogGroup(name, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * Floci does not retain log-group deletion protection state, but the AWS
+     * control plane requires callers to disable it before deleting a group.
+     * Accepting the operation keeps that lifecycle sequence protocol-compatible.
+     */
+    private Response handlePutLogGroupDeletionProtection(JsonNode request, String region) {
+        String identifier = request.path("logGroupIdentifier").asText(null);
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("InvalidParameterException", "logGroupIdentifier is required", 400);
+        }
+        resolveLogGroupName(request);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

@@ -99,6 +99,17 @@ class CloudWatchLogsHandlerTest {
     }
 
     @Test
+    void putLogGroupDeletionProtectionAcceptsTheDeleteLifecycleOperation() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", GROUP);
+        request.put("deletionProtectionEnabled", false);
+
+        Response response = handler.handle("PutLogGroupDeletionProtection", request, REGION);
+
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
     void describeLogStreamsByLogGroupIdentifierArnWithWildcardSuffix() {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("logGroupIdentifier", GROUP_ARN_WILDCARD);
