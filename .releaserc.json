@@ -1,11 +1,6 @@
 {
   "tagFormat": "${version}",
-  "branches": [
-    {
-      "name": "release/+([0-9])?(.{+([0-9]),x}).x",
-      "channel": "${name.replace(/^release\\//,'')}"
-    }
-  ],
+  "branches": ["main"],
   "plugins": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",

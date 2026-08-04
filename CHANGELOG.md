@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **release:** one-button releases — new "Release Cut" workflow (`workflow_dispatch`, with a dry-run option) runs semantic-release from `main`: bumps `pom.xml`, writes `CHANGELOG.md`, commits, tags, and creates the GitHub Release; the tag then triggers the existing publishing workflow. `release/x.y.x` branches are retired for now
+- **release:** versioned images are now also published to Amazon ECR Public (`public.ecr.aws/floci/floci:x.y.z`, `latest`, `x.y.z-compat`, `latest-compat`), mirroring the nightly ECR Public publishing
 - **apigateway:** support the reserved `floci:override-id` tag on `CreateRestApi` (v1) and `CreateApi` (v2) to pin the generated API ID, unifying custom IDs with the tag KMS and Cognito already use. Override keys are stripped from the returned tags, validated (non-blank, no whitespace/control characters and no `/`, `?`, `#`) and rejected on `TagResource` with `BadRequestException`, which is what both services declare. The older API-Gateway-specific `_custom_id_` tag still works as a deprecated fallback and is now stripped too; `floci:override-id` wins when both are present. Creating an API whose override ID already exists in the region is rejected with `ConflictException` (409) instead of overwriting the existing API ([#1593](https://github.com/floci-io/floci/pull/1593))
 
 ### Changed

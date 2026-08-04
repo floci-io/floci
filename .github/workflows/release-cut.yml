@@ -1,0 +1,60 @@
+name: Release Cut
+
+# One-button release from main.
+#
+# Manually dispatched: semantic-release analyzes the Conventional Commits on
+# main, bumps pom.xml (via the exec plugin running `mvn versions:set`), writes
+# CHANGELOG.md, commits those files, tags the release (tagFormat: ${version}),
+# and creates the GitHub Release. The tag push then fires release.yml exactly
+# as a manual tag push does today.
+#
+# GH_TOKEN must be a fine-grained PAT with contents:write. The default
+# GITHUB_TOKEN cannot be used: tags pushed with it do not trigger other
+# workflows (GitHub's recursion guard), so release.yml would never run.
+#
+# Maven note: the exec plugin invokes `mvn versions:set`; ubuntu-latest ships
+# a system mvn, which is sufficient for that goal.
+#
+# Required secrets: GH_TOKEN
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Dry run (compute the next version and release notes without releasing)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Cut release from main
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5.6.0
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install semantic-release plugins
+        run: npm install --no-save @semantic-release/changelog @semantic-release/exec @semantic-release/git
+
+      - name: Run semantic-release
+        run: npx semantic-release@24 ${{ inputs.dry-run && '--dry-run' || '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
