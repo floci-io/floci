@@ -404,10 +404,18 @@ public class ContainerLauncher {
 
         // Then SIGTERM the container. The runtime library's default SIGTERM handler exits
         // the process while the runtime API socket is still up, matching real AWS Lambda's
-        // shutdown flow. Grace window follows AWS's documented Shutdown-phase limits:
-        // 2s when at least one extension is registered, else the runtime's own 300ms
-        // sub-budget. Docker's timeout is expressed in whole seconds, so 300ms rounds
-        // up to 1s — still an order of magnitude tighter than the pre-fix default.
+        // shutdown flow.
+        //
+        // stopTimeoutSeconds is the ceiling docker waits for PID 1 to exit before SIGKILL,
+        // not a grace floor: the runtime typically exits promptly, so `docker stop`
+        // returns shortly after and this value rarely matters end-to-end. Sized against
+        // AWS's documented Shutdown-phase tiers as a defensive upper bound only — 2s
+        // when at least one extension is registered (matching AWS's 2000ms
+        // external-extensions budget), else 1s. NOTE: extensions run as sibling
+        // `docker exec`s (not children of PID 1) and are killed when the container
+        // exits; the 2s ceiling does not provide a guaranteed grace window for
+        // extension shutdown work — only that we will not preempt PID 1 for at least
+        // that long if it happens to be slow.
         int stopTimeoutSeconds = server.hasRegisteredExtensions() ? 2 : 1;
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream(),
                 stopTimeoutSeconds);
