@@ -204,6 +204,16 @@ class KinesisAnalyticsV2ServiceTest {
     }
 
     @Test
+    void createApplicationStoresEnvironmentProperties() {
+        Map<String, Map<String, String>> groups = Map.of(
+                "ProducerConfigProperties", Map.of("aws.region", "us-west-2"));
+        FlinkApplication app = service.createApplication("props", "FLINK-1_18", ROLE, null, null,
+                null, null, null, 1, null, groups);
+        assertEquals("us-west-2",
+                app.getEnvironmentProperties().get("ProducerConfigProperties").get("aws.region"));
+    }
+
+    @Test
     void createApplicationRejectsTooManyTags() {
         Map<String, String> tooMany = new HashMap<>();
         for (int i = 0; i < 51; i++) {

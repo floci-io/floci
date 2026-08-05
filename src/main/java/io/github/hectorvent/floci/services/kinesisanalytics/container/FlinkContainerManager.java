@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.kinesisanalytics.container;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -17,9 +20,14 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
@@ -54,6 +62,7 @@ public class FlinkContainerManager {
     private final RegionResolver regionResolver;
     private final S3Service s3Service;
     private final FlinkRestClient flinkRest;
+    private final ObjectMapper objectMapper;
 
     private final Map<String, Closeable> logStreams = new ConcurrentHashMap<>();
     private final Map<String, String> containerIds = new ConcurrentHashMap<>();
@@ -71,13 +80,15 @@ public class FlinkContainerManager {
                                  EmulatorConfig config,
                                  RegionResolver regionResolver,
                                  S3Service s3Service,
-                                 FlinkRestClient flinkRest) {
+                                 FlinkRestClient flinkRest,
+                                 ObjectMapper objectMapper) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.containerDetector = containerDetector;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
         this.s3Service = s3Service;
         this.flinkRest = flinkRest;
     }
@@ -168,8 +179,73 @@ public class FlinkContainerManager {
                 stopCluster(app);
                 throw e;
             }
+            // A real MSF environment always provides this file to every Flink process (JobManager and
+            // TaskManager) so KinesisAnalyticsRuntime.getApplicationProperties() never has to handle a
+            // missing file, even when no EnvironmentProperties were configured (then it's an empty
+            // array). User code's main() runs on the JobManager during job submission; a sink/source's
+            // open() can run on either, so both containers get it.
+            // /etc/flink does not exist in the stock apache/flink image (confirmed against the real
+            // image) and the container's non-root "flink" user can't create it — but naming the tar
+            // entry "flink/application_properties.json" and extracting into the existing /etc lets the
+            // archive extraction itself create the subdirectory, which the daemon-level copy API can do
+            // even though the in-container user couldn't (verified live: root:root 775, world-readable).
+            byte[] propertiesJson = applicationPropertiesJson(app);
+            copyFileIntoContainer(jm.containerId(), "/etc", "flink/application_properties.json", propertiesJson);
+            copyFileIntoContainer(app.getTaskManagerContainerId(), "/etc", "flink/application_properties.json",
+                    propertiesJson);
             pendingJars.put(app.getApplicationName(), jarBytes);
             submissionFailed.remove(app.getApplicationName());
+        }
+    }
+
+    /** Builds {@code /etc/flink/application_properties.json} exactly matching the real MSF/KDA runtime
+     *  file shape: a JSON array of {@code {PropertyGroupId, PropertyMap}} objects, the same shape as
+     *  the AWS API's own {@code EnvironmentProperties.PropertyGroups}. Package-private (not private)
+     *  so FlinkContainerManagerTest can assert on the JSON shape directly. */
+    byte[] applicationPropertiesJson(FlinkApplication app) {
+        ArrayNode root = objectMapper.createArrayNode();
+        app.getEnvironmentProperties().forEach((groupId, properties) -> {
+            ObjectNode group = root.addObject();
+            group.put("PropertyGroupId", groupId);
+            ObjectNode map = group.putObject("PropertyMap");
+            properties.forEach(map::put);
+        });
+        try {
+            return objectMapper.writeValueAsBytes(root);
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not serialize application_properties.json", e);
+        }
+    }
+
+    private void copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content) {
+        if (containerId == null) {
+            return;
+        }
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(relativePath, content)))
+                    .withRemotePath(remoteDir)
+                    .exec();
+        } catch (Exception e) {
+            LOG.warnv("Could not copy {0} into Flink container {1}: {2}", relativePath, containerId, e.getMessage());
+        }
+    }
+
+    private static byte[] tarSingleFile(String entryName, byte[] content) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
+                TarArchiveEntry entry = new TarArchiveEntry(entryName);
+                entry.setSize(content.length);
+                entry.setMode(0644);
+                tar.putArchiveEntry(entry);
+                tar.write(content);
+                tar.closeArchiveEntry();
+            }
+            return out.toByteArray();
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not build in-memory tar for " + entryName, e);
         }
     }
 

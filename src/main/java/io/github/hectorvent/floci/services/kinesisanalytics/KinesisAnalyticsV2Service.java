@@ -104,6 +104,17 @@ public class KinesisAnalyticsV2Service {
                                               String applicationMode, String codeS3Bucket, String codeS3Key,
                                               String codeS3ObjectVersion, int parallelism,
                                               Map<String, String> tags) {
+        return createApplication(applicationName, runtimeEnvironment, serviceExecutionRole,
+                applicationDescription, applicationMode, codeS3Bucket, codeS3Key, codeS3ObjectVersion,
+                parallelism, tags, null);
+    }
+
+    public FlinkApplication createApplication(String applicationName, String runtimeEnvironment,
+                                              String serviceExecutionRole, String applicationDescription,
+                                              String applicationMode, String codeS3Bucket, String codeS3Key,
+                                              String codeS3ObjectVersion, int parallelism,
+                                              Map<String, String> tags,
+                                              Map<String, Map<String, String>> environmentProperties) {
         if (applicationName == null || applicationName.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ApplicationName is required", 400);
         }
@@ -142,6 +153,9 @@ public class KinesisAnalyticsV2Service {
         app.setParallelism(parallelism < 1 ? 1 : parallelism);
         if (tags != null) {
             app.setTags(new LinkedHashMap<>(tags));
+        }
+        if (environmentProperties != null) {
+            app.setEnvironmentProperties(new LinkedHashMap<>(environmentProperties));
         }
 
         storage.put(applicationName, app);

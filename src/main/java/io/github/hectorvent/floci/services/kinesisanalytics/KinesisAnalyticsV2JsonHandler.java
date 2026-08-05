@@ -68,10 +68,13 @@ public class KinesisAnalyticsV2JsonHandler {
         String codeVersion = s3.path("ObjectVersion").asText(null);
         int parallelism = appConfig.path("FlinkApplicationConfiguration")
                 .path("ParallelismConfiguration").path("Parallelism").asInt(1);
+        Map<String, Map<String, String>> environmentProperties =
+                parsePropertyGroups(appConfig.path("EnvironmentProperties").path("PropertyGroups"));
 
         FlinkApplication app = service.createApplication(applicationName, runtimeEnvironment,
                 serviceExecutionRole, applicationDescription, applicationMode,
-                codeBucket, codeKey, codeVersion, parallelism, parseTags(request.path("Tags")));
+                codeBucket, codeKey, codeVersion, parallelism, parseTags(request.path("Tags")),
+                environmentProperties);
         return applicationDetailResponse(app);
     }
 
@@ -248,6 +251,37 @@ public class KinesisAnalyticsV2JsonHandler {
                 .put("Parallelism", app.getParallelism())
                 .put("CurrentParallelism", app.getParallelism());
 
+        if (!app.getEnvironmentProperties().isEmpty()) {
+            ArrayNode groups = config.putObject("EnvironmentPropertyDescriptions")
+                    .putArray("PropertyGroupDescriptions");
+            app.getEnvironmentProperties().forEach((groupId, properties) -> {
+                ObjectNode group = groups.addObject();
+                group.put("PropertyGroupId", groupId);
+                ObjectNode map = group.putObject("PropertyMap");
+                properties.forEach(map::put);
+            });
+        }
+
         return config;
+    }
+
+    /** {@code ApplicationConfiguration.EnvironmentProperties.PropertyGroups}: a list of
+     *  {@code {PropertyGroupId, PropertyMap}} objects, keyed by PropertyGroupId internally since
+     *  that's how a Flink app looks a group up via {@code KinesisAnalyticsRuntime.getApplicationProperties()}. */
+    private Map<String, Map<String, String>> parsePropertyGroups(JsonNode propertyGroupsNode) {
+        Map<String, Map<String, String>> groups = new LinkedHashMap<>();
+        if (propertyGroupsNode != null && propertyGroupsNode.isArray()) {
+            for (JsonNode group : propertyGroupsNode) {
+                String groupId = group.path("PropertyGroupId").asText(null);
+                if (groupId == null) {
+                    continue;
+                }
+                Map<String, String> properties = new LinkedHashMap<>();
+                group.path("PropertyMap").fields().forEachRemaining(
+                        entry -> properties.put(entry.getKey(), entry.getValue().asText(null)));
+                groups.put(groupId, properties);
+            }
+        }
+        return groups;
     }
 }

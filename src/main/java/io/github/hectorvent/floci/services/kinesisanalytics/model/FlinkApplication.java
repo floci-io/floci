@@ -85,6 +85,12 @@ public class FlinkApplication {
     // like containerId/accountId above, not part of the wire response the handler builds.
     private Map<String, String> tags = new LinkedHashMap<>();
 
+    // ApplicationConfiguration.EnvironmentProperties.PropertyGroups, keyed by PropertyGroupId (the
+    // key a Flink app looks it up by via KinesisAnalyticsRuntime.getApplicationProperties()). Echoed
+    // back on DescribeApplication (unlike tags) as ApplicationConfigurationDescription
+    // .EnvironmentPropertyDescriptions.PropertyGroupDescriptions, built explicitly by the handler.
+    private Map<String, Map<String, String>> environmentProperties = new LinkedHashMap<>();
+
     public FlinkApplication() {}
 
     public FlinkApplication(String applicationName, String applicationArn,
@@ -160,6 +166,11 @@ public class FlinkApplication {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? tags : new LinkedHashMap<>(); }
+
+    public Map<String, Map<String, String>> getEnvironmentProperties() { return environmentProperties; }
+    public void setEnvironmentProperties(Map<String, Map<String, String>> environmentProperties) {
+        this.environmentProperties = environmentProperties != null ? environmentProperties : new LinkedHashMap<>();
+    }
 
     /** True when the application has a code artifact to deploy (S3 JAR), i.e. a job should run. */
     public boolean hasCode() {

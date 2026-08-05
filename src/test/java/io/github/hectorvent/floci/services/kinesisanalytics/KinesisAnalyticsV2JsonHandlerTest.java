@@ -153,6 +153,40 @@ class KinesisAnalyticsV2JsonHandlerTest {
     }
 
     @Test
+    void createWithEnvironmentPropertiesEchoesThemOnDescribe() {
+        ObjectNode s3 = MAPPER.createObjectNode();
+        s3.put("BucketARN", "arn:aws:s3:::flink-code");
+        s3.put("FileKey", "app.jar");
+        ObjectNode codeCfg = MAPPER.createObjectNode();
+        codeCfg.set("CodeContent", MAPPER.createObjectNode().set("S3ContentLocation", s3));
+        ObjectNode propertyGroup = MAPPER.createObjectNode();
+        propertyGroup.put("PropertyGroupId", "ProducerConfigProperties");
+        propertyGroup.set("PropertyMap", MAPPER.createObjectNode().put("aws.region", "us-west-2"));
+        ObjectNode envProps = MAPPER.createObjectNode();
+        envProps.putArray("PropertyGroups").add(propertyGroup);
+        ObjectNode appCfg = MAPPER.createObjectNode();
+        appCfg.set("ApplicationCodeConfiguration", codeCfg);
+        appCfg.set("EnvironmentProperties", envProps);
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("ApplicationName", "envprops");
+        req.put("RuntimeEnvironment", "FLINK-1_18");
+        req.put("ServiceExecutionRole", ROLE);
+        req.set("ApplicationConfiguration", appCfg);
+        assertThat(handler.handle("CreateApplication", req, REGION).getStatus(), is(200));
+
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("ApplicationName", "envprops");
+        ObjectNode detail = (ObjectNode) entity(handler.handle("DescribeApplication", describe, REGION))
+                .get("ApplicationDetail");
+        var groups = detail.get("ApplicationConfigurationDescription")
+                .get("EnvironmentPropertyDescriptions").get("PropertyGroupDescriptions");
+        assertEquals(1, groups.size());
+        assertEquals("ProducerConfigProperties", groups.get(0).get("PropertyGroupId").asText());
+        assertEquals("us-west-2", groups.get(0).get("PropertyMap").get("aws.region").asText());
+    }
+
+    @Test
     void unsupportedActionReturns400() {
         Response resp = handler.handle("BogusAction", MAPPER.createObjectNode(), REGION);
         assertThat(resp.getStatus(), is(400));

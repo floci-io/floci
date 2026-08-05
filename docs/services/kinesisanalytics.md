@@ -74,7 +74,35 @@ aws kinesisanalyticsv2 describe-application --application-name jobdemo  # Applic
 ```
 
 The job's main class is taken from the JAR's manifest (as in AWS Managed Flink). Not yet emulated:
-`EnvironmentProperties` injection, snapshots/savepoints, and in-place code updates.
+snapshots/savepoints and in-place code updates.
+
+### Runtime properties (`EnvironmentProperties`)
+
+Pass `ApplicationConfiguration.EnvironmentProperties.PropertyGroups` on `CreateApplication` to configure
+your application without recompiling it — exactly as with real AWS. Floci writes them to
+`/etc/flink/application_properties.json` inside **both** the JobManager and TaskManager containers
+before the job runs, the same well-known path real Managed Service for Apache Flink uses, so a JAR
+written against `KinesisAnalyticsRuntime.getApplicationProperties()` picks them up unmodified:
+
+```bash
+aws kinesisanalyticsv2 create-application \
+  --application-name jobdemo --runtime-environment FLINK-1_18 \
+  --service-execution-role arn:aws:iam::000000000000:role/x \
+  --application-configuration '{
+    "ApplicationCodeConfiguration": {
+      "CodeContent": { "S3ContentLocation": {
+        "BucketARN": "arn:aws:s3:::flink-code", "FileKey": "app.jar" } },
+      "CodeContentType": "ZIPFILE" },
+    "EnvironmentProperties": {
+      "PropertyGroups": [
+        { "PropertyGroupId": "ProducerConfigProperties",
+          "PropertyMap": { "aws.region": "us-west-2", "flink.stream.initpos": "LATEST" } }
+      ] }
+  }'
+```
+
+`DescribeApplication` echoes them back under
+`ApplicationConfigurationDescription.EnvironmentPropertyDescriptions.PropertyGroupDescriptions`.
 
 ## Supported runtimes
 
