@@ -206,6 +206,43 @@ class IamServiceTest {
     }
 
     @Test
+    void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
+        IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        iamService.updateAssumeRolePolicy("LambdaExec", newDoc, role.getRoleId());
+
+        assertEquals(newDoc, iamService.getRole("LambdaExec").getAssumeRolePolicyDocument());
+    }
+
+    @Test
+    void updateAssumeRolePolicyWithNullExpectedIdSkipsCheck() {
+        iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        iamService.updateAssumeRolePolicy("LambdaExec", newDoc, null);
+
+        assertEquals(newDoc, iamService.getRole("LambdaExec").getAssumeRolePolicyDocument());
+    }
+
+    @Test
+    void updateAssumeRolePolicyRejectsMismatchedExpectedId() {
+        // github.com/floci-io/floci/issues/2084 (Greptile follow-up) — if the role named here was
+        // deleted and recreated under the same name since the caller last verified its identity,
+        // the recreated role has a different RoleId. The update must be refused rather than
+        // silently applied to a role the caller never actually verified owning.
+        IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        String originalDoc = role.getAssumeRolePolicyDocument();
+        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.updateAssumeRolePolicy("LambdaExec", newDoc, "AROAWRONGID"));
+        assertEquals("EntityAlreadyExists", ex.getErrorCode());
+        assertEquals(originalDoc, iamService.getRole("LambdaExec").getAssumeRolePolicyDocument(),
+                "rejected update must not have changed the role's trust policy");
+    }
+
+    @Test
     void deleteRoleWithAttachedPolicyFails() {
         iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
         String policyArn = iamService.createPolicy("P", "/", null, "{}", null).getArn();

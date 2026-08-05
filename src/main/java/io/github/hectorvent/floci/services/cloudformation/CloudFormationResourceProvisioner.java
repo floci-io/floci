@@ -1968,6 +1968,13 @@ public class CloudFormationResourceProvisioner {
 
         IamRole role;
         boolean createdRole = false;
+        // Set only on the adoption path, to the role's trust policy (and verified RoleId) as they
+        // were before this attempt touched them. Lets a later failure (e.g. bad ManagedPolicyArns)
+        // restore the trust policy below, so a rolled-back update doesn't leave it changed despite
+        // UPDATE_ROLLBACK_COMPLETE - and restore it onto the *same verified role*, not onto a
+        // replacement that took the name in the meantime.
+        String priorAssumeRolePolicyDocument = null;
+        String priorAssumeRoleId = null;
         try {
             role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, 3600, Map.of());
             createdRole = true;
@@ -1987,6 +1994,22 @@ public class CloudFormationResourceProvisioner {
                 r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
                 throw e;
             }
+            // createRole() only runs on first create; adopting an existing role on update must
+            // still apply this template's current AssumeRolePolicyDocument, or a changed trust
+            // policy is silently dropped while the stack still reports UPDATE_COMPLETE.
+            //
+            // Deliberately not re-fetching the role afterward: everything read from `role` below
+            // (Arn, RoleId, AttachedPolicyArns) is unaffected by a trust-policy update, and a
+            // failing re-fetch here would escape before the failure-cleanup block below can
+            // restore the trust policy, leaving the new document active despite a rolled-back
+            // update.
+            // Pass existingRoleId through so IamService re-verifies identity atomically with the
+            // write, closing the gap between the check above and this call: a role deleted and
+            // recreated under the same name in between would otherwise silently receive an update
+            // meant for the role this stack actually owns.
+            priorAssumeRolePolicyDocument = role.getAssumeRolePolicyDocument();
+            priorAssumeRoleId = existingRoleId;
+            iamService.updateAssumeRolePolicy(resolvedRoleName, assumeDoc, existingRoleId);
         }
 
         r.setPhysicalId(resolvedRoleName);
@@ -1995,6 +2018,8 @@ public class CloudFormationResourceProvisioner {
 
         Set<String> originalPolicyArns = new HashSet<>(role.getAttachedPolicyArns());
         LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
+        final String documentToRestore = priorAssumeRolePolicyDocument;
+        final String roleIdToRestore = priorAssumeRoleId;
         try {
             for (String policyArn : managedPolicyArns) {
                 iamService.attachRolePolicy(resolvedRoleName, policyArn);
@@ -2010,6 +2035,16 @@ public class CloudFormationResourceProvisioner {
                 String cleanupDescription = "detach policy " + policyArn + " from role " + resolvedRoleName;
                 if (!attemptIamCleanup(failure, cleanupDescription,
                         () -> iamService.detachRolePolicy(resolvedRoleName, policyArn))) {
+                    cleanupSucceeded = false;
+                }
+            }
+            if (documentToRestore != null) {
+                // ID-verified, same as the primary write above: if the role was deleted and
+                // recreated under this name in between, this must not write the restored document
+                // onto the replacement.
+                if (!attemptIamCleanup(failure, "restore prior trust policy on role " + resolvedRoleName,
+                        () -> iamService.updateAssumeRolePolicy(
+                                resolvedRoleName, documentToRestore, roleIdToRestore))) {
                     cleanupSucceeded = false;
                 }
             }
