@@ -1330,10 +1330,15 @@ public class SesService {
 
     public void deleteReceiptRuleSet(String name, String region) {
         requireRuleSetName(name);
-        // AWS is idempotent here: deleting a non-existent rule set succeeds without error. Hold the
-        // lock so a concurrent set-active/clear (which scans and re-puts active sets) can't resurrect
-        // the rule set we just deleted.
+        // Hold the lock so the active-check-then-delete is atomic and a concurrent set-active/clear
+        // (which scans and re-puts active sets) can't resurrect the rule set we just deleted.
         synchronized (receiptRuleSetLock) {
+            ReceiptRuleSet existing = receiptRuleSetStore.get(receiptRuleSetKey(region, name)).orElse(null);
+            if (existing != null && existing.isActive()) {
+                // AWS rejects deleting the active rule set (verified: CannotDelete / 400).
+                throw new AwsException("CannotDelete", "Cannot delete active rule set: " + name, 400);
+            }
+            // AWS is idempotent otherwise: deleting a non-existent rule set succeeds without error.
             receiptRuleSetStore.delete(receiptRuleSetKey(region, name));
         }
         LOG.infov("Deleted SES receipt rule set: {0} in region {1}", name, region);
@@ -1362,10 +1367,14 @@ public class SesService {
 
     public ReceiptRuleSet describeActiveReceiptRuleSet(String region) {
         String prefix = "receiptRuleSet::" + region + "::";
-        return receiptRuleSetStore.scan(k -> k.startsWith(prefix)).stream()
-                .filter(ReceiptRuleSet::isActive)
-                .findFirst()
-                .orElse(null);
+        // Read under the lock so a concurrent set-active replacement (clear-then-set) can't expose its
+        // intermediate no-active state — the reader sees either the old or the new active set.
+        synchronized (receiptRuleSetLock) {
+            return receiptRuleSetStore.scan(k -> k.startsWith(prefix)).stream()
+                    .filter(ReceiptRuleSet::isActive)
+                    .findFirst()
+                    .orElse(null);
+        }
     }
 
     private void clearActiveReceiptRuleSet(String region) {

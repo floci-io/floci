@@ -87,6 +87,16 @@ class SesReceiptRuleSetV1IntegrationTest {
         .when().post("/").then().statusCode(200)
                 .body(containsString("<Metadata>"))
                 .body(containsString("<Name>" + RS + "</Name>"));
+
+        // While active, deleting the rule set is rejected (verified against AWS) and it is preserved.
+        req("DeleteReceiptRuleSet").formParam("RuleSetName", RS)
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>CannotDelete</Code>"))
+                .body(containsString("Cannot delete active rule set: " + RS));
+
+        req("DescribeReceiptRuleSet").formParam("RuleSetName", RS)
+        .when().post("/").then().statusCode(200)
+                .body(containsString("<Name>" + RS + "</Name>"));
     }
 
     @Test

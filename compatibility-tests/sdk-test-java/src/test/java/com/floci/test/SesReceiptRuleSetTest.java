@@ -10,6 +10,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.AlreadyExistsException;
+import software.amazon.awssdk.services.ses.model.CannotDeleteException;
 import software.amazon.awssdk.services.ses.model.DescribeActiveReceiptRuleSetResponse;
 import software.amazon.awssdk.services.ses.model.DescribeReceiptRuleSetResponse;
 import software.amazon.awssdk.services.ses.model.ListReceiptRuleSetsResponse;
@@ -85,6 +86,10 @@ class SesReceiptRuleSetTest {
         DescribeActiveReceiptRuleSetResponse a = ses.describeActiveReceiptRuleSet(b -> { });
         assertThat(a.metadata()).isNotNull();
         assertThat(a.metadata().name()).isEqualTo(ruleSet);
+
+        // The active rule set can't be deleted (matches AWS) — a caller must unset it first.
+        assertThatThrownBy(() -> ses.deleteReceiptRuleSet(b -> b.ruleSetName(ruleSet)))
+                .isInstanceOf(CannotDeleteException.class);
     }
 
     @Test
