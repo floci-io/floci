@@ -18,6 +18,9 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.Volume;
+import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -63,6 +66,36 @@ class Ec2ServiceTest {
 
         assertEquals("MissingParameter", error.getErrorCode());
         assertEquals("The request must contain the parameter ImageId", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createSubnetRequiresVpcIdInsteadOfNotFound() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createSubnet(
+                "us-east-1", null, "10.0.1.0/24", null));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The request must contain the parameter VpcId", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createSubnetRejectsBlankVpcIdInsteadOfNotFound() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createSubnet(
+                "us-east-1", "   ", "10.0.1.0/24", null));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The request must contain the parameter VpcId", error.getMessage());
         assertEquals(400, error.getHttpStatus());
     }
 
@@ -298,6 +331,50 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void describeKeyPairsThrowsNotFoundForMissingName() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of("does-not-exist"), List.of()));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void describeKeyPairsThrowsNotFoundForMissingId() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of(), List.of("key-missing")));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+    }
+
+    @Test
+    void describeKeyPairsReturnsRequestedKeyAndAllowsEmptyUnfilteredList() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        // Unfiltered describe on an empty account is not an error.
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+
+        service.createKeyPair("us-east-1", "present-key");
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("present-key"), List.of()).size());
+
+        // A missing name is not masked by a present one in the same request.
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of("present-key", "absent-key"), List.of()));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+    }
+
+    @Test
     void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -345,6 +422,143 @@ class Ec2ServiceTest {
         mapping.setDeviceName("/dev/sda1");
         mapping.setEbs(ebs);
         return mapping;
+    }
+
+    @Test
+    void attachVolumeMarksVolumeInUseWithAttachmentDetails() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        String instanceId = inst.getInstanceId();
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
+                false, 0, null, null, List.of());
+        VolumeAttachment response = service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
+
+        assertEquals(volume.getVolumeId(), response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals("/dev/sdf", response.getDevice());
+        assertEquals("attached", response.getState());
+        assertFalse(response.isDeleteOnTermination());
+        Volume attached = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("in-use", attached.getState());
+        assertEquals(1, attached.getAttachments().size());
+        assertEquals(instanceId, attached.getAttachments().getFirst().getInstanceId());
+        assertEquals("/dev/sdf", attached.getAttachments().getFirst().getDevice());
+        assertEquals("attached", attached.getAttachments().getFirst().getState());
+        assertFalse(attached.getAttachments().getFirst().isDeleteOnTermination());
+    }
+
+    @Test
+    void attachVolumeThrowsWithDifferentAZ() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        String volumeAz = List.of("us-east-1a", "us-east-1b", "us-east-1c").stream()
+                .filter(az -> !az.equals(instanceAz))
+                .findFirst()
+                .orElseThrow();
+        Volume volume = service.createVolume("us-east-1", volumeAz, "gp3", 8,
+                false, 0, null, null, List.of());
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.attachVolume("us-east-1", volume.getVolumeId(), inst.getInstanceId(), "/dev/sdf"));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void attachVolumeThrowsWithIncorrectInstanceState() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.pending());
+        String az = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", az, "gp3", 8,
+                false, 0, null, null, List.of());
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.attachVolume("us-east-1", volume.getVolumeId(), inst.getInstanceId(), "/dev/sdf"));
+        assertEquals("IncorrectInstanceState", error.getErrorCode());
+    }
+
+    @Test
+    void detachVolumeMarksVolumeAvailableAndClearsAttachment() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        String instanceId = inst.getInstanceId();
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
+                false, 0, null, null, List.of());
+        service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
+
+        VolumeAttachment response = service.detachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf", false);
+
+        assertEquals(volume.getVolumeId(), response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals("/dev/sdf", response.getDevice());
+        assertEquals("detached", response.getState());
+        assertFalse(response.isDeleteOnTermination());
+        Volume detached = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("available", detached.getState());
+        assertTrue(detached.getAttachments().isEmpty());
+    }
+
+    @Test
+    void detachRootVolumeRequiresForceAndStopped() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        String instanceId = inst.getInstanceId();
+        String rootVolumeId = inst.getRootVolumeId();
+        String rootDeviceName = inst.getRootDeviceName();
+
+        // forced but not stopped
+        inst.setState(InstanceState.running());
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, true));
+        assertEquals("OperationNotPermitted", error.getErrorCode());
+        AwsException errorWithoutInstanceId = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, null, null, true));
+        assertEquals("OperationNotPermitted", errorWithoutInstanceId.getErrorCode());
+
+        // stopped but not forced
+        inst.setState(InstanceState.stopped());
+        error = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, false));
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        errorWithoutInstanceId = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, null, null, false));
+        assertEquals("InvalidParameterCombination", errorWithoutInstanceId.getErrorCode());
+
+        // success
+        VolumeAttachment response = service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, true);
+        assertEquals(rootVolumeId, response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals(rootDeviceName, response.getDevice());
+        assertEquals("detached", response.getState());
+        assertTrue(response.isDeleteOnTermination());
+
+        Volume detached = service.describeVolumes("us-east-1", List.of(rootVolumeId), Map.of()).getFirst();
+        assertEquals("available", detached.getState());
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {

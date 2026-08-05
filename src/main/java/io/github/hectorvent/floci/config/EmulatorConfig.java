@@ -86,6 +86,19 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean strictClaiming();
+
+        /**
+         * When enabled, a REST request whose SigV4 credential scope names a service
+         * absent from the catalog is rejected with {@code UnknownOperationException}
+         * instead of falling through JAX-RS matching into S3's path-style routes,
+         * where it surfaces as a misleading {@code NoSuchBucket} (issue #1754).
+         *
+         * <p>On by default. Turn it off if Floci serves a route whose signing scope
+         * is not yet enumerated in the catalog: the request then falls through as it
+         * did before, rather than failing with a 404 that has no workaround.
+         */
+        @WithDefault("true")
+        boolean rejectUnknownServiceScope();
     }
 
     interface DnsConfig {
@@ -267,6 +280,7 @@ public interface EmulatorConfig {
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
+        RumStorageConfig rum();
     }
 
     interface SsmStorageConfig {
@@ -475,6 +489,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface RumStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -542,6 +563,7 @@ public interface EmulatorConfig {
         ResourceGroupsTaggingServiceConfig tagging();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
+        MwaaServiceConfig mwaa();
         PipesServiceConfig pipes();
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
@@ -572,6 +594,7 @@ public interface EmulatorConfig {
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
+        RumServiceConfig rum();
     }
 
     interface IotServiceConfig {
@@ -596,6 +619,11 @@ public interface EmulatorConfig {
     }
 
     interface IotDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RumServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1317,6 +1345,15 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
 
         /**
+         * Extra /etc/hosts entries added to every Lambda container, as "hostname:ip" pairs.
+         * The ip may be the literal "host-gateway" to map to the Docker host, mirroring
+         * {@code docker run --add-host hostname:host-gateway}.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS (comma-separated)
+         */
+        Optional<List<String>> extraHosts();
+
+        /**
          * Concurrent executions ceiling applied per region. AWS Lambda's
          * "account-level" concurrency is in fact a per-region quota (default 1000);
          * Floci mirrors that semantics and partitions counters by the region
@@ -1501,6 +1538,72 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean ecrRegistryMirror();
+
+        /**
+         * When true, starts k3s with {@code --flannel-backend=none --disable-network-policy
+         * --disable-kube-proxy} instead of its bundled networking stack. k3s's default flannel CNI
+         * and kube-proxy run embedded in the k3s server process itself (not separate, killable
+         * DaemonSets), so a real CNI (e.g. Cilium) can only cleanly take over if k3s never starts
+         * its own in the first place — there is no way to evict them after the fact. CoreDNS,
+         * local-path-provisioner, and metrics-server are unaffected; they don't depend on which CNI
+         * is in place.
+         */
+        @WithDefault("false")
+        boolean disableCni();
+    }
+
+    /**
+     * MWAA (Managed Workflows for Apache Airflow), backed by a real Apache Airflow instance
+     * (LocalExecutor) plus a dedicated Postgres metadata database, one pair of containers per
+     * environment. See {@code services/mwaa/MwaaEnvironmentManager}.
+     */
+    interface MwaaServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, environments go straight to AVAILABLE without starting real Docker containers. */
+        @WithDefault("false")
+        boolean mock();
+
+        /** Image for the per-environment Postgres metadata database. Not shared with RDS's config knob. */
+        @WithDefault("postgres:16-alpine")
+        String defaultPostgresImage();
+
+        /** Airflow versions environments may request. Combined with the image tag
+         *  {@code apache/airflow:<version>-python3.12}. */
+        @WithDefault("2.10.5,2.9.3,2.8.4")
+        List<String> supportedVersions();
+
+        /** Airflow version used when {@code CreateEnvironment} omits {@code AirflowVersion}. */
+        @WithDefault("2.10.5")
+        String defaultVersion();
+
+        /** Base port of the web/CLI proxy port range. First environment gets this port. */
+        @WithDefault("8700")
+        int proxyBasePort();
+
+        /** Inclusive upper bound of the proxy port range. */
+        @WithDefault("8799")
+        int proxyMaxPort();
+
+        @WithDefault("./data/mwaa")
+        String dataPath();
+
+        /** Docker network to attach the Postgres/Airflow containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
+
+        /** Poll interval for syncing DAGs (and optionally requirements) from the environment's
+         *  S3 {@code DagS3Path} into the Airflow container. */
+        @WithDefault("30")
+        int dagSyncIntervalSeconds();
+
+        /** When true, {@code RequirementsS3Path} is installed via {@code pip install -r} on create
+         *  and on every DAG-sync pass in which the requirements file's ETag changed. */
+        @WithDefault("true")
+        boolean installRequirements();
     }
 
     interface InitHooksConfig {

@@ -590,6 +590,17 @@ class IamServiceTest {
         assertTrue(admin.getPolicyId().startsWith("ANPA"));
         assertEquals("v1", admin.getDefaultVersionId());
 
+        // Referenced by the roles `cdk bootstrap` and the aws-bench scenario stacks create.
+        // A missing entry surfaces as "Policy <arn> does not exist" on the consuming role,
+        // which rolls the whole stack back.
+        for (String name : new String[] {
+                "AWSCloudFormationReadOnlyAccess", "AmazonAthenaFullAccess",
+                "AmazonRedshiftFullAccess", "AmazonS3TablesReadOnlyAccess" }) {
+            IamPolicy seeded = iamService.getPolicy("arn:aws:iam::aws:policy/" + name);
+            assertEquals(name, seeded.getPolicyName());
+            assertEquals("/", seeded.getPath());
+        }
+
         IamPolicy lambda = iamService.getPolicy(
                 "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
         assertEquals("AWSLambdaBasicExecutionRole", lambda.getPolicyName());
@@ -611,6 +622,27 @@ class IamServiceTest {
                 "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole");
         assertEquals("AmazonRDSEnhancedMonitoringRole", rdsMonitoring.getPolicyName());
         assertEquals("/service-role/", rdsMonitoring.getPath());
+
+        IamPolicy bedrock = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
+        assertEquals("AmazonBedrockFullAccess", bedrock.getPolicyName());
+        assertEquals("/", bedrock.getPath());
+
+        IamPolicy bedrockReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockReadOnly");
+        assertEquals("AmazonBedrockReadOnly", bedrockReadOnly.getPolicyName());
+        assertEquals("/", bedrockReadOnly.getPath());
+    }
+
+    @Test
+    void attachAmazonBedrockFullAccessToRole() {
+        // Regression: AmazonBedrockFullAccess was absent from the seed catalog, so
+        // AttachRolePolicy (the Terraform path — CloudFormation attaches inline and
+        // never calls it) 404'd with NoSuchEntity. Attaching it must now succeed.
+        iamService.createRole("BedrockRole", "/", "{}", null, 0, null);
+        iamService.attachRolePolicy("BedrockRole", "arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
+
+        List<String> attached = iamService.listAttachedRolePolicies("BedrockRole", null).stream()
+                .map(IamPolicy::getArn).toList();
+        assertTrue(attached.contains("arn:aws:iam::aws:policy/AmazonBedrockFullAccess"));
     }
 
     @Test
