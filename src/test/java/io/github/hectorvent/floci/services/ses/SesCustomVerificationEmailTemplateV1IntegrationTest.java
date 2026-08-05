@@ -47,6 +47,16 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void get_missing_returnsDoesNotExistOnV1() {
+        // v1 returns CustomVerificationEmailTemplateDoesNotExist / 400 (verified against AWS), so the
+        // v1 SDK's typed exception fires — not the v2 NotFoundException / 404.
+        query("GetCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>CustomVerificationEmailTemplateDoesNotExist</Code>"));
+    }
+
+    @Test
     @Order(1)
     void create() {
         create(NAME, "Verify your email").when().post("/").then().statusCode(200)
@@ -74,7 +84,9 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     @Test
     @Order(4)
     void update() {
-        create(NAME, "Updated via v1").when().post("/").then().statusCode(400);  // create dup fails
+        // create dup fails with the v1-native code (verified against AWS), not the v2 AlreadyExistsException
+        create(NAME, "Updated via v1").when().post("/").then().statusCode(400)
+                .body(containsString("<Code>CustomVerificationEmailTemplateAlreadyExists</Code>"));
         query("UpdateCustomVerificationEmailTemplate")
                 .formParam("TemplateName", NAME).formParam("FromEmailAddress", FROM)
                 .formParam("TemplateSubject", "Updated via v1")

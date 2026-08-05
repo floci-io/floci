@@ -655,7 +655,12 @@ public class SesController {
     public Response getCustomVerificationEmailTemplate(@Context HttpHeaders headers,
                                                        @PathParam("templateName") String templateName) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(cvetJson(sesService.getCustomVerificationEmailTemplate(templateName, region), true)).build();
+        try {
+            return Response.ok(
+                    cvetJson(sesService.getCustomVerificationEmailTemplate(templateName, region), true)).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
     }
 
     @PUT
@@ -680,8 +685,12 @@ public class SesController {
     public Response deleteCustomVerificationEmailTemplate(@Context HttpHeaders headers,
                                                           @PathParam("templateName") String templateName) {
         String region = regionResolver.resolveRegion(headers);
-        sesService.deleteCustomVerificationEmailTemplate(templateName, region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        try {
+            sesService.deleteCustomVerificationEmailTemplate(templateName, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
     }
 
     private CustomVerificationEmailTemplate parseCvet(JsonNode request) {
@@ -2289,9 +2298,11 @@ public class SesController {
             case "InvalidParameterValue", "InvalidTemplate", "ValidationError",
                  "InvalidRenderingParameter", "MissingRenderingAttribute" ->
                     new AwsException("BadRequestException", e.getMessage(), 400);
-            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist" ->
+            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist",
+                 "CustomVerificationEmailTemplateDoesNotExist" ->
                     new AwsException("NotFoundException", e.getMessage(), 404);
-            case "AlreadyExists", "ConfigurationSetAlreadyExists" ->
+            case "AlreadyExists", "ConfigurationSetAlreadyExists",
+                 "CustomVerificationEmailTemplateAlreadyExists" ->
                     new AwsException("AlreadyExistsException", e.getMessage(), 400);
             case "ConfigurationSetSendingPausedException" ->
                     new AwsException("SendingPausedException", e.getMessage(), 400);

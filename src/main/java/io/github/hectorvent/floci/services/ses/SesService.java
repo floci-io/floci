@@ -1049,7 +1049,9 @@ public class SesService {
         // the key as absent; validation and logging stay outside the lock.
         synchronized (cvetMutationLock) {
             if (cvetStore.get(key).isPresent()) {
-                throw new AwsException("AlreadyExistsException",
+                // v1-native code (verified: CustomVerificationEmailTemplateAlreadyExists / 400);
+                // remapV1Exception translates it to AlreadyExistsException / 400 for the v2 boundary.
+                throw new AwsException("CustomVerificationEmailTemplateAlreadyExists",
                         "Custom verification email template <" + template.getTemplateName() + "> already exists", 400);
             }
             cvetStore.put(key, template);
@@ -1160,8 +1162,10 @@ public class SesService {
     }
 
     private static AwsException cvetNotFound(String templateName) {
-        return new AwsException("NotFoundException",
-                "Custom verification email template <" + templateName + "> does not exist", 404);
+        // v1-native code (verified: CustomVerificationEmailTemplateDoesNotExist / 400).
+        // SesController.remapV1Exception translates it to NotFoundException / 404 for the v2 boundary.
+        return new AwsException("CustomVerificationEmailTemplateDoesNotExist",
+                "Custom verification email template <" + templateName + "> does not exist", 400);
     }
 
     private static String cvetKey(String region, String templateName) {
