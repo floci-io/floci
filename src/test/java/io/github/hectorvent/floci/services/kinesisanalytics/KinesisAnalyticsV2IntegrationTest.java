@@ -198,6 +198,47 @@ class KinesisAnalyticsV2IntegrationTest {
     }
 
     @Test
+    void updateApplicationWithNewCodeLocationRoundTripsThroughTheWireProtocol() {
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-update-code", "RuntimeEnvironment": "FLINK-1_18",
+                 "ServiceExecutionRole": "%s",
+                 "ApplicationConfiguration": {"ApplicationCodeConfiguration": {
+                     "CodeContent": {"S3ContentLocation": {
+                         "BucketARN": "arn:aws:s3:::flink-code", "FileKey": "app.jar"}},
+                     "CodeContentType": "ZIPFILE"}}}
+                """.formatted(ROLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.UpdateApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-update-code", "CurrentApplicationVersionId": 1,
+                 "ApplicationConfigurationUpdate": {"ApplicationCodeConfigurationUpdate": {
+                     "CodeContentUpdate": {"S3ContentLocationUpdate": {
+                         "BucketARNUpdate": "arn:aws:s3:::flink-code-v2",
+                         "FileKeyUpdate": "app-v2.jar"}}}}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ApplicationDetail.ApplicationVersionId", equalTo(2))
+            .body("ApplicationDetail.ApplicationConfigurationDescription"
+                    + ".ApplicationCodeConfigurationDescription.CodeContentDescription"
+                    + ".S3ApplicationCodeLocationDescription.BucketARN", equalTo("arn:aws:s3:::flink-code-v2"))
+            .body("ApplicationDetail.ApplicationConfigurationDescription"
+                    + ".ApplicationCodeConfigurationDescription.CodeContentDescription"
+                    + ".S3ApplicationCodeLocationDescription.FileKey", equalTo("app-v2.jar"));
+    }
+
+    @Test
     void snapshotLifecycleRoundTripsThroughTheWireProtocol() {
         given()
             .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")

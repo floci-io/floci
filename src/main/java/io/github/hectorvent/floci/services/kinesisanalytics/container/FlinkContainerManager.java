@@ -325,6 +325,30 @@ public class FlinkContainerManager {
         return "RUNNING".equals(flinkRest.jobState(rest, app.getFlinkJobId()));
     }
 
+    /**
+     * Swaps in a new application JAR on an already-running cluster ({@code UpdateApplication} with a
+     * new {@code ApplicationCodeConfigurationUpdate}), without tearing down the JobManager/TaskManager
+     * containers: cancels the current job (if any) and refreshes {@code application_properties.json},
+     * then stashes the new JAR the same way {@link #startCluster} does so the readiness poller
+     * ({@link #advanceToRunning}) picks it up and resubmits it as soon as task slots free up. Callers
+     * must only invoke this when the application already has a TaskManager (a running job) — attaching
+     * code to a bare cluster for the first time is not supported here.
+     */
+    public void redeployCode(FlinkApplication app) {
+        String rest = app.getRestEndpoint();
+        if (rest != null && app.getFlinkJobId() != null) {
+            flinkRest.cancelJob(rest, app.getFlinkJobId());
+            app.setFlinkJobId(null);
+        }
+        byte[] propertiesJson = applicationPropertiesJson(app);
+        copyFileIntoContainer(app.getContainerId(), "/etc", "flink/application_properties.json", propertiesJson);
+        copyFileIntoContainer(app.getTaskManagerContainerId(), "/etc", "flink/application_properties.json",
+                propertiesJson);
+        pendingJars.put(app.getApplicationName(), readJar(app));
+        submissionFailed.remove(app.getApplicationName());
+        LOG.infov("Redeployed code for Kinesis Analytics V2 application {0}", app.getApplicationName());
+    }
+
     public void stopCluster(FlinkApplication app) {
         String rest = app.getRestEndpoint();
         if (rest != null && app.getFlinkJobId() != null) {

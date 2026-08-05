@@ -232,6 +232,14 @@ public class KinesisAnalyticsV2Service {
 
     public FlinkApplication updateApplication(String applicationName, Long currentApplicationVersionId,
                                               String serviceExecutionRole) {
+        return updateApplication(applicationName, currentApplicationVersionId, serviceExecutionRole,
+                null, null, null, null);
+    }
+
+    public FlinkApplication updateApplication(String applicationName, Long currentApplicationVersionId,
+                                              String serviceExecutionRole, String codeS3Bucket,
+                                              String codeS3Key, String codeS3ObjectVersion,
+                                              Integer parallelism) {
         FlinkApplication app = describeApplication(applicationName);
         // AWS requires CurrentApplicationVersionId and rejects a stale value with
         // ConcurrentModificationException (optimistic concurrency on the application version).
@@ -247,6 +255,41 @@ public class KinesisAnalyticsV2Service {
         if (serviceExecutionRole != null && !serviceExecutionRole.isBlank()) {
             app.setServiceExecutionRole(serviceExecutionRole);
         }
+        boolean codeChanged = codeS3Bucket != null && !codeS3Bucket.isBlank()
+                && codeS3Key != null && !codeS3Key.isBlank();
+        if (codeChanged) {
+            app.setCodeS3Bucket(codeS3Bucket);
+            app.setCodeS3Key(codeS3Key);
+            app.setCodeS3ObjectVersion(codeS3ObjectVersion);
+        }
+        if (parallelism != null && parallelism > 0) {
+            app.setParallelism(parallelism);
+        }
+
+        if (codeChanged && app.getApplicationStatus() == ApplicationStatus.RUNNING
+                && !config.services().kinesisAnalytics().mock()) {
+            if (app.getTaskManagerContainerId() == null) {
+                // The application is running as a bare cluster (no code yet); attaching code to an
+                // already-running cluster for the first time is not yet emulated.
+                throw new AwsException("InvalidRequestException",
+                        "Adding code to a running bare-cluster application is not supported; "
+                                + "stop and start " + applicationName + " instead", 400);
+            }
+            try {
+                // In-place redeploy: cancel the current job and swap in the new JAR without tearing
+                // down the JobManager/TaskManager containers. The readiness poller resubmits it, the
+                // same way it submits a fresh job on StartApplication.
+                containerManager.redeployCode(app);
+                app.setApplicationStatus(ApplicationStatus.STARTING);
+            } catch (AwsException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                LOG.errorv(e, "Failed to redeploy code for application {0}", applicationName);
+                throw new AwsException("InternalFailureException",
+                        "Failed to redeploy application code for " + applicationName, 500);
+            }
+        }
+
         app.setApplicationVersionId(app.getApplicationVersionId() + 1);
         app.setLastUpdateTimestamp(Instant.now());
         putApplication(app);

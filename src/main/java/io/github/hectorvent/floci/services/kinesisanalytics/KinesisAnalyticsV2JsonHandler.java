@@ -135,11 +135,23 @@ public class KinesisAnalyticsV2JsonHandler {
         Long currentVersionId = request.hasNonNull("CurrentApplicationVersionId")
                 ? request.path("CurrentApplicationVersionId").asLong()
                 : null;
-        // ServiceExecutionRoleUpdate is the only field this emulator applies; other configuration
-        // updates are accepted (version bump) but not otherwise modelled.
         String serviceExecutionRole = request.path("ServiceExecutionRoleUpdate").asText(null);
-        return applicationDetailResponse(
-                service.updateApplication(applicationName, currentVersionId, serviceExecutionRole));
+
+        // ApplicationConfigurationUpdate.ApplicationCodeConfigurationUpdate.CodeContentUpdate
+        // .S3ContentLocationUpdate: a new JAR location to redeploy in place.
+        JsonNode appCfgUpdate = request.path("ApplicationConfigurationUpdate");
+        JsonNode s3Update = appCfgUpdate.path("ApplicationCodeConfigurationUpdate")
+                .path("CodeContentUpdate").path("S3ContentLocationUpdate");
+        String codeBucket = bucketFromArn(s3Update.path("BucketARNUpdate").asText(null));
+        String codeKey = s3Update.path("FileKeyUpdate").asText(null);
+        String codeVersion = s3Update.path("ObjectVersionUpdate").asText(null);
+        JsonNode parallelismUpdate = appCfgUpdate.path("FlinkApplicationConfigurationUpdate")
+                .path("ParallelismConfigurationUpdate").path("ParallelismUpdate");
+        Integer parallelism = parallelismUpdate.isMissingNode() || parallelismUpdate.isNull()
+                ? null : parallelismUpdate.asInt();
+
+        return applicationDetailResponse(service.updateApplication(applicationName, currentVersionId,
+                serviceExecutionRole, codeBucket, codeKey, codeVersion, parallelism));
     }
 
     private Response handleDeleteApplication(JsonNode request) {

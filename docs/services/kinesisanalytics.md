@@ -18,7 +18,7 @@ state backed by a live Flink job on Floci's Docker network.
 | `ListApplications` | Lists all applications |
 | `StartApplication` | Starts an application, provisioning a Flink JobManager container |
 | `StopApplication` | Stops a running application and tears down its container |
-| `UpdateApplication` | Updates an application and bumps its version |
+| `UpdateApplication` | Updates an application (code, parallelism, execution role) and bumps its version; redeploys code in place on a running job |
 | `DeleteApplication` | Deletes an application |
 | `TagResource` | Assigns one or more tags to an application |
 | `UntagResource` | Removes one or more tags from an application |
@@ -77,8 +77,28 @@ aws kinesisanalyticsv2 start-application --application-name jobdemo --run-config
 aws kinesisanalyticsv2 describe-application --application-name jobdemo  # ApplicationStatus: RUNNING
 ```
 
-The job's main class is taken from the JAR's manifest (as in AWS Managed Flink). Not yet emulated:
-in-place code updates.
+The job's main class is taken from the JAR's manifest (as in AWS Managed Flink).
+
+### Updating application code in place
+
+`UpdateApplication` with a new `ApplicationConfigurationUpdate.ApplicationCodeConfigurationUpdate`
+redeploys a new JAR onto an **already-running** application without tearing down its JobManager/
+TaskManager containers: the current Flink job is cancelled and the new JAR is uploaded and run on the
+same cluster, exactly the way `StartApplication` submits a job — the application briefly transitions
+`RUNNING → STARTING → RUNNING` while the new job comes up. Calling `UpdateApplication` on a `READY`
+application just stores the new code location for the next `StartApplication`.
+`FlinkApplicationConfigurationUpdate.ParallelismConfigurationUpdate.ParallelismUpdate` is also applied.
+
+```bash
+aws kinesisanalyticsv2 update-application \
+  --application-name jobdemo --current-application-version-id 1 \
+  --application-configuration-update '{
+    "ApplicationCodeConfigurationUpdate": { "CodeContentUpdate": { "S3ContentLocationUpdate": {
+      "BucketARNUpdate": "arn:aws:s3:::flink-code", "FileKeyUpdate": "app-v2.jar" } } } }'
+```
+
+Not yet emulated: attaching code to a **bare** running cluster (one started without code) via
+`UpdateApplication` — stop and start the application instead.
 
 ### Runtime properties (`EnvironmentProperties`)
 

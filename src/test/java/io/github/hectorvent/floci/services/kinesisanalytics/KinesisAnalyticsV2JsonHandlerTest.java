@@ -189,6 +189,34 @@ class KinesisAnalyticsV2JsonHandlerTest {
     }
 
     @Test
+    void updateApplicationWithNewCodeLocationEchoesItOnDescribe() {
+        createRunningCodedApplication("redeploy-target");
+
+        ObjectNode s3Update = MAPPER.createObjectNode();
+        s3Update.put("BucketARNUpdate", "arn:aws:s3:::flink-code-v2");
+        s3Update.put("FileKeyUpdate", "app-v2.jar");
+        ObjectNode codeCfgUpdate = MAPPER.createObjectNode();
+        codeCfgUpdate.set("CodeContentUpdate", MAPPER.createObjectNode().set("S3ContentLocationUpdate", s3Update));
+        ObjectNode appCfgUpdate = MAPPER.createObjectNode();
+        appCfgUpdate.set("ApplicationCodeConfigurationUpdate", codeCfgUpdate);
+
+        ObjectNode updateReq = MAPPER.createObjectNode();
+        updateReq.put("ApplicationName", "redeploy-target");
+        updateReq.put("CurrentApplicationVersionId", 1L);
+        updateReq.set("ApplicationConfigurationUpdate", appCfgUpdate);
+        Response updated = handler.handle("UpdateApplication", updateReq, REGION);
+        assertThat(updated.getStatus(), is(200));
+        ObjectNode detail = (ObjectNode) entity(updated).get("ApplicationDetail");
+        assertEquals(2L, detail.get("ApplicationVersionId").asLong());
+
+        var loc = detail.get("ApplicationConfigurationDescription")
+                .get("ApplicationCodeConfigurationDescription")
+                .get("CodeContentDescription").get("S3ApplicationCodeLocationDescription");
+        assertEquals("arn:aws:s3:::flink-code-v2", loc.get("BucketARN").asText());
+        assertEquals("app-v2.jar", loc.get("FileKey").asText());
+    }
+
+    @Test
     void unsupportedActionReturns400() {
         Response resp = handler.handle("BogusAction", MAPPER.createObjectNode(), REGION);
         assertThat(resp.getStatus(), is(400));

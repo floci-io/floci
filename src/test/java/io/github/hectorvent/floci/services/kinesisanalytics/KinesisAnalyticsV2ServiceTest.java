@@ -368,6 +368,71 @@ class KinesisAnalyticsV2ServiceTest {
         assertEquals(SnapshotStatus.FAILED, snapshot.getSnapshotStatus());
     }
 
+    @Test
+    void updateApplicationWithNewCodeWhileReadyJustUpdatesStoredCode() {
+        service.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+
+        FlinkApplication updated = service.updateApplication("demo", 1L, null,
+                "flink-code", "v2.jar", null, null);
+
+        assertEquals("flink-code", updated.getCodeS3Bucket());
+        assertEquals("v2.jar", updated.getCodeS3Key());
+        assertEquals(ApplicationStatus.READY, updated.getApplicationStatus());
+        assertEquals(2L, updated.getApplicationVersionId());
+    }
+
+    @Test
+    void updateApplicationUpdatesParallelism() {
+        create("demo");
+        FlinkApplication updated = service.updateApplication("demo", 1L, null, null, null, null, 5);
+        assertEquals(5, updated.getParallelism());
+    }
+
+    @Test
+    void updateApplicationRedeploysCodeInPlaceWhenRunningInRealMode() {
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+        app.setTaskManagerContainerId("tm-1");
+        app.setFlinkJobId("job-1");
+
+        FlinkApplication updated = realMode.updateApplication("demo", 1L, null,
+                "bucket", "v2.jar", null, null);
+
+        Mockito.verify(manager).redeployCode(app);
+        assertEquals("v2.jar", updated.getCodeS3Key());
+        assertEquals(ApplicationStatus.STARTING, updated.getApplicationStatus());
+    }
+
+    @Test
+    void updateApplicationRejectsCodeChangeOnRunningBareCluster() {
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+
+        AwsException ex = assertThrows(AwsException.class, () -> realMode.updateApplication(
+                "demo", 1L, null, "bucket", "app.jar", null, null));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+        Mockito.verify(manager, Mockito.never()).redeployCode(Mockito.any());
+    }
+
+    @Test
+    void updateApplicationWithCodeChangeInMockModeSkipsContainerRedeploy() {
+        service.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+        service.startApplication("demo"); // mock mode: RUNNING immediately, no container
+
+        FlinkApplication updated = service.updateApplication("demo", 1L, null,
+                "bucket", "v2.jar", null, null);
+
+        assertEquals("v2.jar", updated.getCodeS3Key());
+        // Mock mode has no container to redeploy against, so the application simply stays RUNNING.
+        assertEquals(ApplicationStatus.RUNNING, updated.getApplicationStatus());
+    }
+
     private KinesisAnalyticsV2Service mockModeService() {
         return buildService(true, Mockito.mock(FlinkContainerManager.class));
     }
