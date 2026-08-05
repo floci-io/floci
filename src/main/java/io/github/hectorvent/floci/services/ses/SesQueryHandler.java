@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfigur
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.KinesisFirehoseDestination;
@@ -107,6 +108,12 @@ public class SesQueryHandler {
                         handleUpdateConfigurationSetReputationMetricsEnabled(params, region);
                 case "PutConfigurationSetDeliveryOptions" ->
                         handlePutConfigurationSetDeliveryOptions(params, region);
+                case "CreateReceiptRuleSet" -> handleCreateReceiptRuleSet(params, region);
+                case "DescribeReceiptRuleSet" -> handleDescribeReceiptRuleSet(params, region);
+                case "ListReceiptRuleSets" -> handleListReceiptRuleSets(region);
+                case "DeleteReceiptRuleSet" -> handleDeleteReceiptRuleSet(params, region);
+                case "SetActiveReceiptRuleSet" -> handleSetActiveReceiptRuleSet(params, region);
+                case "DescribeActiveReceiptRuleSet" -> handleDescribeActiveReceiptRuleSet(region);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
             };
@@ -829,6 +836,71 @@ public class SesQueryHandler {
         sesService.setConfigurationSetDeliveryOptions(configSet, options, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "PutConfigurationSetDeliveryOptions", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleCreateReceiptRuleSet(MultivaluedMap<String, String> params, String region) {
+        sesService.createReceiptRuleSet(getParam(params, "RuleSetName"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "CreateReceiptRuleSet", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleDescribeReceiptRuleSet(MultivaluedMap<String, String> params, String region) {
+        ReceiptRuleSet ruleSet = sesService.describeReceiptRuleSet(getParam(params, "RuleSetName"), region);
+        XmlBuilder xml = new XmlBuilder();
+        writeReceiptRuleSetMetadata(xml, ruleSet);
+        xml.start("Rules").end("Rules");
+        return Response.ok(AwsQueryResponse.envelope(
+                "DescribeReceiptRuleSet", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private Response handleListReceiptRuleSets(String region) {
+        XmlBuilder xml = new XmlBuilder().start("RuleSets");
+        for (ReceiptRuleSet rs : sesService.listReceiptRuleSets(region)) {
+            xml.start("member");
+            writeReceiptRuleSetMetadataFields(xml, rs);
+            xml.end("member");
+        }
+        xml.end("RuleSets");
+        return Response.ok(AwsQueryResponse.envelope(
+                "ListReceiptRuleSets", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private Response handleDeleteReceiptRuleSet(MultivaluedMap<String, String> params, String region) {
+        sesService.deleteReceiptRuleSet(getParam(params, "RuleSetName"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "DeleteReceiptRuleSet", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleSetActiveReceiptRuleSet(MultivaluedMap<String, String> params, String region) {
+        // RuleSetName is optional here: when absent, the account's active rule set is cleared.
+        sesService.setActiveReceiptRuleSet(getParam(params, "RuleSetName"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "SetActiveReceiptRuleSet", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleDescribeActiveReceiptRuleSet(String region) {
+        ReceiptRuleSet active = sesService.describeActiveReceiptRuleSet(region);
+        XmlBuilder xml = new XmlBuilder();
+        // When no rule set is active AWS returns an empty result (no Metadata element).
+        if (active != null) {
+            writeReceiptRuleSetMetadata(xml, active);
+            xml.start("Rules").end("Rules");
+        }
+        return Response.ok(AwsQueryResponse.envelope(
+                "DescribeActiveReceiptRuleSet", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private void writeReceiptRuleSetMetadata(XmlBuilder xml, ReceiptRuleSet ruleSet) {
+        xml.start("Metadata");
+        writeReceiptRuleSetMetadataFields(xml, ruleSet);
+        xml.end("Metadata");
+    }
+
+    private void writeReceiptRuleSetMetadataFields(XmlBuilder xml, ReceiptRuleSet ruleSet) {
+        xml.elem("Name", ruleSet.getName());
+        if (ruleSet.getCreatedTimestamp() != null) {
+            xml.elem("CreatedTimestamp", ruleSet.getCreatedTimestamp().toString());
+        }
     }
 
     /**

@@ -55,6 +55,12 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `DeleteConfigurationSetTrackingOptions`  | Remove the custom tracking redirect domain |
 | `UpdateConfigurationSetReputationMetricsEnabled` | Enable or disable reputation metrics for a configuration set |
 | `PutConfigurationSetDeliveryOptions` | Set the TLS policy (delivery options) for a configuration set |
+| `CreateReceiptRuleSet`              | Create a receipt rule set (stored inertly)                |
+| `DescribeReceiptRuleSet`            | Read a receipt rule set (Rules always empty)              |
+| `ListReceiptRuleSets`               | List receipt rule sets                                    |
+| `DeleteReceiptRuleSet`              | Delete a receipt rule set (idempotent)                    |
+| `SetActiveReceiptRuleSet`           | Mark a rule set active, or clear the active one           |
+| `DescribeActiveReceiptRuleSet`      | Read the active receipt rule set                          |
 
 ## Configuration
 
@@ -161,6 +167,7 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 - `SendEmail` stores the text body or the HTML body as the captured message body.
 - `SetIdentityNotificationTopic` publishes to the configured topic on a Bounce/Complaint/Delivery event (triggered via the mailbox simulator addresses or the suppression list), independent of any configuration set. The payload uses the legacy format (`notificationType`, no `mail.tags`, headers only when `SetIdentityHeadersInNotificationsEnabled` is on).
 - Identity (sending authorization) policies are stored and returned as metadata: the policy document, the per-identity limit of 20, and the create/update/delete error shapes match AWS, but Floci does not evaluate policy authorization (Principal-account existence, Resource-ARN match) or gate sending on it.
+- Receipt rule sets are stored inertly: Floci has no inbound-mail endpoint, so a rule set never holds any receipt rules and routes no mail. `CreateReceiptRuleSet` / `DescribeReceiptRuleSet` (Rules always empty) / `ListReceiptRuleSets` / `DeleteReceiptRuleSet` (idempotent) and `SetActiveReceiptRuleSet` / `DescribeActiveReceiptRuleSet` round-trip so tools like Terraform (`aws_ses_receipt_rule_set`, `aws_ses_active_receipt_rule_set`) can declare a rule set during bootstrap. Individual receipt rules and receipt filters are not implemented.
 - For the REST JSON API see [SES v2](#v2) below.
 
 ## SES v2 (REST JSON) {#v2}
