@@ -1802,6 +1802,10 @@ public class ApiGatewayController {
         node.put("routeKey", r.getRouteKey());
         node.put("authorizationType", r.getAuthorizationType());
         if (r.getAuthorizerId() != null) node.put("authorizerId", r.getAuthorizerId());
+        if (r.getAuthorizationScopes() != null && !r.getAuthorizationScopes().isEmpty()) {
+            ArrayNode scopes = node.putArray("authorizationScopes");
+            r.getAuthorizationScopes().forEach(scopes::add);
+        }
         if (r.getTarget() != null) node.put("target", r.getTarget());
         if (r.getRouteResponseSelectionExpression() != null) node.put("routeResponseSelectionExpression", r.getRouteResponseSelectionExpression());
         return node;

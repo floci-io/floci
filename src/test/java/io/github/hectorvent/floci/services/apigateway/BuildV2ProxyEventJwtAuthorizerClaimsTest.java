@@ -63,7 +63,7 @@ class BuildV2ProxyEventJwtAuthorizerClaimsTest {
         claims.put("nickname", null);
 
         String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", claims,
+                "GET", "/assets", "GET /assets", claims, null,
                 "abc123", "v1", headers, uriInfo, null, "req-1");
         JsonNode authorizer = new ObjectMapper().readTree(json)
                 .path("requestContext").path("authorizer");
@@ -80,7 +80,46 @@ class BuildV2ProxyEventJwtAuthorizerClaimsTest {
                 "array claims use API Gateway's space-separated bracket form, not JSON");
         assertFalse(claimsNode.has("nickname"), "null-valued claims are omitted, not \"null\"");
         assertTrue(authorizer.path("jwt").get("scopes").isNull(),
-                "scopes is null when no authorization scopes are configured");
+                "no scopes handed over by dispatch → scopes: null");
+    }
+
+    @Test
+    void scopesFromDispatchSurfaceAsArray() throws Exception {
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("sub", "user-123");
+        claims.put("scope", "read write");
+
+        String json = controller.buildV2ProxyEvent(
+                "GET", "/assets", "GET /assets", claims, List.of("read", "write"),
+                "abc123", "v1", headers, uriInfo, null, "req-scope");
+        JsonNode jwt = new ObjectMapper().readTree(json)
+                .path("requestContext").path("authorizer").path("jwt");
+
+        JsonNode scopes = jwt.get("scopes");
+        assertTrue(scopes.isArray(), "dispatch-validated scopes must surface as a JSON array");
+        assertEquals(List.of("read", "write"),
+                List.of(scopes.get(0).asText(), scopes.get(1).asText()));
+        assertEquals("read write", jwt.path("claims").get("scope").asText(),
+                "the raw scope claim itself stays in claims (matches real AWS events)");
+    }
+
+    @Test
+    void scopeClaimAloneDoesNotPopulateScopes() throws Exception {
+        // Verified against real API Gateway: a route WITHOUT authorizationScopes
+        // renders "scopes": null even when the token carries a scope claim, so the
+        // builder must not derive scopes from the claims map on its own.
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("sub", "user-123");
+        claims.put("scope", "aws.cognito.signin.user.admin");
+
+        String json = controller.buildV2ProxyEvent(
+                "GET", "/assets", "GET /assets", claims, null,
+                "abc123", "v1", headers, uriInfo, null, "req-noscopes");
+        JsonNode jwt = new ObjectMapper().readTree(json)
+                .path("requestContext").path("authorizer").path("jwt");
+
+        assertTrue(jwt.get("scopes").isNull());
+        assertEquals("aws.cognito.signin.user.admin", jwt.path("claims").get("scope").asText());
     }
 
     @Test
@@ -90,7 +129,7 @@ class BuildV2ProxyEventJwtAuthorizerClaimsTest {
         claims.put("address", Map.of("country", "JP"));
 
         String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", claims,
+                "GET", "/assets", "GET /assets", claims, null,
                 "abc123", "v1", headers, uriInfo, null, "req-map");
         JsonNode claimsNode = new ObjectMapper().readTree(json)
                 .path("requestContext").path("authorizer").path("jwt").path("claims");
@@ -102,7 +141,7 @@ class BuildV2ProxyEventJwtAuthorizerClaimsTest {
     @Test
     void nullClaimsMapOmitsAuthorizer() throws Exception {
         String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", null,
+                "GET", "/assets", "GET /assets", null, null,
                 "abc123", "v1", headers, uriInfo, null, "req-2");
         JsonNode event = new ObjectMapper().readTree(json);
 
@@ -113,7 +152,7 @@ class BuildV2ProxyEventJwtAuthorizerClaimsTest {
     @Test
     void emptyClaimsMapOmitsAuthorizer() throws Exception {
         String json = controller.buildV2ProxyEvent(
-                "GET", "/assets", "GET /assets", Map.of(),
+                "GET", "/assets", "GET /assets", Map.of(), null,
                 "abc123", "v1", headers, uriInfo, null, "req-3");
         JsonNode event = new ObjectMapper().readTree(json);
 
