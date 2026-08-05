@@ -136,6 +136,8 @@ floci:
         # mode: memory
       appsync:
         flush-interval-ms: 5000
+      rum:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -218,6 +220,7 @@ floci:
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
+      # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
       hot-reload:
         enabled: false
     apigateway:
@@ -376,6 +379,18 @@ floci:
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+    mwaa:
+      enabled: true
+      mock: false
+      default-postgres-image: "postgres:16-alpine"
+      supported-versions: "2.10.5,2.9.3,2.8.4"
+      default-version: "2.10.5"
+      proxy-base-port: 8700
+      proxy-max-port: 8799
+      data-path: ./data/mwaa
+      keep-running-on-shutdown: false
+      dag-sync-interval-seconds: 30
+      install-requirements: true
     elbv2:
       enabled: true
       mock: false
@@ -438,4 +453,6 @@ floci:
         host: 0.0.0.0
         port: 1883
     iotdata:
+      enabled: true
+    rum:
       enabled: true

@@ -328,6 +328,9 @@ final class CognitoAuthFlowHandler {
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
         }
+        if ("UNCONFIRMED".equals(user.getUserStatus())) {
+            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
+        }
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
         }
@@ -385,6 +388,9 @@ final class CognitoAuthFlowHandler {
         if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
+        }
+        if ("UNCONFIRMED".equals(user.getUserStatus())) {
+            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
         }
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);

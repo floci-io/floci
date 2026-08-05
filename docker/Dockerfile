@@ -58,7 +58,31 @@ COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
 
 VOLUME /app/data
 
-EXPOSE 4566 6379-6399
+EXPOSE 4566
+
+# Need to expose separately due to https://github.com/floci-io/floci/issues/2095.
+# This preseres compatibility with https://github.com/docker-java/docker-java/blob/002b6eb7aa2b892be729c7c2a5e95f782924db38/docker-java-api/src/main/java/com/github/dockerjava/api/model/ExposedPort.java#L119
+EXPOSE 6379
+EXPOSE 6380
+EXPOSE 6381
+EXPOSE 6382
+EXPOSE 6383
+EXPOSE 6384
+EXPOSE 6385
+EXPOSE 6386
+EXPOSE 6387
+EXPOSE 6388
+EXPOSE 6389
+EXPOSE 6390
+EXPOSE 6391
+EXPOSE 6392
+EXPOSE 6393
+EXPOSE 6394
+EXPOSE 6395
+EXPOSE 6396
+EXPOSE 6397
+EXPOSE 6398
+EXPOSE 6399
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
     CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
