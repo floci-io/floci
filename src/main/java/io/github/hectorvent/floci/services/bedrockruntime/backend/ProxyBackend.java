@@ -13,6 +13,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -65,7 +66,7 @@ public class ProxyBackend implements BedrockBackend {
             uri = URI.create(stripTrailingSlash(baseUrl) + "/chat/completions");
             builder = HttpRequest.newBuilder()
                     .uri(uri)
-                    .timeout(Duration.ofSeconds(60))
+                    .timeout(Duration.ofSeconds(proxyConfig.requestTimeoutSeconds()))
                     .header("Content-Type", "application/json");
         } catch (IllegalArgumentException e) {
             throw new AwsException("ValidationException",
@@ -87,6 +88,9 @@ public class ProxyBackend implements BedrockBackend {
         HttpResponse<String> response;
         try {
             response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+        } catch (HttpTimeoutException e) {
+            LOG.warnv("Bedrock proxy backend timed out: modelId={0}, url={1}, error={2}", modelId, uri, e.getMessage());
+            throw new AwsException("ModelTimeoutException", "Proxy backend timed out: " + e.getMessage(), 408);
         } catch (Exception e) {
             LOG.warnv("Bedrock proxy backend call failed: modelId={0}, url={1}, error={2}", modelId, uri, e.getMessage());
             throw new AwsException("ModelErrorException", "Failed to reach proxy backend: " + e.getMessage(), 424);

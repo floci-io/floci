@@ -1207,6 +1207,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean passthrough();
+
+        /**
+         * How long to wait for the backend to finish generating a response before
+         * failing the request with ModelTimeoutException. Larger models on
+         * CPU-backed backends (e.g. Ollama) may need more than the default.
+         */
+        @WithDefault("60")
+        int requestTimeoutSeconds();
     }
 
     interface TextractServiceConfig {
