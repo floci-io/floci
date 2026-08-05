@@ -61,6 +61,30 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void getSecretValueWithMatchingVersionIdAndStage() {
+        service.createSecret("paired", "v1", null, null, null, null, REGION);
+        SecretVersion current = service.getSecretValue("paired", null, null, REGION);
+
+        SecretVersion fetched = service.getSecretValue("paired",
+                current.getVersionId(), "AWSCURRENT", REGION);
+        assertEquals("v1", fetched.getSecretString());
+    }
+
+    @Test
+    void getSecretValueWithMismatchedVersionIdAndStageThrows() {
+        // botocore: when both are supplied they must refer to the same version; moto and
+        // LocalStack both raise InvalidRequestException with this message.
+        service.createSecret("mismatched", "v1", null, null, null, null, REGION);
+        SecretVersion current = service.getSecretValue("mismatched", null, null, REGION);
+
+        AwsException thrown = assertThrows(AwsException.class, () ->
+                service.getSecretValue("mismatched", current.getVersionId(), "AWSPREVIOUS", REGION));
+        assertEquals("InvalidRequestException", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains(
+                "You provided a VersionStage that is not associated to the provided VersionId."));
+    }
+
+    @Test
     void putSecretValueRotatesVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         service.putSecretValue("my-secret", "v2", null, null, REGION, null);
