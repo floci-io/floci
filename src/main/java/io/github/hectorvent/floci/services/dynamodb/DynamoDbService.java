@@ -1439,8 +1439,14 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        DynamoDbReservedWords.check(expression, "UpdateExpression");
-        String remaining = expression.trim();
+        // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
+        // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
+        // comma-separated action parsing below work regardless of formatting. Normalize
+        // before the reserved-word check too: its function-call lookahead skips only
+        // literal spaces, so on a raw "if_not_exists\n(...)" it would read the function
+        // name as a bare identifier instead.
+        String remaining = expression.trim().replaceAll("\\s+", " ");
+        DynamoDbReservedWords.check(remaining, "UpdateExpression");
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -1716,15 +1722,15 @@ public class DynamoDbService {
             String[] parts = clause.split("\\s+", 3);
             if (parts.length < 2) break;
 
-            String attrName = resolveAttributeName(parts[0], exprAttrNames);
+            String attrPath = parts[0];
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
                 JsonNode addValue = exprAttrValues.get(valuePlaceholder);
                 if (addValue != null) {
-                    JsonNode existingValue = item.get(attrName);
+                    JsonNode existingValue = getValueAtPath(item, attrPath, exprAttrNames);
                     JsonNode newValue = applyAddOperation(existingValue, addValue);
-                    item.set(attrName, newValue);
+                    setValueAtPath(item, attrPath, newValue, exprAttrNames);
                 }
             }
 
@@ -1827,19 +1833,19 @@ public class DynamoDbService {
             String[] parts = clause.split("\\s+", 3);
             if (parts.length < 2) break;
 
-            String attrName = resolveAttributeName(parts[0], exprAttrNames);
+            String attrPath = parts[0];
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
                 JsonNode deleteValue = exprAttrValues.get(valuePlaceholder);
                 if (deleteValue != null) {
-                    JsonNode existingValue = item.get(attrName);
+                    JsonNode existingValue = getValueAtPath(item, attrPath, exprAttrNames);
                     if (existingValue != null) {
                         JsonNode newValue = applyDeleteOperation(existingValue, deleteValue);
                         if (newValue == null) {
-                            item.remove(attrName);
+                            removeValueAtPath(item, attrPath, exprAttrNames);
                         } else {
-                            item.set(attrName, newValue);
+                            setValueAtPath(item, attrPath, newValue, exprAttrNames);
                         }
                     }
                 }

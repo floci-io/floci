@@ -14,6 +14,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.apigateway.model.Account;
@@ -36,6 +37,8 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
+import io.swagger.v3.oas.models.security.SecurityScheme;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -172,15 +175,19 @@ public class ApiGatewayService {
         Map<String, String> tags = request.get("tags") instanceof Map<?, ?> m
                 ? (Map<String, String>) m : new HashMap<>();
 
-        String customId = tags.get("_custom_id_");
-        String apiId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
+        String customId = ReservedTags.extractOverrideApiId(tags);
+        String apiId = customId != null ? customId : shortId(10);
+        if (apiStore.get(apiKey(region, apiId)).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "REST API with id '" + apiId + "' already exists", 409);
+        }
 
         RestApi api = new RestApi();
         api.setId(apiId);
         api.setName(name);
         api.setDescription(description);
         api.setCreatedDate(System.currentTimeMillis() / 1000L);
-        api.setTags(tags);
+        api.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
 
         EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
         if (request.get(EPC_KEY) instanceof Map<?, ?> epMap) {
@@ -628,6 +635,16 @@ public class ApiGatewayService {
         authorizer.setAuthorizerUri((String) request.get("authorizerUri"));
         authorizer.setIdentitySource((String) request.get("identitySource"));
         authorizer.setAuthorizerResultTtlInSeconds(String.valueOf(request.getOrDefault("authorizerResultTtlInSeconds", "300")));
+        // COGNITO_USER_POOLS authorizers carry the pool ARNs; keep them so get-authorizer reflects them.
+        if (request.get("providerARNs") instanceof List<?> arns) {
+            List<String> providerArns = new ArrayList<>();
+            for (Object arn : arns) {
+                if (arn != null) {
+                    providerArns.add(arn.toString());
+                }
+            }
+            authorizer.setProviderARNs(providerArns);
+        }
 
         authorizerStore.put(authorizerKey(region, apiId, authorizer.getId()), authorizer);
         LOG.infov("Created authorizer {0} for API {1}", authorizer.getId(), apiId);
@@ -1045,6 +1062,7 @@ public class ApiGatewayService {
     }
 
     public void tagResource(String region, String apiId, Map<String, String> tags) {
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         RestApi api = getRestApi(region, apiId);
         api.getTags().putAll(tags);
         apiStore.put(apiKey(region, apiId), api);
@@ -1094,10 +1112,11 @@ public class ApiGatewayService {
             resourceStore.put(resourceKey(region, apiId, root.getId()), root);
         }
 
-        // Clear existing models and validators
+        // Clear existing models, validators, and authorizers before rebuilding them from the spec.
         String prefix = region + "::" + apiId + "::";
         modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
         requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
+        authorizerStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(authorizerStore::delete);
 
         // Update API metadata from spec
         if (openAPI.getInfo() != null) {
@@ -1117,7 +1136,187 @@ public class ApiGatewayService {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
         }
-        return result.getOpenAPI();
+        OpenAPI openAPI = result.getOpenAPI();
+        validateImportedAuthorizers(openAPI);
+        return openAPI;
+    }
+
+    private void validateImportedAuthorizers(OpenAPI openAPI) {
+        if (openAPI.getComponents() == null || openAPI.getComponents().getSecuritySchemes() == null) {
+            return;
+        }
+        for (var entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
+            String schemeName = entry.getKey();
+            SecurityScheme scheme = entry.getValue();
+            importedAuthorizationType(scheme, schemeName);
+            Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
+            if (authDef == null) {
+                continue;
+            }
+            String type = importedAuthorizerType(authDef, schemeName);
+            importedAuthorizerUri(authDef, schemeName);
+            importedProviderArns(authDef, schemeName);
+            int ttl = importedAuthorizerTtl(authDef, schemeName);
+            String identitySource = resolveImportedIdentitySource(scheme, authDef, type, schemeName);
+            if ("request".equalsIgnoreCase(type) && ttl > 0 && identitySource == null) {
+                throw new AwsException(
+                        "BadRequestException",
+                        "REQUEST authorizer " + schemeName
+                                + " must specify identitySource when authorizer caching is enabled.",
+                        400);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> importedAuthorizerDefinition(SecurityScheme scheme, String schemeName) {
+        if (scheme == null || scheme.getExtensions() == null) {
+            return null;
+        }
+        Object definition = scheme.getExtensions().get("x-amazon-apigateway-authorizer");
+        if (definition == null) {
+            return null;
+        }
+        if (definition instanceof Map<?, ?>) {
+            return (Map<String, Object>) definition;
+        }
+        throw invalidImportedAuthorizerProperty(
+                "x-amazon-apigateway-authorizer", schemeName, "an object");
+    }
+
+    private String importedAuthorizerType(Map<String, Object> authDef, String schemeName) {
+        String type = importedAuthorizerString(authDef, "type", schemeName);
+        if (type != null) {
+            String normalizedType = type.toLowerCase(java.util.Locale.ROOT);
+            if ("token".equals(normalizedType)
+                    || "request".equals(normalizedType)
+                    || "cognito_user_pools".equals(normalizedType)) {
+                return normalizedType;
+            }
+        }
+        throw invalidImportedAuthorizerProperty(
+                "x-amazon-apigateway-authorizer.type",
+                schemeName,
+                "one of token, request, or cognito_user_pools");
+    }
+
+    private String importedAuthorizerUri(Map<String, Object> authDef, String schemeName) {
+        return importedAuthorizerString(authDef, "authorizerUri", schemeName);
+    }
+
+    private String importedAuthorizerString(
+            Map<String, Object> authDef, String propertyName, String schemeName) {
+        Object value = authDef.get(propertyName);
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof String stringValue) {
+            return stringValue;
+        }
+        throw invalidImportedAuthorizerProperty(
+                "x-amazon-apigateway-authorizer." + propertyName, schemeName, "a string");
+    }
+
+    private List<String> importedProviderArns(Map<String, Object> authDef, String schemeName) {
+        Object value = authDef.get("providerARNs");
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof List<?> rawArns)) {
+            throw invalidImportedAuthorizerProperty(
+                    "x-amazon-apigateway-authorizer.providerARNs",
+                    schemeName,
+                    "an array of strings");
+        }
+        List<String> providerArns = new ArrayList<>();
+        for (Object rawArn : rawArns) {
+            if (!(rawArn instanceof String arn)) {
+                throw invalidImportedAuthorizerProperty(
+                        "x-amazon-apigateway-authorizer.providerARNs",
+                        schemeName,
+                        "an array of strings");
+            }
+            providerArns.add(arn);
+        }
+        return providerArns;
+    }
+
+    private AwsException invalidImportedAuthorizerProperty(
+            String propertyName, String schemeName, String expectedType) {
+        return new AwsException(
+                "BadRequestException",
+                propertyName + " for security scheme " + schemeName + " must be " + expectedType + ".",
+                400);
+    }
+
+    private String importedAuthorizationType(SecurityScheme scheme, String schemeName) {
+        if (scheme == null || scheme.getExtensions() == null) {
+            return null;
+        }
+        Object value = scheme.getExtensions().get("x-amazon-apigateway-authtype");
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof String authorizationType) {
+            return authorizationType;
+        }
+        throw new AwsException(
+                "BadRequestException",
+                "x-amazon-apigateway-authtype for security scheme " + schemeName + " must be a string.",
+                400);
+    }
+
+    private String resolveImportedIdentitySource(
+            SecurityScheme scheme,
+            Map<String, Object> authDef,
+            String authorizerType,
+            String schemeName) {
+        String configured = importedAuthorizerString(authDef, "identitySource", schemeName);
+        String identitySource = configured != null ? configured.trim() : null;
+        if (identitySource != null && identitySource.isEmpty()) {
+            identitySource = null;
+        }
+        boolean derivesIdentityFromScheme = authorizerType == null
+                || "token".equalsIgnoreCase(authorizerType)
+                || "cognito_user_pools".equalsIgnoreCase(authorizerType);
+        if (identitySource == null && derivesIdentityFromScheme
+                && scheme.getName() != null && scheme.getIn() != null
+                && "header".equalsIgnoreCase(scheme.getIn().toString())) {
+            identitySource = "method.request.header." + scheme.getName();
+        }
+        if (identitySource == null
+                && (authorizerType == null || "token".equalsIgnoreCase(authorizerType))) {
+            identitySource = "method.request.header.Authorization";
+        }
+        return identitySource;
+    }
+
+    private int importedAuthorizerTtl(Map<String, Object> authDef, String schemeName) {
+        Object configured = authDef.get("authorizerResultTtlInSeconds");
+        if (configured == null) {
+            return 300;
+        }
+        String value = configured.toString();
+        if (!value.matches("\\d+")) {
+            throw invalidImportedAuthorizerTtl(schemeName);
+        }
+        try {
+            int ttl = Integer.parseInt(value);
+            if (ttl > 3600) {
+                throw invalidImportedAuthorizerTtl(schemeName);
+            }
+            return ttl;
+        } catch (NumberFormatException e) {
+            throw invalidImportedAuthorizerTtl(schemeName);
+        }
+    }
+
+    private AwsException invalidImportedAuthorizerTtl(String schemeName) {
+        return new AwsException(
+                "BadRequestException",
+                "authorizerResultTtlInSeconds for authorizer " + schemeName
+                        + " must be an integer between 0 and 3600.",
+                400);
     }
 
     @SuppressWarnings("unchecked")
@@ -1168,6 +1367,50 @@ public class ApiGatewayService {
             }
         }
 
+        // Import security schemes: create an Authorizer for each x-amazon-apigateway-authorizer scheme
+        // and record how each scheme name maps to a method authorizationType, so per-operation/root
+        // `security` requirements can be applied to methods below. Without this, imported APIs with a
+        // Lambda authorizer land as authorizationType=NONE and are silently open at runtime.
+        Map<String, String> schemeToAuthorizerId = new HashMap<>();
+        Map<String, String> schemeToAuthType = new HashMap<>();
+        if (openAPI.getComponents() != null && openAPI.getComponents().getSecuritySchemes() != null) {
+            for (var schemeEntry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
+                String schemeName = schemeEntry.getKey();
+                SecurityScheme scheme = schemeEntry.getValue();
+                String authtype = importedAuthorizationType(scheme, schemeName);
+                Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
+                if (authDef != null) {
+                    String t = importedAuthorizerType(authDef, schemeName); // token | request | cognito_user_pools
+                    Map<String, Object> req = new HashMap<>();
+                    req.put("name", schemeName);
+                    req.put("authorizerUri", importedAuthorizerUri(authDef, schemeName));
+                    req.put("authorizerResultTtlInSeconds", importedAuthorizerTtl(authDef, schemeName));
+                    String identitySource = resolveImportedIdentitySource(scheme, authDef, t, schemeName);
+                    if (identitySource != null) {
+                        req.put("identitySource", identitySource);
+                    }
+                    if ("cognito_user_pools".equalsIgnoreCase(t)) {
+                        req.put("type", "COGNITO_USER_POOLS");
+                        // Cognito user-pool authorizers carry the pool ARNs in the authorizer extension.
+                        List<String> providerArns = importedProviderArns(authDef, schemeName);
+                        if (providerArns != null) {
+                            req.put("providerARNs", providerArns);
+                        }
+                        schemeToAuthType.put(schemeName, "COGNITO_USER_POOLS");
+                    } else {
+                        req.put("type", t == null ? "TOKEN" : t.toUpperCase());
+                        schemeToAuthType.put(schemeName, "CUSTOM");
+                    }
+                    Authorizer created = createAuthorizer(region, apiId, req);
+                    schemeToAuthorizerId.put(schemeName, created.getId());
+                } else if ("awsSigv4".equalsIgnoreCase(authtype)) {
+                    schemeToAuthType.put(schemeName, "AWS_IAM");
+                } else {
+                    schemeToAuthType.put(schemeName, "NONE"); // plain apiKey scheme
+                }
+            }
+        }
+
         if (openAPI.getPaths() == null) return;
 
         // Find the root resource
@@ -1197,7 +1440,32 @@ public class ApiGatewayService {
 
                 // Create the method
                 Map<String, Object> methodRequest = new HashMap<>();
-                methodRequest.put("authorizationType", "NONE");
+                // Apply the operation's (or the API root's) security requirement, resolving the scheme
+                // to a method authorizationType (CUSTOM/AWS_IAM/COGNITO_USER_POOLS) + authorizerId.
+                List<SecurityRequirement> secReqs = operation.getSecurity() != null
+                        ? operation.getSecurity() : openAPI.getSecurity();
+                String authType = "NONE";
+                String authorizerId = null;
+                if (secReqs != null) {
+                    // AWS resolves the OR-list of security requirements to the first declared
+                    // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
+                    resolveAuth:
+                    for (SecurityRequirement secReq : secReqs) {
+                        for (String schemeName : secReq.keySet()) {
+                            String mapped = schemeToAuthType.get(schemeName);
+                            if (mapped == null || "NONE".equals(mapped)) {
+                                continue;
+                            }
+                            authType = mapped;
+                            authorizerId = schemeToAuthorizerId.get(schemeName);
+                            break resolveAuth;
+                        }
+                    }
+                }
+                methodRequest.put("authorizationType", authType);
+                if (authorizerId != null) {
+                    methodRequest.put("authorizerId", authorizerId);
+                }
 
                 // Link request models from operation requestBody
                 if (operation.getRequestBody() != null && operation.getRequestBody().getContent() != null) {
