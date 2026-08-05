@@ -79,7 +79,7 @@ public class ProxyBackend implements BedrockBackend {
         try {
             requestBody = objectMapper.writeValueAsString(openAiRequest);
         } catch (Exception e) {
-            throw new AwsException("InternalFailure", "Failed to serialize proxy request: " + e.getMessage(), 500);
+            throw new AwsException("InternalServerException", "Failed to serialize proxy request: " + e.getMessage(), 500);
         }
         builder.POST(HttpRequest.BodyPublishers.ofString(requestBody));
 
