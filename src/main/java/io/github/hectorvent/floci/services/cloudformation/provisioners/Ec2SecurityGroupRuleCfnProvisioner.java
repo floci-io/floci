@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -12,11 +13,11 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * CloudFormation provisioning for the standalone security-group rule resources:
@@ -31,8 +32,6 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisioner {
-
-    private static final Logger LOG = Logger.getLogger(Ec2SecurityGroupRuleCfnProvisioner.class);
 
     private static final String INGRESS = "AWS::EC2::SecurityGroupIngress";
     private static final String EGRESS = "AWS::EC2::SecurityGroupEgress";
@@ -95,13 +94,10 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
             return;
         }
         // A standalone rule can target a group that outlives the stack, so the permission has to be
-        // revoked explicitly. Failures are swallowed: on a whole-stack delete the group is usually
-        // gone already, and AWS does not fail a stack deletion over an already-absent rule.
-        try {
-            ec2Service.deleteSecurityGroupRule(region, physicalId);
-        } catch (Exception e) {
-            LOG.debugv("Error deleting security group rule {0}: {1}", physicalId, e.getMessage());
-        }
+        // revoked explicitly. deleteSecurityGroupRule already absorbs the two cases a stack delete
+        // runs into, returning false for a rule that is no longer recorded and succeeding when the
+        // group itself is gone, so a throw from here is a real failure and belongs to the caller.
+        ec2Service.deleteSecurityGroupRule(region, physicalId);
     }
 
     /**
@@ -123,22 +119,38 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
         // It reaches the ipv4 and ipv6 ranges; UserIdGroupPair has no description field to put it on.
         String description = resolve(rule, "Description", engine);
         String cidr = resolve(rule, "CidrIp", engine);
+        String cidr6 = resolve(rule, "CidrIpv6", engine);
+        String peerGroup = firstNonBlank(
+                resolve(rule, "SourceSecurityGroupId", engine),
+                resolve(rule, "DestinationSecurityGroupId", engine));
+        String prefixList = firstNonBlank(
+                resolve(rule, "SourcePrefixListId", engine),
+                resolve(rule, "DestinationPrefixListId", engine));
+
+        // "You must specify exactly one of the following sources: an IPv4 address range, an IPv6
+        // address range, a prefix list, or a security group." Naming several used to authorize a
+        // rule record per peer while only the first id was kept, so delete revoked one of them and
+        // an update left the others on the group.
+        long sources = Stream.of(cidr, cidr6, peerGroup, prefixList)
+                .filter(s -> s != null && !s.isBlank())
+                .count();
+        if (sources > 1) {
+            throw new AwsException("ValidationError",
+                    "A security group rule must specify exactly one of CidrIp, CidrIpv6, "
+                    + "a prefix list, or a security group.", 400);
+        }
+
         if (cidr != null && !cidr.isBlank()) {
             IpRange range = new IpRange();
             range.setCidrIp(cidr);
             range.setDescription(description);
             perm.getIpRanges().add(range);
         }
-        String cidr6 = resolve(rule, "CidrIpv6", engine);
         if (cidr6 != null && !cidr6.isBlank()) {
             Ipv6Range range6 = new Ipv6Range();
             range6.setCidrIpv6(cidr6);
             range6.setDescription(description);
             perm.getIpv6Ranges().add(range6);
-        }
-        String peerGroup = resolve(rule, "SourceSecurityGroupId", engine);
-        if (peerGroup == null || peerGroup.isBlank()) {
-            peerGroup = resolve(rule, "DestinationSecurityGroupId", engine);
         }
         if (peerGroup != null && !peerGroup.isBlank()) {
             UserIdGroupPair pair = new UserIdGroupPair();
@@ -167,6 +179,10 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
                 .map(SecurityGroup::getGroupId)
                 .findFirst()
                 .orElse(groupName);
+    }
+
+    private static String firstNonBlank(String preferred, String fallback) {
+        return preferred != null && !preferred.isBlank() ? preferred : fallback;
     }
 
     private static String resolve(JsonNode props, String name, CloudFormationTemplateEngine engine) {

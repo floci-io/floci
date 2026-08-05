@@ -282,11 +282,50 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
     }
 
     @Test
-    void deleteSwallowsServiceFailures() {
-        doThrow(new AwsException("InvalidGroup.NotFound", "gone", 400))
+    void deletePropagatesServiceFailures() {
+        // deleteSecurityGroupRule already absorbs an unrecorded rule and an absent group, so a
+        // throw is a real failure. Swallowing it reported the resource deleted while its permission
+        // was still on the group.
+        doThrow(new AwsException("InternalFailure", "storage down", 500))
                 .when(ec2).deleteSecurityGroupRule("us-east-1", "sgr-abc");
-        provisioner.delete(INGRESS, "sgr-abc", "us-east-1");
-        verify(ec2).deleteSecurityGroupRule("us-east-1", "sgr-abc");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.delete(INGRESS, "sgr-abc", "us-east-1"));
+
+        assertEquals("InternalFailure", failure.getErrorCode());
+    }
+
+    @Test
+    void severalPeerPropertiesAreRejected() {
+        // "You must specify exactly one of the following sources." Naming several authorized a rule
+        // record per peer while only the first id was kept as the physical id, so delete revoked one
+        // of them and the rest stayed on the group.
+        StackResource r = resource(INGRESS, "WebIngress");
+        ObjectNode props = mapper.createObjectNode()
+                .put("GroupId", "sg-123")
+                .put("IpProtocol", "tcp")
+                .put("CidrIp", "10.0.0.0/16")
+                .put("CidrIpv6", "::/0");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(ec2, never()).authorizeSecurityGroupIngress(anyString(), anyString(), anyList());
+    }
+
+    @Test
+    void aCidrAndAPeerGroupTogetherAreRejected() {
+        StackResource r = resource(EGRESS, "WebEgress");
+        ObjectNode props = mapper.createObjectNode()
+                .put("GroupId", "sg-123")
+                .put("IpProtocol", "tcp")
+                .put("CidrIp", "10.0.0.0/16")
+                .put("DestinationSecurityGroupId", "sg-peer");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(ec2, never()).authorizeSecurityGroupEgress(anyString(), anyString(), anyList());
     }
 
     @Test
