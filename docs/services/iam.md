@@ -51,6 +51,7 @@
 | GetPolicy | Returns metadata for a managed IAM policy. |
 | DeletePolicy | Deletes a managed IAM policy. |
 | ListPolicies | Lists managed IAM policies, including seeded AWS managed policies. |
+| ListEntitiesForPolicy | Lists roles, users, and groups with a direct managed-policy attachment. |
 | CreatePolicyVersion | Creates a new version of a managed policy. |
 | GetPolicyVersion | Returns a managed policy version document. |
 | DeletePolicyVersion | Deletes a non-default managed policy version. |
@@ -59,6 +60,10 @@
 | TagPolicy | Adds tags to a managed policy. |
 | UntagPolicy | Removes tags from a managed policy. |
 | ListPolicyTags | Lists tags stored for a managed policy. |
+
+`ListEntitiesForPolicy` currently returns direct permissions-policy attachments. `EntityFilter`,
+`PathPrefix`, `PolicyUsageFilter`, and pagination are not yet applied; responses return
+`IsTruncated=false`.
 
 ### Permission Boundaries
 
