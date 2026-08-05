@@ -46,11 +46,11 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
 
-      - uses: graalvm/setup-graalvm@6f3fa030c4b8f77c1f554a860f593a654538fa38 # v1
+      - uses: graalvm/setup-graalvm@0def53c0fd8534bc13416c9469f5be45265824fd # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
@@ -81,11 +81,11 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
 
-      - uses: graalvm/setup-graalvm@6f3fa030c4b8f77c1f554a860f593a654538fa38 # v1
+      - uses: graalvm/setup-graalvm@0def53c0fd8534bc13416c9469f5be45265824fd # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
@@ -116,7 +116,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
 
@@ -130,8 +130,11 @@ jobs:
           name: native-arm64
           path: native/arm64/
 
-      - name: Make binaries executable
-        run: chmod +x native/amd64/*-runner native/arm64/*-runner
+      - name: Stage binaries under a fixed name
+        run: |
+          for arch in amd64 arm64; do
+            mv native/$arch/*-runner native/$arch/application
+          done
 
       - name: Set created timestamp
         id: created
@@ -141,15 +144,15 @@ jobs:
         id: source_date
         run: echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6.2.0
+        uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
@@ -160,7 +163,7 @@ jobs:
           registry-type: public
 
       - name: Build and push native nightly image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         env:
           SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
         with:
@@ -184,7 +187,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push compat nightly image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         env:
           SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
         with:

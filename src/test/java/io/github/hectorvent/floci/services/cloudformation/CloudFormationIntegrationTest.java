@@ -6820,6 +6820,69 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void rollbackStack_customBusWithRule_rollsBackBusAndRule() {
+        // RbBus provisions first, RbRule (on that custom bus) second, then BadSecret fails
+        // (SecretString + GenerateSecretString is invalid), forcing a CREATE rollback. The rule
+        // and its custom bus must both be cleaned up, not leaked.
+        String failingTemplate = """
+            {
+              "Resources": {
+                "RbBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-rb-bus" }
+                },
+                "RbRule": {
+                  "Type": "AWS::Events::Rule",
+                  "DependsOn": "RbBus",
+                  "Properties": {
+                    "Name": "cfn-rb-rule",
+                    "EventBusName": { "Ref": "RbBus" },
+                    "EventPattern": { "source": ["rb.test"] }
+                  }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "RbRule",
+                  "Properties": {
+                    "Name": "cfn-rb-secret",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-rb-stack")
+            .formParam("TemplateBody", failingTemplate)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-rb-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+
+        // The rule created on the custom bus was rolled back...
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-rb-rule\",\"EventBusName\":\"cfn-rb-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+
+        // ...and so was the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-rb-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
     void createStack_resourceFailure_setsRollbackComplete_singleResource() {
         // A lone failing resource still moves the stack to ROLLBACK_COMPLETE (no orphaned state).
         String template = """
@@ -6921,6 +6984,340 @@ class CloudFormationIntegrationTest {
                 .body("name", equalTo("cfn-private-api"))
                 .body("endpointConfiguration.types", contains("PRIVATE"))
                 .body("endpointConfiguration.vpcEndpointIds", contains("vpce-12345678"));
+    }
+
+    @Test
+    void createStack_withEventBus_createsRealBusAndResolvesRefAndGetAtt() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": {
+                    "Name": "cfn-custom-bus",
+                    "Description": "Custom bus created via CloudFormation",
+                    "Tags": [ { "Key": "env", "Value": "test" } ]
+                  }
+                }
+              },
+              "Outputs": {
+                "BusRef":  { "Value": { "Ref": "MyBus" } },
+                "BusArn":  { "Value": { "Fn::GetAtt": ["MyBus", "Arn"] } },
+                "BusName": { "Value": { "Fn::GetAtt": ["MyBus", "Name"] } }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbus-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eventbus-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .body(containsString("<OutputKey>BusRef</OutputKey>"))
+            .body(containsString("<OutputValue>cfn-custom-bus</OutputValue>"))
+            .body(containsString("event-bus/cfn-custom-bus"));
+
+        // The bus really exists in EventBridge, not a stub.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-custom-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Name", equalTo("cfn-custom-bus"))
+            .body("Arn", containsString("event-bus/cfn-custom-bus"));
+    }
+
+    @Test
+    void deleteStack_withEventBus_removesBus() {
+        String template = """
+            { "Resources": { "MyBus": { "Type": "AWS::Events::EventBus",
+              "Properties": { "Name": "cfn-bus-to-delete" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbus-delete-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-eventbus-delete-stack")
+        .when().post("/").then().statusCode(200);
+
+        // The bus is gone.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-bus-to-delete\"}")
+        .when().post("/")
+        .then().body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deleteStack_customBusWithRule_removesBusAndRule() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-teardown-bus" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-teardown-rule",
+                    "EventBusName": { "Ref": "MyBus" },
+                    "EventPattern": { "source": ["teardown.test"] }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-teardown-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        // Sanity: the rule exists on the custom bus before teardown.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-teardown-rule\",\"EventBusName\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().statusCode(200).body("Name", equalTo("cfn-teardown-rule"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-teardown-stack")
+        .when().post("/").then().statusCode(200);
+
+        // The rule is gone from the custom bus...
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-teardown-rule\",\"EventBusName\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+
+        // ...and so is the bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void createStack_customBusRuleDeliversEventToSqs() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-e2e-bus" }
+                },
+                "TargetQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": { "QueueName": "cfn-e2e-queue" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-e2e-rule",
+                    "EventBusName": { "Ref": "MyBus" },
+                    "EventPattern": { "source": ["my.e2e.app"] },
+                    "Targets": [
+                      { "Id": "Target0", "Arn": { "Fn::GetAtt": ["TargetQueue", "Arn"] } }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-e2e-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-e2e-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The rule is attached to the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-e2e-rule\",\"EventBusName\":\"cfn-e2e-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Targets[0].Arn", equalTo("arn:aws:sqs:us-east-1:000000000000:cfn-e2e-queue"));
+
+        // Send a matching event to the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.PutEvents")
+            .body("""
+                {"Entries":[{"Source":"my.e2e.app","DetailType":"t",
+                 "Detail":"{\\"hello\\":\\"world\\"}","EventBusName":"cfn-e2e-bus"}]}
+                """)
+        .when().post("/")
+        .then().statusCode(200).body("FailedEntryCount", equalTo(0));
+
+        // Resolve the queue URL, then confirm the message was delivered.
+        String getUrlXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "cfn-e2e-queue")
+        .when().post("/")
+        .then().statusCode(200).extract().body().asString();
+        String queueUrl = getUrlXml.substring(
+                getUrlXml.indexOf("<QueueUrl>") + "<QueueUrl>".length(),
+                getUrlXml.indexOf("</QueueUrl>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("my.e2e.app"))
+            .body(containsString("hello"));
+    }
+
+    @Test
+    void createStack_withEventBusPolicyIndividualForm_writesStatement() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-policy-bus" }
+                },
+                "MyPolicy": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "AllowAcct",
+                    "Action": "events:PutEvents",
+                    "Principal": "111122223333"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbuspolicy-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eventbuspolicy-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-policy-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Policy", containsString("AllowAcct"))
+            .body("Policy", containsString("111122223333"));
+    }
+
+    @Test
+    void createStack_withEventBusPolicyStatementForm_mergesMultipleStatements() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-stmt-bus" }
+                },
+                "PolicyA": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "StmtA",
+                    "Statement": {
+                      "Effect": "Allow",
+                      "Principal": { "AWS": "arn:aws:iam::111111111111:root" },
+                      "Action": "events:PutEvents",
+                      "Resource": { "Fn::GetAtt": ["MyBus", "Arn"] }
+                    }
+                  }
+                },
+                "PolicyB": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "StmtB",
+                    "Statement": {
+                      "Effect": "Allow",
+                      "Principal": { "AWS": "arn:aws:iam::222222222222:root" },
+                      "Action": "events:PutEvents",
+                      "Resource": { "Fn::GetAtt": ["MyBus", "Arn"] }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-stmt-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-stmt-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // Both statements must be present — a naive whole-policy replace would keep only one.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-stmt-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Policy", containsString("StmtA"))
+            .body("Policy", containsString("StmtB"))
+            .body("Policy", containsString("111111111111"))
+            .body("Policy", containsString("222222222222"));
     }
 
 }
