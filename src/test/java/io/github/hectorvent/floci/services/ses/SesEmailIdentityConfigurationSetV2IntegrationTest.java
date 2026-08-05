@@ -336,6 +336,21 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
     }
 
     @Test
+    @Order(17)
+    void createEmailIdentity_withNonArrayTags_returns400AndDoesNotCreate() {
+        String id = "cs-attr-oncreate-badtags@floci.test";
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"EmailIdentity\":\"" + id + "\",\"Tags\":\"oops\"}")
+        .when().post("/v2/email/identities").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Tags must be an array."));
+
+        // Tags is validated before the identity is persisted, so nothing is created.
+        given().header("Authorization", SES_AUTH)
+        .when().get("/v2/email/identities/" + id).then().statusCode(404);
+    }
+
+    @Test
     @Order(13)
     void createEmailIdentity_withNonStringConfigurationSet_returns400() {
         // ConfigurationSetName is a string; a non-string must be rejected, not coerced.

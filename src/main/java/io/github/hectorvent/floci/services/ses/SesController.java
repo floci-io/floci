@@ -117,6 +117,12 @@ public class SesController {
                         "Email identity " + emailIdentity + " already exist.", 400);
             }
 
+            // Parse Tags up front. parseTagsArray is pure (it only reads the node), so validating the
+            // shape before creating the identity keeps the call atomic — a malformed Tags value fails
+            // without leaving a half-created identity behind, matching AWS and the ConfigurationSetName
+            // pre-check below.
+            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
+
             // Verified against AWS: a non-existent ConfigurationSetName fails the whole call
             // (NotFoundException) without creating the identity, so validate it before creating.
             // Only the empty string means "no default configuration set" (consistent with the
@@ -135,7 +141,6 @@ public class SesController {
                 sesService.setEmailIdentityConfigurationSet(emailIdentity, configurationSetName, region);
             }
 
-            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
             if (parsedTags != null) {
                 sesService.setIdentityTags(emailIdentity, region, parsedTags);
             }
