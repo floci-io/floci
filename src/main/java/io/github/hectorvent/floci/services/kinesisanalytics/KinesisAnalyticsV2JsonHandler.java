@@ -11,6 +11,10 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Dispatches Kinesis Analytics V2 (Managed Service for Apache Flink) actions for the
@@ -38,6 +42,9 @@ public class KinesisAnalyticsV2JsonHandler {
             case "StopApplication" -> handleStopApplication(request);
             case "UpdateApplication" -> handleUpdateApplication(request);
             case "DeleteApplication" -> handleDeleteApplication(request);
+            case "TagResource" -> handleTagResource(request);
+            case "UntagResource" -> handleUntagResource(request);
+            case "ListTagsForResource" -> handleListTagsForResource(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -64,7 +71,7 @@ public class KinesisAnalyticsV2JsonHandler {
 
         FlinkApplication app = service.createApplication(applicationName, runtimeEnvironment,
                 serviceExecutionRole, applicationDescription, applicationMode,
-                codeBucket, codeKey, codeVersion, parallelism);
+                codeBucket, codeKey, codeVersion, parallelism, parseTags(request.path("Tags")));
         return applicationDetailResponse(app);
     }
 
@@ -137,6 +144,56 @@ public class KinesisAnalyticsV2JsonHandler {
         service.deleteApplication(applicationName, createTimestamp);
         // AWS DeleteApplication returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleTagResource(JsonNode request) {
+        String resourceArn = request.path("ResourceARN").asText(null);
+        service.tagResource(resourceArn, parseTags(request.path("Tags")));
+        // AWS TagResource returns an empty body.
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUntagResource(JsonNode request) {
+        String resourceArn = request.path("ResourceARN").asText(null);
+        List<String> tagKeys = new ArrayList<>();
+        request.path("TagKeys").forEach(k -> tagKeys.add(k.asText()));
+        service.untagResource(resourceArn, tagKeys);
+        // AWS UntagResource returns an empty body.
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListTagsForResource(JsonNode request) {
+        String resourceArn = request.path("ResourceARN").asText(null);
+        Map<String, String> tags = service.listTagsForResource(resourceArn);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Tags", tagsNode(tags));
+        return Response.ok(response).build();
+    }
+
+    /** {@code Tags} is a list of {@code {Key, Value}} objects on this API, not a string map. */
+    private Map<String, String> parseTags(JsonNode tagsNode) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (tagsNode != null && tagsNode.isArray()) {
+            for (JsonNode tag : tagsNode) {
+                String key = tag.path("Key").asText(null);
+                if (key != null) {
+                    tags.put(key, tag.path("Value").asText(null));
+                }
+            }
+        }
+        return tags;
+    }
+
+    private ArrayNode tagsNode(Map<String, String> tags) {
+        ArrayNode arr = objectMapper.createArrayNode();
+        tags.forEach((k, v) -> {
+            ObjectNode tag = arr.addObject();
+            tag.put("Key", k);
+            if (v != null) {
+                tag.put("Value", v);
+            }
+        });
+        return arr;
     }
 
     private Response applicationDetailResponse(FlinkApplication app) {

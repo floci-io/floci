@@ -158,6 +158,59 @@ class KinesisAnalyticsV2JsonHandlerTest {
         assertThat(resp.getStatus(), is(400));
     }
 
+    @Test
+    void createApplicationWithTagsThenListTagsForResourceRoundTrips() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("ApplicationName", "tagged");
+        req.put("RuntimeEnvironment", "FLINK-1_18");
+        req.put("ServiceExecutionRole", ROLE);
+        req.putArray("Tags")
+                .addObject().put("Key", "env").put("Value", "dev");
+        Response created = handler.handle("CreateApplication", req, REGION);
+        assertThat(created.getStatus(), is(200));
+        // Tags is a list of {Key, Value} objects on this API, never echoed on ApplicationDetail.
+        assertThat(entity(created).get("ApplicationDetail").has("Tags"), is(false));
+
+        String arn = entity(created).get("ApplicationDetail").get("ApplicationARN").asText();
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.put("ResourceARN", arn);
+        Response listed = handler.handle("ListTagsForResource", listReq, REGION);
+        assertThat(listed.getStatus(), is(200));
+        var tags = entity(listed).get("Tags");
+        assertEquals(1, tags.size());
+        assertEquals("env", tags.get(0).get("Key").asText());
+        assertEquals("dev", tags.get(0).get("Value").asText());
+    }
+
+    @Test
+    void tagResourceThenUntagResourceRoundTrips() {
+        createApplication("demo");
+        String arn = describeArn("demo");
+
+        ObjectNode tagReq = MAPPER.createObjectNode();
+        tagReq.put("ResourceARN", arn);
+        tagReq.putArray("Tags").addObject().put("Key", "team").put("Value", "platform");
+        assertThat(handler.handle("TagResource", tagReq, REGION).getStatus(), is(200));
+
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.put("ResourceARN", arn);
+        assertEquals(1, entity(handler.handle("ListTagsForResource", listReq, REGION)).get("Tags").size());
+
+        ObjectNode untagReq = MAPPER.createObjectNode();
+        untagReq.put("ResourceARN", arn);
+        untagReq.putArray("TagKeys").add("team");
+        assertThat(handler.handle("UntagResource", untagReq, REGION).getStatus(), is(200));
+
+        assertEquals(0, entity(handler.handle("ListTagsForResource", listReq, REGION)).get("Tags").size());
+    }
+
+    private String describeArn(String name) {
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("ApplicationName", name);
+        return entity(handler.handle("DescribeApplication", describe, REGION))
+                .get("ApplicationDetail").get("ApplicationARN").asText();
+    }
+
     private KinesisAnalyticsV2Service mockModeService() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))

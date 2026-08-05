@@ -20,6 +20,9 @@ state backed by a live Flink job on Floci's Docker network.
 | `StopApplication` | Stops a running application and tears down its container |
 | `UpdateApplication` | Updates an application and bumps its version |
 | `DeleteApplication` | Deletes an application |
+| `TagResource` | Assigns one or more tags to an application |
+| `UntagResource` | Removes one or more tags from an application |
+| `ListTagsForResource` | Lists the tags assigned to an application |
 <!-- floci:actions:end -->
 
 ## How it works

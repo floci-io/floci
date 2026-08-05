@@ -12,6 +12,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -190,6 +194,61 @@ class KinesisAnalyticsV2ServiceTest {
         FlinkApplication app = create("bare");
         assertFalse(app.hasCode());
         assertEquals(1, app.getParallelism());
+    }
+
+    @Test
+    void createApplicationStoresTags() {
+        FlinkApplication app = service.createApplication("tagged", "FLINK-1_18", ROLE, null, null,
+                null, null, null, 1, Map.of("env", "dev"));
+        assertEquals("dev", app.getTags().get("env"));
+    }
+
+    @Test
+    void createApplicationRejectsTooManyTags() {
+        Map<String, String> tooMany = new HashMap<>();
+        for (int i = 0; i < 51; i++) {
+            tooMany.put("k" + i, "v");
+        }
+        AwsException ex = assertThrows(AwsException.class, () -> service.createApplication(
+                "tagged", "FLINK-1_18", ROLE, null, null, null, null, null, 1, tooMany));
+        assertEquals("TooManyTagsException", ex.getErrorCode());
+    }
+
+    @Test
+    void tagResourceThenListTagsForResourceRoundTrips() {
+        FlinkApplication app = create("demo");
+
+        Map<String, String> after = service.tagResource(app.getApplicationArn(), Map.of("team", "platform"));
+        assertEquals("platform", after.get("team"));
+        assertEquals("platform", service.listTagsForResource(app.getApplicationArn()).get("team"));
+    }
+
+    @Test
+    void untagResourceRemovesKeys() {
+        FlinkApplication app = create("demo");
+        service.tagResource(app.getApplicationArn(), Map.of("team", "platform", "env", "dev"));
+
+        Map<String, String> after = service.untagResource(app.getApplicationArn(), List.of("team"));
+        assertFalse(after.containsKey("team"));
+        assertEquals("dev", after.get("env"));
+    }
+
+    @Test
+    void tagResourceRejectsUnknownArn() {
+        assertThrows(AwsException.class, () -> service.tagResource(
+                "arn:aws:kinesisanalytics:us-east-1:000000000000:application/nope", Map.of("k", "v")));
+    }
+
+    @Test
+    void tagResourceRejectsExceedingMaxTags() {
+        FlinkApplication app = create("demo");
+        Map<String, String> tooMany = new HashMap<>();
+        for (int i = 0; i < 51; i++) {
+            tooMany.put("k" + i, "v");
+        }
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.tagResource(app.getApplicationArn(), tooMany));
+        assertEquals("TooManyTagsException", ex.getErrorCode());
     }
 
     private KinesisAnalyticsV2Service mockModeService() {

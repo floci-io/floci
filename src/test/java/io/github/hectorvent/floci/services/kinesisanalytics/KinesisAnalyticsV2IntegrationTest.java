@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -135,5 +136,64 @@ class KinesisAnalyticsV2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    void tagLifecycleRoundTripsThroughTheWireProtocol() {
+        String arn = given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-tags", "RuntimeEnvironment": "FLINK-1_18",
+                 "ServiceExecutionRole": "%s",
+                 "Tags": [{"Key": "env", "Value": "dev"}]}
+                """.formatted(ROLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            // Tags is a list of {Key, Value} objects on this API, never echoed on ApplicationDetail.
+            .body("ApplicationDetail.Tags", equalTo(null))
+            .extract().path("ApplicationDetail.ApplicationARN");
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.ListTagsForResource")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ResourceARN\": \"" + arn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.Key", hasItem("env"))
+            .body("Tags.Value", hasItem("dev"));
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.TagResource")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ResourceARN\": \"" + arn + "\", \"Tags\": [{\"Key\": \"team\", \"Value\": \"platform\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.UntagResource")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ResourceARN\": \"" + arn + "\", \"TagKeys\": [\"env\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.ListTagsForResource")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ResourceARN\": \"" + arn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.Key", hasItem("team"))
+            .body("Tags.Key", not(hasItem("env")));
     }
 }

@@ -18,6 +18,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -38,6 +39,10 @@ import java.util.concurrent.TimeUnit;
 public class KinesisAnalyticsV2Service {
 
     private static final Logger LOG = Logger.getLogger(KinesisAnalyticsV2Service.class);
+
+    // AWS: "the maximum number of user-defined application tags is 50" (the stated 200-tag ceiling
+    // on the Tags/TagKeys shapes includes AWS-managed system tags, which floci does not model).
+    private static final int MAX_USER_TAGS = 50;
 
     private final StorageBackend<String, FlinkApplication> storage;
     private final EmulatorConfig config;
@@ -89,6 +94,16 @@ public class KinesisAnalyticsV2Service {
                                               String serviceExecutionRole, String applicationDescription,
                                               String applicationMode, String codeS3Bucket, String codeS3Key,
                                               String codeS3ObjectVersion, int parallelism) {
+        return createApplication(applicationName, runtimeEnvironment, serviceExecutionRole,
+                applicationDescription, applicationMode, codeS3Bucket, codeS3Key, codeS3ObjectVersion,
+                parallelism, null);
+    }
+
+    public FlinkApplication createApplication(String applicationName, String runtimeEnvironment,
+                                              String serviceExecutionRole, String applicationDescription,
+                                              String applicationMode, String codeS3Bucket, String codeS3Key,
+                                              String codeS3ObjectVersion, int parallelism,
+                                              Map<String, String> tags) {
         if (applicationName == null || applicationName.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ApplicationName is required", 400);
         }
@@ -104,6 +119,10 @@ public class KinesisAnalyticsV2Service {
         if (storage.get(applicationName).isPresent()) {
             throw new AwsException("ResourceInUseException",
                     "Application already exists: " + applicationName, 400);
+        }
+        if (tags != null && tags.size() > MAX_USER_TAGS) {
+            throw new AwsException("TooManyTagsException",
+                    "The maximum number of user-defined application tags is " + MAX_USER_TAGS, 400);
         }
 
         String accountId = regionResolver.getAccountId();
@@ -121,6 +140,9 @@ public class KinesisAnalyticsV2Service {
         app.setCodeS3Key(codeS3Key);
         app.setCodeS3ObjectVersion(codeS3ObjectVersion);
         app.setParallelism(parallelism < 1 ? 1 : parallelism);
+        if (tags != null) {
+            app.setTags(new LinkedHashMap<>(tags));
+        }
 
         storage.put(applicationName, app);
         LOG.infov("Created Kinesis Analytics V2 application {0}", applicationName);
@@ -243,6 +265,49 @@ public class KinesisAnalyticsV2Service {
         }
         storage.delete(applicationName);
         LOG.infov("Deleted Kinesis Analytics V2 application {0}", applicationName);
+    }
+
+    public Map<String, String> listTagsForResource(String resourceArn) {
+        return findByArn(resourceArn).getTags();
+    }
+
+    public Map<String, String> tagResource(String resourceArn, Map<String, String> tags) {
+        FlinkApplication app = findByArn(resourceArn);
+        Map<String, String> merged = new LinkedHashMap<>(app.getTags());
+        if (tags != null) {
+            merged.putAll(tags);
+        }
+        if (merged.size() > MAX_USER_TAGS) {
+            throw new AwsException("TooManyTagsException",
+                    "The maximum number of user-defined application tags is " + MAX_USER_TAGS, 400);
+        }
+        app.setTags(merged);
+        putApplication(app);
+        return app.getTags();
+    }
+
+    public Map<String, String> untagResource(String resourceArn, List<String> tagKeys) {
+        FlinkApplication app = findByArn(resourceArn);
+        if (tagKeys != null) {
+            tagKeys.forEach(app.getTags()::remove);
+        }
+        putApplication(app);
+        return app.getTags();
+    }
+
+    private FlinkApplication findByArn(String resourceArn) {
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw new AwsException("InvalidArgumentException", "ResourceARN is required", 400);
+        }
+        // Resource format is "application/<name>"; application names never contain '/'.
+        int slash = resourceArn.lastIndexOf('/');
+        if (slash < 0 || slash == resourceArn.length() - 1) {
+            throw new AwsException("InvalidArgumentException", "Invalid resource ARN: " + resourceArn, 400);
+        }
+        String applicationName = resourceArn.substring(slash + 1);
+        return storage.get(applicationName)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No application found for ARN: " + resourceArn, 400));
     }
 
     private void startReadinessPoller() {

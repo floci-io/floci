@@ -5,6 +5,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * In-memory representation of a Managed Service for Apache Flink application
@@ -78,6 +80,11 @@ public class FlinkApplication {
     // FlinkApplicationConfiguration.ParallelismConfiguration.Parallelism (defaults to 1).
     private int parallelism = 1;
 
+    // Resource tags. Real AWS never echoes these in ApplicationDetail (CreateApplication /
+    // DescribeApplication) — only ListTagsForResource returns them — so this is bookkeeping only,
+    // like containerId/accountId above, not part of the wire response the handler builds.
+    private Map<String, String> tags = new LinkedHashMap<>();
+
     public FlinkApplication() {}
 
     public FlinkApplication(String applicationName, String applicationArn,
@@ -150,6 +157,9 @@ public class FlinkApplication {
 
     public int getParallelism() { return parallelism; }
     public void setParallelism(int parallelism) { this.parallelism = parallelism; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? tags : new LinkedHashMap<>(); }
 
     /** True when the application has a code artifact to deploy (S3 JAR), i.e. a job should run. */
     public boolean hasCode() {
