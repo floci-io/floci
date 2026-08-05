@@ -17,11 +17,13 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.exception.NotFoundException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 
 import java.io.Closeable;
@@ -147,6 +149,8 @@ public class ContainerLauncher {
 
         // Start Runtime API server first so container can connect on boot
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
+        runtimeApiServer.setFunctionMetadata(fn.getFunctionName(), fn.getVersion(), fn.getHandler(),
+                fn.getAccountId());
 
         // Everything after the runtime-api server is allocated runs inside one try/catch: a failure
         // ANYWHERE below — image/host resolve, the code-volume populate (ensureCodeVolume), the spec
@@ -218,6 +222,18 @@ public class ContainerLauncher {
                 .withLogRotation();
 
         specBuilder.withEmbeddedDns();
+
+        // Inject extra hosts entries into the container if present. Split on the FIRST
+        // colon, mirroring docker --add-host: hostnames cannot contain colons, but IPv6
+        // addresses do (e.g. "db.internal:2001:db8::1").
+        config.services().lambda().extraHosts().ifPresent(hosts -> hosts.forEach(entry -> {
+            int sep = entry.indexOf(':');
+            if (sep <= 0 || sep == entry.length() - 1) {
+                LOG.warnv("Ignoring malformed lambda extra-hosts entry (expected hostname:ip): {0}", entry);
+                return;
+            }
+            specBuilder.withExtraHost(entry.substring(0, sep), entry.substring(sep + 1));
+        }));
 
         // Whether /var/task is served from a shared read-only volume (large code) or copied
         // directly into this container (small code). Decided once here so both the spec (below)
@@ -327,6 +343,29 @@ public class ContainerLauncher {
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
+
+        // Extensions can log as soon as they start, which is before the container's own log stream
+        // is attached below. Create the group/stream up front so those early lines are not dropped
+        // by CloudWatch; the call is idempotent, so attach() repeating it is harmless.
+        LogDestination logDestination = new LogDestination(cwLogGroup, cwLogStream, lambdaRegion);
+        logStreamer.ensureLogGroupAndStream(cwLogGroup, cwLogStream, lambdaRegion);
+
+        // Real AWS's runtime interface client discovers and launches every binary under
+        // /opt/extensions/ as a sibling process to the main entrypoint before the runtime is
+        // considered ready; Floci only runs the image's own ENTRYPOINT/CMD, so extensions
+        // (e.g. aws-lambda-web-adapter) never start without this. Best-effort: an extension
+        // launch failure shouldn't fail the whole container launch, since a function with no
+        // extensions is the common case and this must be a no-op for it.
+        launchExtensions(dockerClient, containerId, fn.getFunctionName(), runtimeApiServer, logDestination);
+
+        // Init-readiness barrier: the execs above are detached, so without waiting here the caller
+        // could enqueue the first invocation before an extension is ready to receive it — the
+        // adapter would silently miss that invoke. Real AWS likewise holds the environment out of
+        // service until every extension is init-ready, which it defines as the extension's first
+        // /extension/event/next rather than its register call. A no-extensions function (the
+        // common case) does not wait at all; a timeout is non-fatal, since a container that serves
+        // invocations without a slow extension is strictly better than failing the launch.
+        awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
 
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
@@ -598,6 +637,136 @@ public class ContainerLauncher {
 
     private static boolean isProvidedRuntime(String runtime) {
         return runtime != null && runtime.startsWith("provided");
+    }
+
+    /** Directory Lambda's real init system scans for extension binaries. */
+    private static final String EXTENSIONS_DIR = "/opt/extensions";
+
+    /**
+     * How long a launch waits for extensions to call {@code /extension/register} before giving up
+     * and serving invocations without them. Real AWS allows extensions the function's full init
+     * budget (10s); this is deliberately shorter, since exceeding it here is non-fatal and the
+     * cost of the wait is paid on every cold start of a function that has extensions.
+     */
+    private static final long EXTENSION_REGISTRATION_TIMEOUT_MS = 5000;
+
+    /**
+     * Discovers binaries under {@link #EXTENSIONS_DIR} inside the (already started) container and
+     * launches each as a detached process — the piece of real AWS's init system (which starts every
+     * registered extension alongside the runtime) that Floci otherwise has no equivalent for. Uses
+     * {@code docker exec} rather than baking a wrapper entrypoint into the image, since the image is
+     * user-supplied and unmodified.
+     *
+     * <p>Extensions inherit the container's env (already set on the container itself, including
+     * {@code AWS_LAMBDA_RUNTIME_API}) automatically — {@code docker exec} does not need it re-supplied.
+     * Best-effort throughout: a function with no {@code /opt/extensions} directory (the common case)
+     * must be a silent no-op, and a failure launching one extension must not prevent the container
+     * (or other extensions) from running.
+     */
+    /** Where a container's output is sent: the CloudWatch log group/stream and its region. */
+    private record LogDestination(String logGroup, String logStream, String region) { }
+
+    private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,
+                                  RuntimeApiServer runtimeApiServer, LogDestination logDestination) {
+        List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName);
+        // Arm the readiness barrier before starting any extension process, so the latch already
+        // exists when the first one starts polling /extension/event/next — otherwise a
+        // fast-starting extension could become ready before there is anything to count it down.
+        runtimeApiServer.expectExtensions(extensionNames.size());
+        for (String name : extensionNames) {
+            try {
+                String path = EXTENSIONS_DIR + "/" + name;
+                var create = dockerClient.execCreateCmd(containerId)
+                        .withCmd(path)
+                        .withAttachStdout(true)
+                        .withAttachStderr(true);
+                String execId = create.exec().getId();
+                // Detached: an extension runs for the container's whole lifetime, so this must not
+                // block the launch waiting for it to exit.
+                //
+                // The callback forwards the exec's output to the function's CloudWatch log group,
+                // the same destination the container's PID 1 output goes to. That has to be done
+                // explicitly: `docker logs` only covers PID 1, so an exec's stream never reaches
+                // the container log and an observability extension's output would vanish entirely.
+                // Draining is also required in its own right — an unread exec pipe fills up and
+                // stalls the extension process.
+                dockerClient.execStartCmd(execId).exec(logStreamer.execLogCallback(
+                        logDestination.logGroup(), logDestination.logStream(), logDestination.region(),
+                        "lambda:" + functionName + ":" + name));
+                LOG.infov("Launched extension {0} for function {1} (container {2})",
+                        name, functionName, containerId);
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to launch extension {0} for function {1}; continuing without it",
+                        name, functionName);
+            }
+        }
+    }
+
+    /**
+     * Waits for every launched extension to become init-ready — its first
+     * {@code /extension/event/next}, the point at which AWS considers an extension initialised —
+     * before the container is handed to the caller for its first invocation.
+     *
+     * <p>Best-effort by design: a timeout logs and proceeds rather than failing the launch. An
+     * extension that is slow or crashes on startup should degrade to "invocations run without it"
+     * — the same outcome as before this barrier existed — not take the whole function down. A
+     * genuinely broken extension reports {@code init/error} instead, which condemns the
+     * environment through {@code RuntimeApiServer}'s fault path.
+     */
+    private void awaitExtensionReadiness(RuntimeApiServer runtimeApiServer, String functionName) {
+        try {
+            if (!runtimeApiServer.awaitExtensionsReady(EXTENSION_REGISTRATION_TIMEOUT_MS)) {
+                LOG.warnv("Not all extensions for function {0} became ready within {1}ms; "
+                                + "continuing without them",
+                        functionName, String.valueOf(EXTENSION_REGISTRATION_TIMEOUT_MS));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("Interrupted waiting for extensions of function {0} to become ready", functionName);
+        }
+    }
+
+    /**
+     * Lists file names directly under {@link #EXTENSIONS_DIR} inside the container, or an empty
+     * list if the directory doesn't exist or the probe fails (most functions have no extensions).
+     *
+     * <p>Uses Docker's archive API ({@code copyArchiveFromContainerCmd}) rather than {@code exec}ing
+     * a shell/{@code find}/{@code basename} pipeline inside the container: a minimal or distroless
+     * function image can have a valid extension binary under {@code /opt/extensions} without any of
+     * those utilities present, which would silently look like "no extensions" to a shell-based probe.
+     * The archive API only talks to the Docker daemon, so it works regardless of the image contents.
+     */
+    private List<String> listExtensionBinaries(DockerClient dockerClient, String containerId, String functionName) {
+        try (InputStream tarStream = dockerClient.copyArchiveFromContainerCmd(containerId, EXTENSIONS_DIR).exec();
+             TarArchiveInputStream tar = new TarArchiveInputStream(tarStream)) {
+
+            List<String> names = new ArrayList<>();
+            TarArchiveEntry entry;
+            while ((entry = tar.getNextEntry()) != null) {
+                if (!tar.canReadEntryData(entry) || entry.isDirectory()) {
+                    continue;
+                }
+                // Docker wraps the requested directory itself as a leading path component (e.g.
+                // "extensions/lambda-adapter"); only direct children count as extension binaries,
+                // matching the real init system's non-recursive scan of the directory.
+                String name = entry.getName();
+                int slash = name.indexOf('/');
+                if (slash < 0 || name.indexOf('/', slash + 1) >= 0) {
+                    continue;
+                }
+                if ((entry.getMode() & 0111) == 0) {
+                    continue;
+                }
+                names.add(name.substring(slash + 1));
+            }
+            return names;
+        } catch (NotFoundException e) {
+            return List.of();
+        } catch (Exception e) {
+            LOG.debugv("Could not list {0} for function {1} ({2}); assuming no extensions",
+                    EXTENSIONS_DIR, functionName, e.getMessage());
+            return List.of();
+        }
     }
 
     /**

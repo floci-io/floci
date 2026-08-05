@@ -242,6 +242,21 @@ class LambdaServiceTest {
     }
 
     @Test
+    void publishVersionCarriesTheOwningAccount() {
+        service.createFunction(REGION, baseRequest("account-versioned-fn"));
+
+        LambdaFunction version = service.publishVersion(REGION, "account-versioned-fn", null);
+
+        // A version snapshot is built field by field, so anything reading accountId off it (the
+        // deployment-package key, execution-role session ownership) otherwise has to re-derive the
+        // account from the ARN or fall back to the default account.
+        assertEquals("000000000000", version.getAccountId());
+        assertEquals(
+                service.getFunction(REGION, "account-versioned-fn").getAccountId(),
+                version.getAccountId());
+    }
+
+    @Test
     void createFunctionWithSubdirectoryHandler() throws Exception {
         Map<String, Object> req = new java.util.HashMap<>(Map.of(
                 "FunctionName", "subdir-handler-fn",

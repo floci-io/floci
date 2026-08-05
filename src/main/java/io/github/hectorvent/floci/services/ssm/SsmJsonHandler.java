@@ -19,8 +19,10 @@ import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class SsmJsonHandler {
@@ -110,7 +112,8 @@ public class SsmJsonHandler {
             parametersArray.add(parameterToNode(p));
         }
         response.set("Parameters", parametersArray);
-        response.set("InvalidParameters", objectMapper.createArrayNode());
+        response.set("InvalidParameters", invalidParameterNames(names,
+                params.stream().map(Parameter::getName).toList()));
         return Response.ok(response).build();
     }
 
@@ -145,8 +148,17 @@ public class SsmJsonHandler {
         ArrayNode deletedArray = objectMapper.createArrayNode();
         deleted.forEach(deletedArray::add);
         response.set("DeletedParameters", deletedArray);
-        response.set("InvalidParameters", objectMapper.createArrayNode());
+        response.set("InvalidParameters", invalidParameterNames(names, deleted));
         return Response.ok(response).build();
+    }
+
+    private ArrayNode invalidParameterNames(List<String> requestedNames, List<String> returnedNames) {
+        Set<String> returnedNameSet = new HashSet<>(returnedNames);
+        ArrayNode invalidNames = objectMapper.createArrayNode();
+        requestedNames.stream()
+                .filter(name -> !returnedNameSet.contains(name))
+                .forEach(invalidNames::add);
+        return invalidNames;
     }
 
     private Response handleGetParameterHistory(JsonNode request, String region) {
