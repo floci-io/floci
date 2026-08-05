@@ -679,6 +679,19 @@ class BedrockProxyIntegrationTest {
     }
 
     @Test
+    void invokeModel_notSupportedByProxyBackend_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/invoke")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
     void converse_noMappingNoDefaultNoPassthrough_returns400() {
         given()
             .contentType("application/json")

@@ -89,7 +89,7 @@ public class BedrockRuntimeController {
     @Consumes(MediaType.WILDCARD)
     public Response invokeModelWithResponseStream(@PathParam("modelId") String modelId) {
         throw new AwsException("UnsupportedOperationException",
-                "InvokeModelWithResponseStream is not supported by the Floci stub. "
+                "InvokeModelWithResponseStream is not supported by Floci yet. "
                         + "Use InvokeModel or Converse instead.", 501);
     }
 
@@ -98,7 +98,7 @@ public class BedrockRuntimeController {
     @Consumes(MediaType.WILDCARD)
     public Response converseStream(@PathParam("modelId") String modelId) {
         throw new AwsException("UnsupportedOperationException",
-                "ConverseStream is not supported by the Floci stub. "
+                "ConverseStream is not supported by Floci yet. "
                         + "Use Converse instead.", 501);
     }
 }

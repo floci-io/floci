@@ -21,7 +21,7 @@ import java.util.Map;
 /**
  * Forwards Bedrock Converse requests to any OpenAI-compatible {@code /chat/completions}
  * endpoint (Ollama, OpenRouter, LiteLLM, vLLM, ...). InvokeModel is not yet supported and
- * falls back to the stub response.
+ * fails fast rather than returning a fabricated response.
  */
 @ApplicationScoped
 public class ProxyBackend implements BedrockBackend {
@@ -30,7 +30,6 @@ public class ProxyBackend implements BedrockBackend {
 
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
-    private final StubBackend stubBackend;
 
     // Config is immutable for the process's lifetime, so the mapping string is parsed
     // once here rather than on every Converse request.
@@ -42,10 +41,9 @@ public class ProxyBackend implements BedrockBackend {
             .build();
 
     @Inject
-    public ProxyBackend(ObjectMapper objectMapper, EmulatorConfig config, StubBackend stubBackend) {
+    public ProxyBackend(ObjectMapper objectMapper, EmulatorConfig config) {
         this.objectMapper = objectMapper;
         this.config = config;
-        this.stubBackend = stubBackend;
         this.modelMapping = parseModelMapping(config.services().bedrockRuntime().proxy().modelMapping().orElse(""));
     }
 
@@ -116,9 +114,8 @@ public class ProxyBackend implements BedrockBackend {
 
     @Override
     public byte[] invokeModel(String modelId, byte[] body) {
-        LOG.warnv("Bedrock proxy backend does not support InvokeModel yet; returning stub response for modelId={0}",
-                modelId);
-        return stubBackend.invokeModel(modelId, body);
+        throw new AwsException("ValidationException",
+                "InvokeModel is not supported by the bedrock-runtime proxy backend; use Converse.", 400);
     }
 
     String resolveModel(String bedrockModelId, EmulatorConfig.BedrockProxyConfig proxyConfig) {
