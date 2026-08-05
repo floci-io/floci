@@ -200,6 +200,32 @@ class IamRoleCfnProvisionerTest {
     }
 
     @Test
+    void updateToleratesATrackedPolicyThatIsAlreadyGone() {
+        // Removed out of band between executions. deleteRolePolicy and detachRolePolicy both raise
+        // NoSuchEntity on an absent target, which would fail an update whose desired end state,
+        // the policy not being on the role, already holds.
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+        r.getAttributes().put("__FlociInlinePolicyNames", "gone");
+        r.getAttributes().put("__FlociManagedPolicyArns", "arn:aws:iam::aws:policy/Gone");
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Policies": []}
+                """), ctx());
+
+        verify(iam, never()).deleteRolePolicy(anyString(), anyString());
+        verify(iam, never()).detachRolePolicy(anyString(), anyString());
+        assertNull(r.getAttributes().get("__FlociInlinePolicyNames"));
+    }
+
+    @Test
     void updateLeavesInlinePoliciesTheStackNeverWroteAlone() {
         // Only names a previous execution recorded are removed, so a policy added out of band
         // survives an update that does not declare it.

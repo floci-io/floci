@@ -149,14 +149,18 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             // Anything the previous execution wrote and this template no longer declares. Without
             // this the role keeps permissions the stack stopped declaring while the stack still
             // reports UPDATE_COMPLETE, which is the failure mode #1952 is about one level over.
+            // A tracked policy that is already gone is skipped rather than deleted again. Both IAM
+            // calls raise NoSuchEntity on an absent target, which would fail an update whose desired
+            // end state, the policy not being on the role, already holds.
             for (String stale : previousInlineNames) {
-                if (!inlineWrittenByThisAttempt.contains(stale)) {
+                if (!inlineWrittenByThisAttempt.contains(stale)
+                        && originalInlinePolicies.containsKey(stale)) {
                     iamService.deleteRolePolicy(resolvedRoleName, stale);
                     inlineRemovedByThisAttempt.add(stale);
                 }
             }
             for (String stale : previousManagedArns) {
-                if (!managedPolicyArns.contains(stale)) {
+                if (!managedPolicyArns.contains(stale) && originalPolicyArns.contains(stale)) {
                     iamService.detachRolePolicy(resolvedRoleName, stale);
                     detachedByThisAttempt.add(stale);
                 }
