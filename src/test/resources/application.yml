@@ -61,6 +61,8 @@ floci:
       cloudfront:
       appsync:
         flush-interval-ms: 60000
+      rum:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
@@ -80,6 +82,7 @@ floci:
 
   protocols:
     strict-claiming: false
+    reject-unknown-service-scope: true
 
   docker:
     log-max-size: "10m"
@@ -224,6 +227,9 @@ floci:
       enabled: true
       mock: true
       ecr-registry-mirror: true
+    mwaa:
+      enabled: true
+      mock: true
     pipes:
       enabled: true
     elbv2:
@@ -283,4 +289,6 @@ floci:
         host: 127.0.0.1
         port: 1883
     iotdata:
+      enabled: true
+    rum:
       enabled: true

@@ -34,7 +34,13 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
-        String host = requestContext.getHeaderString("Host");
+        URI uri = requestContext.getUriInfo().getRequestUri();
+
+        // HTTP/2 (RFC 9113) has no "Host" header — the authority travels in the
+        // ":authority" pseudo-header, surfaced here as the request URI authority.
+        // Falling back to it keeps virtual-hosted-style routing working when a
+        // browser negotiates HTTP/2 over HTTPS (where the Host header is absent).
+        String host = resolveHost(requestContext.getHeaderString("Host"), uri);
         if (host == null) return;
 
         // Do not hijack requests meant for other AWS services
@@ -55,7 +61,6 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         String bucket = extractBucket(host, baseHostname);
         if (bucket == null) return;
 
-        URI uri = requestContext.getUriInfo().getRequestUri();
         String path = uri.getRawPath();
 
         // Do not rewrite S3 Control API paths — the account ID appears as a host label
@@ -72,6 +77,26 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 .build();
 
         requestContext.setRequestUri(newUri);
+    }
+
+    /**
+     * Resolves the effective request authority used for virtual-host detection.
+     *
+     * <p>HTTP/1.1 carries it in the {@code Host} header. HTTP/2 (RFC 9113) has no
+     * {@code Host} header — the authority is in the {@code :authority} pseudo-header,
+     * which the container exposes as the request URI authority. When the {@code Host}
+     * header is absent we fall back to the URI authority so virtual-hosted-style
+     * requests are recognized on both protocol versions.
+     *
+     * @param hostHeader the value of the {@code Host} header, or {@code null}
+     * @param requestUri the request URI, or {@code null}
+     * @return the effective authority ({@code host[:port]}), or {@code null} if neither is available
+     */
+    static String resolveHost(String hostHeader, URI requestUri) {
+        if (hostHeader != null) {
+            return hostHeader;
+        }
+        return requestUri != null ? requestUri.getAuthority() : null;
     }
 
     /**

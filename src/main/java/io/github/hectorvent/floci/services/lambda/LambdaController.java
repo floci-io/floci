@@ -250,7 +250,7 @@ public class LambdaController {
         if (result.getLogResult() != null) {
             builder.header("X-Amz-Log-Result", result.getLogResult());
         }
-        builder.header("X-Amz-Executed-Version", "$LATEST");
+        builder.header("X-Amz-Executed-Version", result.getExecutedVersion());
         builder.header("X-Amz-Request-Id", result.getRequestId());
 
         if (result.getPayload() != null && result.getPayload().length > 0) {

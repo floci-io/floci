@@ -448,10 +448,11 @@ public class CodeBuildService {
         build.setPhases(new CopyOnWriteArrayList<>());
 
         buildsFor(region).put(buildId, build);
+        Build responseBuild = copyBuild(build);
 
         runner.startBuild(region, build, project, buildspecOverride);
 
-        return build;
+        return responseBuild;
     }
 
     public Build getBuild(String region, String buildId) {
@@ -502,5 +503,28 @@ public class CodeBuildService {
         return startBuild(region, account, original.getProjectName(),
                 null, original.getEnvironment(), original.getArtifacts(),
                 null, original.getTimeoutInMinutes(), null, null);
+    }
+
+    private Build copyBuild(Build source) {
+        Build copy = new Build();
+        copy.setId(source.getId());
+        copy.setArn(source.getArn());
+        copy.setBuildNumber(source.getBuildNumber());
+        copy.setBuildStatus(source.getBuildStatus());
+        copy.setBuildComplete(source.getBuildComplete());
+        copy.setCurrentPhase(source.getCurrentPhase());
+        copy.setProjectName(source.getProjectName());
+        copy.setInitiator(source.getInitiator());
+        copy.setStartTime(source.getStartTime());
+        copy.setEndTime(source.getEndTime());
+        copy.setSource(source.getSource());
+        copy.setArtifacts(source.getArtifacts());
+        copy.setEnvironment(source.getEnvironment());
+        copy.setLogs(source.getLogs());
+        copy.setPhases(source.getPhases() != null ? new ArrayList<>(source.getPhases()) : null);
+        copy.setTimeoutInMinutes(source.getTimeoutInMinutes());
+        copy.setQueuedTimeoutInMinutes(source.getQueuedTimeoutInMinutes());
+        copy.setEncryptionKey(source.getEncryptionKey());
+        return copy;
     }
 }
