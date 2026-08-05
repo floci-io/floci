@@ -23,6 +23,10 @@ state backed by a live Flink job on Floci's Docker network.
 | `TagResource` | Assigns one or more tags to an application |
 | `UntagResource` | Removes one or more tags from an application |
 | `ListTagsForResource` | Lists the tags assigned to an application |
+| `CreateApplicationSnapshot` | Triggers a Flink savepoint of the application's running job |
+| `DescribeApplicationSnapshot` | Returns details about an application snapshot |
+| `ListApplicationSnapshots` | Lists the snapshots for an application |
+| `DeleteApplicationSnapshot` | Deletes an application snapshot |
 <!-- floci:actions:end -->
 
 ## How it works
@@ -74,7 +78,7 @@ aws kinesisanalyticsv2 describe-application --application-name jobdemo  # Applic
 ```
 
 The job's main class is taken from the JAR's manifest (as in AWS Managed Flink). Not yet emulated:
-snapshots/savepoints and in-place code updates.
+in-place code updates.
 
 ### Runtime properties (`EnvironmentProperties`)
 
@@ -103,6 +107,33 @@ aws kinesisanalyticsv2 create-application \
 
 `DescribeApplication` echoes them back under
 `ApplicationConfigurationDescription.EnvironmentPropertyDescriptions.PropertyGroupDescriptions`.
+
+### Snapshots (savepoints)
+
+`CreateApplicationSnapshot` triggers a real Flink [savepoint](https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/savepoints/)
+of the application's running job — the application must be `RUNNING` with a deployed job. The
+snapshot starts `CREATING` and transitions to `READY` (or `FAILED`) once Flink's savepoint completes,
+polled the same way `StartApplication` polls job readiness. Snapshot files land on a **named Docker
+volume** mounted at `/opt/flink/savepoints` in the JobManager container, not the container's ephemeral
+filesystem, so they survive a `StopApplication`/`StartApplication` cycle; the volume itself is only
+removed on `DeleteApplication`.
+
+```bash
+aws kinesisanalyticsv2 create-application-snapshot \
+  --application-name jobdemo --snapshot-name before-upgrade
+
+aws kinesisanalyticsv2 describe-application-snapshot \
+  --application-name jobdemo --snapshot-name before-upgrade  # SnapshotStatus: CREATING -> READY
+
+aws kinesisanalyticsv2 list-application-snapshots --application-name jobdemo
+
+aws kinesisanalyticsv2 delete-application-snapshot \
+  --application-name jobdemo --snapshot-name before-upgrade \
+  --snapshot-creation-timestamp <SnapshotCreationTimestamp from describe>
+```
+
+Restoring a job *from* a snapshot (`CreateApplication`/`UpdateApplication` with a
+`RestoreConfiguration` pointing at one) is not yet emulated.
 
 ## Supported runtimes
 

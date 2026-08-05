@@ -16,10 +16,15 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsRuntimes;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.SnapshotStatus;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
@@ -28,10 +33,12 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manages the backing Apache Flink cluster for a Managed Service for Apache Flink application.
@@ -53,6 +60,7 @@ public class FlinkContainerManager {
 
     private static final Logger LOG = Logger.getLogger(FlinkContainerManager.class);
     private static final int JOBMANAGER_REST_PORT = 8081;
+    private static final String SAVEPOINTS_MOUNT = "/opt/flink/savepoints";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -136,6 +144,13 @@ public class FlinkContainerManager {
                 .withEnv("FLINK_PROPERTIES", jmProps)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation();
+        // Named volume (not the container's ephemeral filesystem) so snapshots survive a
+        // Stop/StartApplication cycle — stopCluster() removes the JobManager container, but this
+        // volume is only removed on DeleteApplication (removeSavepointsVolume), mirroring how other
+        // Docker-backed services keep persistent data outside the container lifecycle.
+        ContainerStorageHelper.applyStorage(jmSpec, lifecycleManager, config, "kinesisanalytics",
+                app.getApplicationName() + "-savepoints", app.getApplicationName() + "-savepoints",
+                SAVEPOINTS_MOUNT);
         if (!containerDetector.isRunningInContainer()) {
             jmSpec.withDynamicPort(JOBMANAGER_REST_PORT);
         } else {
@@ -345,6 +360,77 @@ public class FlinkContainerManager {
     }
 
     /**
+     * Triggers a Flink savepoint for the application's running job. Requires the application to
+     * actually be RUNNING (a live {@code flinkJobId} and REST endpoint) — the caller
+     * ({@link io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsV2Service}) is
+     * responsible for that AWS-shaped precondition check. Stores the async operation's
+     * {@code request-id} on the snapshot for {@link #advanceSnapshot} to poll; throws on a failure to
+     * even start the trigger (e.g. JobManager unreachable) so the caller can mark the snapshot FAILED.
+     */
+    public void createSnapshot(FlinkApplication app, Snapshot snapshot) {
+        try {
+            String requestId = flinkRest.triggerSavepoint(app.getRestEndpoint(), app.getFlinkJobId(),
+                    SAVEPOINTS_MOUNT);
+            snapshot.setFlinkRequestId(requestId);
+            LOG.infov("Triggered Flink savepoint for application {0} snapshot {1}: request {2}",
+                    app.getApplicationName(), snapshot.getSnapshotName(), requestId);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to trigger Flink savepoint: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Polls a CREATING snapshot toward a terminal state, mutating {@code snapshot}'s status in place.
+     * Returns {@code true} once terminal (READY or FAILED) so the caller stops polling; {@code false}
+     * while still in progress, including when the JobManager probe itself fails (transient — the
+     * caller should keep retrying, same as {@code advanceToRunning}'s job-state polling).
+     */
+    public boolean advanceSnapshot(FlinkApplication app, Snapshot snapshot) {
+        String rest = app.getRestEndpoint();
+        if (rest == null || snapshot.getFlinkRequestId() == null) {
+            return false;
+        }
+        FlinkRestClient.SavepointStatus status = flinkRest.savepointStatus(rest, app.getFlinkJobId(),
+                snapshot.getFlinkRequestId());
+        if (status == null || !"COMPLETED".equals(status.statusId())) {
+            return false; // still IN_PROGRESS, or a transient probe failure — keep polling
+        }
+        if (status.failed()) {
+            snapshot.setSnapshotStatus(SnapshotStatus.FAILED);
+            LOG.warnv("Flink savepoint failed for application {0} snapshot {1}",
+                    app.getApplicationName(), snapshot.getSnapshotName());
+        } else {
+            snapshot.setSnapshotStatus(SnapshotStatus.READY);
+            snapshot.setFlinkLocation(status.location());
+            LOG.infov("Flink savepoint ready for application {0} snapshot {1}: {2}",
+                    app.getApplicationName(), snapshot.getSnapshotName(), status.location());
+        }
+        return true;
+    }
+
+    /** Best-effort removal of a snapshot's files. A no-op if the JobManager isn't currently running —
+     *  the files remain in the savepoints volume until {@link #removeSavepointsVolume} on delete. */
+    public void deleteSnapshotFiles(FlinkApplication app, Snapshot snapshot) {
+        String containerId = app.getContainerId();
+        if (containerId == null || snapshot.getFlinkLocation() == null) {
+            return;
+        }
+        try {
+            execInContainer(containerId, new String[]{"rm", "-rf", snapshot.getFlinkLocation()});
+        } catch (Exception e) {
+            LOG.warnv("Could not remove savepoint files at {0} for application {1}: {2}",
+                    snapshot.getFlinkLocation(), app.getApplicationName(), e.getMessage());
+        }
+    }
+
+    /** Removes the persistent savepoints volume. Called only on DeleteApplication, never on a plain
+     *  StopApplication (stopCluster), so snapshots survive a stop/restart cycle. */
+    public void removeSavepointsVolume(FlinkApplication app) {
+        ContainerStorageHelper.removeStorage(config, lifecycleManager, "kinesisanalytics",
+                app.getApplicationName() + "-savepoints", app.getApplicationName() + "-savepoints");
+    }
+
+    /**
      * Stops and removes every running Flink container (JobManagers and TaskManagers). Wired into
      * {@code EmulatorLifecycle.onStop()} so containers are torn down on shutdown alongside the other
      * container managers.
@@ -380,4 +466,37 @@ public class FlinkContainerManager {
             logStreams.put(app.getApplicationName(), logHandle);
         }
     }
+
+    private ExecResult execInContainer(String containerId, String[] cmd) throws Exception {
+        var dockerClient = lifecycleManager.getDockerClient();
+        var exec = dockerClient.execCreateCmd(containerId)
+                .withCmd(cmd)
+                .withAttachStdout(true)
+                .withAttachStderr(true)
+                .exec();
+
+        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        boolean completed = dockerClient.execStartCmd(exec.getId())
+                .exec(new ResultCallback.Adapter<Frame>() {
+                    @Override
+                    public void onNext(Frame frame) {
+                        if (frame.getStreamType() == StreamType.STDERR) {
+                            stderr.writeBytes(frame.getPayload());
+                        } else {
+                            stdout.writeBytes(frame.getPayload());
+                        }
+                    }
+                })
+                .awaitCompletion(15, TimeUnit.SECONDS);
+
+        if (!completed) {
+            throw new RuntimeException("exec timed out in container " + containerId);
+        }
+        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
+        return new ExecResult(exitCode != null ? exitCode : -1,
+                stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));
+    }
+
+    private record ExecResult(long exitCode, String stdout, String stderr) {}
 }

@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.ApplicationStatus;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.SnapshotStatus;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -276,6 +278,9 @@ public class KinesisAnalyticsV2Service {
             // No-op for a READY app with no container; also clears any stale container left from a
             // previous run (containerId is not persisted across an emulator restart).
             containerManager.stopCluster(app);
+            // Only on delete, never on a plain StopApplication (stopCluster above) — the savepoints
+            // volume must survive a stop/restart cycle so snapshots remain describable/listable.
+            containerManager.removeSavepointsVolume(app);
         }
         storage.delete(applicationName);
         LOG.infov("Deleted Kinesis Analytics V2 application {0}", applicationName);
@@ -309,6 +314,84 @@ public class KinesisAnalyticsV2Service {
         return app.getTags();
     }
 
+    public Snapshot createApplicationSnapshot(String applicationName, String snapshotName) {
+        FlinkApplication app = describeApplication(applicationName);
+        if (snapshotName == null || snapshotName.isBlank()) {
+            throw new AwsException("InvalidArgumentException", "SnapshotName is required", 400);
+        }
+        // Real AWS requires a live, running job to snapshot — a bare cluster (no code) never has one.
+        if (app.getApplicationStatus() != ApplicationStatus.RUNNING || !app.hasCode()) {
+            throw new AwsException("InvalidRequestException",
+                    "Application " + applicationName + " must be RUNNING with a deployed job to "
+                            + "create a snapshot", 400);
+        }
+        if (app.getSnapshots().containsKey(snapshotName)) {
+            throw new AwsException("ResourceInUseException",
+                    "Snapshot already exists: " + snapshotName, 400);
+        }
+
+        Snapshot snapshot = new Snapshot(snapshotName, app.getApplicationVersionId(), app.getRuntimeEnvironment());
+        if (config.services().kinesisAnalytics().mock()) {
+            // No backing job to snapshot: come up READY immediately, same as StartApplication's
+            // mock-mode shortcut.
+            snapshot.setSnapshotStatus(SnapshotStatus.READY);
+        } else {
+            try {
+                containerManager.createSnapshot(app, snapshot);
+            } catch (RuntimeException e) {
+                LOG.errorv(e, "Failed to trigger snapshot {0} for application {1}",
+                        snapshotName, applicationName);
+                snapshot.setSnapshotStatus(SnapshotStatus.FAILED);
+            }
+        }
+        app.getSnapshots().put(snapshotName, snapshot);
+        putApplication(app);
+        LOG.infov("Creating Kinesis Analytics V2 snapshot {0} for application {1}",
+                snapshotName, applicationName);
+        return snapshot;
+    }
+
+    public Snapshot describeApplicationSnapshot(String applicationName, String snapshotName) {
+        FlinkApplication app = describeApplication(applicationName);
+        Snapshot snapshot = app.getSnapshots().get(snapshotName);
+        if (snapshot == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Snapshot not found: " + snapshotName, 400);
+        }
+        return snapshot;
+    }
+
+    public List<Snapshot> listApplicationSnapshots(String applicationName) {
+        return List.copyOf(describeApplication(applicationName).getSnapshots().values());
+    }
+
+    public void deleteApplicationSnapshot(String applicationName, String snapshotName,
+                                          Instant snapshotCreationTimestamp) {
+        FlinkApplication app = describeApplication(applicationName);
+        Snapshot snapshot = app.getSnapshots().get(snapshotName);
+        if (snapshot == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Snapshot not found: " + snapshotName, 400);
+        }
+        if (snapshotCreationTimestamp == null || snapshot.getSnapshotCreationTimestamp() == null
+                || snapshot.getSnapshotCreationTimestamp().getEpochSecond()
+                        != snapshotCreationTimestamp.getEpochSecond()) {
+            throw new AwsException("InvalidArgumentException",
+                    "Provided SnapshotCreationTimestamp does not match snapshot " + snapshotName, 400);
+        }
+        if (snapshot.getSnapshotStatus() == SnapshotStatus.CREATING) {
+            throw new AwsException("ResourceInUseException",
+                    "Snapshot " + snapshotName + " cannot be deleted while still being created", 400);
+        }
+        if (!config.services().kinesisAnalytics().mock()) {
+            containerManager.deleteSnapshotFiles(app, snapshot);
+        }
+        app.getSnapshots().remove(snapshotName);
+        putApplication(app);
+        LOG.infov("Deleted Kinesis Analytics V2 snapshot {0} for application {1}",
+                snapshotName, applicationName);
+    }
+
     private FlinkApplication findByArn(String resourceArn) {
         if (resourceArn == null || resourceArn.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ResourceARN is required", 400);
@@ -331,12 +414,22 @@ public class KinesisAnalyticsV2Service {
                     return;
                 }
                 for (FlinkApplication app : allApplications()) {
+                    boolean changed = false;
                     if (app.getApplicationStatus() == ApplicationStatus.STARTING
                             && containerManager.advanceToRunning(app)) {
                         LOG.infov("Kinesis Analytics V2 application {0} is now RUNNING",
                                 app.getApplicationName());
                         app.setApplicationStatus(ApplicationStatus.RUNNING);
                         app.setLastUpdateTimestamp(Instant.now());
+                        changed = true;
+                    }
+                    for (Snapshot snapshot : app.getSnapshots().values()) {
+                        if (snapshot.getSnapshotStatus() == SnapshotStatus.CREATING
+                                && containerManager.advanceSnapshot(app, snapshot)) {
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
                         putApplication(app);
                     }
                 }

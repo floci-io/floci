@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.kinesisanalytics;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -15,6 +16,7 @@ import org.mockito.Mockito;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.when;
 
 class KinesisAnalyticsV2JsonHandlerTest {
@@ -236,6 +238,76 @@ class KinesisAnalyticsV2JsonHandlerTest {
         assertThat(handler.handle("UntagResource", untagReq, REGION).getStatus(), is(200));
 
         assertEquals(0, entity(handler.handle("ListTagsForResource", listReq, REGION)).get("Tags").size());
+    }
+
+    @Test
+    void createApplicationSnapshotThenDescribeAndListThenDeleteRoundTrips() {
+        createRunningCodedApplication("streaming");
+
+        ObjectNode createSnap = MAPPER.createObjectNode();
+        createSnap.put("ApplicationName", "streaming");
+        createSnap.put("SnapshotName", "before-upgrade");
+        assertThat(handler.handle("CreateApplicationSnapshot", createSnap, REGION).getStatus(), is(200));
+
+        ObjectNode describeSnap = MAPPER.createObjectNode();
+        describeSnap.put("ApplicationName", "streaming");
+        describeSnap.put("SnapshotName", "before-upgrade");
+        Response described = handler.handle("DescribeApplicationSnapshot", describeSnap, REGION);
+        assertThat(described.getStatus(), is(200));
+        ObjectNode details = (ObjectNode) entity(described).get("SnapshotDetails");
+        assertEquals("before-upgrade", details.get("SnapshotName").asText());
+        // Mock mode: the snapshot completes immediately, same as the application itself.
+        assertEquals("READY", details.get("SnapshotStatus").asText());
+        double creationTimestamp = details.get("SnapshotCreationTimestamp").asDouble();
+
+        Response listed = handler.handle("ListApplicationSnapshots",
+                MAPPER.createObjectNode().put("ApplicationName", "streaming"), REGION);
+        assertThat(listed.getStatus(), is(200));
+        var summaries = entity(listed).get("SnapshotSummaries");
+        assertEquals(1, summaries.size());
+        assertEquals("before-upgrade", summaries.get(0).get("SnapshotName").asText());
+
+        ObjectNode deleteSnap = MAPPER.createObjectNode();
+        deleteSnap.put("ApplicationName", "streaming");
+        deleteSnap.put("SnapshotName", "before-upgrade");
+        deleteSnap.put("SnapshotCreationTimestamp", creationTimestamp);
+        assertThat(handler.handle("DeleteApplicationSnapshot", deleteSnap, REGION).getStatus(), is(200));
+
+        var afterDelete = entity(handler.handle("ListApplicationSnapshots",
+                MAPPER.createObjectNode().put("ApplicationName", "streaming"), REGION)).get("SnapshotSummaries");
+        assertEquals(0, afterDelete.size());
+    }
+
+    @Test
+    void createApplicationSnapshotFailsWhenApplicationNotRunning() {
+        createApplication("demo");
+
+        ObjectNode createSnap = MAPPER.createObjectNode();
+        createSnap.put("ApplicationName", "demo");
+        createSnap.put("SnapshotName", "before-upgrade");
+        assertThrows(AwsException.class, () -> handler.handle("CreateApplicationSnapshot", createSnap, REGION));
+    }
+
+    private void createRunningCodedApplication(String name) {
+        ObjectNode s3 = MAPPER.createObjectNode();
+        s3.put("BucketARN", "arn:aws:s3:::flink-code");
+        s3.put("FileKey", "app.jar");
+        ObjectNode codeCfg = MAPPER.createObjectNode();
+        codeCfg.set("CodeContent", MAPPER.createObjectNode().set("S3ContentLocation", s3));
+        codeCfg.put("CodeContentType", "ZIPFILE");
+        ObjectNode appCfg = MAPPER.createObjectNode();
+        appCfg.set("ApplicationCodeConfiguration", codeCfg);
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("ApplicationName", name);
+        req.put("RuntimeEnvironment", "FLINK-1_18");
+        req.put("ServiceExecutionRole", ROLE);
+        req.set("ApplicationConfiguration", appCfg);
+        assertThat(handler.handle("CreateApplication", req, REGION).getStatus(), is(200));
+
+        ObjectNode start = MAPPER.createObjectNode();
+        start.put("ApplicationName", name);
+        assertThat(handler.handle("StartApplication", start, REGION).getStatus(), is(200));
     }
 
     private String describeArn(String name) {

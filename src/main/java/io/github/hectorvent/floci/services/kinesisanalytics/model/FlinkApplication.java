@@ -91,6 +91,11 @@ public class FlinkApplication {
     // .EnvironmentPropertyDescriptions.PropertyGroupDescriptions, built explicitly by the handler.
     private Map<String, Map<String, String>> environmentProperties = new LinkedHashMap<>();
 
+    // Application snapshots (Flink savepoints), keyed by SnapshotName. Bookkeeping — snapshots are
+    // only ever returned via CreateApplicationSnapshot/DescribeApplicationSnapshot/
+    // ListApplicationSnapshots, never embedded in ApplicationDetail.
+    private Map<String, Snapshot> snapshots = new LinkedHashMap<>();
+
     public FlinkApplication() {}
 
     public FlinkApplication(String applicationName, String applicationArn,
@@ -170,6 +175,11 @@ public class FlinkApplication {
     public Map<String, Map<String, String>> getEnvironmentProperties() { return environmentProperties; }
     public void setEnvironmentProperties(Map<String, Map<String, String>> environmentProperties) {
         this.environmentProperties = environmentProperties != null ? environmentProperties : new LinkedHashMap<>();
+    }
+
+    public Map<String, Snapshot> getSnapshots() { return snapshots; }
+    public void setSnapshots(Map<String, Snapshot> snapshots) {
+        this.snapshots = snapshots != null ? snapshots : new LinkedHashMap<>();
     }
 
     /** True when the application has a code artifact to deploy (S3 JAR), i.e. a job should run. */

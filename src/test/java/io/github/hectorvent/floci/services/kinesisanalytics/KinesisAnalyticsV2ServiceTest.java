@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.ApplicationStatus;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.SnapshotStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -259,6 +261,111 @@ class KinesisAnalyticsV2ServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.tagResource(app.getApplicationArn(), tooMany));
         assertEquals("TooManyTagsException", ex.getErrorCode());
+    }
+
+    private FlinkApplication createRunningWithCode(String name) {
+        service.createApplication(name, "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+        return service.startApplication(name); // mock mode: RUNNING immediately
+    }
+
+    @Test
+    void createApplicationSnapshotRequiresRunningApplication() {
+        create("demo"); // READY, never started
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApplicationSnapshot("demo", "snap1"));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApplicationSnapshotRequiresCode() {
+        create("demo");
+        service.startApplication("demo"); // mock mode: RUNNING even with no code
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApplicationSnapshot("demo", "snap1"));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApplicationSnapshotSucceedsInMockMode() {
+        createRunningWithCode("demo");
+        Snapshot snapshot = service.createApplicationSnapshot("demo", "snap1");
+        assertEquals(SnapshotStatus.READY, snapshot.getSnapshotStatus());
+        assertEquals(1L, snapshot.getApplicationVersionId());
+    }
+
+    @Test
+    void createApplicationSnapshotRejectsDuplicateName() {
+        createRunningWithCode("demo");
+        service.createApplicationSnapshot("demo", "snap1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApplicationSnapshot("demo", "snap1"));
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
+    void describeApplicationSnapshotThrowsWhenMissing() {
+        createRunningWithCode("demo");
+        assertThrows(AwsException.class, () -> service.describeApplicationSnapshot("demo", "nope"));
+    }
+
+    @Test
+    void listApplicationSnapshotsIncludesCreated() {
+        createRunningWithCode("demo");
+        service.createApplicationSnapshot("demo", "snap1");
+        service.createApplicationSnapshot("demo", "snap2");
+        assertEquals(2, service.listApplicationSnapshots("demo").size());
+    }
+
+    @Test
+    void deleteApplicationSnapshotRemovesIt() {
+        createRunningWithCode("demo");
+        Snapshot snapshot = service.createApplicationSnapshot("demo", "snap1");
+        service.deleteApplicationSnapshot("demo", "snap1", snapshot.getSnapshotCreationTimestamp());
+        assertTrue(service.listApplicationSnapshots("demo").isEmpty());
+    }
+
+    @Test
+    void deleteApplicationSnapshotRejectsWrongTimestamp() {
+        createRunningWithCode("demo");
+        service.createApplicationSnapshot("demo", "snap1");
+        assertThrows(AwsException.class, () -> service.deleteApplicationSnapshot(
+                "demo", "snap1", java.time.Instant.ofEpochSecond(1)));
+    }
+
+    @Test
+    void deleteApplicationSnapshotRejectsWhileStillCreating() {
+        // Real mode, but the mocked FlinkContainerManager.createSnapshot never actually advances the
+        // snapshot to READY/FAILED, so it stays CREATING — matching a real Flink savepoint still
+        // in flight when a delete is attempted.
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+        // Real mode's startApplication only marks STARTING; force RUNNING directly to isolate the
+        // snapshot precondition from the readiness-poller mechanics already covered elsewhere.
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+        Snapshot snapshot = realMode.createApplicationSnapshot("demo", "snap1");
+        assertEquals(SnapshotStatus.CREATING, snapshot.getSnapshotStatus());
+
+        AwsException ex = assertThrows(AwsException.class, () -> realMode.deleteApplicationSnapshot(
+                "demo", "snap1", snapshot.getSnapshotCreationTimestamp()));
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApplicationSnapshotMarksFailedWhenTriggerThrows() {
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        Mockito.doThrow(new RuntimeException("jobmanager unreachable"))
+                .when(manager).createSnapshot(Mockito.any(), Mockito.any());
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+
+        // The trigger failure marks the snapshot FAILED rather than failing CreateApplicationSnapshot
+        // itself, the same async-follow-up-failure shape job submission already uses.
+        Snapshot snapshot = realMode.createApplicationSnapshot("demo", "snap1");
+        assertEquals(SnapshotStatus.FAILED, snapshot.getSnapshotStatus());
     }
 
     private KinesisAnalyticsV2Service mockModeService() {

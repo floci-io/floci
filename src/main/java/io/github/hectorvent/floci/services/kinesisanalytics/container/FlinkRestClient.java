@@ -141,4 +141,57 @@ public class FlinkRestClient {
             LOG.debugf("Flink cancel of job %s on %s failed: %s", jobId, restBase, e.toString());
         }
     }
+
+    /**
+     * Triggers a savepoint via {@code POST /jobs/:id/savepoints} and returns the async operation's
+     * {@code request-id}, used to poll completion via {@link #savepointStatus}.
+     */
+    public String triggerSavepoint(String restBase, String jobId, String targetDirectory)
+            throws IOException, InterruptedException {
+        String requestBody = "{\"target-directory\":\"" + targetDirectory + "\",\"cancel-job\":false}";
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder(URI.create(restBase + "/jobs/" + jobId + "/savepoints"))
+                        .timeout(Duration.ofSeconds(10))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 202 && resp.statusCode() != 200) {
+            throw new IOException("Flink /jobs/" + jobId + "/savepoints trigger failed: HTTP "
+                    + resp.statusCode() + " " + resp.body());
+        }
+        return mapper.readTree(resp.body()).path("request-id").asText(null);
+    }
+
+    /**
+     * Polls {@code GET /jobs/:id/savepoints/:requestId}. {@code statusId} is Flink's async-operation
+     * status ({@code IN_PROGRESS}/{@code COMPLETED}); null if the probe itself failed (network/parse
+     * error, e.g. the JobManager isn't reachable — different from a Flink-reported failure).
+     */
+    public SavepointStatus savepointStatus(String restBase, String jobId, String requestId) {
+        try {
+            HttpResponse<String> resp = http.send(
+                    HttpRequest.newBuilder(URI.create(restBase + "/jobs/" + jobId + "/savepoints/" + requestId))
+                            .timeout(Duration.ofSeconds(5)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                return null;
+            }
+            var root = mapper.readTree(resp.body());
+            String statusId = root.path("status").path("id").asText(null);
+            var operation = root.path("operation");
+            boolean failed = operation.has("failure-cause");
+            String location = operation.path("location").asText(null);
+            return new SavepointStatus(statusId, location, failed);
+        } catch (Exception e) {
+            LOG.debugf("Flink savepoint status probe (job %s, request %s) on %s failed: %s",
+                    jobId, requestId, restBase, e.toString());
+            return null;
+        }
+    }
+
+    /** {@code statusId}: Flink's async-operation status ({@code IN_PROGRESS}/{@code COMPLETED}).
+     *  {@code location}: the savepoint's path once completed successfully. {@code failed}: true when
+     *  Flink reports a {@code failure-cause} (the savepoint itself failed, as opposed to still running). */
+    public record SavepointStatus(String statusId, String location, boolean failed) {}
 }

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -45,6 +46,10 @@ public class KinesisAnalyticsV2JsonHandler {
             case "TagResource" -> handleTagResource(request);
             case "UntagResource" -> handleUntagResource(request);
             case "ListTagsForResource" -> handleListTagsForResource(request);
+            case "CreateApplicationSnapshot" -> handleCreateApplicationSnapshot(request);
+            case "DescribeApplicationSnapshot" -> handleDescribeApplicationSnapshot(request);
+            case "ListApplicationSnapshots" -> handleListApplicationSnapshots(request);
+            case "DeleteApplicationSnapshot" -> handleDeleteApplicationSnapshot(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -147,6 +152,58 @@ public class KinesisAnalyticsV2JsonHandler {
         service.deleteApplication(applicationName, createTimestamp);
         // AWS DeleteApplication returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleCreateApplicationSnapshot(JsonNode request) {
+        String applicationName = request.path("ApplicationName").asText(null);
+        String snapshotName = request.path("SnapshotName").asText(null);
+        service.createApplicationSnapshot(applicationName, snapshotName);
+        // AWS CreateApplicationSnapshot returns an empty body.
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeApplicationSnapshot(JsonNode request) {
+        String applicationName = request.path("ApplicationName").asText(null);
+        String snapshotName = request.path("SnapshotName").asText(null);
+        Snapshot snapshot = service.describeApplicationSnapshot(applicationName, snapshotName);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("SnapshotDetails", snapshotDetailNode(snapshot));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListApplicationSnapshots(JsonNode request) {
+        String applicationName = request.path("ApplicationName").asText(null);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("SnapshotSummaries");
+        for (Snapshot snapshot : service.listApplicationSnapshots(applicationName)) {
+            summaries.add(snapshotDetailNode(snapshot));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteApplicationSnapshot(JsonNode request) {
+        String applicationName = request.path("ApplicationName").asText(null);
+        String snapshotName = request.path("SnapshotName").asText(null);
+        Instant snapshotCreationTimestamp = request.hasNonNull("SnapshotCreationTimestamp")
+                ? Instant.ofEpochMilli(Math.round(request.path("SnapshotCreationTimestamp").asDouble() * 1000))
+                : null;
+        service.deleteApplicationSnapshot(applicationName, snapshotName, snapshotCreationTimestamp);
+        // AWS DeleteApplicationSnapshot returns an empty body.
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private ObjectNode snapshotDetailNode(Snapshot snapshot) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("SnapshotName", snapshot.getSnapshotName());
+        node.put("SnapshotStatus", snapshot.getSnapshotStatus().name());
+        node.put("ApplicationVersionId", snapshot.getApplicationVersionId());
+        if (snapshot.getSnapshotCreationTimestamp() != null) {
+            node.put("SnapshotCreationTimestamp", snapshot.getSnapshotCreationTimestamp().toEpochMilli() / 1000.0);
+        }
+        if (snapshot.getRuntimeEnvironment() != null) {
+            node.put("RuntimeEnvironment", snapshot.getRuntimeEnvironment());
+        }
+        return node;
     }
 
     private Response handleTagResource(JsonNode request) {

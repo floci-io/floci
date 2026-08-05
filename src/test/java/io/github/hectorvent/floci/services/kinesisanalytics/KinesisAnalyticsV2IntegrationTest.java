@@ -196,4 +196,95 @@ class KinesisAnalyticsV2IntegrationTest {
             .body("Tags.Key", hasItem("team"))
             .body("Tags.Key", not(hasItem("env")));
     }
+
+    @Test
+    void snapshotLifecycleRoundTripsThroughTheWireProtocol() {
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-snapshot", "RuntimeEnvironment": "FLINK-1_18",
+                 "ServiceExecutionRole": "%s",
+                 "ApplicationConfiguration": {"ApplicationCodeConfiguration": {
+                     "CodeContent": {"S3ContentLocation": {
+                         "BucketARN": "arn:aws:s3:::flink-code", "FileKey": "app.jar"}},
+                     "CodeContentType": "ZIPFILE"}}}
+                """.formatted(ROLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.StartApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-snapshot", "RunConfiguration": {}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplicationSnapshot")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-snapshot", "SnapshotName": "before-upgrade"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String creationTimestamp = given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.DescribeApplicationSnapshot")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-snapshot", "SnapshotName": "before-upgrade"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SnapshotDetails.SnapshotName", equalTo("before-upgrade"))
+            // mock mode: the snapshot completes immediately, same as the application itself.
+            .body("SnapshotDetails.SnapshotStatus", equalTo("READY"))
+            .extract().jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
+            .getString("SnapshotDetails.SnapshotCreationTimestamp");
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.ListApplicationSnapshots")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-snapshot"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SnapshotSummaries.SnapshotName", hasItem("before-upgrade"));
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.DeleteApplicationSnapshot")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ApplicationName\": \"it-snapshot\", \"SnapshotName\": \"before-upgrade\", "
+                    + "\"SnapshotCreationTimestamp\": " + creationTimestamp + "}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.ListApplicationSnapshots")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-snapshot"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SnapshotSummaries", equalTo(java.util.List.of()));
+    }
 }
