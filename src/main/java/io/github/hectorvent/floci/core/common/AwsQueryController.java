@@ -82,7 +82,7 @@ public class AwsQueryController {
             "CreateGroup", "GetGroup", "DeleteGroup", "ListGroups",
             "AddUserToGroup", "RemoveUserFromGroup", "ListGroupsForUser",
             "CreateRole", "GetRole", "DeleteRole", "ListRoles", "UpdateRole",
-            "CreatePolicy", "GetPolicy", "DeletePolicy", "ListPolicies",
+            "CreatePolicy", "GetPolicy", "DeletePolicy", "ListPolicies", "ListEntitiesForPolicy",
             "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion",
             "ListPolicyVersions", "SetDefaultPolicyVersion",
             "AttachUserPolicy", "DetachUserPolicy", "ListAttachedUserPolicies",
@@ -170,7 +170,7 @@ public class AwsQueryController {
             "ModifyLaunchTemplate", "DeleteLaunchTemplate",
             "DescribeNetworkInterfaces",
             "CreateFlowLogs", "DescribeFlowLogs", "DeleteFlowLogs",
-            "CreateVolume", "DescribeVolumes", "DeleteVolume"
+            "CreateVolume", "DescribeVolumes", "DeleteVolume", "AttachVolume", "DetachVolume"
     );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;

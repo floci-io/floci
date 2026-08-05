@@ -640,7 +640,9 @@ public class LambdaService {
         String name = ref.name();
         String qualifier = ref.qualifier();
         LambdaFunction fn = resolveInvokeTarget(region, name, qualifier);
-        return executorService.invoke(fn, payload, type);
+        InvokeResult result = executorService.invoke(fn, payload, type);
+        result.setExecutedVersion(fn.getVersion());
+        return result;
     }
 
     private LambdaFunction resolveInvokeTarget(String region, String name, String qualifier) {
@@ -956,6 +958,7 @@ public class LambdaService {
         functionName = fn.getFunctionName();
         int version = nextVersionNumber(region + "::" + functionName);
         LambdaFunction snapshot = new LambdaFunction();
+        snapshot.setAccountId(fn.getAccountId());
         snapshot.setFunctionName(fn.getFunctionName());
         snapshot.setVersion(String.valueOf(version));
         snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
