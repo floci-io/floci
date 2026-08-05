@@ -462,6 +462,92 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void resendConfirmationCodeReplacesTheSignUpCode() throws Exception {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ResendConfirmationCodePool",
+                  "AutoVerifiedAttributes": ["email"]
+                }
+                """);
+        String resendPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "resend-confirmation-code-client"
+                }
+                """.formatted(resendPoolId));
+        String resendClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String resendUsername = "resend+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(resendClientId, resendUsername, resendUsername))
+                .then()
+                .statusCode(200);
+
+        String originalCode = fetchLatestSesVerificationCode(resendUsername);
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        Response resendResponse = cognitoAction("ResendConfirmationCode", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(resendClientId, resendUsername));
+        resendResponse.then().statusCode(200);
+        assertEquals("email",
+                resendResponse.jsonPath().getString("CodeDeliveryDetails.AttributeName"));
+        assertEquals("EMAIL",
+                resendResponse.jsonPath().getString("CodeDeliveryDetails.DeliveryMedium"));
+        assertThat(resendResponse.jsonPath().getString("CodeDeliveryDetails.Destination"),
+                containsString("@"));
+
+        String replacementCode = fetchLatestSesVerificationCode(resendUsername);
+        assertNotEquals(originalCode, replacementCode);
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "%s"
+                }
+                """.formatted(resendClientId, resendUsername, originalCode))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"));
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "%s"
+                }
+                """.formatted(resendClientId, resendUsername, replacementCode))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("ResendConfirmationCode", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(resendClientId, resendUsername))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+    }
+
+    @Test
     @Order(8)
     void forgotPasswordRequiresVerifiedRecoveryDestination() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """

@@ -247,11 +247,24 @@ class S3MultipartIntegrationTest {
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"));
 
+        // Percent-encoded bucket/key separator: the AWS SDK for .NET encodes the whole
+        // copy source, so the header carries no literal slash.
+        given()
+            .header("x-amz-copy-source", BUCKET + "%2Fsource-for-copy.bin")
+            .header("x-amz-copy-source-range", "bytes=2-5")
+        .when()
+            .put("/" + BUCKET + "/copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=3")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CopyPartResult"))
+            .body(containsString("<ETag>"));
+
         // Complete the upload
         String completeXml = """
                 <CompleteMultipartUpload>
                     <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
                     <Part><PartNumber>2</PartNumber><ETag>etag2</ETag></Part>
+                    <Part><PartNumber>3</PartNumber><ETag>etag3</ETag></Part>
                 </CompleteMultipartUpload>""";
         given()
             .contentType("application/xml")
@@ -261,13 +274,15 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Verify contents: full source + ranged slice
+        // Verify contents: full source, ranged slice, then the same slice copied
+        // through the percent-encoded separator. The last four bytes prove the
+        // encoded source resolved to the same object, not just that it returned 200.
         given()
         .when()
             .get("/" + BUCKET + "/copy-dest.bin")
         .then()
             .statusCode(200)
-            .body(equalTo("ABCDEFGHIJCDEF"));
+            .body(equalTo("ABCDEFGHIJCDEFCDEF"));
     }
 
     @Test
