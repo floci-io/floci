@@ -1314,6 +1314,46 @@ class CognitoServiceTest {
     }
 
     @Test
+    void initiateAuthWithUserSrpAuthRejectsUnconfirmedUser() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        service.signUp(client.getClientId(), "bob", "Password123!", Map.of("email", "bob@example.com"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_SRP_AUTH",
+                        Map.of("USERNAME", "bob", "SRP_A", "ABCDEF1234567890")));
+
+        assertEquals("UserNotConfirmedException", ex.getErrorCode());
+    }
+
+    @Test
+    void respondToAuthChallengeWithUserSrpAuthRejectsNewlyUnconfirmedUser() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        String password = "Password123!";
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        service.adminSetUserPassword(pool.getId(), "bob", password, true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_SRP_AUTH",
+                Map.of("USERNAME", "bob", "SRP_A", "ABCDEF1234567890"));
+        String session = (String) initResult.get("Session");
+        // Simulate the user becoming unconfirmed after the SRP session is created.
+        CognitoUser user = service.adminGetUser(pool.getId(), "bob");
+        user.setUserStatus("UNCONFIRMED");
+        userStore.put(pool.getId() + "::" + user.getUsername(), user);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER", session,
+                        Map.of(
+                                "USERNAME", "bob",
+                                "PASSWORD_CLAIM_SIGNATURE", "invalid-sig",
+                                "TIMESTAMP", "Wed Apr 8 12:00:00 UTC 2026"
+                        )));
+
+        assertEquals("UserNotConfirmedException", ex.getErrorCode());
+    }
+
+    @Test
     void respondToAuthChallengeWithInvalidSrpSignatureRejects() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         String password = "Password123!";

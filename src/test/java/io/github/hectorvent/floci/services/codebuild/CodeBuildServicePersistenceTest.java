@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectArtifacts;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectEnvironment;
@@ -20,6 +21,8 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -82,6 +85,38 @@ class CodeBuildServicePersistenceTest {
         assertNull(reloaded.batchGetProjects(REGION, List.of("p2")).stream().findFirst().orElse(null));
     }
 
+    @Test
+    void startAndRetryBuildResponsesUseAcceptedBuildSnapshot() {
+        CodeBuildRunner runner = mock(CodeBuildRunner.class);
+        doAnswer(invocation -> {
+            Build build = invocation.getArgument(1, Build.class);
+            build.setBuildStatus("FAILED");
+            build.setBuildComplete(true);
+            build.setCurrentPhase("COMPLETED");
+            return null;
+        }).when(runner).startBuild(any(), any(), any(), any());
+
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory(), runner);
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                new ProjectEnvironment(), "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+
+        Build startResponse = service.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null);
+        assertEquals("IN_PROGRESS", startResponse.getBuildStatus());
+        assertEquals(false, startResponse.getBuildComplete());
+        assertEquals("SUBMITTED", startResponse.getCurrentPhase());
+        assertEquals("FAILED", service.getBuild(REGION, startResponse.getId()).getBuildStatus());
+
+        Build retryResponse = service.retryBuild(REGION, ACCOUNT, startResponse.getId());
+        assertEquals("IN_PROGRESS", retryResponse.getBuildStatus());
+        assertEquals(false, retryResponse.getBuildComplete());
+        assertEquals("SUBMITTED", retryResponse.getCurrentPhase());
+        assertTrue(retryResponse.getBuildNumber() > startResponse.getBuildNumber());
+        assertEquals("FAILED", service.getBuild(REGION, retryResponse.getId()).getBuildStatus());
+    }
+
     private static ProjectSource source(String type) {
         ProjectSource s = new ProjectSource();
         s.setType(type);
@@ -95,8 +130,12 @@ class CodeBuildServicePersistenceTest {
     }
 
     private static CodeBuildService serviceWithStorage(StorageFactory storage) {
+        return serviceWithStorage(storage, mock(CodeBuildRunner.class));
+    }
+
+    private static CodeBuildService serviceWithStorage(StorageFactory storage, CodeBuildRunner runner) {
         CodeBuildService service = new CodeBuildService(
-                mock(CodeBuildRunner.class), mock(EmulatorConfig.class), storage);
+                runner, mock(EmulatorConfig.class), storage);
         service.initializeStorage();
         return service;
     }
