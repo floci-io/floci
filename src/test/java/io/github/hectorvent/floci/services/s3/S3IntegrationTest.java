@@ -362,6 +362,44 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(21)
+    void createBucketAppliesTagsFromCreateBucketConfiguration() {
+        String bucket = "tagged-at-create-bucket";
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <Tags>
+                        <Tag>
+                            <Key>owner</Key>
+                            <Value>data-team</Value>
+                        </Tag>
+                    </Tags>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucket + "?tagging")
+        .then()
+            .statusCode(200)
+            .body(containsString("owner"))
+            .body(containsString("data-team"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
     @Order(20)
     void headBucketReturnsStoredRegionForLocationConstraintBucket() {
         String bucket = "eu-head-bucket";
@@ -480,6 +518,64 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(119)
+    void copyObjectWithPercentEncodedBucketSeparatorSucceeds() {
+        // The AWS SDK for .NET percent-encodes the whole copy source, so a v4 client sends
+        // "bucket%2Ffolder%2Fkey.txt" with no literal slash anywhere in the header.
+        String bucket = "copy-encoded-separator-bucket";
+        String srcKey = "folder/file.txt";
+
+        given().put("/" + bucket).then().statusCode(200);
+        given()
+            .contentType("text/plain")
+            .body("encoded separator")
+        .when()
+            .put("/" + bucket + "/" + srcKey)
+        .then()
+            .statusCode(200);
+
+        // Fully encoded, no leading separator: the .NET wire format.
+        given()
+            .header("x-amz-copy-source", bucket + "%2Ffolder%2Ffile.txt")
+        .when()
+            .put("/" + bucket + "/copied/dotnet.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        // Lowercase %2f, and a leading encoded separator, name the same object.
+        given()
+            .header("x-amz-copy-source", "%2F" + bucket + "%2ffolder%2ffile.txt")
+        .when()
+            .put("/" + bucket + "/copied/lowercase.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        // Mixed: encoded bucket separator, literal slash inside the key.
+        given()
+            .header("x-amz-copy-source", bucket + "%2Ffolder/file.txt")
+        .when()
+            .put("/" + bucket + "/copied/mixed.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        for (String copied : new String[] {"dotnet", "lowercase", "mixed"}) {
+            given()
+            .when()
+                .get("/" + bucket + "/copied/" + copied + ".txt")
+            .then()
+                .statusCode(200)
+                .body(equalTo("encoded separator"));
+            given().delete("/" + bucket + "/copied/" + copied + ".txt");
+        }
+
+        given().delete("/" + bucket + "/" + srcKey);
+        given().delete("/" + bucket);
+    }
+
+    @Test
     @Order(120)
     void copyObjectWithQuestionMarkInSourceKeySucceeds() {
         String sourceBucket = "copy-question-source-bucket";
@@ -550,6 +646,15 @@ class S3IntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("InvalidArgument"));
+
+        // Decoding still rejects a malformed key reached through an encoded separator.
+        given()
+            .header("x-amz-copy-source", "test-bucket%2F%ZZinvalid")
+        .when()
+            .put("/test-bucket/dest-key")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
     }
 
     @Test
@@ -557,6 +662,23 @@ class S3IntegrationTest {
     void copyObjectWithEmptyBucketReturns400() {
         given()
             .header("x-amz-copy-source", "/key-only-no-bucket")
+        .when()
+            .put("/test-bucket/dest-key")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+
+        // A source with no separator at all names no bucket, encoded form included.
+        given()
+            .header("x-amz-copy-source", "key-only-no-bucket")
+        .when()
+            .put("/test-bucket/dest-key")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+
+        given()
+            .header("x-amz-copy-source", "%2Fkey-only-no-bucket")
         .when()
             .put("/test-bucket/dest-key")
         .then()

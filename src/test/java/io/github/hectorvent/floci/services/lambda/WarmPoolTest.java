@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -14,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -153,6 +155,80 @@ class WarmPoolTest {
 
         // containerLauncher.launch should only have been called once (cold start)
         verify(containerLauncher, times(1)).launch(any());
+
+        pool.shutdown();
+    }
+
+    /**
+     * An extension reporting init/exit error is fatal to the execution environment in real AWS,
+     * so the container must be retired after the invocation rather than returned to the pool.
+     */
+    @Test
+    void releaseAfterExtensionFatalError_retiresContainerInsteadOfPooling() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("faulted-fn");
+
+        RuntimeApiServer faultedServer = mock(RuntimeApiServer.class);
+        when(faultedServer.isFaulted()).thenReturn(true);
+        ContainerHandle faulted = new ContainerHandle("cid-faulted", "faulted-fn", faultedServer, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle("cid-fresh", "faulted-fn", null, ContainerState.WARM);
+
+        // Both acquires below cold-start (the pool is empty, then the faulted handle is discarded
+        // before any liveness check), so no isAlive stubbing is needed.
+        when(containerLauncher.launch(any())).thenReturn(faulted, fresh);
+
+        ContainerHandle first = pool.acquire(fn);
+        assertSame(faulted, first);
+
+        // The extension died during this invocation; releasing must tear the container down.
+        pool.release(first);
+        verify(containerLauncher, times(1)).stop(faulted);
+
+        // The next acquire cold-starts rather than handing the condemned container back out.
+        ContainerHandle second = pool.acquire(fn);
+        assertSame(fresh, second);
+        assertNotSame(faulted, second);
+        verify(containerLauncher, times(2)).launch(any());
+
+        pool.shutdown();
+    }
+
+    /**
+     * A container whose extension faults while it sits WARM in the pool is still *running*, so the
+     * liveness probe alone would hand it back out. It must be skipped and discarded on acquire.
+     */
+    @Test
+    void acquire_discardsPooledHandleWhoseExtensionFaulted() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("pooled-fault-fn");
+
+        RuntimeApiServer server = mock(RuntimeApiServer.class);
+        ContainerHandle pooled = new ContainerHandle("cid-pooled", "pooled-fault-fn", server, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle("cid-fresh", "pooled-fault-fn", null, ContainerState.WARM);
+
+        when(containerLauncher.launch(any())).thenReturn(pooled, fresh);
+        // Healthy at release time, so it goes into the pool as normal.
+        when(server.isFaulted()).thenReturn(false);
+        ContainerHandle seeded = pool.acquire(fn);
+        assertSame(pooled, seeded);
+        pool.release(seeded);
+
+        // The extension now faults while the container sits idle in the pool. isAlive() is stubbed
+        // true so the container is unambiguously still running: if the faulted check were removed,
+        // this handle would be considered reusable and handed straight back out.
+        when(server.isFaulted()).thenReturn(true);
+        lenient().when(containerLauncher.isAlive(pooled)).thenReturn(true);
+
+        ContainerHandle acquired = pool.acquire(fn);
+        assertSame(fresh, acquired);
+        assertNotSame(pooled, acquired);
+        verify(containerLauncher, times(1)).stop(pooled);
 
         pool.shutdown();
     }

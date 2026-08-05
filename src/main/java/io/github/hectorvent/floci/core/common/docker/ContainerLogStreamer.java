@@ -57,20 +57,51 @@ public class ContainerLogStreamer {
                     .withStdErr(true)
                     .withFollowStream(true)
                     .withTimestamps(false)
-                    .exec(new ResultCallback.Adapter<>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
-                            if (!line.isEmpty()) {
-                                LOG.infov("[{0}] {1}", logPrefix, line);
-                                forwardToCloudWatchLogs(logGroup, logStream, region, line);
-                            }
-                        }
-                    });
+                    .exec(frameCallback(logGroup, logStream, region, logPrefix));
         } catch (Exception e) {
             LOG.warnv("Could not attach log stream for container {0}: {1}", containerId, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Streams the output of a {@code docker exec} to the same destinations as {@link #attach}.
+     *
+     * <p>Needed because {@code docker logs} (and therefore {@link #attach}, which uses
+     * {@code logContainerCmd}) only covers the container's PID 1 stdout/stderr. An exec runs on a
+     * separate Docker stream that never reaches that log, so a Lambda extension started via exec
+     * would otherwise produce no CloudWatch output at all — the opposite of what an observability
+     * extension is for.
+     *
+     * <p>The returned callback must be handed to {@code execStartCmd(...).exec(...)} by the caller,
+     * which owns the exec's lifecycle. Draining it is required regardless of logging: an undrained
+     * exec output pipe fills up and stalls the process on the other end.
+     *
+     * @param logPrefix console-only prefix (e.g. {@code "lambda:myFn:my-extension"}); the message
+     *                  forwarded to CloudWatch is left unprefixed so the log stream matches real
+     *                  AWS, which interleaves extension output with the function's own.
+     */
+    public ResultCallback.Adapter<Frame> execLogCallback(String logGroup, String logStream,
+                                                        String region, String logPrefix) {
+        return frameCallback(logGroup, logStream, region, logPrefix);
+    }
+
+    /** Shared frame handling for both the container log stream and exec streams. */
+    private ResultCallback.Adapter<Frame> frameCallback(String logGroup, String logStream,
+                                                       String region, String logPrefix) {
+        return new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                if (frame == null || frame.getPayload() == null) {
+                    return;
+                }
+                String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
+                if (!line.isEmpty()) {
+                    LOG.infov("[{0}] {1}", logPrefix, line);
+                    forwardToCloudWatchLogs(logGroup, logStream, region, line);
+                }
+            }
+        };
     }
 
     /**
