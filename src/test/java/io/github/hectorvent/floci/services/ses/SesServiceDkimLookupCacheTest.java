@@ -57,6 +57,7 @@ class SesServiceDkimLookupCacheTest {
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 new InMemoryStorage<String, ContactList>(),
                 new InMemoryStorage<String, Contact>(),
+                new InMemoryStorage<String, String>(),
                 mock(SmtpRelay.class),
                 new ObjectMapper(),
                 route53Service,
