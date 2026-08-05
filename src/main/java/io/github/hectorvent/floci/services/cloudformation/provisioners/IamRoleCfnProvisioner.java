@@ -10,6 +10,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -27,6 +28,9 @@ import java.util.Set;
 public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(IamRoleCfnProvisioner.class);
+
+    private static final String INLINE_NAMES_ATTR = "__FlociInlinePolicyNames";
+    private static final String MANAGED_ARNS_ATTR = "__FlociManagedPolicyArns";
 
     private final IamService iamService;
 
@@ -91,8 +95,16 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", role.getArn());
         r.getAttributes().put("RoleId", role.getRoleId());
 
+        // What the previous execution of this resource wrote, so an update can take out what the
+        // template stopped declaring. Only these names are removed, which leaves inline policies and
+        // attachments added out of band alone.
+        Set<String> previousInlineNames = readTrackedSet(r, INLINE_NAMES_ATTR);
+        Set<String> previousManagedArns = readTrackedSet(r, MANAGED_ARNS_ATTR);
+
         Set<String> originalPolicyArns = new HashSet<>(role.getAttachedPolicyArns());
         LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
+        LinkedHashSet<String> detachedByThisAttempt = new LinkedHashSet<>();
+        LinkedHashSet<String> inlineRemovedByThisAttempt = new LinkedHashSet<>();
         // What the inline policies looked like before this attempt, so a partial write can be put
         // back. On an update that adopts an existing role these are the values to restore; for a
         // name this attempt introduced there is no prior value and the policy is removed instead.
@@ -112,9 +124,14 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             if (props != null && props.has("Policies")) {
                 for (JsonNode policy : props.get("Policies")) {
                     String declaredName = ctx.resolveOptional(policy, "PolicyName");
-                    final String policyName = declaredName == null || declaredName.isBlank()
-                            ? ctx.generatePhysicalName(r.getLogicalId() + "Policy", 128, false)
-                            : declaredName;
+                    if (declaredName == null || declaredName.isBlank()) {
+                        // PolicyName is a required property of AWS::IAM::Role Policies. Generating
+                        // one produced a fresh name on every execution, so an update accumulated
+                        // copies of the same policy instead of replacing it.
+                        throw new AwsException("ValidationError",
+                                "An inline policy on role " + resolvedRoleName + " has no PolicyName.", 400);
+                    }
+                    final String policyName = declaredName;
                     JsonNode document = policy.get("PolicyDocument");
                     if (document == null || document.isNull()) {
                         // Skipping it and reporting CREATE_COMPLETE without the declared policy is
@@ -128,8 +145,45 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                     inlineWrittenByThisAttempt.add(policyName);
                 }
             }
+
+            // Anything the previous execution wrote and this template no longer declares. Without
+            // this the role keeps permissions the stack stopped declaring while the stack still
+            // reports UPDATE_COMPLETE, which is the failure mode #1952 is about one level over.
+            for (String stale : previousInlineNames) {
+                if (!inlineWrittenByThisAttempt.contains(stale)) {
+                    iamService.deleteRolePolicy(resolvedRoleName, stale);
+                    inlineRemovedByThisAttempt.add(stale);
+                }
+            }
+            for (String stale : previousManagedArns) {
+                if (!managedPolicyArns.contains(stale)) {
+                    iamService.detachRolePolicy(resolvedRoleName, stale);
+                    detachedByThisAttempt.add(stale);
+                }
+            }
         } catch (RuntimeException failure) {
             boolean cleanupSucceeded = true;
+
+            // Reconciliation runs last, so unwinding it comes first. A policy this attempt took out
+            // because the template stopped declaring it goes back with the document it had.
+            for (String policyName : inlineRemovedByThisAttempt) {
+                String prior = originalInlinePolicies.get(policyName);
+                if (prior == null) {
+                    continue;
+                }
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "restore inline policy " + policyName + " on role " + resolvedRoleName,
+                        () -> iamService.putRolePolicy(resolvedRoleName, policyName, prior))) {
+                    cleanupSucceeded = false;
+                }
+            }
+            for (String policyArn : detachedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "reattach policy " + policyArn + " to role " + resolvedRoleName,
+                        () -> iamService.attachRolePolicy(resolvedRoleName, policyArn))) {
+                    cleanupSucceeded = false;
+                }
+            }
 
             List<String> inlineRollback = new ArrayList<>(inlineWrittenByThisAttempt);
             Collections.reverse(inlineRollback);
@@ -168,6 +222,30 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             }
             throw failure;
         }
+
+        // What the next execution compares its template against.
+        writeTrackedSet(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
+        writeTrackedSet(r, MANAGED_ARNS_ATTR, managedPolicyArns);
+    }
+
+    private static Set<String> readTrackedSet(StackResource r, String attribute) {
+        String raw = r.getAttributes().get(attribute);
+        if (raw == null || raw.isEmpty()) {
+            return Set.of();
+        }
+        return new LinkedHashSet<>(List.of(raw.split("\n")));
+    }
+
+    /**
+     * Newline separated because an IAM policy name may contain a comma, per the
+     * {@code [\w+=,.@-]+} pattern CloudFormation documents for {@code PolicyName}.
+     */
+    private static void writeTrackedSet(StackResource r, String attribute, Collection<String> values) {
+        if (values.isEmpty()) {
+            r.getAttributes().remove(attribute);
+            return;
+        }
+        r.getAttributes().put(attribute, String.join("\n", values));
     }
 
     @Override

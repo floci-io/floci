@@ -100,20 +100,23 @@ class IamRoleCfnProvisionerTest {
     }
 
     @Test
-    void inlinePolicyWithoutANameGetsAGeneratedOne() {
+    void inlinePolicyWithoutANameFailsTheResource() {
+        // PolicyName is required on AWS::IAM::Role Policies. Generating one gave the same policy a
+        // fresh name on every execution, so an update accumulated copies instead of replacing it.
         stubCreate("app-role");
+        StackResource r = resource();
 
-        provisioner.provision(resource(), props("""
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
                 {
                   "RoleName": "app-role",
                   "Policies": [{"PolicyDocument": {"Version": "2012-10-17", "Statement": []}}]
                 }
-                """), ctx());
+                """), ctx()));
 
-        ArgumentCaptor<String> policyName = ArgumentCaptor.forClass(String.class);
-        verify(iam).putRolePolicy(eq("app-role"), policyName.capture(), eq(EMPTY_TRUST));
-        assertTrue(policyName.getValue().startsWith("test-stack-AppRolePolicy-"),
-                "unexpected generated policy name: " + policyName.getValue());
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(iam, never()).putRolePolicy(anyString(), anyString(), anyString());
+        verify(iam).deleteRole("app-role");
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
     }
 
     @Test
@@ -156,6 +159,66 @@ class IamRoleCfnProvisionerTest {
         verify(iam).deleteRolePolicy("app-role", "first");
         verify(iam).deleteRole("app-role");
         assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void updateRemovesTheInlinePoliciesAndAttachmentsTheTemplateDropped() {
+        // A policy the previous execution wrote and the new template no longer declares used to
+        // stay on the role while the stack still reported UPDATE_COMPLETE.
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getInlinePolicies().put("keep", EMPTY_TRUST);
+        existing.getInlinePolicies().put("drop", EMPTY_TRUST);
+        existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Keep");
+        existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+        r.getAttributes().put("__FlociInlinePolicyNames", "keep\ndrop");
+        r.getAttributes().put("__FlociManagedPolicyArns",
+                "arn:aws:iam::aws:policy/Keep\narn:aws:iam::aws:policy/Drop");
+
+        provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Keep"],
+                  "Policies": [
+                    {"PolicyName": "keep", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), ctx());
+
+        verify(iam).deleteRolePolicy("app-role", "drop");
+        verify(iam).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Drop");
+        verify(iam, never()).deleteRolePolicy("app-role", "keep");
+        verify(iam, never()).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Keep");
+        assertEquals("keep", r.getAttributes().get("__FlociInlinePolicyNames"));
+    }
+
+    @Test
+    void updateLeavesInlinePoliciesTheStackNeverWroteAlone() {
+        // Only names a previous execution recorded are removed, so a policy added out of band
+        // survives an update that does not declare it.
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getInlinePolicies().put("added-out-of-band", EMPTY_TRUST);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Policies": []}
+                """), ctx());
+
+        verify(iam, never()).deleteRolePolicy(anyString(), anyString());
     }
 
     @Test
