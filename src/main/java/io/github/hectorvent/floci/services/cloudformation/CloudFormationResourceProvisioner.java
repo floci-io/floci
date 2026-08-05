@@ -345,7 +345,6 @@ public class CloudFormationResourceProvisioner {
                 // EC2 networking. These delegate to Ec2Service so the resources actually exist
                 // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
                 // fake physical id. Topological ordering guarantees parents are provisioned first.
-                case "AWS::EC2::VPC" -> provisionVpc(resource, properties, engine, region);
                 case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
@@ -421,6 +420,14 @@ public class CloudFormationResourceProvisioner {
             }
             return;
         }
+        // Rule deletion needs the rule's event bus (stored as an attribute at provision time),
+        // which the type/physicalId delete path can't provide; a custom-bus rule looked up under
+        // the default bus would silently no-op and leave the rule (and its bus) live.
+        if ("AWS::Events::Rule".equals(resourceType)) {
+            deleteEventBridgeRuleSafe(resource.getPhysicalId(),
+                    resource.getAttributes().get("EventBusName"), region);
+            return;
+        }
         // AWS::IAM::Policy is an inline policy; detaching it needs the principals it was attached to,
         // which the type/physicalId delete path can't provide (only the delete-stack path has them).
         if ("AWS::IAM::Policy".equals(resourceType)) {
@@ -466,8 +473,8 @@ public class CloudFormationResourceProvisioner {
             case "AWS::S3::Bucket" -> s3Service.deleteBucket(physicalId);
             case "AWS::SNS::Topic" -> snsService.deleteTopic(physicalId, region);
             case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
-            case "AWS::DynamoDB::Table" -> dynamoDbService.deleteTable(physicalId, region);
-            case "AWS::Lambda::Function" -> lambdaService.deleteFunction(region, physicalId);
+            case "AWS::DynamoDB::Table" -> deleteDynamoTableSafe(physicalId, region);
+            case "AWS::Lambda::Function" -> deleteLambdaFunctionSafe(physicalId, region);
             case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
             // AWS::IAM::Policy is inline: it is removed together with its owning principal (see
             // deleteRoleSafe), or precisely via the StackResource-aware delete path. Nothing to do
@@ -598,15 +605,6 @@ public class CloudFormationResourceProvisioner {
     // ELBv2 create-load-balancer, etc. resolve it). physicalId is set to the real EC2 id so
     // Ref/exports resolve to a real vpc-/subnet-/... id rather than a stub.
 
-    private void provisionVpc(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
-        String cidr = resolveOptional(props, "CidrBlock", engine);
-        var vpc = ec2Service.createVpc(region, cidr, false);
-        r.setPhysicalId(vpc.getVpcId());
-        r.getAttributes().put("VpcId", vpc.getVpcId());
-        if (vpc.getCidrBlock() != null) {
-            r.getAttributes().put("CidrBlock", vpc.getCidrBlock());
-        }
-    }
 
     private void provisionSubnet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
         String vpcId = resolveOptional(props, "VpcId", engine);
@@ -946,10 +944,34 @@ public class CloudFormationResourceProvisioner {
                                       String region) {
         String imageId = resolveOptional(props, "ImageId", engine);
         String instanceType = resolveOptional(props, "InstanceType", engine);
+        String keyName = resolveOptional(props, "KeyName", engine);
+
+        // An instance may reference a LaunchTemplate for its config; fields the
+        // properties don't set resolve from the template's data, as on AWS.
+        if (props != null && props.has("LaunchTemplate")) {
+            JsonNode ltRef = engine.resolveNode(props.get("LaunchTemplate"));
+            try {
+                var ltData = ec2Service.resolveLaunchTemplateData(region,
+                        ltRef.path("LaunchTemplateId").asText(null),
+                        ltRef.path("LaunchTemplateName").asText(null),
+                        ltRef.path("Version").asText(null));
+                if (imageId == null || imageId.isBlank()) {
+                    imageId = ltData.getImageId();
+                }
+                if (instanceType == null || instanceType.isBlank()) {
+                    instanceType = ltData.getInstanceType();
+                }
+                if (keyName == null || keyName.isBlank()) {
+                    keyName = ltData.getKeyName();
+                }
+            } catch (Exception e) {
+                LOG.debugv("Could not resolve launch template for instance {0}: {1}",
+                        r.getLogicalId(), e.getMessage());
+            }
+        }
         if (instanceType == null || instanceType.isBlank()) {
             instanceType = "t3.micro";
         }
-        String keyName = resolveOptional(props, "KeyName", engine);
         String subnetId = resolveOptional(props, "SubnetId", engine);
         String userData = resolveOptional(props, "UserData", engine);
         String iamInstanceProfile = resolveOptional(props, "IamInstanceProfile", engine);
@@ -2481,8 +2503,9 @@ public class CloudFormationResourceProvisioner {
             }
             validateEventBusMutablePropertiesUnchanged(r, bus, description, tags);
         }
-        // Optional inline resource policy (rare for CDK EventBus constructs). Applied after the
-        // bus exists so an adopted bus picks up a policy change on update too.
+
+        // Optional inline resource policy (rare for CDK EventBus constructs). Applied after the bus
+        // exists so an adopted bus picks up a policy change on update too.
         if (props != null && props.has("Policy") && !props.get("Policy").isNull()) {
             String policyJson = engine.resolveNode(props.get("Policy")).toString();
             eventBridgeService.putPermission(busName, null, null, null, null, policyJson, region);
@@ -2648,10 +2671,14 @@ public class CloudFormationResourceProvisioner {
             }
             eventBridgeService.deleteRule(ruleName, busName, region);
         } catch (AwsException e) {
+            // An already-deleted rule is the one failure that genuinely means "done". Anything else
+            // is a real error worth surfacing rather than hiding behind a debug line.
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
             }
             LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
+        } catch (Exception e) {
+            LOG.debugv("Could not delete EventBridge rule {0}: {1}", ruleName, e.getMessage());
         }
     }
 
@@ -2686,6 +2713,7 @@ public class CloudFormationResourceProvisioner {
         }
         deleteEventBusSafe(busName, region);
     }
+
 
     private void provisionEventBusPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                          String region) {
@@ -4457,6 +4485,28 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
+    private void deleteDynamoTableSafe(String tableName, String region) {
+        try {
+            dynamoDbService.deleteTable(tableName, region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("DynamoDB table already gone, treating as deleted: {0}", tableName);
+        }
+    }
+
+    private void deleteLambdaFunctionSafe(String functionName, String region) {
+        try {
+            lambdaService.deleteFunction(region, functionName);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Lambda function already gone, treating as deleted: {0}", functionName);
+        }
+    }
+
     private void deleteManagedPolicy(StackResource resource) {
         String policyArn = resource.getPhysicalId();
         for (String roleName : managedPolicyRoleTargets(resource)) {
@@ -4618,12 +4668,24 @@ public class CloudFormationResourceProvisioner {
      */
     private String generatePhysicalName(String stackName, String logicalId, int maxLength, boolean lowercase) {
         String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        String name = stackName + "-" + logicalId + "-" + suffix;
+        String base = stackName + "-" + logicalId;
         if (lowercase) {
-            name = name.toLowerCase();
+            base = base.toLowerCase();
         }
+        String name = base + "-" + suffix;
         if (maxLength > 0 && name.length() > maxLength) {
-            name = name.substring(0, maxLength);
+            // Truncate the descriptive prefix but always keep the trailing uniqueness token. When a
+            // stack's name approaches the length limit, distinct logical resources still get distinct
+            // physical names — CloudFormation preserves the random suffix when it shortens a generated
+            // name. Truncating the whole string (suffix included) would collapse every such resource
+            // onto one name and break Ref/GetAtt-based lookup (e.g. a custom resource's ServiceToken
+            // resolving to the wrong Lambda).
+            int keep = Math.max(0, maxLength - suffix.length() - 1);
+            String prefix = base.length() > keep ? base.substring(0, keep) : base;
+            while (prefix.endsWith("-")) {
+                prefix = prefix.substring(0, prefix.length() - 1);
+            }
+            name = prefix.isEmpty() ? suffix : prefix + "-" + suffix;
         }
         return name;
     }

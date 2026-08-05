@@ -442,7 +442,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     // "Policy" is deliberately absent: an inline resource policy is supported (see
-    // provisionEventBridgeEventBus), so rejecting it would regress templates that rely on it.
+    // provisionEventBridgeEventBus), so rejecting it would regress templates main supports today.
     @ParameterizedTest
     @ValueSource(strings = {
             "EventSourceName", "KmsKeyIdentifier", "DeadLetterConfig", "LogConfig"
