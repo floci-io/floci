@@ -117,6 +117,15 @@ public class WarmPool implements ContainerTeardown {
                 if (candidate == null) {
                     break;
                 }
+                // A container whose extension reported a fatal error is still *running*, so the
+                // liveness probe alone would hand it back out. Skip it for the same reason a dead
+                // one is skipped: it can no longer serve invocations correctly.
+                if (candidate.isFaulted()) {
+                    LOG.infov("Discarding pooled container {0} for function {1}: an extension reported a fatal error",
+                            candidate.getContainerId(), fn.getFunctionName());
+                    stopQuietly(candidate);
+                    continue;
+                }
                 if (containerLauncher.isAlive(candidate)) {
                     handle = candidate;
                     break;
@@ -145,6 +154,16 @@ public class WarmPool implements ContainerTeardown {
      */
     public void release(ContainerHandle handle) {
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
+        // An extension reporting an init/exit error is fatal to the execution environment in real
+        // AWS. RuntimeApiServer already refuses new work at that point; the container is torn down
+        // here rather than at fault time so the invocation that was in flight when the extension
+        // failed still completes normally through the runtime.
+        if (handle.isFaulted()) {
+            LOG.infov("Retiring container {0} for function {1}: an extension reported a fatal error",
+                    handle.getContainerId(), handle.getFunctionName());
+            stopQuietly(handle);
+            return;
+        }
         if (ephemeral || handle.isHotReload()) {
             LOG.debugv("{0}: stopping container {1} after invocation",
                     handle.isHotReload() ? "Hot-reload" : "Ephemeral", handle.getContainerId());
