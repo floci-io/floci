@@ -106,6 +106,15 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
         URI originalUri = requestContext.getUriInfo().getRequestUri();
         String originalPath = originalUri.getRawPath();
+
+        // Host matching alone cannot tell whether this request was already rewritten: the Host
+        // header still names the execute-api subdomain afterwards. Rewriting twice would produce
+        // /execute-api/{apiId}/execute-api/{apiId}/... and a 404, so bail out if another
+        // execute-api filter got here first.
+        if (originalPath != null && originalPath.startsWith("/execute-api/")) {
+            return;
+        }
+
         String path = originalPath == null ? "" : stripLeadingSlash(originalPath);
         String firstSegment = firstSegment(path);
 
