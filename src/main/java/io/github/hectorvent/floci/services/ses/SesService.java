@@ -1347,6 +1347,9 @@ public class SesService {
     public void setActiveReceiptRuleSet(String name, String region) {
         // No RuleSetName clears the account's active rule set (matches AWS).
         boolean clearOnly = name == null || name.isBlank();
+        if (!clearOnly) {
+            requireRuleSetName(name);
+        }
         synchronized (receiptRuleSetLock) {
             if (!clearOnly) {
                 ReceiptRuleSet target = receiptRuleSetStore.get(receiptRuleSetKey(region, name))
@@ -1387,9 +1390,24 @@ public class SesService {
         }
     }
 
+    // Verified against AWS: RuleSetName must match ^[a-zA-Z0-9_.-]+$ (a character outside that set is
+    // a Smithy ValidationError), and must additionally be <= 64 chars and start/end with an
+    // alphanumeric (otherwise a service-level "Not a valid ruleSetName" InvalidParameterValue).
+    private static final Pattern RULE_SET_NAME_CHARS = Pattern.compile("^[a-zA-Z0-9_.-]+$");
+
     private static void requireRuleSetName(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RuleSetName is required.", 400);
+        }
+        if (!RULE_SET_NAME_CHARS.matcher(name).matches()) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'ruleSetName' failed to satisfy constraint: "
+                            + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_.-]+$", 400);
+        }
+        if (name.length() > 64
+                || !Character.isLetterOrDigit(name.charAt(0))
+                || !Character.isLetterOrDigit(name.charAt(name.length() - 1))) {
+            throw new AwsException("InvalidParameterValue", "Not a valid ruleSetName: " + name, 400);
         }
     }
 

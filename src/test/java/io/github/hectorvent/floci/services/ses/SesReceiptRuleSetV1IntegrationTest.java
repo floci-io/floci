@@ -139,4 +139,34 @@ class SesReceiptRuleSetV1IntegrationTest {
         .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>RuleSetDoesNotExist</Code>"));
     }
+
+    @Test
+    @Order(11)
+    void createRuleSet_charOutsideAllowedSet_returnsValidationError() {
+        // A character outside ^[a-zA-Z0-9_.-]+$ is a Smithy ValidationError (verified against AWS).
+        req("CreateReceiptRuleSet").formParam("RuleSetName", "floci bad name")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>ValidationError</Code>"))
+                .body(containsString("ruleSetName"));
+    }
+
+    @Test
+    @Order(12)
+    void createRuleSet_badFormat_returnsNotValidRuleSetName() {
+        // Valid characters, but a name must start/end with an alphanumeric (verified against AWS).
+        req("CreateReceiptRuleSet").formParam("RuleSetName", "-floci-bad")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("Not a valid ruleSetName: -floci-bad"));
+    }
+
+    @Test
+    @Order(13)
+    void createRuleSet_dottedName_isAccepted() {
+        // A dot is inside the allowed character set (verified against AWS).
+        req("CreateReceiptRuleSet").formParam("RuleSetName", "floci.v1.dotted")
+        .when().post("/").then().statusCode(200);
+        req("DeleteReceiptRuleSet").formParam("RuleSetName", "floci.v1.dotted")
+        .when().post("/").then().statusCode(200);
+    }
 }
