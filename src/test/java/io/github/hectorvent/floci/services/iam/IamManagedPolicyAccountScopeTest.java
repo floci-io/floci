@@ -82,6 +82,7 @@ class IamManagedPolicyAccountScopeTest {
                 .map(AwsManagedPolicies.ManagedPolicyDef::arn)
                 .toList();
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSXRayDaemonWriteAccess"));
+        assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSCloudFormationReadOnlyAccess"));
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSCloudFormationFullAccess"));
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AmazonElasticFileSystemClientFullAccess"));
     }

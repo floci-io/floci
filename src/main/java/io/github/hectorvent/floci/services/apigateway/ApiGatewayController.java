@@ -1653,6 +1653,10 @@ public class ApiGatewayController {
         if (a.getAuthorizerUri() != null) node.put("authorizerUri", a.getAuthorizerUri());
         if (a.getIdentitySource() != null) node.put("identitySource", a.getIdentitySource());
         node.put("authorizerResultTtlInSeconds", Integer.parseInt(a.getAuthorizerResultTtlInSeconds()));
+        if (a.getProviderARNs() != null && !a.getProviderARNs().isEmpty()) {
+            ArrayNode arns = node.putArray("providerARNs");
+            a.getProviderARNs().forEach(arns::add);
+        }
         return node;
     }
 
