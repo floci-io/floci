@@ -100,6 +100,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -119,6 +120,12 @@ public class CloudFormationResourceProvisioner {
     private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
     private static final String INLINE_CLEANUP_USER_TARGETS_ATTR = "__FlociInlineCleanupUserTargets";
     private static final String INLINE_CLEANUP_GROUP_TARGETS_ATTR = "__FlociInlineCleanupGroupTargets";
+    private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
+    private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
+    private static final Set<String> EVENT_BUS_SUPPORTED_PROPERTIES =
+            Set.of("Name", "Description", "Tags", "Policy");
+    private static final Pattern EVENT_BUS_TAG_PATTERN =
+            Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final String LAMBDA_NAME_MODE_EXPLICIT = "explicit";
     private static final String LAMBDA_NAME_MODE_GENERATED = "generated";
     private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
@@ -305,7 +312,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Route53::HostedZone" -> provisionRoute53HostedZone(resource, properties, engine);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
-                case "AWS::Events::EventBus" -> provisionEventBus(resource, properties, engine, region, stackName);
+                case "AWS::Events::EventBus" -> provisionEventBridgeEventBus(resource, properties, engine, region);
                 case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(resource, properties, engine, region);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
@@ -464,6 +471,18 @@ public class CloudFormationResourceProvisioner {
             deleteManagedPolicy(resource);
             return;
         }
+        // A Rule on a custom bus is keyed by that bus; the physical id is only the rule name, so the
+        // type/physicalId path resolves to the "default" bus and never finds it — leaving the rule (and
+        // then its bus) undeletable. Pass the bus name captured at provision time.
+        if ("AWS::Events::Rule".equals(resourceType)) {
+            deleteEventBridgeRuleSafe(resource.getPhysicalId(),
+                    resource.getAttributes().get("EventBusName"), region);
+            return;
+        }
+        if ("AWS::Events::EventBus".equals(resourceType)) {
+            deleteEventBusSafe(resource, region);
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
@@ -503,6 +522,7 @@ public class CloudFormationResourceProvisioner {
                     "ValidationError",
                     "SecretTargetAttachment deletion requires the StackResource metadata that records its managed fields.",
                     400);
+            // No bus context on the type/physicalId path (e.g. CREATE-rollback); targets the default bus.
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
@@ -2780,6 +2800,8 @@ public class CloudFormationResourceProvisioner {
                 state, description, roleArn, Map.of(), region);
         r.setPhysicalId(ruleName);
         r.getAttributes().put("Arn", rule.getArn());
+        // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
+        // the right bus (the physical id is only the rule name, which resolves to the default bus).
         if (busName != null && !busName.isBlank()) {
             r.getAttributes().put("EventBusName", busName);
         }
@@ -2827,70 +2849,271 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
+    /**
+     * Provisions an {@code AWS::Events::EventBus} (a custom EventBridge event bus). Without this the
+     * resource would fall through to the generic stub, which assigns a physical id but never registers
+     * the bus with the EventBridge service — so any {@code AWS::Events::Rule} (or PutEvents) targeting
+     * the bus fails "EventBus not found". Per the AWS spec, {@code Ref} returns the bus <em>name</em>
+     * (not the ARN), so the physical id is the name; {@code Fn::GetAtt "Arn"} exposes the ARN.
+     */
+    private void provisionEventBridgeEventBus(StackResource r, JsonNode props,
+                                              CloudFormationTemplateEngine engine, String region) {
+        validateEventBusProperties(props);
+        String existingBusName = r.getPhysicalId();
+        String busName = resolveOptional(props, "Name", engine);
+        validateEventBusName(busName);
+        if (existingBusName != null && !existingBusName.equals(busName)) {
+            throw new AwsException("ValidationError",
+                    "Updating EventBus Name requires resource replacement, which is not supported.", 400);
+        }
+        String description = resolveOptional(props, "Description", engine);
+        if (description != null && description.length() > 512) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Description must not exceed 512 characters.", 400);
+        }
+        Map<String, String> tags = parseEventBusTags(
+                props != null ? props.get("Tags") : null, engine);
+
+        EventBus bus;
+        try {
+            bus = eventBridgeService.createEventBus(busName, description, tags, region);
+            r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+        } catch (AwsException e) {
+            boolean stackAlreadyOwnsBus = existingBusName != null && existingBusName.equals(busName);
+            if (!stackAlreadyOwnsBus || !"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            bus = eventBridgeService.describeEventBus(busName, region);
+            // A missing created-time means ownership was never tracked, not that it changed: stacks
+            // provisioned before this attribute existed are restored without it. Refusing there would
+            // wedge every later UpdateStack, including no-op ones. Only a recorded time that actually
+            // disagrees means the bus was recreated out of band and belongs to its new owner.
+            String existingCreatedTime = r.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
+            String actualCreatedTime = eventBusCreatedTime(bus);
+            if (existingCreatedTime != null && !existingCreatedTime.equals(actualCreatedTime)) {
+                r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
+                throw e;
+            }
+            validateEventBusMutablePropertiesUnchanged(r, bus, description, tags);
+        }
+
+        // Record identity before applying the policy: rollbackCreatedResources skips any resource
+        // whose physicalId is still null, so a putPermission failure after the bus exists would
+        // otherwise orphan it with no way for rollback to find it.
+        r.setPhysicalId(busName);              // Ref → EventBus name (AWS-faithful)
+        r.getAttributes().put("Arn", bus.getArn());
+        r.getAttributes().put("Name", busName);
+        r.getAttributes().put(EVENT_BUS_CREATED_TIME_ATTR, eventBusCreatedTime(bus));
+        recordEventBusManagedTagKeys(r, tags.keySet());
+
+        // Optional inline resource policy (rare for CDK EventBus constructs). Applied after the bus
+        // exists so an adopted bus picks up a policy change on update too.
+        if (props != null && props.has("Policy") && !props.get("Policy").isNull()) {
+            String policyJson = engine.resolveNode(props.get("Policy")).toString();
+            eventBridgeService.putPermission(busName, null, null, null, null, policyJson, region);
+        }
+    }
+
+    private void validateEventBusProperties(JsonNode props) {
+        if (props == null || props.isNull()) {
+            return;
+        }
+        if (!props.isObject()) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Properties must be an object.", 400);
+        }
+        List<String> unsupported = new ArrayList<>();
+        props.fieldNames().forEachRemaining(name -> {
+            if (!EVENT_BUS_SUPPORTED_PROPERTIES.contains(name)) {
+                unsupported.add(name);
+            }
+        });
+        if (!unsupported.isEmpty()) {
+            Collections.sort(unsupported);
+            throw new AwsException("ValidationError",
+                    "Unsupported AWS::Events::EventBus properties: "
+                            + String.join(", ", unsupported), 400);
+        }
+    }
+
+    private void validateEventBusName(String busName) {
+        if (busName == null || busName.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Name is required for AWS::Events::EventBus.", 400);
+        }
+        if (busName.length() > 256
+                || !busName.matches("[.\\-_A-Za-z0-9]+")
+                || "default".equals(busName)) {
+            throw new AwsException("ValidationError",
+                    "Invalid custom event bus Name: " + busName, 400);
+        }
+    }
+
+    private Map<String, String> parseEventBusTags(
+            JsonNode tagsNode, CloudFormationTemplateEngine engine) {
+        if (tagsNode == null || tagsNode.isNull()) {
+            return Map.of();
+        }
+        JsonNode resolvedTags = engine.resolveNode(tagsNode);
+        if (!resolvedTags.isArray()) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Tags must be an array.", 400);
+        }
+        if (resolvedTags.size() > 50) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus supports at most 50 tags.", 400);
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (JsonNode entry : resolvedTags) {
+            if (!entry.isObject()) {
+                throw new AwsException("ValidationError",
+                        "Each AWS::Events::EventBus tag must be an object.", 400);
+            }
+            String key = entry.path("Key").asText(null);
+            String value = entry.path("Value").asText(null);
+            if (key == null || key.isEmpty() || key.length() > 128) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Key must contain 1 to 128 characters.", 400);
+            }
+            if (key.regionMatches(true, 0, "aws:", 0, 4)) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Key must not use the reserved aws: prefix.", 400);
+            }
+            if (!EVENT_BUS_TAG_PATTERN.matcher(key).matches()) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Key contains unsupported characters.", 400);
+            }
+            if (value == null || value.length() > 256) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Value must contain at most 256 characters.", 400);
+            }
+            if (!EVENT_BUS_TAG_PATTERN.matcher(value).matches()) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Value contains unsupported characters.", 400);
+            }
+            if (tags.putIfAbsent(key, value) != null) {
+                throw new AwsException("ValidationError",
+                        "Duplicate event bus tag Key: " + key, 400);
+            }
+        }
+        return tags;
+    }
+
+    private void validateEventBusMutablePropertiesUnchanged(
+            StackResource resource, EventBus bus, String requestedDescription,
+            Map<String, String> requestedTags) {
+        if (!Objects.equals(bus.getDescription(), requestedDescription)) {
+            throw unsupportedEventBusMutableUpdate();
+        }
+
+        Map<String, String> currentManagedTags = new LinkedHashMap<>();
+        for (String key : eventBusManagedTagKeys(resource)) {
+            if (bus.getTags().containsKey(key)) {
+                currentManagedTags.put(key, bus.getTags().get(key));
+            }
+        }
+        if (!currentManagedTags.equals(requestedTags)) {
+            throw unsupportedEventBusMutableUpdate();
+        }
+    }
+
+    private AwsException unsupportedEventBusMutableUpdate() {
+        return new AwsException("ValidationError",
+                "Updating AWS::Events::EventBus Description or Tags is not supported "
+                        + "until transactional rollback is available.", 400);
+    }
+
+    private Set<String> eventBusManagedTagKeys(StackResource resource) {
+        String value = resource.getAttributes().get(EVENT_BUS_MANAGED_TAG_KEYS_ATTR);
+        if (value == null || value.isBlank()) {
+            return Set.of();
+        }
+        try {
+            JsonNode keys = objectMapper.readTree(value);
+            if (!keys.isArray()) {
+                throw new IllegalArgumentException("managed tag keys are not an array");
+            }
+            Set<String> result = new HashSet<>();
+            keys.forEach(key -> result.add(key.asText()));
+            return result;
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Invalid stored EventBus managed-tag metadata: " + e.getMessage(), 500);
+        }
+    }
+
+    private void recordEventBusManagedTagKeys(StackResource resource, Set<String> keys) {
+        try {
+            resource.getAttributes().put(
+                    EVENT_BUS_MANAGED_TAG_KEYS_ATTR,
+                    objectMapper.writeValueAsString(new TreeSet<>(keys)));
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Failed to store EventBus managed-tag metadata: " + e.getMessage(), 500);
+        }
+    }
+
+    private String eventBusCreatedTime(EventBus bus) {
+        return bus.getCreatedTime() != null ? bus.getCreatedTime().toString() : "";
+    }
+
     private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
         try {
-            // Remove all targets before deleting the rule
+            // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
             var targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {
                 List<String> targetIds = targets.stream().map(Target::getId).toList();
                 eventBridgeService.removeTargets(ruleName, busName, targetIds, region);
             }
             eventBridgeService.deleteRule(ruleName, busName, region);
+        } catch (AwsException e) {
+            // An already-deleted rule is the one failure that genuinely means "done". Anything else
+            // is a real error worth surfacing rather than hiding behind a debug line.
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
         } catch (Exception e) {
             LOG.debugv("Could not delete EventBridge rule {0}: {1}", ruleName, e.getMessage());
         }
     }
 
-    private void provisionEventBus(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                   String region, String stackName) {
-        String name = resolveOptional(props, "Name", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 256, false);
-        }
-        String description = resolveOptional(props, "Description", engine);
-
-        Map<String, String> tags = new HashMap<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.put(key, engine.resolve(tag.path("Value")));
-                }
-            }
-        }
-
-        EventBus bus;
+    private void deleteEventBusSafe(String busName, String region) {
         try {
-            bus = eventBridgeService.createEventBus(name, description, tags, region);
+            eventBridgeService.deleteEventBus(busName, region);
         } catch (AwsException e) {
-            if ("ResourceAlreadyExistsException".equals(e.getErrorCode())) {
-                bus = eventBridgeService.describeEventBus(name, region);
-            } else {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
             }
+            LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
         }
-
-        // Optional inline resource policy (rare for CDK EventBus constructs).
-        if (props != null && props.has("Policy") && !props.get("Policy").isNull()) {
-            String policyJson = engine.resolveNode(props.get("Policy")).toString();
-            eventBridgeService.putPermission(name, null, null, null, null, policyJson, region);
-        }
-
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", bus.getArn());
-        r.getAttributes().put("Name", name);
     }
 
-    private void deleteEventBusSafe(String name, String region) {
+    private void deleteEventBusSafe(StackResource resource, String region) {
+        String busName = resource.getPhysicalId();
+        EventBus bus;
         try {
-            eventBridgeService.deleteEventBus(name, region);
-        } catch (Exception e) {
-            // Warn (not debug): the stack still records the resource as DELETE_COMPLETE, so a bus
-            // left alive here (e.g. rules deleted out of dependency order) is a silent divergence
-            // that must stay diagnosable.
-            LOG.warnv("Could not delete event bus {0}: {1}", name, e.getMessage());
+            bus = eventBridgeService.describeEventBus(busName, region);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
+                return;
+            }
+            throw e;
         }
+
+        // A missing attribute means ownership was never tracked, not that it changed: stacks
+        // provisioned before this attribute existed are restored from cloudformation-stacks.json
+        // without it. Refusing there would leave every such stack permanently in DELETE_FAILED, so
+        // fall back to the pre-tracking behaviour of deleting what the stack recorded it created.
+        String expectedCreatedTime = resource.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
+        if (expectedCreatedTime != null && !expectedCreatedTime.equals(eventBusCreatedTime(bus))) {
+            throw new AwsException("ValidationError",
+                    "EventBus ownership changed; refusing to delete: " + busName, 400);
+        }
+        deleteEventBusSafe(busName, region);
     }
+
 
     private void provisionEventBusPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                          String region) {
