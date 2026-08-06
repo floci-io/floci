@@ -47,6 +47,10 @@ Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`.
 the backing service and sets a real physical ID plus the `Ref` / `Fn::GetAtt` attributes used by
 cross-resource references.
 
+> Adding a type? See [Adding a CloudFormation Resource Type](../../CONTRIBUTING.md#adding-a-cloudformation-resource-type).
+> Types live in per-service provisioners under `services/cloudformation/provisioners/`; keep this
+> table in step with them.
+
 | Service | Resource types |
 |---|---|
 | S3 | `Bucket`, `BucketPolicy` (accepted; policy not enforced) |
@@ -62,7 +66,7 @@ cross-resource references.
 | ECS | `Cluster`, `TaskDefinition`, `Service` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance`, `DBCluster`, `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup` (DBInstance/DBCluster start real containers) |
-| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance` |
+| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup` |
 | Route 53 | `HostedZone`, `RecordSet` |
@@ -71,7 +75,7 @@ cross-resource references.
 | Step Functions | `StateMachine` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool`, `UserPoolClient` |
-| EventBridge | `Events::Rule` |
+| EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
