@@ -1,13 +1,16 @@
 name: Release
 
 # Triggered when a version tag (e.g. 1.2.3) is pushed.
-# Builds native (amd64 + arm64) Docker images and pushes them to Docker Hub.
+# Builds native (amd64 + arm64) Docker images and pushes them to Docker Hub
+# and Amazon ECR Public.
 #
 # Published tags:
 #   Native:  floci/floci:1.2.3        floci/floci:latest
+#            public.ecr.aws/floci/floci:1.2.3        public.ecr.aws/floci/floci:latest
 #   Compat:  floci/floci:1.2.3-compat floci/floci:latest-compat
+#            public.ecr.aws/floci/floci:1.2.3-compat public.ecr.aws/floci/floci:latest-compat
 #
-# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ROLE_ARN
 
 on:
   push:
@@ -16,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 # Per-tag concurrency. Back-to-back tag pushes (e.g. 1.5.3 and 1.6.0 landing
 # minutes apart) resolve to different ${{ github.ref }} values, so they run
@@ -129,6 +133,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+        with:
+          registry-type: public
+
       - name: Build and push native multi-arch image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         env:
@@ -143,6 +158,8 @@ jobs:
           tags: |
             floci/floci:${{ steps.version.outputs.version }}
             floci/floci:latest
+            public.ecr.aws/floci/floci:${{ steps.version.outputs.version }}
+            public.ecr.aws/floci/floci:latest
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           labels: |
@@ -169,6 +186,8 @@ jobs:
           tags: |
             floci/floci:${{ steps.version.outputs.version }}-compat
             floci/floci:latest-compat
+            public.ecr.aws/floci/floci:${{ steps.version.outputs.version }}-compat
+            public.ecr.aws/floci/floci:latest-compat
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           labels: |
