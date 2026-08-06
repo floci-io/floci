@@ -99,6 +99,16 @@ class SecretsManagerSelectorTest {
     }
 
     @Test
+    void objectAndArrayValuesSerializeAsJson() {
+        // Third deliberate divergence from the real agent: Go's %v would inject
+        // "map[a:1 b:2]" for a nested object; JSON is parseable by the consumer.
+        assertEquals("{\"a\":1,\"b\":2}",
+                SecretsManagerSelector.extractJsonKey("{\"nested\":{\"a\":1,\"b\":2}}", "nested"));
+        assertEquals("[1,2,3]",
+                SecretsManagerSelector.extractJsonKey("{\"list\":[1,2,3]}", "list"));
+    }
+
+    @Test
     void missingJsonKeyIsAnError() {
         AwsException e = assertThrows(AwsException.class,
                 () -> SecretsManagerSelector.extractJsonKey("{\"other\":\"x\"}", "token"));

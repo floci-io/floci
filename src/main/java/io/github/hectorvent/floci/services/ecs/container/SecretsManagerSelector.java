@@ -49,7 +49,9 @@ record SecretsManagerSelector(String secretId, String jsonKey, String versionSta
      * Extracts a top-level JSON field from a secret string, mirroring the agent's behavior
      * (asm.go): missing key and non-JSON secrets are errors. Scalar values are rendered with
      * {@code asText()}, which keeps large numbers in plain notation where the Go agent's
-     * {@code %v} would print scientific notation; objects and arrays serialize as JSON.
+     * {@code %v} would print scientific notation. Object and array values deliberately serialize
+     * as JSON, another divergence: the agent's {@code %v} on the unmarshalled value would inject
+     * Go's native rendering ({@code map[a:1 b:2]}), which no consumer can parse back.
      */
     static String extractJsonKey(String secretString, String jsonKey) {
         JsonNode root;
