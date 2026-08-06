@@ -2169,7 +2169,7 @@ class CognitoServiceTest {
         }
 
         @Test
-        void confirmSignUpMarksOnlyEmailVerifiedWhenBothAutoVerifiedAndEmailIsFirstDeliveryTarget() {
+        void confirmSignUpMarksOnlyPhoneNumberVerifiedWhenBothAutoVerifiedEvenWhenEmailListedFirst() {
             String poolName = "BothVerifyEmailFirstPool";
             String email = "dual-user@example.com";
             String password = "Passw0rd!";
@@ -2189,10 +2189,10 @@ class CognitoServiceTest {
             CognitoUser user = svc.adminGetUser(pool.getId(), email);
 
             assertEquals("CONFIRMED", user.getUserStatus());
-            assertEquals("true", user.getAttributes().get("email_verified"),
-                    "ConfirmSignUp should set email_verified=true when email is the first auto-verified delivery target");
-            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
-                    "ConfirmSignUp should not set phone_number_verified when the code was delivered to email, not phone");
+            assertEquals("true", user.getAttributes().get("phone_number_verified"),
+                    "ConfirmSignUp should set phone_number_verified=true when both contacts are auto-verified, regardless of list order");
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the code was delivered to phone, not email");
         }
 
         @Test
