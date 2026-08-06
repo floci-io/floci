@@ -57,6 +57,22 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     }
 
     @Test
+    @Order(11)
+    void create_unverifiedFromAddress_returnsFromEmailAddressNotVerifiedOnV1() {
+        // An unverified FromEmailAddress is FromEmailAddressNotVerified / 400 on v1 (verified against
+        // AWS), not the v2 NotFoundException / 404.
+        query("CreateCustomVerificationEmailTemplate")
+                .formParam("TemplateName", "cvet-v1-unverified-from")
+                .formParam("FromEmailAddress", "cvet-v1-not-verified@floci.test")
+                .formParam("TemplateSubject", "Verify your email")
+                .formParam("TemplateContent", "<html><body>verify</body></html>")
+                .formParam("SuccessRedirectionURL", "https://example.com/ok")
+                .formParam("FailureRedirectionURL", "https://example.com/fail")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>FromEmailAddressNotVerified</Code>"));
+    }
+
+    @Test
     @Order(1)
     void create() {
         create(NAME, "Verify your email").when().post("/").then().statusCode(200)

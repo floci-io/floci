@@ -2299,7 +2299,7 @@ public class SesController {
                  "InvalidRenderingParameter", "MissingRenderingAttribute" ->
                     new AwsException("BadRequestException", e.getMessage(), 400);
             case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist",
-                 "CustomVerificationEmailTemplateDoesNotExist" ->
+                 "CustomVerificationEmailTemplateDoesNotExist", "FromEmailAddressNotVerified" ->
                     new AwsException("NotFoundException", e.getMessage(), 404);
             case "AlreadyExists", "ConfigurationSetAlreadyExists",
                  "CustomVerificationEmailTemplateAlreadyExists" ->

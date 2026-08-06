@@ -1111,8 +1111,10 @@ public class SesService {
         requireCvetField(t.getSuccessRedirectionURL(), "SuccessRedirectionURL");
         requireCvetField(t.getFailureRedirectionURL(), "FailureRedirectionURL");
         if (!isVerifiedSender(t.getFromEmailAddress(), region)) {
-            throw new AwsException("NotFoundException",
-                    "The from email address <" + t.getFromEmailAddress() + "> is not verified", 404);
+            // v1-native code (verified: FromEmailAddressNotVerified / 400); remapV1Exception
+            // translates it to NotFoundException / 404 for the v2 boundary.
+            throw new AwsException("FromEmailAddressNotVerified",
+                    "The from email address <" + t.getFromEmailAddress() + "> is not verified", 400);
         }
         if (!isValidRedirectUrl(t.getSuccessRedirectionURL())) {
             throw new AwsException("InvalidParameterValue", "The success redirection URL is invalid", 400);
