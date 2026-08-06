@@ -306,8 +306,11 @@ Do not add `Co-Authored-By` trailers for AI tools in commit messages. Keep attri
 ## Release Awareness
 
 - Changes merged into `main` do not automatically imply a stable release
-- Release branches define stable release lines
-- Tags trigger publishing workflows
+- Releases are cut from `main` via the "Release Cut" workflow (`workflow_dispatch`
+  on `.github/workflows/release-cut.yml`), which runs semantic-release: it bumps
+  `pom.xml`, writes `CHANGELOG.md`, commits, tags, and creates the GitHub Release
+- `release/x.y.x` branches are retired for now
+- Tags still trigger the publishing workflows (`release.yml`)
 
 Treat release workflows as critical infrastructure.
 
