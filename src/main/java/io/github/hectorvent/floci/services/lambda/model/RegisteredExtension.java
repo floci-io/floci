@@ -50,6 +50,15 @@ public class RegisteredExtension {
     }
 
     /**
+     * Whether a poll is currently parked, without consuming it — unlike
+     * {@link #takeWaitingContext()}, which clears the context as it hands it over. Called under the
+     * owning server's lock, like the rest of this class.
+     */
+    public boolean hasWaitingContext() {
+        return waitingContext != null;
+    }
+
+    /**
      * Records that this extension has issued its first {@code /extension/event/next}, which is
      * what AWS treats as the extension being init-ready (registering alone only obtains an
      * identifier). Called under the owning server's lock, like the rest of this class.
