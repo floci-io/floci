@@ -57,7 +57,7 @@ cross-resource references.
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
-| Secrets Manager | `Secret` |
+| Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service` |
 | EKS | `Cluster`, `Nodegroup` |
@@ -83,6 +83,25 @@ cross-resource references.
 All other resource types are accepted without error and assigned a synthetic physical ID (with an
 `arn:aws:stub:::<logicalId>` ARN attribute), so templates with unsupported types still reach
 `CREATE_COMPLETE` rather than failing.
+
+## Secrets Manager Target Attachments
+
+`AWS::SecretsManager::SecretTargetAttachment` adds the target's database connection fields to the
+referenced secret while preserving credentials and custom fields. `Ref` and `Fn::GetAtt Id` return
+the complete secret ARN, only one attachment can own a secret, and deleting the attachment removes
+only its managed connection fields.
+
+Supported target types are:
+
+- `AWS::RDS::DBInstance`
+- `AWS::RDS::DBCluster`
+- `AWS::DocDB::DBInstance`
+- `AWS::DocDB::DBCluster`
+
+Redshift clusters, Redshift Serverless namespaces, and DocumentDB Elastic clusters are not supported
+because their backing services are not implemented. A `SecretId` change is applied in place rather
+than reproducing CloudFormation's replacement event sequence; failed changes restore affected secret
+data and attachment ownership.
 
 ## Lambda Stack Updates
 
