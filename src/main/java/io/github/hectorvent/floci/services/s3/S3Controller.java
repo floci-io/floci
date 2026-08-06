@@ -2256,10 +2256,11 @@ public class S3Controller {
         // as a "folder" (an index document lives beneath it) 302-redirects to the slash-terminated form
         // so the page's relative asset URLs resolve against the right base (matching real S3).
         if (!s3Service.objectExists(bucket, prefix) && s3Service.objectExists(bucket, prefix + "/" + index)) {
-            String query = request.query();
-            String location = rawPath + "/" + (query == null ? "" : "?" + query);
+            // The query string is deliberately dropped: real S3 answers
+            // GET /photos?code=abc&state=xyz with a bare "Location: /photos/" (verified against a
+            // live website endpoint in us-east-1, same for HEAD and for nested prefixes).
             return Response.status(Response.Status.FOUND)
-                    .header("Location", location)
+                    .header("Location", rawPath + "/")
                     .build();
         }
         return null;

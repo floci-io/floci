@@ -262,9 +262,15 @@ class S3WebsiteIntegrationTest {
             .header("Location", equalTo("/docs/"));
     }
 
+    /**
+     * Real S3 drops the query string from the folder redirect: a live us-east-1 website endpoint
+     * answers {@code GET /photos?code=abc&state=xyz} with a bare {@code Location: /photos/}.
+     * An SPA relying on the callback parameters surviving the redirect has to handle that on AWS,
+     * so the emulator matches rather than improving on it.
+     */
     @Test
     @Order(17)
-    void directoryRedirectPreservesQueryString() {
+    void directoryRedirectDropsQueryStringLikeRealS3() {
         given()
             .header("Host", websiteHost())
             .redirects().follow(false)
@@ -272,7 +278,7 @@ class S3WebsiteIntegrationTest {
             .get("/docs?code=abc&state=xyz")
         .then()
             .statusCode(302)
-            .header("Location", equalTo("/docs/?code=abc&state=xyz"));
+            .header("Location", equalTo("/docs/"));
     }
 
     @Test
@@ -337,7 +343,7 @@ class S3WebsiteIntegrationTest {
             .head("/docs?code=abc&state=xyz")
         .then()
             .statusCode(302)
-            .header("Location", equalTo("/docs/?code=abc&state=xyz"))
+            .header("Location", equalTo("/docs/"))
             .body(emptyString());
     }
 
