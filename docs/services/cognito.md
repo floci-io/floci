@@ -137,7 +137,9 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
 - Sign-in resolves by the **current** email alias **or** the UUID. `SECRET_HASH` is validated against
   the exact `USERNAME` value sent: `Base64(HMAC-SHA256(USERNAME + clientId, clientSecret))`.
 - In `CUSTOM_AUTH` / SRP flows, `ChallengeParameters.USERNAME` echoes the **UUID** (as real AWS does);
-  the `RespondToAuthChallenge` `SECRET_HASH` is validated against the `USERNAME` sent that round.
+  the `RespondToAuthChallenge` `SECRET_HASH` is validated against the `USERNAME` sent that round. That
+  `USERNAME` must still resolve to the session's user — the UUID or any of its current aliases — and a
+  value naming a different user is rejected with `NotAuthorizedException`.
 - `AdminUpdateUserAttributes` can change the email; afterwards sign-in works with the new email and
   fails with the old one, while `Username`/`sub` stay fixed.
 - Duplicate email/phone on `AdminCreateUser`: `UsernameExistsException` when the incoming alias is

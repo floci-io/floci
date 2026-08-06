@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -304,8 +305,19 @@ final class CognitoAuthFlowHandler {
         } catch (Exception e) {
             throw new AwsException("InternalErrorException", "SECRET_HASH computation failed", 500);
         }
-        if (!expected.equals(provided)) {
+        if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
+                provided.getBytes(StandardCharsets.UTF_8))) {
             throw new AwsException("NotAuthorizedException", "SECRET_HASH does not match", 400);
+        }
+    }
+
+    private String resolveToCanonicalUsername(UserPool pool, String username) {
+        try {
+            return service.adminGetUser(pool.getId(), username).getUsername();
+        } catch (AwsException e) {
+            LOG.debugv("Could not resolve USERNAME {0} in pool {1}: {2}",
+                    username, pool.getId(), e.getMessage());
+            return null;
         }
     }
 
@@ -482,9 +494,13 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("InvalidParameterException", "ANSWER is required", 400);
         }
 
-        validateSecretHash(client, responses, responses.getOrDefault("USERNAME", state.username));
+        String suppliedUsername = responses.getOrDefault("USERNAME", state.username);
+        validateSecretHash(client, responses, suppliedUsername);
 
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
+        if (!user.getUsername().equals(resolveToCanonicalUsername(pool, suppliedUsername))) {
+            throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
+        }
 
         boolean answerCorrect = verifyAuthChallenge(pool, client, user, state, answer);
         if (!state.history.isEmpty()) {

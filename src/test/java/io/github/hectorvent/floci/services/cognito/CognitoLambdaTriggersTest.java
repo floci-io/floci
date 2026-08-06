@@ -827,6 +827,57 @@ class CognitoLambdaTriggersTest {
         assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void customAuthRejectsChallengeResponseUsernameThatIsNotTheSessionUser() {
+        Map<String, Object> req = new HashMap<>();
+        req.put("PoolName", "alias-custom-binding-pool");
+        req.put("UsernameAttributes", List.of("email"));
+        req.put("LambdaConfig", Map.of(
+                "DefineAuthChallenge", "arn:aws:lambda:::define",
+                "CreateAuthChallenge", "arn:aws:lambda:::create",
+                "VerifyAuthChallengeResponse", "arn:aws:lambda:::verify"));
+        UserPool pool = service.createUserPool(req, "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", true, false, List.of(), List.of());
+        String secret = client.getClientSecret();
+        assertNotNull(secret);
+
+        service.adminCreateUser(pool.getId(), "victim@example.com",
+                Map.of("email", "victim@example.com"), null);
+        CognitoUser other = service.adminCreateUser(pool.getId(), "other@example.com",
+                Map.of("email", "other@example.com"), null);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("issueTokens", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("publicChallengeParameters", Map.of("question", "q"),
+                        "privateChallengeParameters", Map.of("answer", "blue"))));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("answerCorrect", true)));
+
+        Map<String, Object> init = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "victim@example.com"));
+        String session = (String) init.get("Session");
+
+        // A SECRET_HASH that is valid for a *different* user must not satisfy the challenge:
+        // the sent USERNAME has to resolve to the session's user, as it does in real Cognito.
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
+                        Map.of("USERNAME", other.getUsername(), "ANSWER", "blue",
+                                "SECRET_HASH", secretHash(secret, other.getUsername(), client.getClientId()))));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+
+        // The session user's own email alias still resolves to the session user, so it is accepted
+        // even though the session was keyed off the canonical UUID.
+        Map<String, Object> tokens = service.respondToAuthChallenge(client.getClientId(),
+                "CUSTOM_CHALLENGE", session,
+                Map.of("USERNAME", "victim@example.com", "ANSWER", "blue",
+                        "SECRET_HASH", secretHash(secret, "victim@example.com", client.getClientId())));
+        assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
+    }
+
     private static String secretHash(String secret, String username, String clientId) {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
