@@ -793,9 +793,7 @@ public class ApiGatewayExecuteController {
                 String bodyStr = bodyNode.asText();
                 boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
                 byte[] bytes = isBase64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
-                String ct = MediaType.APPLICATION_JSON;
-                JsonNode ctNode = node.path("headers").path("Content-Type");
-                if (!ctNode.isMissingNode() && !ctNode.isNull()) ct = ctNode.asText();
+                String ct = findHeaderIgnoreCase(respHeaders, "Content-Type").orElse(MediaType.APPLICATION_JSON);
                 builder.entity(bytes).type(ct);
             }
             return builder.build();
@@ -803,6 +801,22 @@ public class ApiGatewayExecuteController {
             LOG.warnv("Failed to parse Lambda response: {0}", e.getMessage());
             return Response.status(502).entity(result.getPayload()).type(MediaType.APPLICATION_JSON).build();
         }
+    }
+
+    /**
+     * HTTP header names are case-insensitive on the wire (RFC 7230 §3.2), and Lambda proxy
+     * integrations commonly return lowercased names (e.g. the AWS Lambda Web Adapter emits
+     * "content-type", not "Content-Type"). A plain JsonNode#path lookup is exact-case and
+     * silently misses those, so Content-Type detection needs to scan case-insensitively.
+     */
+    private static java.util.Optional<String> findHeaderIgnoreCase(JsonNode headersNode, String name) {
+        if (headersNode == null || !headersNode.isObject()) return java.util.Optional.empty();
+        var it = headersNode.fields();
+        while (it.hasNext()) {
+            var e = it.next();
+            if (e.getKey().equalsIgnoreCase(name)) return java.util.Optional.of(e.getValue().asText());
+        }
+        return java.util.Optional.empty();
     }
 
     // ──────────────────────────── AWS (non-proxy) ────────────────────────────
