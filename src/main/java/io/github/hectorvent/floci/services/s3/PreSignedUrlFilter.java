@@ -157,12 +157,19 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             // Canonical request
             String path = requestContext.getUriInfo().getRequestUri().getRawPath();
             String canonicalQueryString = buildCanonicalQueryString(queryParams);
+            String payloadHash = requestContext.getHeaderString("x-amz-content-sha256");
+            if (payloadHash == null) {
+                payloadHash = queryParams.getFirst("X-Amz-Content-Sha256");
+            }
+            if (payloadHash == null) {
+                payloadHash = "UNSIGNED-PAYLOAD";
+            }
             String canonicalRequest = requestContext.getMethod() + "\n"
                     + path + "\n"
                     + canonicalQueryString + "\n"
                     + canonicalHeaders + "\n"
                     + signedHeaders + "\n"
-                    + "UNSIGNED-PAYLOAD";
+                    + payloadHash;
 
             // String to sign
             String stringToSign = "AWS4-HMAC-SHA256\n"

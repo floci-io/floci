@@ -539,6 +539,49 @@ class S3AuthEnforcementIntegrationTest {
 
     @Test
     @Order(22)
+    void presignedRequestWithExplicitContentSha256IsAccepted() throws Exception {
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+        String contentHash = sha256Hex("private body");
+        String sig = presignedSignature("GET", path, "test", "test", "3600", contentHash);
+        given()
+            .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "3600")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Content-Sha256", contentHash)
+            .queryParam("X-Amz-Signature", sig)
+        .when()
+            .get(path)
+        .then()
+            .statusCode(200)
+            .body(equalTo("private body"));
+    }
+
+    @Test
+    @Order(23)
+    void presignedRequestWithMismatchedContentSha256IsRejected() throws Exception {
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+        String contentHash = sha256Hex("private body");
+        String wrongHash = sha256Hex("wrong body");
+        String sig = presignedSignature("GET", path, "test", "test", "3600", contentHash);
+        given()
+            .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "3600")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Content-Sha256", wrongHash)
+            .queryParam("X-Amz-Signature", sig)
+        .when()
+            .get(path)
+        .then()
+            .statusCode(403)
+            .body(containsString("SignatureDoesNotMatch"));
+    }
+
+    @Test
+    @Order(24)
     void presignedRequestWithTamperedSignatureIsRejected() {
         String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
         String signature = presignedSignature("GET", path, "test", "test", "3600");
@@ -591,13 +634,22 @@ class S3AuthEnforcementIntegrationTest {
 
     private static String presignedSignature(String method, String path,
                                               String accessKeyId, String secretKey, String expires) {
+        return presignedSignature(method, path, accessKeyId, secretKey, expires, "UNSIGNED-PAYLOAD");
+    }
+
+    private static String presignedSignature(String method, String path,
+                                              String accessKeyId, String secretKey,
+                                              String expires, String payloadHash) {
         try {
             String credentialScope = SIGNING_DATE + "/us-east-1/s3/aws4_request";
             String encodedCredential = URLEncoder.encode(
                     accessKeyId + "/" + credentialScope, StandardCharsets.UTF_8);
 
             // Build query string in sorted order (excluding Signature)
+            String contentSha256Param = "UNSIGNED-PAYLOAD".equals(payloadHash)
+                    ? "" : "&X-Amz-Content-Sha256=" + payloadHash;
             String canonicalQueryString = "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+                    + contentSha256Param
                     + "&X-Amz-Credential=" + encodedCredential
                     + "&X-Amz-Date=" + SIGNING_TIMESTAMP
                     + "&X-Amz-Expires=" + expires
@@ -608,7 +660,7 @@ class S3AuthEnforcementIntegrationTest {
                     + canonicalQueryString + "\n"
                     + "host:localhost:" + io.restassured.RestAssured.port + "\n\n"
                     + "host\n"
-                    + "UNSIGNED-PAYLOAD";
+                    + payloadHash;
 
             String stringToSign = "AWS4-HMAC-SHA256\n"
                     + SIGNING_TIMESTAMP + "\n"
