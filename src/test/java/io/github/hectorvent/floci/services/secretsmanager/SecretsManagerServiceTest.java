@@ -162,6 +162,34 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void targetAttachmentClaimIsExclusiveAndIdempotentForItsOwner() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+
+        assertTrue(service.claimTargetAttachment("my-secret", "stack/First", REGION));
+        assertFalse(service.claimTargetAttachment("my-secret", "stack/First", REGION));
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.claimTargetAttachment("my-secret", "stack/Second", REGION));
+
+        assertEquals("ResourceExistsException", duplicate.getErrorCode());
+        assertTrue(duplicate.getMessage().contains("already attached"));
+        assertTrue(service.canManageTargetAttachment("my-secret", "stack/First", REGION));
+        assertFalse(service.canManageTargetAttachment("my-secret", "stack/Second", REGION));
+    }
+
+    @Test
+    void targetAttachmentClaimCanOnlyBeReleasedByItsOwner() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+        service.claimTargetAttachment("my-secret", "stack/First", REGION);
+
+        service.releaseTargetAttachment("my-secret", "stack/Second", REGION);
+        assertThrows(AwsException.class,
+                () -> service.claimTargetAttachment("my-secret", "stack/Second", REGION));
+
+        service.releaseTargetAttachment("my-secret", "stack/First", REGION);
+        assertTrue(service.claimTargetAttachment("my-secret", "stack/Second", REGION));
+    }
+
+    @Test
     void updateSecret() {
         service.createSecret("my-secret", "value", null, "old desc", null, null, REGION);
         service.updateSecret("my-secret", "new desc", null, REGION);
