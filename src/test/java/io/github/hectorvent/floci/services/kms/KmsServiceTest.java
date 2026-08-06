@@ -1054,6 +1054,40 @@ class KmsServiceTest {
                 kmsService.putKeyPolicy("non-existent", "{}", REGION));
     }
 
+    // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicy() {
+        KmsKey key = kmsService.createKey("list-policy-key", REGION);
+
+        Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), REGION);
+
+        @SuppressWarnings("unchecked")
+        List<String> policyNames = (List<String>) result.get("PolicyNames");
+        assertEquals(1, policyNames.size());
+        assertEquals("default", policyNames.getFirst());
+        assertFalse((Boolean) result.get("Truncated"));
+        // Truncated is always false, so NextMarker must not be emitted at all.
+        assertFalse(result.containsKey("NextMarker"));
+    }
+
+    @Test
+    void listKeyPoliciesResolvesByArn() {
+        // The model documents KeyId for this operation as key ID or key ARN only; alias
+        // acceptance is a Floci-wide resolveKey superset, not this operation's AWS contract.
+        KmsKey key = kmsService.createKey("list-policy-arn", REGION);
+
+        assertEquals(List.of("default"),
+                kmsService.listKeyPolicies(key.getArn(), REGION).get("PolicyNames"));
+    }
+
+    @Test
+    void listKeyPoliciesOnNonExistentKeyThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies("non-existent", REGION));
+        assertEquals("NotFoundException", ex.getErrorCode());
+    }
+
     // ── Issue #290 — Key Rotation ───────────────────────────────────────────
 
     @Test
