@@ -192,6 +192,33 @@ class SesListManagementOptionsV2IntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void send_unsafeHeader_isDroppedFromStoredMessage() {
+        String recipient = "lmo-unsafe-hdr@floci.test";
+        // A user-supplied header whose value carries CR/LF must not survive on any surface: the SMTP
+        // relay already drops it, and the stored SentEmail (GET /_aws/ses) must not retain it either.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("""
+                    {
+                      "FromEmailAddress": "%s",
+                      "Destination": {"ToAddresses": ["%s"]},
+                      "Content": {"Simple": {"Subject": {"Data": "hi"}, "Body": {"Text": {"Data": "hi"}},
+                        "Headers": [
+                          {"Name": "X-Safe", "Value": "ok"},
+                          {"Name": "X-Evil", "Value": "bad\\r\\nBcc: attacker@evil.com"}
+                        ]}}
+                    }
+                    """.formatted(FROM, recipient))
+        .when().post("/v2/email/outbound-emails").then().statusCode(200);
+
+        given().header("Authorization", AUTH).queryParam("email", recipient)
+        .when().get("/_aws/ses").then().statusCode(200)
+                .body(org.hamcrest.Matchers.containsString("X-Safe"))
+                .body(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("X-Evil")))
+                .body(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("attacker@evil.com")));
+    }
+
+    @Test
     @Order(99)
     void cleanup_deleteContactList() {
         given().header("Authorization", AUTH)

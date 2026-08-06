@@ -333,6 +333,13 @@ public class SesService {
             additionalHeaders = withUnsubscribeHeaders(additionalHeaders, url);
         }
 
+        // Drop unsafe user-supplied headers (blank name or CR/LF in name/value) once here, so the
+        // stored SentEmail, the SMTP relay, and the published events all reflect the same sanitized
+        // set and no injection payload is retained on any surface.
+        if (additionalHeaders != null) {
+            additionalHeaders = additionalHeaders.stream().filter(MessageHeader::isSafe).toList();
+        }
+
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
