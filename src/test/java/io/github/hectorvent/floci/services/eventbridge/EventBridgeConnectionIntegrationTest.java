@@ -226,4 +226,45 @@ class EventBridgeConnectionIntegrationTest {
                 .then().statusCode(404)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
+
+    @Test
+    @Order(11)
+    void describeConnectionTreatsOmittedIsValueSecretAsSecret() {
+        // IsValueSecret is optional; AWS treats an omitted flag as secret. A header
+        // parameter that doesn't set it must still come back masked, not in cleartext.
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.CreateConnection")
+                .body("""
+                        {
+                          "Name": "test-omitted-secret-flag-connection",
+                          "AuthorizationType": "API_KEY",
+                          "AuthParameters": {
+                            "ApiKeyAuthParameters": {"ApiKeyName": "k", "ApiKeyValue": "v"},
+                            "InvocationHttpParameters": {
+                              "HeaderParameters": [
+                                {"Key": "X-Internal-Token", "Value": "hunter2"}
+                              ]
+                            }
+                          }
+                        }
+                        """)
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DescribeConnection")
+                .body("{\"Name\":\"test-omitted-secret-flag-connection\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("AuthParameters.InvocationHttpParameters.HeaderParameters[0].Value", equalTo("*"));
+
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DeleteConnection")
+                .body("{\"Name\":\"test-omitted-secret-flag-connection\"}")
+                .when().post("/")
+                .then().statusCode(200);
+    }
 }
