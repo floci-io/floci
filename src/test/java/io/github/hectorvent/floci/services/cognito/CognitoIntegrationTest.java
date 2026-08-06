@@ -892,6 +892,27 @@ class CognitoIntegrationTest {
                 .body("message", org.hamcrest.Matchers.equalTo("Refresh Token has expired"));
     }
 
+    @Test
+    @Order(102)
+    void refreshWithNonNumericIssuedAtIsRejected() {
+        String raw = "some-pool|someone@example.com|" + clientId + "|not-a-timestamp|"
+                + java.util.UUID.randomUUID();
+        String malformedToken = java.util.Base64.getEncoder().withoutPadding()
+                .encodeToString(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s" }
+                }
+                """.formatted(clientId, malformedToken))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"))
+                .body("message", org.hamcrest.Matchers.equalTo("Invalid Refresh Token"));
+    }
+
     // ── Issue #416: ListUserPoolClients response matches spec ──────────
 
     @Test

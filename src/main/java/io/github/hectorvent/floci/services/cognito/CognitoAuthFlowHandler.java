@@ -235,7 +235,12 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
         String username = parts[1];
-        long iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
+        long iat;
+        try {
+            iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
+        } catch (NumberFormatException e) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+        }
         String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
 
         if (service.isRefreshTokenExpired(client, parts)) {
