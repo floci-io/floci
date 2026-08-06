@@ -1573,6 +1573,19 @@ class S3IntegrationTest {
             .statusCode(200)
             .header("ETag", notNullValue())
             .header("x-amz-server-side-encryption", equalTo("AES256"));
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+            .contentType("text/plain")
+            .header("x-amz-server-side-encryption", "aws:kms")
+            .header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId)
+            .body("kms-encrypted-content")
+        .when()
+            .put("/sse-bucket/kms-encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
     }
 
     @Test
@@ -1584,6 +1597,15 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("AES256"));
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+        .when()
+            .get("/sse-bucket/kms-encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
     }
 
     @Test
@@ -1595,6 +1617,15 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("AES256"));
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+        .when()
+            .head("/sse-bucket/kms-encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
     }
 
     @Test
@@ -1847,6 +1878,7 @@ class S3IntegrationTest {
     void cleanupSseBucket() {
         given().delete("/sse-bucket/encrypted.txt");
         given().delete("/sse-bucket/encrypted-copy.txt");
+        given().delete("/sse-bucket/kms-encrypted.txt");
         given().delete("/sse-bucket/sse-c.txt");
         given().delete("/sse-bucket/sse-c-copy.txt");
         given().delete("/sse-bucket");

@@ -674,6 +674,7 @@ public class S3Controller {
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
             String cacheControl = httpHeaders.getHeaderString("Cache-Control");
             String serverSideEncryption = httpHeaders.getHeaderString("x-amz-server-side-encryption");
+            String sseKmsKeyId = httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id");
             String sseCustomerAlgorithm = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm");
             String sseCustomerKey = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key");
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
@@ -688,6 +689,7 @@ public class S3Controller {
                             .withContentDisposition(contentDisposition)
                             .withCacheControl(cacheControl)
                             .withServerSideEncryption(serverSideEncryption)
+                            .withSseKmsKeyId(sseKmsKeyId)
                             .withSseCustomerAlgorithm(sseCustomerAlgorithm)
                             .withSseCustomerKey(sseCustomerKey)
                             .withSseCustomerKeyMd5(sseCustomerKeyMd5)
@@ -1853,6 +1855,9 @@ public class S3Controller {
         if (obj.getServerSideEncryption() != null) {
             resp.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
         }
+        if (obj.getSseKmsKeyId() != null) {
+            resp.header("x-amz-server-side-encryption-aws-kms-key-id", obj.getSseKmsKeyId());
+        }
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
@@ -1880,6 +1885,9 @@ public class S3Controller {
         }
         if (obj.getServerSideEncryption() != null) {
             resp.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
+        }
+        if (obj.getSseKmsKeyId() != null) {
+            resp.header("x-amz-server-side-encryption-aws-kms-key-id", obj.getSseKmsKeyId());
         }
         appendSseCustomerHeaders(resp, obj);
         if (overrides.contentLanguage() != null) {
