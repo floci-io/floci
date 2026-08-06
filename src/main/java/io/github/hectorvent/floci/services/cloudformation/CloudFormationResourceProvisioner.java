@@ -2877,19 +2877,34 @@ public class CloudFormationResourceProvisioner {
         EventBus bus;
         try {
             bus = eventBridgeService.createEventBus(busName, description, tags, region);
+            r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
             boolean stackAlreadyOwnsBus = existingBusName != null && existingBusName.equals(busName);
             if (!stackAlreadyOwnsBus || !"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
                 throw e;
             }
             bus = eventBridgeService.describeEventBus(busName, region);
+            // A missing created-time means ownership was never tracked, not that it changed: stacks
+            // provisioned before this attribute existed are restored without it. Refusing there would
+            // wedge every later UpdateStack, including no-op ones. Only a recorded time that actually
+            // disagrees means the bus was recreated out of band and belongs to its new owner.
             String existingCreatedTime = r.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
             String actualCreatedTime = eventBusCreatedTime(bus);
-            if (existingCreatedTime == null || !existingCreatedTime.equals(actualCreatedTime)) {
+            if (existingCreatedTime != null && !existingCreatedTime.equals(actualCreatedTime)) {
+                r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
                 throw e;
             }
             validateEventBusMutablePropertiesUnchanged(r, bus, description, tags);
         }
+
+        // Record identity before applying the policy: rollbackCreatedResources skips any resource
+        // whose physicalId is still null, so a putPermission failure after the bus exists would
+        // otherwise orphan it with no way for rollback to find it.
+        r.setPhysicalId(busName);              // Ref → EventBus name (AWS-faithful)
+        r.getAttributes().put("Arn", bus.getArn());
+        r.getAttributes().put("Name", busName);
+        r.getAttributes().put(EVENT_BUS_CREATED_TIME_ATTR, eventBusCreatedTime(bus));
+        recordEventBusManagedTagKeys(r, tags.keySet());
 
         // Optional inline resource policy (rare for CDK EventBus constructs). Applied after the bus
         // exists so an adopted bus picks up a policy change on update too.
@@ -2897,12 +2912,6 @@ public class CloudFormationResourceProvisioner {
             String policyJson = engine.resolveNode(props.get("Policy")).toString();
             eventBridgeService.putPermission(busName, null, null, null, null, policyJson, region);
         }
-
-        r.setPhysicalId(busName);              // Ref → EventBus name (AWS-faithful)
-        r.getAttributes().put("Arn", bus.getArn());
-        r.getAttributes().put("Name", busName);
-        r.getAttributes().put(EVENT_BUS_CREATED_TIME_ATTR, eventBusCreatedTime(bus));
-        recordEventBusManagedTagKeys(r, tags.keySet());
     }
 
     private void validateEventBusProperties(JsonNode props) {
