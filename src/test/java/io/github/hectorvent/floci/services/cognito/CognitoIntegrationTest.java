@@ -874,7 +874,7 @@ class CognitoIntegrationTest {
     @Test
     @Order(101)
     void refreshWithExpiredTokenIsRejected() {
-        String raw = "some-pool|someone@example.com|" + clientId + "|1000000000000|"
+        String raw = poolId + "|someone@example.com|" + clientId + "|1000000000000|"
                 + java.util.UUID.randomUUID();
         String expiredToken = java.util.Base64.getEncoder().withoutPadding()
                 .encodeToString(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -895,7 +895,7 @@ class CognitoIntegrationTest {
     @Test
     @Order(102)
     void refreshWithNonNumericIssuedAtIsRejected() {
-        String raw = "some-pool|someone@example.com|" + clientId + "|not-a-timestamp|"
+        String raw = poolId + "|someone@example.com|" + clientId + "|not-a-timestamp|"
                 + java.util.UUID.randomUUID();
         String malformedToken = java.util.Base64.getEncoder().withoutPadding()
                 .encodeToString(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -907,6 +907,29 @@ class CognitoIntegrationTest {
                   "AuthParameters": { "REFRESH_TOKEN": "%s" }
                 }
                 """.formatted(clientId, malformedToken))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"))
+                .body("message", org.hamcrest.Matchers.equalTo("Invalid Refresh Token"));
+    }
+
+    @Test
+    @Order(103)
+    void refreshWithTokenFromAnotherPoolIsRejected() {
+        // Username exists in the requesting pool and the token is otherwise well-formed and
+        // unexpired, so only the embedded pool id can reject it.
+        String raw = "us-east-1_someOtherPool|" + USERNAME + "|" + clientId + "|"
+                + System.currentTimeMillis() + "|" + java.util.UUID.randomUUID();
+        String foreignToken = java.util.Base64.getEncoder().withoutPadding()
+                .encodeToString(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s" }
+                }
+                """.formatted(clientId, foreignToken))
                 .then()
                 .statusCode(400)
                 .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"))

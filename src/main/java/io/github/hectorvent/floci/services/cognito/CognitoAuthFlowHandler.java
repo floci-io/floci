@@ -234,6 +234,9 @@ final class CognitoAuthFlowHandler {
         if (parts == null) {
             throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
+        if (!pool.getId().equals(parts[0])) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+        }
         String username = parts[1];
         long iat;
         try {
