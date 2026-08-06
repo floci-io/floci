@@ -368,7 +368,9 @@ public class S3Service implements Resettable {
         object.setContentDisposition(effectiveOptions.getContentDisposition());
         object.setCacheControl(effectiveOptions.getCacheControl());
         object.setServerSideEncryption(normalizedServerSideEncryption);
-        object.setSseKmsKeyId(effectiveOptions.getSseKmsKeyId());
+        object.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption)
+                ? effectiveOptions.getSseKmsKeyId()
+                : null);
         if (sseCustomerKey != null) {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
@@ -2661,6 +2663,11 @@ public class S3Service implements Resettable {
         String effectiveServerSideEncryption = destinationCustomerKey != null
                 ? null
                 : (normalizedServerSideEncryption != null ? normalizedServerSideEncryption : source.getServerSideEncryption());
+        String effectiveSseKmsKeyId = "aws:kms".equals(effectiveServerSideEncryption)
+                ? (normalizedServerSideEncryption != null
+                    ? effectiveOptions.getSseKmsKeyId()
+                    : source.getSseKmsKeyId())
+                : null;
         boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
         Map<String, String> effectiveTags = replaceTags
                 ? effectiveOptions.getReplacementTagging()
@@ -2680,6 +2687,7 @@ public class S3Service implements Resettable {
                         .withContentDisposition(effectiveContentDisposition)
                         .withCacheControl(effectiveCacheControl)
                         .withServerSideEncryption(effectiveServerSideEncryption)
+                        .withSseKmsKeyId(effectiveSseKmsKeyId)
                         .withSseCustomerAlgorithm(effectiveOptions.getSseCustomerAlgorithm())
                         .withSseCustomerKey(effectiveOptions.getSseCustomerKey())
                         .withSseCustomerKeyMd5(effectiveOptions.getSseCustomerKeyMd5())

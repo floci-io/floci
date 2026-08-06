@@ -13,6 +13,7 @@ public class CopyObjectOptions {
     private String contentDisposition;
     private String cacheControl;
     private String serverSideEncryption;
+    private String sseKmsKeyId;
     private String sseCustomerAlgorithm;
     private String sseCustomerKey;
     private String sseCustomerKeyMd5;
@@ -56,6 +57,9 @@ public class CopyObjectOptions {
 
     public String getServerSideEncryption() { return serverSideEncryption; }
     public CopyObjectOptions withServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; return this; }
+
+    public String getSseKmsKeyId() { return sseKmsKeyId; }
+    public CopyObjectOptions withSseKmsKeyId(String sseKmsKeyId) { this.sseKmsKeyId = sseKmsKeyId; return this; }
 
     public String getSseCustomerAlgorithm() { return sseCustomerAlgorithm; }
     public CopyObjectOptions withSseCustomerAlgorithm(String sseCustomerAlgorithm) { this.sseCustomerAlgorithm = sseCustomerAlgorithm; return this; }
