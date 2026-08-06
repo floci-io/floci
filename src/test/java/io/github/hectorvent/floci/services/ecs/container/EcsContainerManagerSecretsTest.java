@@ -166,6 +166,104 @@ class EcsContainerManagerSecretsTest {
         verify(lifecycleManager, never()).createAndStart(any());
     }
 
+    @Test
+    void jsonKeySelectorExtractsFieldFromSecretString() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        when(secretsManagerService.getSecretValue(secretArn, null, null, "us-east-1"))
+                .thenReturn(secretVersion("{\"token\":\"expected-value\",\"other\":\"x\"}"));
+
+        manager.startTask(task(),
+                taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token::")))),
+                List.of(), "us-east-1");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(envCaptor.capture());
+        assertTrue(envCaptor.getValue().contains("PROBE=expected-value"));
+        // The service must see the base ARN, never the selector suffix.
+        verify(secretsManagerService).getSecretValue(secretArn, null, null, "us-east-1");
+    }
+
+    @Test
+    void emptyJsonKeySelectorInjectsWholeSecretAndPassesVersionArgs() {
+        // CDK's fromSecretsManagerVersion without a field emits ":::version-id".
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        when(secretsManagerService.getSecretValue(secretArn, "v123", null, "us-east-1"))
+                .thenReturn(secretVersion("whole-secret"));
+
+        manager.startTask(task(),
+                taskDef(containerDef("app", List.of(new Secret("WHOLE", secretArn + ":::v123")))),
+                List.of(), "us-east-1");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(envCaptor.capture());
+        assertTrue(envCaptor.getValue().contains("WHOLE=whole-secret"));
+        verify(secretsManagerService).getSecretValue(secretArn, "v123", null, "us-east-1");
+    }
+
+    @Test
+    void fullSelectorPassesStageAndIdThrough() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        when(secretsManagerService.getSecretValue(secretArn, "v123", "AWSPREVIOUS", "us-east-1"))
+                .thenReturn(secretVersion("{\"token\":\"old-value\"}"));
+
+        manager.startTask(task(),
+                taskDef(containerDef("app",
+                        List.of(new Secret("PROBE", secretArn + ":token:AWSPREVIOUS:v123")))),
+                List.of(), "us-east-1");
+
+        verify(secretsManagerService).getSecretValue(secretArn, "v123", "AWSPREVIOUS", "us-east-1");
+    }
+
+    @Test
+    void missingJsonKeyFailsLaunchWithAgentMessage() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        when(secretsManagerService.getSecretValue(secretArn, null, null, "us-east-1"))
+                .thenReturn(secretVersion("{\"other\":\"x\"}"));
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> manager.startTask(task(),
+                        taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token::")))),
+                        List.of(), "us-east-1"));
+
+        assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
+        assertTrue(thrown.getMessage().contains("did not contain json key token"));
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void nonJsonSecretWithJsonKeyFailsLaunch() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        when(secretsManagerService.getSecretValue(secretArn, null, null, "us-east-1"))
+                .thenReturn(secretVersion("plain-text"));
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> manager.startTask(task(),
+                        taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token::")))),
+                        List.of(), "us-east-1"));
+
+        assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
+        assertTrue(thrown.getMessage().contains("not valid JSON"));
+    }
+
+    @Test
+    void invalidSelectorFormFailsLaunchWithAgentSentence() {
+        // Three-segment form (":token" with no trailing "::") is not a valid selector; the
+        // real agent rejects it rather than guessing.
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> manager.startTask(task(),
+                        taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token")))),
+                        List.of(), "us-east-1"));
+
+        assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
+        assertTrue(thrown.getMessage().contains(
+                "an invalid ARN format for the AWS Secrets Manager secret was specified"));
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
     private static ContainerDefinition containerDef(String name, List<Secret> secrets) {
         ContainerDefinition def = new ContainerDefinition();
         def.setName(name);
