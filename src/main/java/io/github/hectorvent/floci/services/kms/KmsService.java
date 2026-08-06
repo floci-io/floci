@@ -489,6 +489,27 @@ public class KmsService {
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    /**
+     * Lists the policy names attached to a key. KMS supports exactly one key policy, named
+     * {@code default}, so the result can never be truncated: {@code Truncated} is always false and
+     * {@code NextMarker} is omitted.
+     *
+     * <p>{@code Limit} and {@code Marker} are accepted at the wire and ignored: the handler simply
+     * never reads them, which is exactly what moto's KMS does for this operation. A single policy
+     * name fits inside any limit, so the values cannot change the response. Real AWS rejects an
+     * out-of-range {@code Limit} server-side (the model bounds LimitType to [1..1000], but SDKs do
+     * not fully enforce that client-side — botocore checks only the minimum); not re-validating it
+     * here is deliberate leniency, consistent with the emulator's general posture.
+     */
+    public Map<String, Object> listKeyPolicies(String keyId, String region) {
+        String policyName = (String) getKeyPolicy(keyId, region).get("PolicyName");
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("PolicyNames", List.of(policyName));
+        result.put("Truncated", false);
+        return result;
+    }
+
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
         key.setDescription(description);

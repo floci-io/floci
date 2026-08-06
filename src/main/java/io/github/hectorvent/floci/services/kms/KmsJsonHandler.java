@@ -67,6 +67,7 @@ public class KmsJsonHandler {
             case "ListResourceTags" -> handleListResourceTags(request, region);
             case "GetKeyPolicy" -> handleGetKeyPolicy(request, region);
             case "PutKeyPolicy" -> handlePutKeyPolicy(request, region);
+            case "ListKeyPolicies" -> handleListKeyPolicies(request, region);
             case "UpdateKeyDescription" -> handleUpdateKeyDescription(request, region);
             case "GetKeyRotationStatus" -> handleGetKeyRotationStatus(request, region);
             case "EnableKeyRotation" -> handleEnableKeyRotation(request, region);
@@ -472,6 +473,14 @@ public class KmsJsonHandler {
                 request.path("Policy").asText(),
                 region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListKeyPolicies(JsonNode request, String region) {
+        // Limit and Marker are accepted by simply not being read; see the service javadoc.
+        Map<String, Object> result = service.listKeyPolicies(
+                requiredText(request, "KeyId"),
+                region);
+        return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
     private Response handleUpdateKeyDescription(JsonNode request, String region) {
