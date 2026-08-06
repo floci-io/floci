@@ -7010,6 +7010,83 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_samHttpApiAuthorizerHonorsCustomIdentitySource() {
+        // SAM's Authorizers.<Name>.IdentitySource lets a JWT authorizer read the token from
+        // somewhere other than the default Authorization header — e.g. a query-string token,
+        // the same case CloudFormationResourceProvisioner/ApiGatewayExecuteController already
+        // support end-to-end for raw (non-SAM) templates. The SAM transform must forward it
+        // rather than always emitting the header default.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.querystring.token",
+                          "JwtConfiguration": {
+                            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "audience": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-identitysource-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+
+        // The scalar IdentitySource from the SAM template is forwarded, not overridden with the
+        // $request.header.Authorization default.
+        getAuthorizers(apiId)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].IdentitySource", hasItems("$request.querystring.token"));
+    }
+
+    @Test
     void createStack_samHttpApiPerEventAuthNoneOverridesDefaultAuthorizer() {
         // Mirrors a function with two HttpApi events on the same explicit HttpApi: one route picks
         // up Auth.DefaultAuthorizer, the other opts out via Auth: {Authorizer: NONE} (SAM's documented

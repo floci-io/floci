@@ -258,10 +258,9 @@ class SamTransformProcessor {
         authProps.put("Name", authorizerName);
         authProps.put("AuthorizerType", "JWT");
 
+        authProps.set("IdentitySource", resolveIdentitySource(samAuthorizer));
+
         JsonNode jwtConfig = samAuthorizer.path("JwtConfiguration");
-        ArrayNode identitySource = objectMapper.createArrayNode();
-        identitySource.add("$request.header.Authorization");
-        authProps.set("IdentitySource", identitySource);
 
         if (jwtConfig.isObject()) {
             ObjectNode jwtProps = objectMapper.createObjectNode();
@@ -278,6 +277,27 @@ class SamTransformProcessor {
 
         authDef.set("Properties", authProps);
         return authDef;
+    }
+
+    /**
+     * Resolves the SAM authorizer's {@code IdentitySource}, accepting either the documented array
+     * form or a single scalar string — mirroring
+     * {@code CloudFormationResourceProvisioner.resolveIdentitySource}, since the raw
+     * {@code AWS::ApiGatewayV2::Authorizer} resource this expands to accepts both. Defaults to
+     * {@code $request.header.Authorization} when the SAM template doesn't specify one, matching
+     * SAM's own default for JWT authorizers.
+     */
+    private ArrayNode resolveIdentitySource(JsonNode samAuthorizer) {
+        ArrayNode identitySource = objectMapper.createArrayNode();
+        JsonNode raw = samAuthorizer.path("IdentitySource");
+        if (raw.isTextual()) {
+            identitySource.add(raw.asText());
+        } else if (raw.isArray()) {
+            raw.forEach(v -> identitySource.add(v.asText()));
+        } else {
+            identitySource.add("$request.header.Authorization");
+        }
+        return identitySource;
     }
 
     private void expandHttpApiRoute(String apiLogicalId, HttpApiRoute route,
