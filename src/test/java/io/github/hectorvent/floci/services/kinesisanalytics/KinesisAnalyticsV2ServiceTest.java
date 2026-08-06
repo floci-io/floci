@@ -220,6 +220,19 @@ class KinesisAnalyticsV2ServiceTest {
     }
 
     @Test
+    void createApplicationDefaultsSnapshotsEnabledToTrue() {
+        FlinkApplication app = create("demo");
+        assertTrue(app.isSnapshotsEnabled());
+    }
+
+    @Test
+    void createApplicationWithSnapshotsDisabled() {
+        FlinkApplication app = service.createApplication("demo", "FLINK-1_18", ROLE, null, null,
+                null, null, null, 1, null, null, false);
+        assertFalse(app.isSnapshotsEnabled());
+    }
+
+    @Test
     void createApplicationRejectsTooManyTags() {
         Map<String, String> tooMany = new HashMap<>();
         for (int i = 0; i < 51; i++) {
@@ -275,6 +288,29 @@ class KinesisAnalyticsV2ServiceTest {
     @Test
     void createApplicationSnapshotRequiresRunningApplication() {
         create("demo"); // READY, never started
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApplicationSnapshot("demo", "snap1"));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApplicationSnapshotRejectsWhenSnapshotsDisabled() {
+        service.createApplication("demo", "FLINK-1_18", ROLE, null, null,
+                "bucket", "app.jar", null, 1, null, null, false);
+        service.startApplication("demo"); // mock mode: RUNNING immediately
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApplicationSnapshot("demo", "snap1"));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateApplicationTogglesSnapshotsEnabled() {
+        FlinkApplication app = createRunningWithCode("demo");
+        assertTrue(app.isSnapshotsEnabled());
+
+        service.updateApplication("demo", 1L, null, null, null, null, null, false);
+
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createApplicationSnapshot("demo", "snap1"));
         assertEquals("InvalidRequestException", ex.getErrorCode());
@@ -452,6 +488,61 @@ class KinesisAnalyticsV2ServiceTest {
         assertEquals("v2.jar", updated.getCodeS3Key());
         // Mock mode has no container to redeploy against, so the application simply stays RUNNING.
         assertEquals(ApplicationStatus.RUNNING, updated.getApplicationStatus());
+    }
+
+    @Test
+    void createApplicationPresignedUrlReturnsRestEndpointWhenRunning() {
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+        app.setRestEndpoint("http://localhost:41000");
+
+        String url = realMode.createApplicationPresignedUrl("demo", "FLINK_DASHBOARD_URL", 1800L);
+        assertEquals("http://localhost:41000", url);
+    }
+
+    @Test
+    void createApplicationPresignedUrlRejectsWhenNotRunning() {
+        create("demo"); // READY, never started
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApplicationPresignedUrl("demo", "FLINK_DASHBOARD_URL", null));
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApplicationPresignedUrlRejectsUnsupportedUrlType() {
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+        app.setRestEndpoint("http://localhost:41000");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> realMode.createApplicationPresignedUrl("demo", "ZEPPELIN_UI_URL", null));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApplicationPresignedUrlRejectsOutOfRangeExpiration() {
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+        app.setRestEndpoint("http://localhost:41000");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> realMode.createApplicationPresignedUrl("demo", "FLINK_DASHBOARD_URL", 100L));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApplicationPresignedUrlRejectsUnknownApplication() {
+        assertThrows(AwsException.class,
+                () -> service.createApplicationPresignedUrl("nope", "FLINK_DASHBOARD_URL", null));
     }
 
     private KinesisAnalyticsV2Service mockModeService() {

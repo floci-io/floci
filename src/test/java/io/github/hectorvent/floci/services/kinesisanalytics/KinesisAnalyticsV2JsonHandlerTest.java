@@ -189,6 +189,71 @@ class KinesisAnalyticsV2JsonHandlerTest {
     }
 
     @Test
+    void createApplicationDefaultsSnapshotsEnabledToTrueOnDescribe() {
+        createApplication("demo");
+
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("ApplicationName", "demo");
+        ObjectNode detail = (ObjectNode) entity(handler.handle("DescribeApplication", describe, REGION))
+                .get("ApplicationDetail");
+        // No code configured, so ApplicationConfigurationDescription isn't built at all — matches how
+        // EnvironmentPropertyDescriptions is also only ever echoed when the app has code.
+        assertThat(detail.has("ApplicationConfigurationDescription"), is(false));
+    }
+
+    @Test
+    void createApplicationWithSnapshotsDisabledEchoesItOnDescribe() {
+        ObjectNode s3 = MAPPER.createObjectNode();
+        s3.put("BucketARN", "arn:aws:s3:::flink-code");
+        s3.put("FileKey", "app.jar");
+        ObjectNode codeCfg = MAPPER.createObjectNode();
+        codeCfg.set("CodeContent", MAPPER.createObjectNode().set("S3ContentLocation", s3));
+        ObjectNode appCfg = MAPPER.createObjectNode();
+        appCfg.set("ApplicationCodeConfiguration", codeCfg);
+        appCfg.set("ApplicationSnapshotConfiguration",
+                MAPPER.createObjectNode().put("SnapshotsEnabled", false));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("ApplicationName", "nosnaps");
+        req.put("RuntimeEnvironment", "FLINK-1_18");
+        req.put("ServiceExecutionRole", ROLE);
+        req.set("ApplicationConfiguration", appCfg);
+        assertThat(handler.handle("CreateApplication", req, REGION).getStatus(), is(200));
+
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("ApplicationName", "nosnaps");
+        ObjectNode detail = (ObjectNode) entity(handler.handle("DescribeApplication", describe, REGION))
+                .get("ApplicationDetail");
+        assertThat(detail.get("ApplicationConfigurationDescription")
+                .get("ApplicationSnapshotConfigurationDescription").get("SnapshotsEnabled").asBoolean(), is(false));
+
+        ObjectNode createSnap = MAPPER.createObjectNode();
+        createSnap.put("ApplicationName", "nosnaps");
+        createSnap.put("SnapshotName", "attempt");
+        assertThrows(AwsException.class, () -> handler.handle("CreateApplicationSnapshot", createSnap, REGION));
+    }
+
+    @Test
+    void createApplicationPresignedUrlRejectsUnsupportedUrlType() {
+        createApplication("demo");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("ApplicationName", "demo");
+        req.put("UrlType", "ZEPPELIN_UI_URL");
+        assertThrows(AwsException.class, () -> handler.handle("CreateApplicationPresignedUrl", req, REGION));
+    }
+
+    @Test
+    void createApplicationPresignedUrlRejectsWhenNotRunning() {
+        createApplication("demo"); // READY, never started
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("ApplicationName", "demo");
+        req.put("UrlType", "FLINK_DASHBOARD_URL");
+        assertThrows(AwsException.class, () -> handler.handle("CreateApplicationPresignedUrl", req, REGION));
+    }
+
+    @Test
     void updateApplicationWithNewCodeLocationEchoesItOnDescribe() {
         createRunningCodedApplication("redeploy-target");
 

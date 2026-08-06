@@ -14,6 +14,7 @@ state backed by a live Flink job on Floci's Docker network.
 | Action | Description |
 | --- | --- |
 | `CreateApplication` | Creates a Flink application in the READY state |
+| `CreateApplicationPresignedUrl` | Returns a URL to the application's Flink Dashboard |
 | `DescribeApplication` | Returns details about an application |
 | `ListApplications` | Lists all applications |
 | `StartApplication` | Starts an application, provisioning a Flink JobManager container |
@@ -154,6 +155,28 @@ aws kinesisanalyticsv2 delete-application-snapshot \
 
 Restoring a job *from* a snapshot (`CreateApplication`/`UpdateApplication` with a
 `RestoreConfiguration` pointing at one) is not yet emulated.
+
+Pass `ApplicationConfiguration.ApplicationSnapshotConfiguration.SnapshotsEnabled: false` on
+`CreateApplication` (or `ApplicationSnapshotConfigurationUpdate.SnapshotsEnabledUpdate` on
+`UpdateApplication`) to disable snapshots for an application — real AWS defaults this to `true`.
+`CreateApplicationSnapshot` rejects the request with `InvalidRequestException` while disabled.
+
+### Flink Dashboard access
+
+`CreateApplicationPresignedUrl` (with `UrlType: FLINK_DASHBOARD_URL`) returns a URL to the running
+application's Flink Dashboard — the application must be `RUNNING`:
+
+```bash
+aws kinesisanalyticsv2 create-application-presigned-url \
+  --application-name jobdemo --url-type FLINK_DASHBOARD_URL
+```
+
+Real AWS returns a session-authorized, time-limited URL through its own proxy; Floci has no
+equivalent session/proxy layer, so it returns the JobManager container's own REST/dashboard URL
+directly — genuinely live and browsable, but not actually session-scoped or time-limited the way
+`SessionExpirationDurationInSeconds` implies (the parameter is still validated to AWS's documented
+1800–43200 second range). `UrlType: ZEPPELIN_UI_URL` is rejected, since Zeppelin/Studio applications
+aren't supported at all (see below).
 
 ## Supported runtimes
 

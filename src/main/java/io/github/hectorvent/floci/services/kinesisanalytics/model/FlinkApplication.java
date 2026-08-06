@@ -80,6 +80,10 @@ public class FlinkApplication {
     // FlinkApplicationConfiguration.ParallelismConfiguration.Parallelism (defaults to 1).
     private int parallelism = 1;
 
+    // ApplicationSnapshotConfiguration.SnapshotsEnabled — real AWS defaults this to true when the
+    // application is created without specifying it.
+    private boolean snapshotsEnabled = true;
+
     // Resource tags. Real AWS never echoes these in ApplicationDetail (CreateApplication /
     // DescribeApplication) — only ListTagsForResource returns them — so this is bookkeeping only,
     // like containerId/accountId above, not part of the wire response the handler builds.
@@ -168,6 +172,9 @@ public class FlinkApplication {
 
     public int getParallelism() { return parallelism; }
     public void setParallelism(int parallelism) { this.parallelism = parallelism; }
+
+    public boolean isSnapshotsEnabled() { return snapshotsEnabled; }
+    public void setSnapshotsEnabled(boolean snapshotsEnabled) { this.snapshotsEnabled = snapshotsEnabled; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? tags : new LinkedHashMap<>(); }

@@ -328,4 +328,72 @@ class KinesisAnalyticsV2IntegrationTest {
             .statusCode(200)
             .body("SnapshotSummaries", equalTo(java.util.List.of()));
     }
+
+    @Test
+    void createApplicationWithSnapshotsDisabledRejectsCreateApplicationSnapshot() {
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-nosnaps", "RuntimeEnvironment": "FLINK-1_18",
+                 "ServiceExecutionRole": "%s",
+                 "ApplicationConfiguration": {"ApplicationCodeConfiguration": {
+                     "CodeContent": {"S3ContentLocation": {
+                         "BucketARN": "arn:aws:s3:::flink-code", "FileKey": "app.jar"}},
+                     "CodeContentType": "ZIPFILE"},
+                 "ApplicationSnapshotConfiguration": {"SnapshotsEnabled": false}}}
+                """.formatted(ROLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.StartApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-nosnaps", "RunConfiguration": {}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplicationSnapshot")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-nosnaps", "SnapshotName": "attempt"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void createApplicationPresignedUrlRejectsWhenNotRunning() {
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-presigned", "RuntimeEnvironment": "FLINK-1_18",
+                 "ServiceExecutionRole": "%s"}
+                """.formatted(ROLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplicationPresignedUrl")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ApplicationName": "it-presigned", "UrlType": "FLINK_DASHBOARD_URL"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
 }

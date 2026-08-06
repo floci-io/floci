@@ -46,6 +46,10 @@ public class KinesisAnalyticsV2Service {
     // on the Tags/TagKeys shapes includes AWS-managed system tags, which floci does not model).
     private static final int MAX_USER_TAGS = 50;
 
+    // CreateApplicationPresignedUrl's SessionExpirationDurationInSeconds valid range (30 min - 12 hr).
+    private static final long MIN_SESSION_EXPIRATION_SECONDS = 1800;
+    private static final long MAX_SESSION_EXPIRATION_SECONDS = 43200;
+
     private final StorageBackend<String, FlinkApplication> storage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -117,6 +121,18 @@ public class KinesisAnalyticsV2Service {
                                               String codeS3ObjectVersion, int parallelism,
                                               Map<String, String> tags,
                                               Map<String, Map<String, String>> environmentProperties) {
+        return createApplication(applicationName, runtimeEnvironment, serviceExecutionRole,
+                applicationDescription, applicationMode, codeS3Bucket, codeS3Key, codeS3ObjectVersion,
+                parallelism, tags, environmentProperties, null);
+    }
+
+    public FlinkApplication createApplication(String applicationName, String runtimeEnvironment,
+                                              String serviceExecutionRole, String applicationDescription,
+                                              String applicationMode, String codeS3Bucket, String codeS3Key,
+                                              String codeS3ObjectVersion, int parallelism,
+                                              Map<String, String> tags,
+                                              Map<String, Map<String, String>> environmentProperties,
+                                              Boolean snapshotsEnabled) {
         if (applicationName == null || applicationName.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ApplicationName is required", 400);
         }
@@ -158,6 +174,9 @@ public class KinesisAnalyticsV2Service {
         }
         if (environmentProperties != null) {
             app.setEnvironmentProperties(new LinkedHashMap<>(environmentProperties));
+        }
+        if (snapshotsEnabled != null) {
+            app.setSnapshotsEnabled(snapshotsEnabled);
         }
 
         storage.put(applicationName, app);
@@ -245,6 +264,14 @@ public class KinesisAnalyticsV2Service {
                                               String serviceExecutionRole, String codeS3Bucket,
                                               String codeS3Key, String codeS3ObjectVersion,
                                               Integer parallelism) {
+        return updateApplication(applicationName, currentApplicationVersionId, serviceExecutionRole,
+                codeS3Bucket, codeS3Key, codeS3ObjectVersion, parallelism, null);
+    }
+
+    public FlinkApplication updateApplication(String applicationName, Long currentApplicationVersionId,
+                                              String serviceExecutionRole, String codeS3Bucket,
+                                              String codeS3Key, String codeS3ObjectVersion,
+                                              Integer parallelism, Boolean snapshotsEnabled) {
         FlinkApplication app = describeApplication(applicationName);
         // AWS requires CurrentApplicationVersionId and rejects a stale value with
         // ConcurrentModificationException (optimistic concurrency on the application version).
@@ -269,6 +296,9 @@ public class KinesisAnalyticsV2Service {
         }
         if (parallelism != null && parallelism > 0) {
             app.setParallelism(parallelism);
+        }
+        if (snapshotsEnabled != null) {
+            app.setSnapshotsEnabled(snapshotsEnabled);
         }
 
         if (codeChanged && app.getApplicationStatus() == ApplicationStatus.RUNNING
@@ -374,6 +404,10 @@ public class KinesisAnalyticsV2Service {
                     "Application " + applicationName + " must be RUNNING with a deployed job to "
                             + "create a snapshot", 400);
         }
+        if (!app.isSnapshotsEnabled()) {
+            throw new AwsException("InvalidRequestException",
+                    "Snapshots are not enabled for application " + applicationName, 400);
+        }
         if (app.getSnapshots().containsKey(snapshotName)) {
             throw new AwsException("ResourceInUseException",
                     "Snapshot already exists: " + snapshotName, 400);
@@ -439,6 +473,35 @@ public class KinesisAnalyticsV2Service {
         putApplication(app);
         LOG.infov("Deleted Kinesis Analytics V2 snapshot {0} for application {1}",
                 snapshotName, applicationName);
+    }
+
+    /**
+     * Real AWS returns a session-authorized URL to the application's Flink Dashboard (or, for a
+     * Zeppelin Studio notebook, its UI — not supported here since floci already rejects Zeppelin
+     * runtimes at CreateApplication). Since floci has no real IAM-backed session/proxy layer for this,
+     * it returns the JobManager's own REST/dashboard URL directly rather than a genuinely time-limited,
+     * signed one — the same "real behavior, stubbed authorization" tradeoff MWAA's CreateWebLoginToken
+     * makes for its own SSO handshake.
+     */
+    public String createApplicationPresignedUrl(String applicationName, String urlType,
+                                                 Long sessionExpirationDurationInSeconds) {
+        FlinkApplication app = describeApplication(applicationName);
+        if (!"FLINK_DASHBOARD_URL".equals(urlType)) {
+            throw new AwsException("InvalidArgumentException",
+                    "Unsupported UrlType: " + urlType + "; only FLINK_DASHBOARD_URL is supported", 400);
+        }
+        if (sessionExpirationDurationInSeconds != null
+                && (sessionExpirationDurationInSeconds < MIN_SESSION_EXPIRATION_SECONDS
+                        || sessionExpirationDurationInSeconds > MAX_SESSION_EXPIRATION_SECONDS)) {
+            throw new AwsException("InvalidArgumentException",
+                    "SessionExpirationDurationInSeconds must be between " + MIN_SESSION_EXPIRATION_SECONDS
+                            + " and " + MAX_SESSION_EXPIRATION_SECONDS, 400);
+        }
+        if (app.getApplicationStatus() != ApplicationStatus.RUNNING || app.getRestEndpoint() == null) {
+            throw new AwsException("ResourceInUseException",
+                    "Application " + applicationName + " is not available for this operation", 400);
+        }
+        return app.getRestEndpoint();
     }
 
     private FlinkApplication findByArn(String resourceArn) {

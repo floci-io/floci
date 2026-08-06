@@ -37,6 +37,7 @@ public class KinesisAnalyticsV2JsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "CreateApplication" -> handleCreateApplication(request);
+            case "CreateApplicationPresignedUrl" -> handleCreateApplicationPresignedUrl(request);
             case "DescribeApplication" -> handleDescribeApplication(request);
             case "ListApplications" -> handleListApplications(request);
             case "StartApplication" -> handleStartApplication(request);
@@ -75,12 +76,27 @@ public class KinesisAnalyticsV2JsonHandler {
                 .path("ParallelismConfiguration").path("Parallelism").asInt(1);
         Map<String, Map<String, String>> environmentProperties =
                 parsePropertyGroups(appConfig.path("EnvironmentProperties").path("PropertyGroups"));
+        JsonNode snapshotsEnabledNode = appConfig.path("ApplicationSnapshotConfiguration").path("SnapshotsEnabled");
+        Boolean snapshotsEnabled = snapshotsEnabledNode.isMissingNode() || snapshotsEnabledNode.isNull()
+                ? null : snapshotsEnabledNode.asBoolean();
 
         FlinkApplication app = service.createApplication(applicationName, runtimeEnvironment,
                 serviceExecutionRole, applicationDescription, applicationMode,
                 codeBucket, codeKey, codeVersion, parallelism, parseTags(request.path("Tags")),
-                environmentProperties);
+                environmentProperties, snapshotsEnabled);
         return applicationDetailResponse(app);
+    }
+
+    private Response handleCreateApplicationPresignedUrl(JsonNode request) {
+        String applicationName = request.path("ApplicationName").asText(null);
+        String urlType = request.path("UrlType").asText(null);
+        Long sessionExpirationDurationInSeconds = request.hasNonNull("SessionExpirationDurationInSeconds")
+                ? request.path("SessionExpirationDurationInSeconds").asLong() : null;
+        String url = service.createApplicationPresignedUrl(applicationName, urlType,
+                sessionExpirationDurationInSeconds);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("AuthorizedUrl", url);
+        return Response.ok(response).build();
     }
 
     /** Extracts the bucket name from an S3 bucket ARN ({@code arn:aws:s3:::bucket}). */
@@ -149,9 +165,13 @@ public class KinesisAnalyticsV2JsonHandler {
                 .path("ParallelismConfigurationUpdate").path("ParallelismUpdate");
         Integer parallelism = parallelismUpdate.isMissingNode() || parallelismUpdate.isNull()
                 ? null : parallelismUpdate.asInt();
+        JsonNode snapshotsEnabledUpdate = appCfgUpdate.path("ApplicationSnapshotConfigurationUpdate")
+                .path("SnapshotsEnabledUpdate");
+        Boolean snapshotsEnabled = snapshotsEnabledUpdate.isMissingNode() || snapshotsEnabledUpdate.isNull()
+                ? null : snapshotsEnabledUpdate.asBoolean();
 
         return applicationDetailResponse(service.updateApplication(applicationName, currentVersionId,
-                serviceExecutionRole, codeBucket, codeKey, codeVersion, parallelism));
+                serviceExecutionRole, codeBucket, codeKey, codeVersion, parallelism, snapshotsEnabled));
     }
 
     private Response handleDeleteApplication(JsonNode request) {
@@ -330,6 +350,9 @@ public class KinesisAnalyticsV2JsonHandler {
                 properties.forEach(map::put);
             });
         }
+
+        config.putObject("ApplicationSnapshotConfigurationDescription")
+                .put("SnapshotsEnabled", app.isSnapshotsEnabled());
 
         return config;
     }
