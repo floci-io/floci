@@ -911,6 +911,9 @@ public class EventBridgeService {
             }
             if (element.has("anything-but")) {
                 JsonNode anythingBut = element.get("anything-but");
+                if (anythingBut.isValueNode()) {
+                    return actual != null && !actual.isNull() && !matchesExactValue(anythingBut, actual);
+                }
                 if (anythingBut.isArray()) {
                     for (JsonNode v : anythingBut) {
                         if (matchesExactValue(v, actual)) {
