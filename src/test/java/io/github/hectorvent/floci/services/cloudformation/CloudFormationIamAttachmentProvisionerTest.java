@@ -50,6 +50,7 @@ class CloudFormationIamAttachmentProvisionerTest {
                 mapper,
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
+                null,
                 new CloudFormationResourceRegistry(List.of()));
     }
 
