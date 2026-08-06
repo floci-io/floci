@@ -3071,8 +3071,12 @@ public class CloudFormationResourceProvisioner {
             throw e;
         }
 
+        // A missing attribute means ownership was never tracked, not that it changed: stacks
+        // provisioned before this attribute existed are restored from cloudformation-stacks.json
+        // without it. Refusing there would leave every such stack permanently in DELETE_FAILED, so
+        // fall back to the pre-tracking behaviour of deleting what the stack recorded it created.
         String expectedCreatedTime = resource.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
-        if (expectedCreatedTime == null || !expectedCreatedTime.equals(eventBusCreatedTime(bus))) {
+        if (expectedCreatedTime != null && !expectedCreatedTime.equals(eventBusCreatedTime(bus))) {
             throw new AwsException("ValidationError",
                     "EventBus ownership changed; refusing to delete: " + busName, 400);
         }
