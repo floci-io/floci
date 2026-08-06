@@ -556,6 +556,55 @@ class CloudFrontDistributionServingTest {
             .body(containsString("<Code>TooManyOriginCustomHeaders</Code>"));
     }
 
+    /**
+     * A rule whose {@code AllowedOrigin} is {@code *} echoes {@code *}, and the CORS specification
+     * forbids pairing that with {@code Access-Control-Allow-Credentials: true} — browsers reject the
+     * combination for credentialed requests, so emitting it would break in the browser while passing
+     * here. Verified against real S3: a wildcard rule returns only Allow-Origin, Allow-Methods and
+     * Max-Age, with no Allow-Credentials and no Vary; a concrete origin returns both (covered by
+     * {@link #appliesConfiguredOriginHeaderToS3CorsResponses()}).
+     */
+    @Test
+    void wildcardCorsOriginOmitsCredentialsAndVary() {
+        String suffix = suffix();
+        String bucket = "cf-origin-header-cors-wild-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "asset.txt", "cors-body", "text/plain");
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>*</AllowedOrigin>
+                    <AllowedMethod>GET</AllowedMethod>
+                    <AllowedMethod>HEAD</AllowedMethod>
+                    <MaxAgeSeconds>600</MaxAgeSeconds>
+                  </CORSRule>
+                </CORSConfiguration>
+                """);
+
+        Origin origin = s3Origin("s3-origin", bucket);
+        origin.setCustomHeaders(List.of(new LinkedHashMap<>(Map.of(
+                "HeaderName", "Origin",
+                "HeaderValue", "https://configured.example"))));
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(origin));
+        cfg.setDefaultCacheBehavior(defaultBehavior(origin.getId()));
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given()
+            .header("Host", dist.getDomainName())
+            .header("Origin", "https://viewer.example")
+        .when()
+            .get("/asset.txt")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("*"))
+            .header("Access-Control-Allow-Methods", equalTo("GET, HEAD"))
+            .header("Access-Control-Max-Age", equalTo("600"))
+            .header("Access-Control-Allow-Credentials", nullValue())
+            .header("Vary", nullValue());
+    }
+
     @Test
     void appliesConfiguredOriginHeaderToS3CorsResponses() {
         String suffix = suffix();

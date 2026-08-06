@@ -595,12 +595,20 @@ public class CloudFrontServingController {
 
         Map<String, List<String>> headers = new LinkedHashMap<>(response.headers());
         s3Service.evaluateCors(bucket, configuredOrigin, method, List.of()).ifPresent(cors -> {
+            // A rule whose AllowedOrigin is "*" echoes "*" rather than the request origin, and the
+            // CORS spec forbids pairing that with Access-Control-Allow-Credentials: true — browsers
+            // reject the combination outright for credentialed requests. Verified against real S3:
+            // with AllowedOrigins ["*"] it returns only Allow-Origin/Allow-Methods/Max-Age, while a
+            // concrete AllowedOrigin additionally returns Allow-Credentials: true and Vary.
+            boolean wildcardOrigin = "*".equals(cors.allowedOrigin());
             putHeaderReplacing(headers, "Access-Control-Allow-Origin", cors.allowedOrigin());
             putHeaderReplacing(
                     headers,
                     "Access-Control-Allow-Methods",
                     String.join(", ", cors.allowedMethods()));
-            putHeaderReplacing(headers, "Access-Control-Allow-Credentials", "true");
+            if (!wildcardOrigin) {
+                putHeaderReplacing(headers, "Access-Control-Allow-Credentials", "true");
+            }
             if (cors.maxAgeSeconds() > 0) {
                 putHeaderReplacing(
                         headers,
@@ -613,12 +621,16 @@ public class CloudFrontServingController {
                         "Access-Control-Expose-Headers",
                         String.join(", ", cors.exposeHeaders()));
             }
-            mergeVary(
-                    headers,
-                    List.of(
-                            "Origin",
-                            "Access-Control-Request-Headers",
-                            "Access-Control-Request-Method"));
+            // Vary is likewise omitted for a wildcard rule: the response is byte-identical for every
+            // origin, so there is nothing to vary on. Real S3 returns Vary only in the concrete case.
+            if (!wildcardOrigin) {
+                mergeVary(
+                        headers,
+                        List.of(
+                                "Origin",
+                                "Access-Control-Request-Headers",
+                                "Access-Control-Request-Method"));
+            }
         });
         return new OriginResponse(
                 response.status(),
