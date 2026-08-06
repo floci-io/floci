@@ -1,0 +1,11 @@
+{
+  "name": "release-tooling",
+  "private": true,
+  "description": "Pinned semantic-release toolchain for the Release Cut workflow (npm ci only; not part of the emulator build)",
+  "devDependencies": {
+    "semantic-release": "24.2.9",
+    "@semantic-release/changelog": "7.0.0",
+    "@semantic-release/exec": "7.1.0",
+    "@semantic-release/git": "11.0.1"
+  }
+}
