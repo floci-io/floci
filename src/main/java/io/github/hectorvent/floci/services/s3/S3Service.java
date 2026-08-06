@@ -1495,8 +1495,9 @@ public class S3Service implements Resettable {
 
             byte[] allData = combined.toByteArray();
 
-            if ("FULL_OBJECT".equalsIgnoreCase(checksumType) && expectedChecksum != null
-                    && expectedChecksum.hasAnyValue()) {
+            boolean fullObjectChecksumRequested = "FULL_OBJECT".equalsIgnoreCase(checksumType)
+                    && expectedChecksum != null && expectedChecksum.hasAnyValue();
+            if (fullObjectChecksumRequested) {
                 validateFullObjectChecksum(allData, expectedChecksum);
             }
 
@@ -1507,6 +1508,9 @@ public class S3Service implements Resettable {
                     .map(num -> copyPart(upload.getParts().get(num)))
                     .toList();
             S3Checksum checksum = buildChecksum(allData, completedParts, true, upload.getChecksumAlgorithm());
+            if (fullObjectChecksumRequested) {
+                checksum.setChecksumType("FULL_OBJECT");
+            }
             S3Object object = storeObject(bucket, key, allData, upload.getContentType(), upload.getMetadata(),
                     checksum, completedParts,
                     new PutObjectOptions()
@@ -2405,11 +2409,11 @@ public class S3Service implements Resettable {
     }
 
     private static void validateFullObjectChecksum(byte[] data, S3Checksum expected) {
-        if (expected.getChecksumSHA1() != null && !expected.getChecksumSHA1().equals(S3Checksum.sha1Base64(data))) {
-            throw new AwsException("BadDigest", "The SHA1 checksum you specified did not match the payload.", 400);
-        }
-        if (expected.getChecksumSHA256() != null && !expected.getChecksumSHA256().equals(S3Checksum.sha256Base64(data))) {
-            throw new AwsException("BadDigest", "The SHA256 checksum you specified did not match the payload.", 400);
+        if (expected.getChecksumSHA1() != null || expected.getChecksumSHA256() != null) {
+            throw new AwsException("InvalidRequest",
+                    "The FULL_OBJECT checksum type is not supported with the SHA1 or SHA256 checksum algorithm. "
+                            + "Full object checksums are only supported with the CRC32, CRC32C, and CRC64NVME checksum algorithms.",
+                    400);
         }
         if (expected.getChecksumCRC32() != null && !expected.getChecksumCRC32().equals(S3Checksum.crc32Base64(data))) {
             throw new AwsException("BadDigest", "The CRC32 checksum you specified did not match the payload.", 400);
