@@ -100,4 +100,22 @@ class AppSyncExecutionControllerTest {
         Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
         assertEquals("NotFoundException", error.get("errorType"));
     }
+
+    @Test
+    void non404AwsExceptionFromLookupReturnsDataPlaneInternalFailure() {
+        when(appSyncService.getGraphqlApi("api-1"))
+                .thenThrow(new AwsException("BadRequestException", "unexpected management error", 400));
+
+        Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
+
+        assertEquals(500, response.getStatus());
+        assertEquals("InternalFailure", response.getHeaderString("x-amzn-errortype"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getEntity();
+        assertNotNull(body.get("errors"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
+        assertEquals("InternalFailure", error.get("errorType"));
+        assertEquals("InternalFailure", error.get("message"));
+    }
 }
