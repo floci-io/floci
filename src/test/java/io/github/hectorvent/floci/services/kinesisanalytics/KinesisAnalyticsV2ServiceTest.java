@@ -545,6 +545,56 @@ class KinesisAnalyticsV2ServiceTest {
                 () -> service.createApplicationPresignedUrl("nope", "FLINK_DASHBOARD_URL", null));
     }
 
+    @Test
+    void readinessPollerPersistsFlinkJobIdAssignedBeforeReachingRunning() throws InterruptedException {
+        // Regression test: advanceToRunning can assign flinkJobId on a tick where the Flink job has
+        // been submitted but hasn't reached RUNNING yet (it returns false in that case). That
+        // intermediate state must still be persisted — not just the final RUNNING transition — since
+        // pendingJars (a separate in-process-only cache) is already cleared by then; an emulator
+        // restart before the next persist would otherwise leave the application permanently stuck.
+        InMemoryStorage<String, FlinkApplication> backing = Mockito.spy(new InMemoryStorage<>());
+        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        Mockito.doReturn(backing).when(storageFactory)
+                .create(Mockito.anyString(), Mockito.anyString(), Mockito.any());
+
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        var kaConfig = Mockito.mock(EmulatorConfig.KinesisAnalyticsServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.kinesisAnalytics()).thenReturn(kaConfig);
+        when(kaConfig.mock()).thenReturn(false);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        when(manager.advanceToRunning(Mockito.any())).thenAnswer(invocation -> {
+            FlinkApplication app = invocation.getArgument(0);
+            if (app.getFlinkJobId() == null) {
+                app.setFlinkJobId("job-1"); // job just submitted; not yet RUNNING
+            }
+            return false;
+        });
+
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        KinesisAnalyticsV2Service realMode =
+                new KinesisAnalyticsV2Service(storageFactory, config, regionResolver, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.STARTING);
+        Mockito.clearInvocations(backing); // ignore createApplication's own put()
+
+        try {
+            // @PostConstruct isn't wired by a plain `new` in this unit test; start the poller manually.
+            realMode.init();
+            // The poller's first tick fires ~1s after scheduling; give it margin.
+            Thread.sleep(1500);
+
+            Mockito.verify(backing, Mockito.atLeastOnce()).put(Mockito.eq("demo"), Mockito.any());
+            assertEquals("job-1", realMode.describeApplication("demo").getFlinkJobId());
+        } finally {
+            realMode.shutdown();
+        }
+    }
+
     private KinesisAnalyticsV2Service mockModeService() {
         return buildService(true, Mockito.mock(FlinkContainerManager.class));
     }

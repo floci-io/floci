@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -527,13 +528,23 @@ public class KinesisAnalyticsV2Service {
                 }
                 for (FlinkApplication app : allApplications()) {
                     boolean changed = false;
-                    if (app.getApplicationStatus() == ApplicationStatus.STARTING
-                            && containerManager.advanceToRunning(app)) {
-                        LOG.infov("Kinesis Analytics V2 application {0} is now RUNNING",
-                                app.getApplicationName());
-                        app.setApplicationStatus(ApplicationStatus.RUNNING);
-                        app.setLastUpdateTimestamp(Instant.now());
-                        changed = true;
+                    if (app.getApplicationStatus() == ApplicationStatus.STARTING) {
+                        String previousJobId = app.getFlinkJobId();
+                        if (containerManager.advanceToRunning(app)) {
+                            LOG.infov("Kinesis Analytics V2 application {0} is now RUNNING",
+                                    app.getApplicationName());
+                            app.setApplicationStatus(ApplicationStatus.RUNNING);
+                            app.setLastUpdateTimestamp(Instant.now());
+                            changed = true;
+                        } else if (!Objects.equals(previousJobId, app.getFlinkJobId())) {
+                            // The Flink job was just submitted (flinkJobId newly assigned) but hasn't
+                            // reached RUNNING yet. Persist now rather than waiting for that: pendingJars
+                            // (an in-process-only cache) is already cleared at this point, so if the
+                            // emulator restarts before the next RUNNING-triggered persist, an unpersisted
+                            // flinkJobId would leave the application stuck — it could never re-fetch the
+                            // JAR to resubmit, nor know a job was already running to poll instead.
+                            changed = true;
+                        }
                     }
                     for (Snapshot snapshot : app.getSnapshots().values()) {
                         if (snapshot.getSnapshotStatus() == SnapshotStatus.CREATING
