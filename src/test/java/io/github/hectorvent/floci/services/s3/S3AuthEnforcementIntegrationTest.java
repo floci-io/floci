@@ -635,6 +635,23 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("AuthorizationQueryParametersError"));
     }
 
+    @Test
+    @Order(27)
+    void presignedRequestWithUnsupportedAlgorithmIsRejected() {
+        given()
+            .queryParam("X-Amz-Algorithm", "BOGUS-ALGORITHM")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "3600")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Signature", "dummy")
+        .when()
+            .get("/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY)
+        .then()
+            .statusCode(400)
+            .body(containsString("AuthorizationQueryParametersError"));
+    }
+
     private static String publicReadPolicy(String bucket) {
         return """
                 {

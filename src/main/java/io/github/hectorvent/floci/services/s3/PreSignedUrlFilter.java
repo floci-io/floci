@@ -51,6 +51,17 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return;
         }
 
+        if (!"AWS4-HMAC-SHA256".equals(algorithm)) {
+            requestContext.abortWith(
+                errorResponse(
+                    400,
+                    "AuthorizationQueryParametersError",
+                    "Unsupported X-Amz-Algorithm value: " + algorithm
+                )
+            );
+            return;
+        }
+
         if (S3RequestAuthorizationParser.isMissingRequiredPresignedParameter(queryParams)) {
             requestContext.abortWith(errorResponse(
                     S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_STATUS,
