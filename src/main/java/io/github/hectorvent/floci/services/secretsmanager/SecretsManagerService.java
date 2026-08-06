@@ -136,6 +136,13 @@ public class SecretsManagerService {
                 throw new AwsException("ResourceNotFoundException",
                         "Secrets Manager can't find the specified secret version.", 400);
             }
+            // When both selectors are supplied they must name the same version.
+            if (versionStage != null && !versionStage.isEmpty()
+                    && (version.getVersionStages() == null
+                            || !version.getVersionStages().contains(versionStage))) {
+                throw new AwsException("InvalidRequestException",
+                        "You provided a VersionStage that is not associated to the provided VersionId.", 400);
+            }
         } else {
             String stage = (versionStage != null && !versionStage.isEmpty()) ? versionStage : AWSCURRENT;
             version = findVersionByStage(secret, stage);
