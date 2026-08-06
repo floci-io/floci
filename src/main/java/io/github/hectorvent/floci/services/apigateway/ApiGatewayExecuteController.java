@@ -766,7 +766,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private Response buildProxyResponse(InvokeResult result) {
+    Response buildProxyResponse(InvokeResult result) {
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getFunctionError() != null ? 502 : result.getStatusCode()).build();
         }
