@@ -16,11 +16,12 @@ class SecretsManagerJsonHandlerTest {
     private static final String REGION = "us-east-1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private SecretsManagerService service;
     private SecretsManagerJsonHandler handler;
 
     @BeforeEach
     void setUp() {
-        SecretsManagerService service = new SecretsManagerService(new InMemoryStorage<>(), 30);
+        service = new SecretsManagerService(new InMemoryStorage<>(), 30);
         handler = new SecretsManagerJsonHandler(service, MAPPER);
     }
 
@@ -140,6 +141,30 @@ class SecretsManagerJsonHandlerTest {
         assertThat(response.getStatus(), is(200));
         ObjectNode body = (ObjectNode) response.getEntity();
         assertThat(body.get("KmsKeyId").asText(), is("my-kms-key"));
+    }
+
+    @Test
+    void targetAttachmentOwnershipIsNotExposedByPublicResponses() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "attached-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+        service.claimTargetAttachment("attached-secret", "stack/Attachment", REGION);
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "attached-secret");
+        ObjectNode described = (ObjectNode) handler
+                .handle("DescribeSecret", describeReq, REGION)
+                .getEntity();
+        ObjectNode listed = (ObjectNode) ((ObjectNode) handler
+                .handle("ListSecrets", MAPPER.createObjectNode(), REGION)
+                .getEntity())
+                .path("SecretList")
+                .path(0);
+
+        assertThat(described.has("targetAttachmentOwner"), is(false));
+        assertThat(described.has("TargetAttachmentOwner"), is(false));
+        assertThat(listed.has("targetAttachmentOwner"), is(false));
+        assertThat(listed.has("TargetAttachmentOwner"), is(false));
     }
 
     @Test
