@@ -330,8 +330,8 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
                 "authorizer event path must preserve the trailing slash");
         assertEquals("/items/42/", event.path("requestContext").path("path").asText(null),
                 "requestContext.path must preserve the trailing slash");
-        assertTrue(event.path("methodArn").asText("").endsWith("/items/42/"),
-                "methodArn must include the trailing slash");
+        assertTrue(event.path("methodArn").asText("").endsWith("/items/42"),
+                "methodArn keeps the normalized path, since it is matched against policy resources");
         assertEquals("42", event.path("pathParameters").path("id").asText(null),
                 "path parameters must still be extracted from the normalized path");
     }
