@@ -11,15 +11,18 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
- * Regression test for MOCK-integration CORS: a MOCK integration whose "200" integration
- * response declares static {@code responseParameters} (e.g. {@code method.response.header.
- * Access-Control-Allow-Origin -> '*'}) must emit those as real HTTP response headers.
+ * Regression test for MOCK-integration response parameters: a MOCK integration whose "200"
+ * integration response declares static {@code responseParameters} (e.g. {@code
+ * method.response.header.Access-Control-Allow-Origin -> '*'}) must emit those as real HTTP
+ * response headers. Previously {@code invokeMock} returned early on the empty-response-template
+ * path and dropped the static header mappings entirely.
  *
- * <p>This mirrors the CORS-preflight OPTIONS methods produced by API-Gateway OpenAPI import
- * (mock integration, {@code requestTemplates {"statusCode":200}}, NO responseTemplates), which a
- * browser needs so it can preflight cross-origin calls to the emulated API. Previously
- * {@code invokeMock} returned early on the empty-response-template path and dropped the static
- * header mappings entirely.
+ * <p>The integration is shaped like the CORS methods API-Gateway OpenAPI import produces (mock
+ * integration, {@code requestTemplates {"statusCode":200}}, NO responseTemplates), because that
+ * is the configuration the bug was found with. It is exercised over GET rather than OPTIONS:
+ * the dropped-header bug is verb-agnostic, and routing OPTIONS to the configured method is a
+ * separate fix owned by #1955, which also skips {@code GlobalCorsFilter} for deployed-API paths
+ * so a real browser preflight reaches the route at all.
  */
 @QuarkusTest
 class ApiGatewayMockCorsHeadersTest {
@@ -31,7 +34,7 @@ class ApiGatewayMockCorsHeadersTest {
     @BeforeEach
     void setup() {
         createRestApi();
-        setupOptionsMockIntegration();
+        setupMockIntegration();
         createDeploymentAndStage();
     }
 
@@ -46,7 +49,7 @@ class ApiGatewayMockCorsHeadersTest {
                 .extract().path("id");
     }
 
-    private void setupOptionsMockIntegration() {
+    private void setupMockIntegration() {
         rootId = given()
                 .when().get("/restapis/" + apiId + "/resources")
                 .then()
@@ -61,18 +64,18 @@ class ApiGatewayMockCorsHeadersTest {
                 .statusCode(201)
                 .extract().path("id");
 
-        // OPTIONS method, no authorization (preflight must not require auth)
+        // No authorization, mirroring an OpenAPI-imported CORS method.
         given()
                 .contentType(ContentType.JSON)
                 .body("{\"authorizationType\":\"NONE\"}")
-                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/OPTIONS")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
                 .then()
                 .statusCode(201);
 
         given()
                 .contentType(ContentType.JSON)
                 .body("{\"responseParameters\":{}}")
-                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/OPTIONS/responses/200")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET/responses/200")
                 .then()
                 .statusCode(201);
 
@@ -80,7 +83,7 @@ class ApiGatewayMockCorsHeadersTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("{\"type\":\"MOCK\",\"requestTemplates\":{\"application/json\":\"{\\\"statusCode\\\": 200}\"}}")
-                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/OPTIONS/integration")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET/integration")
                 .then()
                 .statusCode(201);
 
@@ -92,7 +95,7 @@ class ApiGatewayMockCorsHeadersTest {
                         + "\"method.response.header.Access-Control-Allow-Methods\":\"'GET,OPTIONS,POST'\","
                         + "\"method.response.header.Access-Control-Allow-Headers\":\"'Content-Type,Authorization,X-Custom-CFN-Header'\""
                         + "}}")
-                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/OPTIONS/integration/responses/200")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET/integration/responses/200")
                 .then()
                 .statusCode(201);
     }
@@ -115,9 +118,9 @@ class ApiGatewayMockCorsHeadersTest {
     }
 
     @Test
-    void optionsPreflightReturnsCorsHeaders() {
+    void mockIntegrationEmitsStaticResponseParameterHeaders() {
         given()
-                .when().options("/execute-api/" + apiId + "/api/cors")
+                .when().get("/execute-api/" + apiId + "/api/cors")
                 .then()
                 .statusCode(200)
                 .header("Access-Control-Allow-Origin", equalTo("*"))
@@ -128,7 +131,7 @@ class ApiGatewayMockCorsHeadersTest {
     @Test
     void alsoViaUserRequestPath() {
         given()
-                .when().options("/restapis/" + apiId + "/api/_user_request_/cors")
+                .when().get("/restapis/" + apiId + "/api/_user_request_/cors")
                 .then()
                 .statusCode(200)
                 .header("Access-Control-Allow-Origin", equalTo("*"));

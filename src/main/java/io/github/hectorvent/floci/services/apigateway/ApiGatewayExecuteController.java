@@ -230,18 +230,6 @@ public class ApiGatewayExecuteController {
         return dispatch("PATCH", apiId, stageName, proxy, headers, uriInfo, body);
     }
 
-    @OPTIONS
-    @Blocking
-    @Path("/{proxy: .*}")
-    public Response handleOptions(@Context HttpHeaders headers, @Context UriInfo uriInfo,
-                                  @PathParam("apiId") String apiId,
-                                  @PathParam("stageName") String stageName,
-                                  @PathParam("proxy") String proxy) {
-        // Route OPTIONS to the API's own method (e.g. a CORS-preflight MOCK integration)
-        // instead of letting the JAX-RS runtime answer with a default Allow-header response.
-        return dispatch("OPTIONS", apiId, stageName, proxy, headers, uriInfo, null);
-    }
-
     // ──────────────────────────── Core dispatch ────────────────────────────
 
     Response dispatch(String httpMethod, String apiId, String stageName,
