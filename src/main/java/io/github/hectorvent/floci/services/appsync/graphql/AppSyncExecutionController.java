@@ -73,7 +73,9 @@ public class AppSyncExecutionController {
                 if (e.getHttpStatus() == 404) {
                     return graphqlError(404, "NotFoundException", e.getMessage());
                 }
-                throw e;
+                // Stay on the data-plane errors envelope; never leak to AwsExceptionMapper (__type).
+                LOG.errorv(e, "Unexpected AwsException looking up API {0}", apiId);
+                return graphqlError(500, "InternalFailure", "InternalFailure");
             }
 
             var graphQLOpt = schemaRegistry.getGraphQL(apiId);
@@ -89,8 +91,6 @@ public class AppSyncExecutionController {
             } catch (AppSyncTransportException e) {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
-        } catch (AwsException e) {
-            throw e;
         } catch (RuntimeException e) {
             LOG.errorv(e, "Unexpected error executing GraphQL for API {0}", apiId);
             return graphqlError(500, "InternalFailure", "InternalFailure");
