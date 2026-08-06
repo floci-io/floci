@@ -77,7 +77,7 @@ public class CloudHsmV2JsonHandler {
         Cluster cluster = service.createCluster(hsmType, SubnetIds, sourceBackupId, tags, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Cluster", clusterNode(cluster));
+        response.set("Cluster", clusterNode(cluster, region));
         return Response.ok(response).build();
     }
 
@@ -95,7 +95,7 @@ public class CloudHsmV2JsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Clusters");
         for (Cluster c : clusters) {
-            arr.add(clusterNode(c));
+            arr.add(clusterNode(c, region));
         }
         return Response.ok(response).build();
     }
@@ -105,7 +105,7 @@ public class CloudHsmV2JsonHandler {
         Cluster cluster = service.deleteCluster(clusterId, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Cluster", clusterNode(cluster));
+        response.set("Cluster", clusterNode(cluster, region));
         return Response.ok(response).build();
     }
 
@@ -175,9 +175,7 @@ public class CloudHsmV2JsonHandler {
         return Response.ok(response).build();
     }
 
-    // ──────────────────────────── Node Builders ────────────────────────────
-
-    private ObjectNode clusterNode(Cluster cluster) {
+    private ObjectNode clusterNode(Cluster cluster , String region) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ClusterId", cluster.getClusterId());
         node.put("State", cluster.getState().wireValue());
@@ -207,7 +205,8 @@ public class CloudHsmV2JsonHandler {
             List<String> subnetIds = cluster.getSubnetIds();
             // Map each subnet to an availability zone
             for (int i = 0; i < subnetIds.size(); i++) {
-                String az = "us-east-1" + (char) ('a' + i); // us-east-1a, us-east-1b, etc.
+                String regionPrefix = region != null ? region : "us-east-1";
+                String az = regionPrefix + (char) ('a' + i);
                 subnetNode.put(az, subnetIds.get(i));
             }
             node.set("SubnetMapping", subnetNode);
