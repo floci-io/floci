@@ -1,7 +1,11 @@
 package io.github.hectorvent.floci.services.lambdamicrovms;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -13,7 +17,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * In-memory state for AWS Lambda MicroVMs ("Lambda Microvms" apiVersion
@@ -39,19 +45,45 @@ public class LambdaMicrovmsService {
     private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9-_]{1,64}");
     private static final int MAX_CONNECTOR_SUBNETS = 16;
 
-    /** region → image name → image */
     private final RegionResolver regionResolver;
+    private final StorageFactory storageFactory;
+
+    /**
+     * Keyed {@code region/id}. The account is not part of the key here: the backend prefixes every
+     * key with the caller's account and strips it again on read, which is the same account the
+     * {@link RegionResolver} resolves, so two accounts sharing a region still cannot see each
+     * other's images, MicroVMs or connectors.
+     */
+    private Map<String, MicrovmImage> images = new ConcurrentHashMap<>();
+    private Map<String, Microvm> microvms = new ConcurrentHashMap<>();
+    private Map<String, NetworkConnector> connectors = new ConcurrentHashMap<>();
 
     @Inject
-    public LambdaMicrovmsService(RegionResolver regionResolver) {
+    public LambdaMicrovmsService(RegionResolver regionResolver, StorageFactory storageFactory) {
         this.regionResolver = regionResolver;
+        this.storageFactory = storageFactory;
     }
 
-    private final Map<String, Map<String, MicrovmImage>> images = new ConcurrentHashMap<>();
-    /** region → microvm id → vm */
-    private final Map<String, Map<String, Microvm>> microvms = new ConcurrentHashMap<>();
-    /** region → connector id → connector */
-    private final Map<String, Map<String, NetworkConnector>> connectors = new ConcurrentHashMap<>();
+    @PostConstruct
+    void init() {
+        initializeStorage();
+    }
+
+    /**
+     * MicroVMs are delivered as part of the lambda service, so they share its storage key and
+     * therefore its configured mode and flush interval rather than declaring their own.
+     */
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.images = new StorageBackedMap<>(storageFactory.create("lambda",
+                "lambda-microvm-images.json", new TypeReference<Map<String, MicrovmImage>>() {}));
+        this.microvms = new StorageBackedMap<>(storageFactory.create("lambda",
+                "lambda-microvms.json", new TypeReference<Map<String, Microvm>>() {}));
+        this.connectors = new StorageBackedMap<>(storageFactory.create("lambda",
+                "lambda-network-connectors.json", new TypeReference<Map<String, NetworkConnector>>() {}));
+    }
 
     // ---------------------------------------------------------------- images
 
@@ -98,12 +130,13 @@ public class LambdaMicrovmsService {
             throw new AwsException("ValidationException",
                     "baseImageArn, buildRoleArn and codeArtifact.uri are required", 400);
         }
-        Map<String, MicrovmImage> store = scopedImages(region);
-        MicrovmImage existing = store.get(name);
+        MicrovmImage existing = images.get(key(region, name));
         if (existing != null && existing.versions.stream()
                 .anyMatch(v -> "SUCCESSFUL".equals(v.state))) {
             // A rebuild of an existing image mints a new version.
-            return addVersion(existing);
+            addVersion(existing);
+            persist(images, region, name, existing);
+            return existing;
         }
         MicrovmImage image = new MicrovmImage();
         image.name = name;
@@ -117,7 +150,7 @@ public class LambdaMicrovmsService {
         image.createdAt = Instant.now();
         image.updatedAt = image.createdAt;
         addVersion(image);
-        store.put(name, image);
+        images.put(key(region, name), image);
         return image;
     }
 
@@ -163,7 +196,7 @@ public class LambdaMicrovmsService {
     }
 
     public MicrovmImage getImage(String region, String name) {
-        MicrovmImage image = scopedImages(region).get(unwrap(name));
+        MicrovmImage image = images.get(key(region, unwrap(name)));
         if (image == null) {
             throw new AwsException("ResourceNotFoundException",
                     "MicroVM image not found: " + name, 404);
@@ -172,7 +205,7 @@ public class LambdaMicrovmsService {
     }
 
     public List<MicrovmImage> listImages(String region) {
-        return scopedImages(region).values().stream()
+        return in(images, region)
                 .sorted(Comparator.comparing(i -> i.name))
                 .toList();
     }
@@ -195,12 +228,13 @@ public class LambdaMicrovmsService {
         addVersion(image);
         image.state = "UPDATED";
         image.updatedAt = Instant.now();
+        persist(images, region, image.name, image);
         return image;
     }
 
     public void deleteImage(String region, String name) {
         MicrovmImage image = getImage(region, name);
-        boolean inUse = scopedMicrovms(region).values().stream()
+        boolean inUse = in(microvms, region)
                 .anyMatch(vm -> image.imageArn.equals(vm.imageArn)
                         && !"TERMINATED".equals(vm.state));
         if (inUse) {
@@ -209,7 +243,7 @@ public class LambdaMicrovmsService {
                     "Cannot delete microvm image with running microvms.", 400);
         }
         image.state = "DELETED";
-        scopedImages(region).remove(unwrap(name));
+        images.remove(key(region, unwrap(name)));
     }
 
     public MicrovmImageVersion getVersion(String region, String name, String imageVersion) {
@@ -227,8 +261,10 @@ public class LambdaMicrovmsService {
             throw new AwsException("ValidationException",
                     "status must be ACTIVE or INACTIVE", 400);
         }
+        MicrovmImage image = getImage(region, name);
         MicrovmImageVersion version = getVersion(region, name, imageVersion);
         version.status = status;
+        persist(images, region, image.name, image);
         return version;
     }
 
@@ -241,6 +277,7 @@ public class LambdaMicrovmsService {
                     ? null
                     : image.versions.get(image.versions.size() - 1).imageVersion;
         }
+        persist(images, region, image.name, image);
     }
 
     // -------------------------------------------------------- managed images
@@ -283,22 +320,20 @@ public class LambdaMicrovmsService {
         if (imageIdentifier == null || imageIdentifier.isBlank()) {
             throw new AwsException("ValidationException", "imageIdentifier is required", 400);
         }
-        MicrovmImage image = scopedImages(region).get(unwrap(imageIdentifier));
+        MicrovmImage image = images.get(key(region, unwrap(imageIdentifier)));
         if (image == null) {
             throw new AwsException("ResourceNotFoundException",
                     "MicroVM image not found: " + imageIdentifier, 404);
         }
         Microvm vm = new Microvm();
         vm.microvmId = "microvm-" + UUID.randomUUID();
-        vm.state = "PENDING";
         vm.imageArn = image.imageArn;
         vm.imageVersion = image.latestActiveImageVersion;
         vm.endpoint = UUID.randomUUID() + ".lambda-microvm." + region + ".on.aws";
         vm.startedAt = Instant.now();
-        scopedMicrovms(region).put(vm.microvmId, vm);
         // Settle instantly: the response carries PENDING, the next read RUNNING.
-        Microvm stored = scopedMicrovms(region).get(vm.microvmId);
-        stored.state = "RUNNING";
+        vm.state = "RUNNING";
+        microvms.put(key(region, vm.microvmId), vm);
         Microvm response = new Microvm();
         response.microvmId = vm.microvmId;
         response.state = "PENDING";
@@ -310,7 +345,7 @@ public class LambdaMicrovmsService {
     }
 
     public Microvm getMicrovm(String region, String microvmId) {
-        Microvm vm = scopedMicrovms(region).get(unwrap(microvmId));
+        Microvm vm = microvms.get(key(region, unwrap(microvmId)));
         if (vm == null) {
             throw new AwsException("ResourceNotFoundException",
                     "MicroVM not found: " + microvmId, 404);
@@ -319,7 +354,7 @@ public class LambdaMicrovmsService {
     }
 
     public List<Microvm> listMicrovms(String region) {
-        return scopedMicrovms(region).values().stream()
+        return in(microvms, region)
                 .sorted(Comparator.comparing(vm -> vm.microvmId))
                 .toList();
     }
@@ -334,6 +369,7 @@ public class LambdaMicrovmsService {
         vm.state = "TERMINATED";
         vm.stateReason = "Success.";
         vm.terminatedAt = Instant.now();
+        persist(microvms, region, vm.microvmId, vm);
     }
 
     // ------------------------------------------------------------ connectors
@@ -386,7 +422,7 @@ public class LambdaMicrovmsService {
             throw new AwsException("InvalidParameterValueException",
                     "SubnetIds must contain between 1 and " + MAX_CONNECTOR_SUBNETS + " entries", 400);
         }
-        boolean duplicate = scopedConnectors(region).values().stream()
+        boolean duplicate = in(connectors, region)
                 .anyMatch(c -> name.equals(c.name));
         if (duplicate) {
             throw new AwsException("ResourceConflictException",
@@ -406,9 +442,9 @@ public class LambdaMicrovmsService {
         connector.lastModified = Instant.now();
         // Recorded on the first read of a freshly created connector.
         connector.stateReason = "Initial creation";
-        scopedConnectors(region).put(connector.id, connector);
         // Settle instantly, as with VMs.
-        scopedConnectors(region).get(connector.id).state = "ACTIVE";
+        connector.state = "ACTIVE";
+        connectors.put(key(region, connector.id), connector);
         // The create response is a snapshot taken before the instant settle,
         // so it reports PENDING while the stored connector is already ACTIVE.
         // It has to carry every member the stored one does, or a client reads
@@ -429,7 +465,7 @@ public class LambdaMicrovmsService {
     }
 
     public NetworkConnector getConnector(String region, String id) {
-        NetworkConnector connector = scopedConnectors(region).get(unwrap(id));
+        NetworkConnector connector = connectors.get(key(region, unwrap(id)));
         if (connector == null) {
             throw new AwsException("ResourceNotFoundException",
                     "Network connector not found: " + id, 404);
@@ -438,7 +474,7 @@ public class LambdaMicrovmsService {
     }
 
     public List<NetworkConnector> listConnectors(String region) {
-        return scopedConnectors(region).values().stream()
+        return in(connectors, region)
                 .sorted(Comparator.comparing(c -> c.id))
                 .toList();
     }
@@ -459,12 +495,13 @@ public class LambdaMicrovmsService {
         if (securityGroupIds != null) {
             connector.securityGroupIds = List.copyOf(securityGroupIds);
         }
+        persist(connectors, region, connector.id, connector);
         return connector;
     }
 
     public void deleteConnector(String region, String id) {
         getConnector(region, id);
-        scopedConnectors(region).remove(unwrap(id));
+        connectors.remove(key(region, unwrap(id)));
     }
 
     // ------------------------------------------------------------------ tags
@@ -481,14 +518,36 @@ public class LambdaMicrovmsService {
     }
 
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        taggable(region, arn).putAll(tags);
+        mutateTags(region, arn, target -> target.putAll(tags));
     }
 
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        Map<String, String> target = taggable(region, arn);
-        if (tagKeys != null) {
-            tagKeys.forEach(target::remove);
+        mutateTags(region, arn, target -> {
+            if (tagKeys != null) {
+                tagKeys.forEach(target::remove);
+            }
+        });
+    }
+
+    /**
+     * Applies a tag mutation and writes the owning resource back. The tag map is a field of the
+     * stored object, so mutating it alone would never reach the backend.
+     */
+    private void mutateTags(String region, String arn, Consumer<Map<String, String>> mutation) {
+        if (arn.contains(":microvm-image:")) {
+            MicrovmImage image = getImage(region, arn.substring(arn.lastIndexOf(':') + 1));
+            mutation.accept(image.tags);
+            persist(images, region, image.name, image);
+            return;
         }
+        if (arn.contains(":network-connector:")) {
+            NetworkConnector connector = getConnector(region, arn.substring(arn.lastIndexOf(':') + 1));
+            mutation.accept(connector.tags);
+            persist(connectors, region, connector.id, connector);
+            return;
+        }
+        throw new AwsException("ResourceNotFoundException",
+                "Resource not found: " + arn, 404);
     }
 
     private Map<String, String> taggable(String region, String arn) {
@@ -507,24 +566,26 @@ public class LambdaMicrovmsService {
     // ----------------------------------------------------------------- state
 
     /**
-     * Storage is keyed by account and region together, not by region alone.
-     * Every ARN this service mints carries the caller's account, so two
-     * accounts sharing a region must not read or mutate each other's images,
-     * MicroVMs or connectors through the list and identifier APIs.
+     * The stored key for a resource. The account half is added by the backend, so callers only
+     * supply the region, and a listing filters on the same prefix the backend hands back.
      */
-    private String scope(String region) {
-        return regionResolver.getAccountId() + "/" + region;
+    private static String key(String region, String id) {
+        return region + "/" + id;
     }
 
-    private Map<String, MicrovmImage> scopedImages(String region) {
-        return images.computeIfAbsent(scope(region), r -> new ConcurrentHashMap<>());
+    private static <V> Stream<V> in(Map<String, V> store, String region) {
+        String prefix = region + "/";
+        return store.entrySet().stream()
+                .filter(entry -> entry.getKey().startsWith(prefix))
+                .map(Map.Entry::getValue);
     }
 
-    private Map<String, Microvm> scopedMicrovms(String region) {
-        return microvms.computeIfAbsent(scope(region), r -> new ConcurrentHashMap<>());
-    }
-
-    private Map<String, NetworkConnector> scopedConnectors(String region) {
-        return connectors.computeIfAbsent(scope(region), r -> new ConcurrentHashMap<>());
+    /**
+     * Re-persists an entity whose fields were mutated in place. {@link StorageBackedMap} only marks
+     * the backend dirty on put and remove, so a mutation applied to a value from get or a listing
+     * would be dropped by the periodic flush and lost on restart.
+     */
+    private static <V> void persist(Map<String, V> store, String region, String id, V value) {
+        store.put(key(region, id), value);
     }
 }
