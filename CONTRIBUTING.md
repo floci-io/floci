@@ -54,7 +54,6 @@ Floci uses a **tag-driven release model**. Docker images are never published on 
 | Branch | Purpose | Docker published? |
 |---|---|---|
 | `main` | Integration branch — all PRs merge here. Treated as unstable/nightly. | No (CI tests only) |
-| `release/x.y.x` | Stable line for a minor version. Receives cherry-picked fixes from `main`. | No (CI tests only) |
 | `X.Y.Z` tag | Signals a production release. Triggers the full Docker publish pipeline. | Yes (`x.y.z`, `latest`, `x.y.z-jvm`, `latest-jvm`) |
 
 ## Commit Message Format
@@ -160,34 +159,16 @@ Docker images are never built on contributor PRs, so merging to `main` is always
 
 ## Release Process (maintainers)
 
-### New minor or major release
+Releases are cut from `main` with the **Release Cut** workflow
+(Actions → Release Cut → Run workflow). semantic-release analyzes the
+Conventional Commits since the last tag, bumps `pom.xml`, regenerates
+`CHANGELOG.md`, commits, tags, and publishes the GitHub Release; the tag
+push triggers the Docker publish pipeline. Use the `dry-run` input to
+preview the next version and notes without releasing.
 
-```bash
-# 1. Create a release branch from main
-git checkout main && git pull
-git checkout -b release/1.2.x
-
-# 2. Push — the semver.yml workflow runs semantic-release automatically,
-#    bumps the version, updates CHANGELOG.md + pom.xml, and pushes tag 1.2.0.
-git push origin release/1.2.x
-
-# 3. The tag push triggers the Docker publish pipeline.
-```
-
-### Patch release on an existing line
-
-```bash
-git checkout release/1.1.x
-git cherry-pick <commit-sha>
-git push origin release/1.1.x
-# semver workflow creates 1.1.x and triggers Docker publish
-```
-
-### Hotfix
-
-1. Fix on `main` via the normal PR process.
-2. Cherry-pick the merge commit onto the relevant `release/x.y.x` branch and push.
-3. If the bug only affects a release branch, open a PR directly against that branch.
+`CHANGELOG.md` is generated — **do not edit it by hand**. Your Conventional
+Commit message is the changelog entry. Genuine corrections to the file
+require the `changelog-edit` label on the PR.
 
 ## Testing Policy for Pull Requests
 
