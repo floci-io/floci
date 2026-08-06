@@ -72,6 +72,17 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return;
         }
 
+        if (expires < 1 || expires > 604800) {
+            requestContext.abortWith(
+                errorResponse(
+                    400,
+                    "AuthorizationQueryParametersError",
+                    "X-Amz-Expires must be between 1 and 604800 seconds."
+                )
+            );
+            return;
+        }
+
         // Check expiration
         if (presignGenerator.isExpired(amzDate, expires)) {
             requestContext.abortWith(errorResponse(403, "AccessDenied",

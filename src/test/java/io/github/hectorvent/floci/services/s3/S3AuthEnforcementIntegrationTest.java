@@ -601,6 +601,40 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("SignatureDoesNotMatch"));
     }
 
+    @Test
+    @Order(25)
+    void presignedRequestWithExpiresExceedingMaxIsRejected() {
+        given()
+            .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "604801")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Signature", "dummy")
+        .when()
+            .get("/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY)
+        .then()
+            .statusCode(400)
+            .body(containsString("AuthorizationQueryParametersError"));
+    }
+
+    @Test
+    @Order(26)
+    void presignedRequestWithExpiresZeroIsRejected() {
+        given()
+            .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "0")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Signature", "dummy")
+        .when()
+            .get("/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY)
+        .then()
+            .statusCode(400)
+            .body(containsString("AuthorizationQueryParametersError"));
+    }
+
     private static String publicReadPolicy(String bucket) {
         return """
                 {
