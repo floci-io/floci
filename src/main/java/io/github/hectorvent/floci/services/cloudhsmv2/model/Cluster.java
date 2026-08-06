@@ -22,7 +22,7 @@ public class Cluster {
     private String sourceBackupId;
     private Certificates certificates;
     private List<Hsm> hsms = new ArrayList<>();
-    private Map<String, String> subnetMapping = new LinkedHashMap<>();
+    private List<String> subnetIds = new ArrayList<>();
     private String securityGroup;
     private Instant createTimestamp;
     private Map<String, String> tagList = new LinkedHashMap<>();
@@ -93,12 +93,12 @@ public class Cluster {
         this.hsms = hsms != null ? hsms : new ArrayList<>();
     }
 
-    public Map<String, String> getSubnetMapping() {
-        return subnetMapping;
+    public List<String> getSubnetIds() {
+        return subnetIds;
     }
 
-    public void setSubnetMapping(Map<String, String> subnetMapping) {
-        this.subnetMapping = subnetMapping != null ? subnetMapping : new LinkedHashMap<>();
+    public void setSubnetIds(List<String> subnetIds) {
+        this.subnetIds = subnetIds != null ? subnetIds : new ArrayList<>();
     }
 
     public String getSecurityGroup() {

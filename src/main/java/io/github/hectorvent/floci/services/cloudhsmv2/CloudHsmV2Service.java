@@ -1,9 +1,7 @@
 package io.github.hectorvent.floci.services.cloudhsmv2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Certificates;
@@ -13,6 +11,9 @@ import io.github.hectorvent.floci.services.cloudhsmv2.model.Hsm;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cert.X509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
@@ -26,16 +27,13 @@ import org.jboss.logging.Logger;
 
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.math.BigInteger;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 /**
  * CloudHSM v2 service implementation for the local emulator.
@@ -52,30 +50,28 @@ public class CloudHsmV2Service {
     private static final Logger LOG = Logger.getLogger(CloudHsmV2Service.class);
     private static final String DEFAULT_HSM_TYPE = "hsm1.medium";
     private static final String DEFAULT_BACKUP_POLICY = "DEFAULT";
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
+    private final SecureRandom SECURE_RANDOM = new SecureRandom();
     private final StorageBackend<String, Cluster> clusters;
-    private final RegionResolver regionResolver;
+
 
     @Inject
-    public CloudHsmV2Service(StorageFactory storageFactory, RegionResolver regionResolver) {
-        this.regionResolver = regionResolver;
+    public CloudHsmV2Service(StorageFactory storageFactory) {
         this.clusters = storageFactory.create("cloudhsmv2", "cloudhsmv2-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {});
     }
 
-    CloudHsmV2Service(StorageBackend<String, Cluster> clusters, RegionResolver regionResolver) {
+    CloudHsmV2Service(StorageBackend<String, Cluster> clusters) {
         this.clusters = clusters;
-        this.regionResolver = regionResolver;
     }
 
     // ──────────────────────────── CreateCluster ────────────────────────────
 
-    public Cluster createCluster(String hsmType, Map<String, String> subnetMapping,
+    public Cluster createCluster(String hsmType, List<String> SubnetIds,
                                  String sourceBackupId, Map<String, String> tags, String region) {
-        if (subnetMapping == null || subnetMapping.isEmpty()) {
+        if (SubnetIds == null || SubnetIds.isEmpty()) {
             throw new AwsException("CloudHsmInvalidRequestException",
-                    "SubnetMapping must contain at least one entry.", 400);
+                    "SubnetIds must contain at least one entry.", 400);
         }
 
         String clusterId = "cluster-" + generateShortId();
@@ -85,7 +81,7 @@ public class CloudHsmV2Service {
         cluster.setState(ClusterState.UNINITIALIZED);
         cluster.setHsmType(hsmType != null ? hsmType : DEFAULT_HSM_TYPE);
         cluster.setVpcId("vpc-" + generateShortId());
-        cluster.setSubnetMapping(new LinkedHashMap<>(subnetMapping));
+        cluster.setSubnetIds(new ArrayList<>(SubnetIds));
         cluster.setSourceBackupId(sourceBackupId);
         cluster.setSecurityGroup("sg-" + generateShortId());
         cluster.setCreateTimestamp(Instant.now());
@@ -195,8 +191,7 @@ public class CloudHsmV2Service {
         Cluster cluster = getCluster(clusterId, region);
 
         if (cluster.getState() != ClusterState.INITIALIZED
-                && cluster.getState() != ClusterState.ACTIVE
-                && cluster.getState() != ClusterState.UNINITIALIZED) {
+                && cluster.getState() != ClusterState.ACTIVE) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "Cannot create HSM in cluster " + clusterId + " with state " + cluster.getState().wireValue(), 400);
         }
@@ -210,8 +205,21 @@ public class CloudHsmV2Service {
         hsm.setHsmId("hsm-" + generateShortId());
         hsm.setAvailabilityZone(availabilityZone);
         hsm.setClusterId(clusterId);
-        hsm.setSubnetId(cluster.getSubnetMapping().getOrDefault(availabilityZone,
-                "subnet-" + generateShortId()));
+        List<String> subnetIds = cluster.getSubnetIds();
+        String subnetId = "";
+        if(subnetId == null || subnetId.isEmpty()) {
+            int azIndex = availabilityZone.length() > 0 ? (availabilityZone.charAt(availabilityZone.length() - 1) - 'a') : 0;
+            if (azIndex >= 0 && azIndex < subnetIds.size()) {
+                subnetId = subnetIds.get(azIndex);
+            }
+        }
+        if (subnetId == null || subnetId.isEmpty()) {
+            // AZ not in the list, use first available subnet
+            subnetId = subnetIds.get(0);
+        } else{
+            subnetId = "subnet-" + generateShortId();
+        }
+        hsm.setSubnetId(subnetId);
         hsm.setEniId("eni-" + generateShortId());
         hsm.setEniIp("10.0." + (SECURE_RANDOM.nextInt(254) + 1) + "." + (SECURE_RANDOM.nextInt(254) + 1));
         hsm.setState("ACTIVE");
@@ -264,7 +272,9 @@ public class CloudHsmV2Service {
 
     public void tagResource(String resourceId, Map<String, String> tags, String region) {
         Cluster cluster = getCluster(resourceId, region);
-        cluster.getTagList().putAll(tags);
+        if (tags != null && !tags.isEmpty()) {
+            cluster.getTagList().putAll(tags);
+        }
         clusters.put(regionKey(region, resourceId), cluster);
     }
 
@@ -287,7 +297,7 @@ public class CloudHsmV2Service {
         }
         return clusters.get(regionKey(region, clusterId)).orElseThrow(() ->
                 new AwsException("CloudHsmResourceNotFoundException",
-                        "Cluster " + clusterId + " not found.", 404));
+                        "Cluster " + clusterId + " not found.", 400));
     }
 
     private String regionKey(String region, String clusterId) {
@@ -333,14 +343,14 @@ public class CloudHsmV2Service {
             KeyPair keyPair = keyGen.generateKeyPair();
 
             X500Name issuer = new X500Name("CN=" + cn + ",O=AWS,C=US");
-            java.math.BigInteger serial = new java.math.BigInteger(128, SECURE_RANDOM);
+            BigInteger serial = new BigInteger(128, SECURE_RANDOM);
             Instant now = Instant.now();
 
-            org.bouncycastle.cert.X509v3CertificateBuilder certBuilder =
-                    new org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+            X509v3CertificateBuilder certBuilder =
+                    new JcaX509v3CertificateBuilder(
                             issuer, serial,
-                            java.util.Date.from(now),
-                            java.util.Date.from(now.plusSeconds(365L * 24 * 3600)),
+                            Date.from(now),
+                            Date.from(now.plusSeconds(365L * 24 * 3600)),
                             issuer, keyPair.getPublic());
 
             ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
@@ -348,8 +358,8 @@ public class CloudHsmV2Service {
                     .build(keyPair.getPrivate());
 
             X509CertificateHolder holder = certBuilder.build(signer);
-            java.security.cert.X509Certificate cert =
-                    new org.bouncycastle.cert.jcajce.JcaX509CertificateConverter()
+            X509Certificate cert =
+                    new JcaX509CertificateConverter()
                             .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                             .getCertificate(holder);
 

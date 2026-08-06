@@ -59,14 +59,10 @@ public class CloudHsmV2JsonHandler {
                         .build();
             };
         } catch (AwsException e) {
-            return Response.status(e.getHttpStatus())
-                    .entity(new AwsErrorResponse(e.jsonType(), e.getMessage()))
-                    .build();
+            return io.github.hectorvent.floci.core.common.JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
-            LOG.errorv("CloudHSM v2 error processing action {0}: {1}", action, e.getMessage());
-            return Response.status(500)
-                    .entity(new AwsErrorResponse("CloudHsmInternalFailureException", e.getMessage()))
-                    .build();
+            LOG.errorf(e, "CloudHSM v2 error processing action %s", action);
+            return io.github.hectorvent.floci.core.common.JsonErrorResponseUtils.createErrorResponse(e);
         }
     }
 
@@ -74,11 +70,11 @@ public class CloudHsmV2JsonHandler {
 
     private Response handleCreateCluster(JsonNode request, String region) {
         String hsmType = text(request, "HsmType");
-        Map<String, String> subnetMapping = parseStringMap(request.path("SubnetMapping"));
+        List<String> SubnetIds = parseStringList(request.path("SubnetIds"));
         String sourceBackupId = text(request, "SourceBackupId");
         Map<String, String> tags = parseTagList(request.path("TagList"));
 
-        Cluster cluster = service.createCluster(hsmType, subnetMapping, sourceBackupId, tags, region);
+        Cluster cluster = service.createCluster(hsmType, SubnetIds, sourceBackupId, tags, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Cluster", clusterNode(cluster));
@@ -205,10 +201,15 @@ public class CloudHsmV2JsonHandler {
             node.put("BackupPolicy", cluster.getBackupPolicy());
         }
 
-        // SubnetMapping
-        if (cluster.getSubnetMapping() != null && !cluster.getSubnetMapping().isEmpty()) {
+        // SubnetMapping - derive from SubnetIds for response
+        if (cluster.getSubnetIds() != null && !cluster.getSubnetIds().isEmpty()) {
             ObjectNode subnetNode = objectMapper.createObjectNode();
-            cluster.getSubnetMapping().forEach(subnetNode::put);
+            List<String> subnetIds = cluster.getSubnetIds();
+            // Map each subnet to an availability zone
+            for (int i = 0; i < subnetIds.size(); i++) {
+                String az = "us-east-1" + (char) ('a' + i); // us-east-1a, us-east-1b, etc.
+                subnetNode.put(az, subnetIds.get(i));
+            }
             node.set("SubnetMapping", subnetNode);
         }
 
@@ -338,7 +339,7 @@ public class CloudHsmV2JsonHandler {
             return value;
         }
         try {
-            return new String(Base64.getDecoder().decode(value));
+            return new String(Base64.getDecoder().decode(value), java.nio.charset.StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             return value;
         }

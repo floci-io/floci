@@ -39,8 +39,7 @@ class CloudHsmV2IntegrationTest {
             .body("""
                 {
                     "HsmType": "hsm1.medium",
-                    "SubnetMapping": {
-                        "us-east-1a": "subnet-abcdef01"
+                    "SubnetIds": ["subnet-abcdef01"]
                     }
                 }
                 """)
@@ -66,7 +65,7 @@ class CloudHsmV2IntegrationTest {
 
     @Test
     @Order(2)
-    void createClusterMissingSubnetMappingFails() {
+    void createClusterMissingSubnetIdsFails() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "CreateCluster")
             .contentType(CONTENT_TYPE)
@@ -84,7 +83,7 @@ class CloudHsmV2IntegrationTest {
 
     @Test
     @Order(3)
-    void createClusterEmptySubnetMappingFails() {
+    void createClusterEmptySubnetIdsFails() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "CreateCluster")
             .contentType(CONTENT_TYPE)
@@ -109,9 +108,7 @@ class CloudHsmV2IntegrationTest {
             .contentType(CONTENT_TYPE)
             .body("""
                 {
-                    "SubnetMapping": {
-                        "us-east-1b": "subnet-12345678"
-                    }
+                    "SubnetIds": ["subnet-12345678"]
                 }
                 """)
         .when()
@@ -323,7 +320,7 @@ class CloudHsmV2IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404)
+            .statusCode(400)
             .body("__type", equalTo("CloudHsmResourceNotFoundException"));
     }
 
@@ -596,7 +593,7 @@ class CloudHsmV2IntegrationTest {
             .contentType(CONTENT_TYPE)
             .body("""
                 {
-                    "SubnetMapping": { "us-east-1c": "subnet-temptest01" }
+                    "SubnetIds": ["subnet-temptest01"]
                 }
                 """)
         .when()
@@ -659,7 +656,7 @@ class CloudHsmV2IntegrationTest {
             .contentType(CONTENT_TYPE)
             .body("""
                 {
-                    "SubnetMapping": { "us-east-1d": "subnet-deletetest" }
+                    "SubnetIds": ["subnet-deletetest"]
                 }
                 """)
         .when()
@@ -714,7 +711,7 @@ class CloudHsmV2IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404)
+            .statusCode(400)
             .body("__type", equalTo("CloudHsmResourceNotFoundException"));
     }
 
