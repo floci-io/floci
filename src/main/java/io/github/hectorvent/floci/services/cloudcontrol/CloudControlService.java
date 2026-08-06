@@ -97,12 +97,16 @@ public class CloudControlService {
      * synchronous-call deadline — a synchronous create would time out on the caller.
      */
     public ProgressEvent createResource(String region, String typeName, String desiredStateJson) {
+        // DesiredState is a required member of CreateResourceInput. Defaulting an absent one to an
+        // empty object provisioned a resource the caller never described.
+        if (desiredStateJson == null || desiredStateJson.isBlank()) {
+            throw new AwsException("InvalidRequestException", "DesiredState is required.", 400);
+        }
         JsonNode props;
         try {
-            props = (desiredStateJson == null || desiredStateJson.isBlank())
-                    ? mapper.createObjectNode() : mapper.readTree(desiredStateJson);
+            props = mapper.readTree(desiredStateJson);
         } catch (Exception e) {
-            throw new AwsException("InvalidRequest", "DesiredState is not valid JSON.", 400);
+            throw new AwsException("InvalidRequestException", "DesiredState is not valid JSON.", 400);
         }
         String token = UUID.randomUUID().toString();
         ProgressEvent pending = new ProgressEvent(typeName, null, token, "CREATE", "IN_PROGRESS", null, null);

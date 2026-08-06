@@ -66,19 +66,20 @@ public class CloudControlJsonHandler {
         return Response.ok(response).build();
     }
 
+    /**
+     * InvalidRequestException is the code Cloud Control declares for a malformed request, so it is
+     * what an SDK maps onto a typed exception. ValidationException is not in the service model.
+     */
     private String required(JsonNode request, String field) {
         String value = request.path(field).asText(null);
         if (value == null || value.isBlank()) {
-            throw new AwsException("ValidationException", field + " is required.", 400);
+            throw new AwsException("InvalidRequestException", field + " is required.", 400);
         }
         return value;
     }
 
     private Response listResources(JsonNode request, String region) {
-        String typeName = request.path("TypeName").asText(null);
-        if (typeName == null || typeName.isBlank()) {
-            throw new AwsException("ValidationException", "TypeName is required.", 400);
-        }
+        String typeName = required(request, "TypeName");
         ObjectNode response = mapper.createObjectNode();
         response.put("TypeName", typeName);
         ArrayNode resources = response.putArray("ResourceDescriptions");

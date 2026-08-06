@@ -142,6 +142,42 @@ class CloudControlIntegrationTest {
     }
 
     @Test
+    void malformedRequestsReportInvalidRequestException() {
+        // InvalidRequestException is the code Cloud Control declares, so an SDK can map it onto a
+        // typed exception. ValidationException is not in the service model.
+        String ct = "application/x-amz-json-1.0";
+
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"DesiredState\":\"{}\"}");
+        assertErrorCode(ct, "CloudApiService.DeleteResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\"}");
+        assertErrorCode(ct, "CloudApiService.GetResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\"}");
+        assertErrorCode(ct, "CloudApiService.GetResourceRequestStatus", "{}");
+        assertErrorCode(ct, "CloudApiService.ListResources", "{}");
+
+        // DesiredState is a required member of CreateResourceInput. An absent one used to become
+        // an empty object and provision anyway.
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\"}");
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\",\"DesiredState\":\"\"}");
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\",\"DesiredState\":\"not json\"}");
+    }
+
+    private void assertErrorCode(String contentType, String target, String body) {
+        given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(contentType, TEXT)))
+                .contentType(contentType)
+                .header("X-Amz-Target", target)
+                .body(body)
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("InvalidRequestException"));
+    }
+
+    @Test
     void getResourceReadsBackATypeTheReadSideDoesNotList() throws InterruptedException {
         String ct = "application/x-amz-json-1.0";
         // AWS::EC2::InternetGateway is provisionable but not one of the listed types, so before
