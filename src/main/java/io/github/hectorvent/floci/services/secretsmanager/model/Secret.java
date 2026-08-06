@@ -28,6 +28,7 @@ public class Secret {
     private RotationRules rotationRules;
     private Instant lastRotatedDate;
     private Instant nextRotationDate;
+    private String targetAttachmentOwner;
 
     @RegisterForReflection
     public record RotationRules(
@@ -171,5 +172,13 @@ public class Secret {
 
     public void setNextRotationDate(Instant nextRotationDate) {
         this.nextRotationDate = nextRotationDate;
+    }
+
+    public String getTargetAttachmentOwner() {
+        return targetAttachmentOwner;
+    }
+
+    public void setTargetAttachmentOwner(String targetAttachmentOwner) {
+        this.targetAttachmentOwner = targetAttachmentOwner;
     }
 }
