@@ -218,6 +218,25 @@ public class RuntimeApiServer {
         return latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * True when this extension is currently parked on {@code /extension/event/next} — its request
+     * reached the handler and was stored as the waiting context rather than answered immediately.
+     *
+     * <p>Package-private and used only by tests that race {@link #stop()} against a poll already in
+     * flight. Such a test cannot use a sleep to decide the poll has landed: the request parking is
+     * what makes {@code stop()}'s SHUTDOWN fan-out see a waiting context instead of queueing the
+     * event for a connection that is about to be torn down, and on a loaded machine an arbitrary
+     * sleep expires before that happens. Polling this instead makes the wait condition-based.
+     *
+     * <p>Read under {@code lock}, per the locking discipline in the class doc.
+     */
+    boolean isExtensionParked(String identifier) {
+        synchronized (lock) {
+            RegisteredExtension extension = extensions.get(identifier);
+            return extension != null && extension.hasWaitingContext();
+        }
+    }
+
     public CompletableFuture<Void> start() {
         CompletableFuture<Void> started = new CompletableFuture<>();
 
