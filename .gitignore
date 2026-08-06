@@ -36,6 +36,3 @@ scripts/node_modules/
 # Python tooling caches
 __pycache__/
 *.pyc
-
-# Agent tooling (local skill registry / SDD cache)
-.atl/

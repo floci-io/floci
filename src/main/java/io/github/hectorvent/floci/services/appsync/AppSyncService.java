@@ -25,7 +25,7 @@ public class AppSyncService {
     private static final Logger LOG = Logger.getLogger(AppSyncService.class);
 
     private final StorageBackend<String, GraphqlApi> apiStore;
-    private final StorageBackend<String, String> schemaStore;
+    private final AccountAwareStorageBackend<String> schemaStore;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     private final StorageBackend<String, DataSource> dataSourceStore;
     private final StorageBackend<String, Resolver> resolverStore;
@@ -47,7 +47,7 @@ public class AppSyncService {
                           SchemaRegistry schemaRegistry, SchemaCreationWorker schemaCreationWorker,
                           Instance<RequestContext> requestContextInstance, ObjectMapper objectMapper,
                           AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
-                          StorageBackend<String, String> schemaStore) {
+                          AccountAwareStorageBackend<String> schemaStore) {
         this.apiStore = storageFactory.create("appsync", "appsync-apis.json", new TypeReference<>() {});
         this.schemaStore = schemaStore;
         this.schemaStatusStore = schemaStatusStore;
