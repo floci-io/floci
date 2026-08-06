@@ -219,6 +219,47 @@ class SesListManagementOptionsV2IntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void send_headerMissingValue_isRejectedLikeAws() {
+        // AWS enforces Content.Simple.Headers[].Value as a required member: a header object that omits
+        // Value is rejected with BadRequestException and a Smithy constraint message, rather than being
+        // silently dropped.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("""
+                    {
+                      "FromEmailAddress": "%s",
+                      "Destination": {"ToAddresses": ["lmo-x@floci.test"]},
+                      "Content": {"Simple": {"Subject": {"Data": "hi"}, "Body": {"Text": {"Data": "b"}},
+                        "Headers": [{"Name": "X-Foo"}]}}
+                    }
+                    """.formatted(FROM))
+        .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", org.hamcrest.Matchers.containsString(
+                        "content.simple.headers.1.member.value"))
+                .body("message", org.hamcrest.Matchers.containsString("Member must not be null"));
+    }
+
+    @Test
+    @Order(11)
+    void send_headerMissingName_isRejectedLikeAws() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("""
+                    {
+                      "FromEmailAddress": "%s",
+                      "Destination": {"ToAddresses": ["lmo-x@floci.test"]},
+                      "Content": {"Simple": {"Subject": {"Data": "hi"}, "Body": {"Text": {"Data": "b"}},
+                        "Headers": [{"Value": "bar"}]}}
+                    }
+                    """.formatted(FROM))
+        .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", org.hamcrest.Matchers.containsString(
+                        "content.simple.headers.1.member.name"))
+                .body("message", org.hamcrest.Matchers.containsString("Member must not be null"));
+    }
+
+    @Test
     @Order(99)
     void cleanup_deleteContactList() {
         given().header("Authorization", AUTH)

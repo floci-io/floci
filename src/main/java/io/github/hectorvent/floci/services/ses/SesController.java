@@ -444,7 +444,8 @@ public class SesController {
                 String subject = simple.path("Subject").path("Data").asText("");
                 String bodyText = simple.path("Body").path("Text").path("Data").asText(null);
                 String bodyHtml = simple.path("Body").path("Html").path("Data").asText(null);
-                List<MessageHeader> additionalHeaders = parseHeadersArray(simple.path("Headers"));
+                List<MessageHeader> additionalHeaders =
+                        parseHeadersArray(simple.path("Headers"), "content.simple.headers");
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
                         bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
                         configurationSetName, emailTags, additionalHeaders, listManagement, region);
@@ -469,7 +470,8 @@ public class SesController {
                             "Content.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
                 }
                 JsonNode templateData = parseTemplateData(template, "TemplateData");
-                List<MessageHeader> additionalHeaders = parseHeadersArray(template.path("Headers"));
+                List<MessageHeader> additionalHeaders =
+                        parseHeadersArray(template.path("Headers"), "content.template.headers");
                 if (hasName || hasArn) {
                     String resolvedName = hasName
                             ? templateName
@@ -566,7 +568,8 @@ public class SesController {
 
             JsonNode defaultTemplateData = parseTemplateData(template, "TemplateData");
             List<MessageTag> defaultEmailTags = parseEmailTagsArray(request.path("DefaultEmailTags"), "DefaultEmailTags");
-            List<MessageHeader> defaultHeaders = parseHeadersArray(template.path("Headers"));
+            List<MessageHeader> defaultHeaders =
+                    parseHeadersArray(template.path("Headers"), "defaultContent.template.headers");
 
             JsonNode bulkEntries = request.path("BulkEmailEntries");
             if (!bulkEntries.isArray() || bulkEntries.isEmpty()) {
@@ -575,6 +578,7 @@ public class SesController {
             }
 
             List<BulkEmailEntry> entries = new ArrayList<>();
+            int entryIndex = 1;
             for (JsonNode node : bulkEntries) {
                 if (!node.isObject()) {
                     throw new AwsException("BadRequestException",
@@ -588,8 +592,10 @@ public class SesController {
                 JsonNode replacementTemplate = requireObjectOrAbsent(replacementContent, "ReplacementTemplate");
                 JsonNode replacementData = parseTemplateData(replacementTemplate, "ReplacementTemplateData");
                 List<MessageTag> replacementTags = parseEmailTagsArray(node.path("ReplacementTags"), "ReplacementTags");
-                List<MessageHeader> entryReplacementHeaders = parseHeadersArray(node.path("ReplacementHeaders"));
+                List<MessageHeader> entryReplacementHeaders = parseHeadersArray(node.path("ReplacementHeaders"),
+                        "bulkEmailEntries." + entryIndex + ".replacementHeaders");
                 entries.add(new BulkEmailEntry(to, cc, bcc, replacementData, replacementTags, entryReplacementHeaders));
+                entryIndex++;
             }
 
             List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
@@ -2137,9 +2143,12 @@ public class SesController {
     /**
      * Parse a V2 SES {@code Content.Simple.Headers} / {@code Content.Template.Headers} array
      * (additional message headers, elements use {@code Name}/{@code Value}). Returns an empty
-     * list when the node is absent so callers can pass it through unconditionally.
+     * list when the node is absent so callers can pass it through unconditionally. Both members
+     * are required: an entry that omits {@code Name} or {@code Value} is rejected the way AWS
+     * does, with a Smithy constraint message anchored at {@code location} (e.g.
+     * {@code content.simple.headers}) and the offending 1-based index.
      */
-    private List<MessageHeader> parseHeadersArray(JsonNode headersNode) {
+    private List<MessageHeader> parseHeadersArray(JsonNode headersNode, String location) {
         if (headersNode.isMissingNode() || headersNode.isNull()) {
             return List.of();
         }
@@ -2147,20 +2156,35 @@ public class SesController {
             throw new AwsException("BadRequestException", "Headers must be an array.", 400);
         }
         List<MessageHeader> out = new ArrayList<>();
+        int index = 1;
         for (JsonNode h : headersNode) {
             if (!h.isObject()) {
                 throw new AwsException("BadRequestException",
                         "Headers entries must be JSON objects.", 400);
             }
-            String name = h.path("Name").asText(null);
-            String value = h.path("Value").asText(null);
-            if (name == null || name.isBlank()) {
+            JsonNode nameNode = h.get("Name");
+            JsonNode valueNode = h.get("Value");
+            if (nameNode == null || nameNode.isNull()) {
+                throw missingHeaderMember(location, index, "name");
+            }
+            if (valueNode == null || valueNode.isNull()) {
+                throw missingHeaderMember(location, index, "value");
+            }
+            String name = nameNode.asText();
+            if (name.isBlank()) {
                 throw new AwsException("BadRequestException",
                         "The header name must be specified.", 400);
             }
-            out.add(new MessageHeader(name, value));
+            out.add(new MessageHeader(name, valueNode.asText()));
+            index++;
         }
         return out;
+    }
+
+    private AwsException missingHeaderMember(String location, int index, String member) {
+        return new AwsException("BadRequestException",
+                "1 validation error detected: Value at '" + location + "." + index + ".member." + member
+                        + "' failed to satisfy constraint: Member must not be null", 400);
     }
 
     /**
