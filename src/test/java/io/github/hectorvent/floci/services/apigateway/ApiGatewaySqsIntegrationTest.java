@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.not;
 class ApiGatewaySqsIntegrationTest {
 
     private static final ObjectMapper mapper = new ObjectMapper();
+    private static final String URI_ACCOUNT_ID = "123456789012";
     private static final String QUEUE_NAME = "apigw-sqs-test";
     private static final String PATH_QUEUE_NAME = "apigw-sqs-path-queue";
     private static final String EXPLICIT_QUEUE_NAME = "apigw-sqs-explicit-queue";
@@ -198,7 +199,7 @@ class ApiGatewaySqsIntegrationTest {
         var integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
-        integrationNode.put("uri", "arn:aws:apigateway:us-east-1:sqs:path/000000000000/" + uriQueueName);
+        integrationNode.put("uri", "arn:aws:apigateway:us-east-1:sqs:path/" + URI_ACCOUNT_ID + "/" + uriQueueName);
         integrationNode.put("passthroughBehavior", "NEVER");
 
         var reqParams = mapper.createObjectNode();
