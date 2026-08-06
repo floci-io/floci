@@ -410,7 +410,7 @@ public class ResolvedServiceCatalog {
                 descriptor("cloudhsmv2", "cloudhsmv2", config.services().cloudhsmv2().enabled(), true,
                         "cloudhsmv2", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("BaldrApiService."), Set.of("cloudhsm"), Set.of(), Set.of())
+                        Set.of("BaldrApiService."), Set.of("cloudhsm"), Set.of(), Set.of()),
                 descriptor("rum", "rum", config.services().rum().enabled(), true,
                         "rum", storageMode(config.storage().services().rum().mode(), config.storage().mode()),
                         config.storage().services().rum().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

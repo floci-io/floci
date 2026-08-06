@@ -133,10 +133,9 @@ public class AwsJson11Controller {
                                BcmDataExportsJsonHandler bcmDataExportsJsonHandler,
                                ConfigServiceJsonHandler configServiceJsonHandler,
                                CloudTrailJsonHandler cloudTrailJsonHandler,
-                               CloudControlJsonHandler cloudControlJsonHandler,
-                               CloudHsmV2JsonHandler cloudHsmV2JsonHandler) {
                                LightsailJsonHandler lightsailJsonHandler,
-                               CloudControlJsonHandler cloudControlJsonHandler) {
+                               CloudControlJsonHandler cloudControlJsonHandler,
+                               CloudHsmV2JsonHandler cloudHsmV2JsonHandler){
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
