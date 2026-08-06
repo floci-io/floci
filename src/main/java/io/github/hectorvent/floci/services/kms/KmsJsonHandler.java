@@ -476,10 +476,9 @@ public class KmsJsonHandler {
     }
 
     private Response handleListKeyPolicies(JsonNode request, String region) {
+        // Limit and Marker are accepted by simply not being read; see the service javadoc.
         Map<String, Object> result = service.listKeyPolicies(
                 requiredText(request, "KeyId"),
-                request.path("Limit").isMissingNode() ? null : request.path("Limit").asInt(),
-                request.path("Marker").asText(null),
                 region);
         return Response.ok(objectMapper.valueToTree(result)).build();
     }

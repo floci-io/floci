@@ -494,13 +494,14 @@ public class KmsService {
      * {@code default}, so the result can never be truncated: {@code Truncated} is always false and
      * {@code NextMarker} is omitted.
      *
-     * <p>{@code Limit} and {@code Marker} are accepted and ignored, which is deliberate. A single
-     * policy name fits inside any valid limit, and the model does not declare
-     * {@code InvalidMarkerException} for this operation, unlike the genuinely paginated
-     * {@code ListKeys}, {@code ListAliases}, {@code ListGrants} and {@code ListResourceTags}. There is
-     * therefore no marker this call could legitimately reject.
+     * <p>{@code Limit} and {@code Marker} are accepted at the wire and ignored: the handler simply
+     * never reads them, which is exactly what moto's KMS does for this operation. A single policy
+     * name fits inside any limit, so the values cannot change the response. Real AWS rejects an
+     * out-of-range {@code Limit} server-side (the model bounds LimitType to [1..1000], but SDKs do
+     * not fully enforce that client-side — botocore checks only the minimum); not re-validating it
+     * here is deliberate leniency, consistent with the emulator's general posture.
      */
-    public Map<String, Object> listKeyPolicies(String keyId, Integer limit, String marker, String region) {
+    public Map<String, Object> listKeyPolicies(String keyId, String region) {
         String policyName = (String) getKeyPolicy(keyId, region).get("PolicyName");
 
         Map<String, Object> result = new HashMap<>();

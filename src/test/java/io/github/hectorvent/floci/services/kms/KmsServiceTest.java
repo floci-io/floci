@@ -1060,7 +1060,7 @@ class KmsServiceTest {
     void listKeyPoliciesReturnsDefaultPolicy() {
         KmsKey key = kmsService.createKey("list-policy-key", REGION);
 
-        Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), null, null, REGION);
+        Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), REGION);
 
         @SuppressWarnings("unchecked")
         List<String> policyNames = (List<String>) result.get("PolicyNames");
@@ -1072,31 +1072,19 @@ class KmsServiceTest {
     }
 
     @Test
-    void listKeyPoliciesResolvesByArnAndAlias() {
+    void listKeyPoliciesResolvesByArn() {
+        // The model documents KeyId for this operation as key ID or key ARN only; alias
+        // acceptance is a Floci-wide resolveKey superset, not this operation's AWS contract.
         KmsKey key = kmsService.createKey("list-policy-arn", REGION);
 
         assertEquals(List.of("default"),
-                kmsService.listKeyPolicies(key.getArn(), null, null, REGION).get("PolicyNames"));
-    }
-
-    @Test
-    void listKeyPoliciesIgnoresLimitAndMarker() {
-        // A single policy name cannot be paginated, and unlike ListKeys / ListAliases / ListGrants /
-        // ListResourceTags this operation does not declare InvalidMarkerException, so there is no
-        // marker it could legitimately reject.
-        KmsKey key = kmsService.createKey("list-policy-paging", REGION);
-
-        for (Integer limit : new Integer[] {null, 1, 1000, 0, 1001}) {
-            Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), limit, "anything", REGION);
-            assertEquals(List.of("default"), result.get("PolicyNames"), "limit=" + limit);
-            assertFalse((Boolean) result.get("Truncated"), "limit=" + limit);
-        }
+                kmsService.listKeyPolicies(key.getArn(), REGION).get("PolicyNames"));
     }
 
     @Test
     void listKeyPoliciesOnNonExistentKeyThrows() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                kmsService.listKeyPolicies("non-existent", null, null, REGION));
+                kmsService.listKeyPolicies("non-existent", REGION));
         assertEquals("NotFoundException", ex.getErrorCode());
     }
 
