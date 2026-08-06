@@ -271,6 +271,38 @@ class ApiGatewayExecuteApiHostIntegrationTest {
                 .body("disableExecuteApiEndpoint", equalTo(false));
     }
 
+    /**
+     * The direct {@code /execute-api/{apiId}/{stage}/...} form is the same execute-api endpoint as
+     * the {@code *.execute-api.localhost.*} host, so {@code disableExecuteApiEndpoint} has to reject
+     * there too — otherwise the two entry points disagree about whether the API is invokable.
+     *
+     * <p>Uses its own HTTP API rather than the shared {@code apiId}: by this point the shared one has
+     * a REST API with a colliding identifier (see {@link #directPathPrefersRestApiWhenIdentifiersCollide}),
+     * so its direct path resolves to REST and never reaches the v2 dispatch this guards.
+     */
+    @Test
+    @Order(10)
+    void disabledExecuteApiEndpointAlsoRejectsTheDirectPath() {
+        String isolatedApiId = given()
+                .header("Authorization", AUTHORIZATION)
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"execute-api-direct-disable-test","protocolType":"HTTP",
+                         "disableExecuteApiEndpoint":true}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("disableExecuteApiEndpoint", equalTo(true))
+                .extract().path("apiId");
+
+        given()
+                .when().get("/execute-api/" + isolatedApiId + "/dev/accounts")
+                .then()
+                .statusCode(403)
+                .body("message", equalTo("Forbidden"));
+    }
+
     private static void createStage(String stageName) {
         given()
                 .header("Authorization", AUTHORIZATION)

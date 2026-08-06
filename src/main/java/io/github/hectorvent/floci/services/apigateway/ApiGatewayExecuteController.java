@@ -1208,6 +1208,21 @@ public class ApiGatewayExecuteController {
     private Response dispatchV2(String httpMethod, String apiId, String stageName,
                                 String proxy, HttpHeaders headers, UriInfo uriInfo,
                                 byte[] body, String region) {
+        // disableExecuteApiEndpoint is enforced here rather than in the caller because both the
+        // host-based route (*.execute-api.localhost.*, already rejected by ApiGatewayExecuteApiHostFilter)
+        // and the direct /execute-api/{apiId}/{stage}/... route land here. Checking at the single
+        // choke point keeps the two entry points from disagreeing about whether an API is invokable.
+        // A missing API is not this method's error to report — findMatchingRoute below 404s.
+        try {
+            if (apiGatewayV2Service.getApi(region, apiId).isDisableExecuteApiEndpoint()) {
+                return Response.status(403)
+                        .entity(jsonMessage("Forbidden"))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+        } catch (AwsException ignored) {
+            // fall through
+        }
+
         String path = "/" + (proxy == null ? "" : proxy);
 
         Route route = apiGatewayV2Service.findMatchingRoute(region, apiId, httpMethod, path);
