@@ -411,6 +411,8 @@ public class CloudFormationService {
 
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
                                  boolean isCreate, String region, String accountId) {
+        StackUpdateSnapshot previousState = snapshotForUpdate(stack);
+        boolean updateCommitted = false;
         try {
             JsonNode template = parseTemplate(templateBody);
 
@@ -469,7 +471,16 @@ public class CloudFormationService {
                         stack.getResources().put(logicalId, resource);
                     }
 
-                    addEvent(stack, logicalId, null, type, "CREATE_IN_PROGRESS", null);
+                    String inProgressStatus = isCreate
+                            ? "CREATE_IN_PROGRESS"
+                            : "UPDATE_IN_PROGRESS";
+                    addEvent(
+                            stack,
+                            logicalId,
+                            resource.getPhysicalId(),
+                            type,
+                            inProgressStatus,
+                            null);
                     if ("AWS::CloudFormation::Stack".equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
@@ -478,6 +489,15 @@ public class CloudFormationService {
                         resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes());
+                    }
+                    resource.setUpdateReplacePolicy(
+                            resDef.path("UpdateReplacePolicy").asText(null));
+                    if (!isCreate) {
+                        if ("CREATE_COMPLETE".equals(resource.getStatus())) {
+                            resource.setStatus("UPDATE_COMPLETE");
+                        } else if ("CREATE_FAILED".equals(resource.getStatus())) {
+                            resource.setStatus("UPDATE_FAILED");
+                        }
                     }
                     stack.getResources().put(logicalId, resource);
 
@@ -498,7 +518,8 @@ public class CloudFormationService {
             // A resource failed to provision: stop, and (on create) roll back what we built so a
             // corrected re-deploy starts from a clean slate (acceptance criterion #9).
             if (failedResource != null) {
-                rollbackFailedExecution(stack, region, isCreate, failedResource);
+                rollbackFailedExecution(
+                        stack, region, isCreate, failedResource, previousState);
                 return;
             }
 
@@ -546,6 +567,24 @@ public class CloudFormationService {
                         exportName, value, stack.getStackName());
             });
 
+            if (!isCreate) {
+                updateCommitted = true;
+                if (hasReplacementUpdates(stack)) {
+                    stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
+                    stack.setLastUpdatedTime(now());
+                    addEvent(stack, stack.getStackName(), stack.getStackId(),
+                            "AWS::CloudFormation::Stack",
+                            "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", null);
+                    // The committed template and new physical IDs must be durable before old
+                    // resources are deleted during replacement cleanup.
+                    persistStack(stack);
+                }
+                List<UpdateCleanupFailure> cleanupFailures =
+                        finishCommittedResourceCleanup(stack);
+                finishCommittedStackUpdate(stack, cleanupFailures);
+                return;
+            }
+
             String completeStatus = isCreate ? "CREATE_COMPLETE" : "UPDATE_COMPLETE";
             stack.setStatus(completeStatus);
             stack.setLastUpdatedTime(now());
@@ -555,27 +594,46 @@ public class CloudFormationService {
             LOG.infov("Stack {0} execution complete: {1}", stack.getStackName(), completeStatus);
 
         } catch (Exception e) {
+            if (!isCreate && updateCommitted) {
+                LOG.errorv(
+                        "Stack {0} update cleanup could not finish: {1}",
+                        stack.getStackName(), e.getMessage());
+                stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
+                stack.setStatusReason(e.getMessage());
+                stack.setLastUpdatedTime(now());
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack",
+                        "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", e.getMessage());
+                persistStack(stack);
+                return;
+            }
             LOG.errorv("Stack {0} execution failed: {1}", stack.getStackName(), e.getMessage());
             String failStatus = isCreate ? "CREATE_FAILED" : "UPDATE_FAILED";
             stack.setStatus(failStatus);
             stack.setStatusReason(e.getMessage());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", failStatus, e.getMessage());
-            persistStack(stack);
+            if (isCreate) {
+                persistStack(stack);
+            } else {
+                rollbackFailedUpdate(
+                        stack, region, previousState, e.getMessage());
+            }
         }
     }
 
     /**
      * Handles a resource that failed to provision.
      *
-     * <p>On a <b>create</b>, rolls back by deleting the resources that were successfully created in
-     * this execution, leaving a clean slate ({@code ROLLBACK_COMPLETE}) so a corrected re-deploy can
-     * start from scratch. On an <b>update</b>, marks {@code UPDATE_ROLLBACK_COMPLETE} and keeps the
-     * prior physical IDs so a corrected re-deploy proceeds (full prior-template restoration is out
-     * of scope — see plan Part 7).
+     * <p>On a <b>create</b>, rolls back by deleting resources created by the failed execution. On
+     * an <b>update</b>, restores the prior resource, template, output, and export state.
      */
-    private void rollbackFailedExecution(Stack stack, String region, boolean isCreate,
-                                         StackResource failedResource) {
+    private void rollbackFailedExecution(
+            Stack stack,
+            String region,
+            boolean isCreate,
+            StackResource failedResource,
+            StackUpdateSnapshot previousState) {
         String failStatus = isCreate ? "CREATE_FAILED" : "UPDATE_FAILED";
         stack.setStatus(failStatus);
         stack.setStatusReason(failedResource.getStatusReason());
@@ -605,18 +663,274 @@ public class CloudFormationService {
                 LOG.errorv("Stack {0} rollback failed: {1}", stack.getStackName(), reason);
             }
         } else {
-            if ("true".equals(failedResource.getAttributes().remove(
-                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))) {
-                failedResource.setStatus("CREATE_COMPLETE");
-                failedResource.setStatusReason(null);
-            }
-            stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
-            stack.setLastUpdatedTime(now());
-            addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", null);
-            LOG.infov("Stack {0} update rolled back (UPDATE_ROLLBACK_COMPLETE)", stack.getStackName());
+            rollbackFailedUpdate(
+                    stack, region, previousState, failedResource.getStatusReason());
+            return;
         }
         persistStack(stack);
+    }
+
+    private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack) {
+        List<UpdateCleanupFailure> failures = new ArrayList<>();
+        for (StackResource resource : stack.getResources().values()) {
+            String cleanupPhysicalId = provisioner.updateCleanupPhysicalId(resource);
+            if (cleanupPhysicalId != null) {
+                addEvent(
+                        stack,
+                        resource.getLogicalId(),
+                        cleanupPhysicalId,
+                        resource.getResourceType(),
+                        "DELETE_IN_PROGRESS",
+                        null);
+            }
+            while (true) {
+                CloudFormationResourceProvisioner.UpdateCleanupResult result =
+                        provisioner.completeUpdate(resource);
+                if (!result.applicable()) {
+                    break;
+                }
+                if (result.complete()) {
+                    if (cleanupPhysicalId != null) {
+                        addEvent(
+                                stack,
+                                resource.getLogicalId(),
+                                cleanupPhysicalId,
+                                resource.getResourceType(),
+                                "DELETE_COMPLETE",
+                                null);
+                    }
+                    provisioner.clearUpdate(resource);
+                    break;
+                }
+                if (result.attempts() < 3) {
+                    continue;
+                }
+
+                String reason = result.failureReason() != null
+                        ? result.failureReason()
+                        : "Resource deletion failed during update cleanup";
+                failures.add(new UpdateCleanupFailure(
+                        resource.getLogicalId(), result.previousPhysicalId(), reason));
+                addEvent(
+                        stack,
+                        resource.getLogicalId(),
+                        result.previousPhysicalId(),
+                        resource.getResourceType(),
+                        "DELETE_FAILED",
+                        reason);
+                provisioner.clearUpdate(resource);
+                break;
+            }
+        }
+        return failures;
+    }
+
+    private void finishCommittedStackUpdate(
+            Stack stack, List<UpdateCleanupFailure> cleanupFailures) {
+        String statusReason = null;
+        if (!cleanupFailures.isEmpty()) {
+            statusReason = "The following resource(s) could not be deleted during update cleanup: ["
+                    + cleanupFailures.stream()
+                            .map(failure -> failure.logicalId()
+                                    + " (" + failure.physicalId() + ")")
+                            .collect(java.util.stream.Collectors.joining(", "))
+                    + "].";
+        }
+        stack.setStatus("UPDATE_COMPLETE");
+        stack.setStatusReason(statusReason);
+        stack.setLastUpdatedTime(now());
+        addEvent(stack, stack.getStackName(), stack.getStackId(),
+                "AWS::CloudFormation::Stack", "UPDATE_COMPLETE", statusReason);
+        persistStack(stack);
+        LOG.infov("Stack {0} execution complete: UPDATE_COMPLETE", stack.getStackName());
+    }
+
+    private boolean hasReplacementUpdates(Stack stack) {
+        return stack.getResources().values().stream()
+                .anyMatch(provisioner::hasReplacementUpdate);
+    }
+
+    private void rollbackFailedUpdate(
+            Stack stack,
+            String region,
+            StackUpdateSnapshot previousState,
+            String failureReason) {
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        stack.setStatusReason(failureReason);
+        addEvent(stack, stack.getStackName(), stack.getStackId(),
+                "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", failureReason);
+
+        List<String> rollbackFailures = rollbackUpdatedResources(
+                stack, previousState.resources(), region);
+        if (rollbackFailures.isEmpty()) {
+            stack.setTemplateBody(previousState.templateBody());
+        }
+        try {
+            restoreOutputAndExportState(stack, region, previousState);
+        } catch (Exception e) {
+            rollbackFailures.add("Outputs");
+            LOG.errorv("Could not restore outputs and exports for stack {0}: {1}",
+                    stack.getStackName(), e.getMessage());
+        }
+        stack.setLastUpdatedTime(now());
+        if (rollbackFailures.isEmpty()) {
+            stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
+            stack.setStatusReason(null);
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", null);
+            LOG.infov("Stack {0} update rolled back (UPDATE_ROLLBACK_COMPLETE)",
+                    stack.getStackName());
+        } else {
+            String reason = "The following resource(s) failed to roll back: ["
+                    + String.join(", ", rollbackFailures) + "].";
+            stack.setStatus("UPDATE_ROLLBACK_FAILED");
+            stack.setStatusReason(reason);
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", reason);
+            LOG.errorv("Stack {0} update rollback failed: {1}", stack.getStackName(), reason);
+        }
+        persistStack(stack);
+    }
+
+    private List<String> rollbackUpdatedResources(
+            Stack stack,
+            Map<String, StackResource> previousResources,
+            String region) {
+        List<StackResource> resources = new ArrayList<>(stack.getResources().values());
+        Collections.reverse(resources);
+        List<String> failures = new ArrayList<>();
+        List<String> removedResources = new ArrayList<>();
+        for (StackResource resource : resources) {
+            try {
+                StackResource previous = previousResources.get(resource.getLogicalId());
+                if (previous == null) {
+                    boolean rollbackOwned = "true".equals(resource.getAttributes().get(
+                            CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+                    if (resource.getPhysicalId() != null || rollbackOwned) {
+                        addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                                resource.getResourceType(), "DELETE_IN_PROGRESS",
+                                "Resource creation cancelled during update rollback");
+                        provisioner.delete(resource, region);
+                    }
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "DELETE_COMPLETE",
+                            "Resource creation cancelled during update rollback");
+                    removedResources.add(resource.getLogicalId());
+                } else if ("true".equals(resource.getAttributes().remove(
+                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))
+                        || provisioner.rollbackUpdate(resource)) {
+                    resource.setStatus(previous.getStatus());
+                    resource.setStatusReason(previous.getStatusReason());
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "UPDATE_COMPLETE",
+                            "Resource update rolled back");
+                } else if (resource.getStatus() != null
+                        && resource.getStatus().startsWith("UPDATE_")) {
+                    String reason = "Rollback is not implemented for "
+                            + resource.getResourceType();
+                    failures.add(resource.getLogicalId());
+                    resource.setStatus("UPDATE_FAILED");
+                    resource.setStatusReason(reason);
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "UPDATE_FAILED", reason);
+                }
+            } catch (Exception e) {
+                failures.add(resource.getLogicalId());
+                resource.setStatus("UPDATE_FAILED");
+                resource.setStatusReason(e.getMessage());
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "UPDATE_FAILED", e.getMessage());
+                LOG.errorv("Could not roll back resource {0}: {1}",
+                        resource.getLogicalId(), e.getMessage());
+            }
+        }
+        removedResources.forEach(stack.getResources()::remove);
+        return failures;
+    }
+
+    private void restoreOutputAndExportState(
+            Stack stack, String region, StackUpdateSnapshot previousState) {
+        RuntimeException storageFailure = null;
+        for (String exportName : new ArrayList<>(stack.getExports().keySet())) {
+            String key = exportKey(region, exportName);
+            exports.remove(key);
+            try {
+                exportBackend.deleteForAccount(storageAccount, key);
+            } catch (RuntimeException e) {
+                storageFailure = appendFailure(storageFailure, e);
+            }
+        }
+
+        stack.getOutputs().clear();
+        stack.getOutputs().putAll(previousState.outputs());
+        stack.getExports().clear();
+        stack.getExports().putAll(previousState.exports());
+        stack.getOutputExportNames().clear();
+        stack.getOutputExportNames().putAll(previousState.outputExportNames());
+
+        for (Map.Entry<String, String> entry : previousState.exports().entrySet()) {
+            String key = exportKey(region, entry.getKey());
+            exports.put(key, entry.getValue());
+            try {
+                exportBackend.putForAccount(storageAccount, key, entry.getValue());
+            } catch (RuntimeException e) {
+                storageFailure = appendFailure(storageFailure, e);
+            }
+        }
+        if (storageFailure != null) {
+            throw storageFailure;
+        }
+    }
+
+    private static RuntimeException appendFailure(
+            RuntimeException existing, RuntimeException additional) {
+        if (existing == null) {
+            return additional;
+        }
+        existing.addSuppressed(additional);
+        return existing;
+    }
+
+    private StackUpdateSnapshot snapshotForUpdate(Stack stack) {
+        return new StackUpdateSnapshot(
+                stack.getTemplateBody(),
+                new LinkedHashMap<>(stack.getOutputs()),
+                new LinkedHashMap<>(stack.getExports()),
+                new LinkedHashMap<>(stack.getOutputExportNames()),
+                copyResources(stack.getResources()));
+    }
+
+    private Map<String, StackResource> copyResources(
+            Map<String, StackResource> resources) {
+        Map<String, StackResource> copies = new LinkedHashMap<>();
+        resources.forEach((logicalId, resource) ->
+                copies.put(logicalId, copyResource(resource)));
+        return copies;
+    }
+
+    private StackResource copyResource(StackResource source) {
+        StackResource copy = new StackResource();
+        copy.setLogicalId(source.getLogicalId());
+        copy.setPhysicalId(source.getPhysicalId());
+        copy.setResourceType(source.getResourceType());
+        copy.setStatus(source.getStatus());
+        copy.setStatusReason(source.getStatusReason());
+        copy.setUpdateReplacePolicy(source.getUpdateReplacePolicy());
+        copy.setTimestamp(source.getTimestamp());
+        copy.setAttributes(new HashMap<>(source.getAttributes()));
+        return copy;
+    }
+
+    private record StackUpdateSnapshot(
+            String templateBody,
+            Map<String, String> outputs,
+            Map<String, String> exports,
+            Map<String, String> outputExportNames,
+            Map<String, StackResource> resources) {
+    }
+
+    private record UpdateCleanupFailure(
+            String logicalId, String physicalId, String failureReason) {
     }
 
     /** Deletes every resource created in this execution, in reverse order. */
