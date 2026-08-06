@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.resourcegroupstagging;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
@@ -131,12 +132,14 @@ public class ResourceGroupsTaggingService implements Resettable {
     private boolean matchesResourceTypeFilters(ResourceTagMapping m, List<String> resourceTypeFilters) {
         if (resourceTypeFilters == null || resourceTypeFilters.isEmpty()) return true;
         // ARN: arn:aws:<service>:<region>:<account>:<type>/<id>  or  arn:aws:<service>:::...
-        String arn = m.getResourceArn();
-        String[] parts = arn.split(":", 6);
-        if (parts.length < 3) return false;
-        String service = parts[2];
-        // resource part is parts[5]: "type/id" or just "type"
-        String resourcePart = parts.length >= 6 ? parts[5] : "";
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(m.getResourceArn());
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        String service = arn.service();
+        String resourcePart = arn.resource(); // "type/id" or just "type"
         String resourceType = resourcePart.contains("/")
                 ? resourcePart.substring(0, resourcePart.indexOf('/'))
                 : resourcePart;

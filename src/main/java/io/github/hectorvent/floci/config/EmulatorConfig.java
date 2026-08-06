@@ -4,6 +4,7 @@ import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 @ConfigMapping(prefix = "floci")
 public interface EmulatorConfig {
@@ -85,6 +86,19 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean strictClaiming();
+
+        /**
+         * When enabled, a REST request whose SigV4 credential scope names a service
+         * absent from the catalog is rejected with {@code UnknownOperationException}
+         * instead of falling through JAX-RS matching into S3's path-style routes,
+         * where it surfaces as a misleading {@code NoSuchBucket} (issue #1754).
+         *
+         * <p>On by default. Turn it off if Floci serves a route whose signing scope
+         * is not yet enumerated in the catalog: the request then falls through as it
+         * did before, rather than failing with a 404 that has no workaround.
+         */
+        @WithDefault("true")
+        boolean rejectUnknownServiceScope();
     }
 
     interface DnsConfig {
@@ -177,6 +191,59 @@ public interface EmulatorConfig {
         WalConfig wal();
 
         ServiceStorageOverrides services();
+
+        EfsSharingConfig efs();
+    }
+
+    /**
+     * Emulates an Amazon EFS access point's POSIX ownership for the shared local Docker volumes
+     * that stand in for EFS file systems. A Docker named volume is created {@code root:root 0755},
+     * so a container whose image runs as a non-root {@code USER} (as ECS tasks and
+     * access-point-mounted workloads typically do) then cannot create files on it. Real EFS
+     * applies the access point's {@code PosixUser} to all I/O and initialises the root directory
+     * per {@code RootDirectory.CreationInfo}. These settings reproduce that: Floci initialises the
+     * shared volume root's owner/permissions once and can run the mounting containers under a
+     * fixed identity, so the emulated file system is writable by the intended uid/gid.
+     *
+     * <p>Every value is empty/false by default, so a shared volume behaves exactly as before —
+     * a plain named volume with no ownership change — unless explicitly configured.
+     */
+    interface EfsSharingConfig {
+        /** Owner uid applied to the volume root (EFS {@code RootDirectory.CreationInfo.OwnerUid}). */
+        OptionalInt ownerUid();
+
+        /** Owner gid applied to the volume root (EFS {@code RootDirectory.CreationInfo.OwnerGid}). */
+        OptionalInt ownerGid();
+
+        /**
+         * Octal permissions applied to the volume root (EFS {@code RootDirectory.CreationInfo.Permissions}),
+         * e.g. {@code "0777"}. A 4-digit value carries the special bits exactly as AWS does — e.g.
+         * {@code "2775"} sets the setgid bit so subdirectories inherit the owner gid (the standard
+         * POSIX pattern for a group-shared tree). When empty, no {@code chmod} for the permission
+         * bits is performed; however the init helper container still runs if {@link #ownerUid()} or
+         * {@link #ownerGid()} is set. Volume-root initialisation is skipped entirely only when all of
+         * {@code owner-uid}, {@code owner-gid}, and {@code root-permissions} are left at their
+         * defaults (plain named volume).
+         */
+        Optional<String> rootPermissions();
+
+        /** Lightweight image used for the one-off {@code chown}/{@code chmod} of the volume root. */
+        @WithDefault("busybox:stable")
+        String initImage();
+
+        /**
+         * Run containers that mount a shared volume as this {@code "uid[:gid]"}, emulating the
+         * access point's {@code PosixUser} that squashes all file-system I/O to a fixed identity.
+         * Empty leaves the container's image {@code USER} in effect.
+         */
+        Optional<String> mountUser();
+
+        /**
+         * Supplementary group id added to containers that mount a shared volume, so a process
+         * running under a different primary uid can still write a group-shared tree owned by
+         * {@link #ownerGid()}. Empty adds no supplementary group.
+         */
+        OptionalInt mountGroupAdd();
     }
 
     interface ServiceStorageOverrides {
@@ -202,6 +269,7 @@ public interface EmulatorConfig {
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
+        LightsailStorageConfig lightsail();
         CodePipelineStorageConfig codepipeline();
         S3VectorsStorageConfig s3vectors();
         EcsStorageConfig ecs();
@@ -211,6 +279,8 @@ public interface EmulatorConfig {
         TranscribeStorageConfig transcribe();
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
+        CloudTrailStorageConfig cloudtrail();
+        RumStorageConfig rum();
     }
 
     interface SsmStorageConfig {
@@ -349,6 +419,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface LightsailStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodePipelineStorageConfig {
         Optional<String> mode();
 
@@ -399,6 +476,20 @@ public interface EmulatorConfig {
     }
 
     interface ElasticBeanstalkStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface CloudTrailStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface RumStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -472,6 +563,7 @@ public interface EmulatorConfig {
         ResourceGroupsTaggingServiceConfig tagging();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
+        MwaaServiceConfig mwaa();
         PipesServiceConfig pipes();
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
@@ -497,11 +589,13 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
         CloudHsmV2ServiceConfig cloudhsmv2();
+        RumServiceConfig rum();
     }
 
     interface IotServiceConfig {
@@ -530,7 +624,12 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
-    interface CloudTrailServiceConfig {
+    interface RumServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface LightsailServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -539,7 +638,6 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
     }
-
     interface S3VectorsServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -578,6 +676,17 @@ public interface EmulatorConfig {
     interface ConfigServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** How often the writer flushes pending records into the destination
+         *  bucket. Real AWS delivers data events with ~5-minute lag; the
+         *  default here is 60s so dev/CI feedback loops stay fast. */
+        @WithDefault("60")
+        int flushIntervalSeconds();
     }
 
     interface AutoScalingServiceConfig {
@@ -642,6 +751,9 @@ public interface EmulatorConfig {
     interface S3ServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean enforceAuth();
 
         @WithDefault("3600")
         int defaultPresignExpirySeconds();
@@ -932,6 +1044,10 @@ public interface EmulatorConfig {
     interface StepFunctionsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
+        @WithDefault("true")
+        boolean allowPlaintextHttp();
     }
 
     interface CloudFormationServiceConfig {
@@ -1054,6 +1170,58 @@ public interface EmulatorConfig {
     interface BedrockRuntimeServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Converse/InvokeModel backend: "stub" (default, hardcoded response, no
+         * external calls) or "proxy" (forwards Converse to an OpenAI-compatible
+         * /chat/completions endpoint; see {@link BedrockProxyConfig}).
+         */
+        @WithDefault("stub")
+        String backend();
+
+        BedrockProxyConfig proxy();
+    }
+
+    interface BedrockProxyConfig {
+        /**
+         * Base URL of the OpenAI-compatible backend (Ollama, OpenRouter, LiteLLM,
+         * vLLM), e.g. "http://localhost:11434/v1". Required when backend=proxy;
+         * requests are POSTed to "{url}/chat/completions".
+         */
+        Optional<String> url();
+
+        /** Sent as "Authorization: Bearer {apiKey}" when present. */
+        Optional<String> apiKey();
+
+        /**
+         * Fallback OpenAI-side model id used when no explicit mapping matches
+         * and passthrough is disabled.
+         */
+        Optional<String> defaultModel();
+
+        /**
+         * Comma-separated {@code bedrockModelId=openaiModelId} pairs, e.g.
+         * {@code "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"}.
+         * A delimited string rather than a native Map config property: Bedrock
+         * model ids contain '.' and ':', which collide with SmallRye's per-key
+         * env-var naming convention for maps.
+         */
+        Optional<String> modelMapping();
+
+        /**
+         * When true, and no explicit mapping matches, forward the raw Bedrock
+         * model id as-is instead of requiring a mapping or defaultModel.
+         */
+        @WithDefault("false")
+        boolean passthrough();
+
+        /**
+         * How long to wait for the backend to finish generating a response before
+         * failing the request with ModelTimeoutException. Larger models on
+         * CPU-backed backends (e.g. Ollama) may need more than the default.
+         */
+        @WithDefault("60")
+        int requestTimeoutSeconds();
     }
 
     interface TextractServiceConfig {
@@ -1127,6 +1295,14 @@ public interface EmulatorConfig {
     interface AppSyncServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Worker threads for async schema creation. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_THREADS */
+        @WithDefault("4")
+        int schemaWorkerThreads();
+
+        /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
+        @WithDefault("30")
+        int schemaWorkerShutdownTimeoutSeconds();
     }
 
     interface BcmDataExportsServiceConfig {
@@ -1225,6 +1401,15 @@ public interface EmulatorConfig {
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Extra /etc/hosts entries added to every Lambda container, as "hostname:ip" pairs.
+         * The ip may be the literal "host-gateway" to map to the Docker host, mirroring
+         * {@code docker run --add-host hostname:host-gateway}.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS (comma-separated)
+         */
+        Optional<List<String>> extraHosts();
 
         /**
          * Concurrent executions ceiling applied per region. AWS Lambda's
@@ -1411,6 +1596,72 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean ecrRegistryMirror();
+
+        /**
+         * When true, starts k3s with {@code --flannel-backend=none --disable-network-policy
+         * --disable-kube-proxy} instead of its bundled networking stack. k3s's default flannel CNI
+         * and kube-proxy run embedded in the k3s server process itself (not separate, killable
+         * DaemonSets), so a real CNI (e.g. Cilium) can only cleanly take over if k3s never starts
+         * its own in the first place — there is no way to evict them after the fact. CoreDNS,
+         * local-path-provisioner, and metrics-server are unaffected; they don't depend on which CNI
+         * is in place.
+         */
+        @WithDefault("false")
+        boolean disableCni();
+    }
+
+    /**
+     * MWAA (Managed Workflows for Apache Airflow), backed by a real Apache Airflow instance
+     * (LocalExecutor) plus a dedicated Postgres metadata database, one pair of containers per
+     * environment. See {@code services/mwaa/MwaaEnvironmentManager}.
+     */
+    interface MwaaServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, environments go straight to AVAILABLE without starting real Docker containers. */
+        @WithDefault("false")
+        boolean mock();
+
+        /** Image for the per-environment Postgres metadata database. Not shared with RDS's config knob. */
+        @WithDefault("postgres:16-alpine")
+        String defaultPostgresImage();
+
+        /** Airflow versions environments may request. Combined with the image tag
+         *  {@code apache/airflow:<version>-python3.12}. */
+        @WithDefault("2.10.5,2.9.3,2.8.4")
+        List<String> supportedVersions();
+
+        /** Airflow version used when {@code CreateEnvironment} omits {@code AirflowVersion}. */
+        @WithDefault("2.10.5")
+        String defaultVersion();
+
+        /** Base port of the web/CLI proxy port range. First environment gets this port. */
+        @WithDefault("8700")
+        int proxyBasePort();
+
+        /** Inclusive upper bound of the proxy port range. */
+        @WithDefault("8799")
+        int proxyMaxPort();
+
+        @WithDefault("./data/mwaa")
+        String dataPath();
+
+        /** Docker network to attach the Postgres/Airflow containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
+
+        /** Poll interval for syncing DAGs (and optionally requirements) from the environment's
+         *  S3 {@code DagS3Path} into the Airflow container. */
+        @WithDefault("30")
+        int dagSyncIntervalSeconds();
+
+        /** When true, {@code RequirementsS3Path} is installed via {@code pip install -r} on create
+         *  and on every DAG-sync pass in which the requirements file's ETag changed. */
+        @WithDefault("true")
+        boolean installRequirements();
     }
 
     interface InitHooksConfig {

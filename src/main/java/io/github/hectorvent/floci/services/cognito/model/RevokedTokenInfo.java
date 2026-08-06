@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cognito.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
@@ -7,6 +9,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * Information about a revoked token for tracking and validation purposes.
  * Used to implement AWS Cognito AdminUserGlobalSignOut token revocation behavior.
  */
+@RegisterForReflection
 public class RevokedTokenInfo {
     
     private final String jti;

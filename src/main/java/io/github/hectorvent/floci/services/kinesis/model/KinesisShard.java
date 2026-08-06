@@ -51,6 +51,9 @@ public class KinesisShard {
     public Instant getCreationTimestamp() { return creationTimestamp; }
     public void setCreationTimestamp(Instant timestamp) { this.creationTimestamp = timestamp; }
 
+    @RegisterForReflection
     public record HashKeyRange(String startingHashKey, String endingHashKey) {}
+
+    @RegisterForReflection
     public record SequenceNumberRange(String startingSequenceNumber, String endingSequenceNumber) {}
 }

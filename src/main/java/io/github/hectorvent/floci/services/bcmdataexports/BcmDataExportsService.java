@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.bcmdataexports;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -236,15 +237,7 @@ public class BcmDataExportsService {
      * behavior for callers that don't pass a 12-digit access key.
      */
     public String accountIdFromArn(String arn) {
-        if (arn == null) {
-            return regionResolver.getAccountId();
-        }
-        // arn:aws:bcm-data-exports:<region>:<account>:export/<name>
-        String[] parts = arn.split(":", 6);
-        if (parts.length >= 5 && !parts[4].isEmpty()) {
-            return parts[4];
-        }
-        return regionResolver.getAccountId();
+        return AwsArnUtils.accountOrDefault(arn, regionResolver.getAccountId());
     }
 
     public void completeExecution(String accountId, ExportExecution exec, boolean success, String reason) {

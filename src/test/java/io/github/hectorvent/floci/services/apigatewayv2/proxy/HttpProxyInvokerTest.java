@@ -114,6 +114,41 @@ class HttpProxyInvokerTest {
     }
 
     @Test
+    void appliesRequestParametersHostHeaderOverride() {
+        Integration integration = httpProxyIntegration(
+                "http://127.0.0.1:" + backendPort + "/public/{proxy}",
+                Map.of("overwrite:header.Host", "lb.localhost.test"));
+        RequestContext ctx = ctxFor("GET", "/wallet/balance", "balance",
+                Map.of("Host", "client.example.test"), Map.of(), null, Map.of());
+
+        new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals("lb.localhost.test", received.get().headers().getFirst("Host"));
+    }
+
+    @Test
+    void hostHeaderOverrideDecodesChunkedResponse() {
+        backend.removeContext("/");
+        backend.createContext("/", exchange -> {
+            byte[] resp = "chunked-body".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, 0);
+            exchange.getResponseBody().write(resp);
+            exchange.close();
+        });
+        Integration integration = httpProxyIntegration(
+                "http://127.0.0.1:" + backendPort + "/public/{proxy}",
+                Map.of("overwrite:header.Host", "lb.localhost.test"));
+        RequestContext ctx = ctxFor("GET", "/wallet/balance", "balance",
+                Map.of("Host", "client.example.test"), Map.of(), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(200, result.statusCode());
+        assertEquals("chunked-body", new String(result.body(), StandardCharsets.UTF_8));
+        assertFalse(result.headers().containsKey("Transfer-encoding"));
+    }
+
+    @Test
     void overwritePathReplacesBackendPath() {
         Integration integration = httpProxyIntegration(
                 "http://127.0.0.1:" + backendPort + "/wrong",

@@ -35,6 +35,7 @@ public class AutoScalingGroup {
     private Instant createdTime;
     private String region;
     private Map<String, String> tags = new ConcurrentHashMap<>();
+    private Map<String, Boolean> tagPropagateAtLaunch = new ConcurrentHashMap<>();
     private String status;  // null = active, "Delete in progress" = deleting
 
     public AutoScalingGroup() {}
@@ -104,6 +105,9 @@ public class AutoScalingGroup {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> v) { this.tags = v; }
+
+    public Map<String, Boolean> getTagPropagateAtLaunch() { return tagPropagateAtLaunch; }
+    public void setTagPropagateAtLaunch(Map<String, Boolean> v) { this.tagPropagateAtLaunch = v; }
 
     public String getStatus() { return status; }
     public void setStatus(String v) { this.status = v; }

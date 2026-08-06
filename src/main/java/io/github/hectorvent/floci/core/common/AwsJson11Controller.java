@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
 import io.github.hectorvent.floci.services.cloudhsmv2.CloudHsmV2JsonHandler;
@@ -13,6 +16,7 @@ import io.github.hectorvent.floci.services.transfer.TransferHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.firehose.FirehoseJsonHandler;
 import io.github.hectorvent.floci.services.glue.GlueJsonHandler;
+import io.github.hectorvent.floci.services.lightsail.LightsailJsonHandler;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingJsonHandler;
 import io.github.hectorvent.floci.services.bcmdataexports.BcmDataExportsJsonHandler;
 import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
@@ -59,6 +63,7 @@ public class AwsJson11Controller {
     private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
 
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictBodyReader;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
     private final SsmJsonHandler ssmJsonHandler;
@@ -93,6 +98,7 @@ public class AwsJson11Controller {
     private final BcmDataExportsJsonHandler bcmDataExportsJsonHandler;
     private final ConfigServiceJsonHandler configServiceJsonHandler;
     private final CloudTrailJsonHandler cloudTrailJsonHandler;
+    private final LightsailJsonHandler lightsailJsonHandler;
     private final CloudControlJsonHandler cloudControlJsonHandler;
     private final CloudHsmV2JsonHandler cloudHsmV2JsonHandler;
 
@@ -129,7 +135,10 @@ public class AwsJson11Controller {
                                CloudTrailJsonHandler cloudTrailJsonHandler,
                                CloudControlJsonHandler cloudControlJsonHandler,
                                CloudHsmV2JsonHandler cloudHsmV2JsonHandler) {
+                               LightsailJsonHandler lightsailJsonHandler,
+                               CloudControlJsonHandler cloudControlJsonHandler) {
         this.objectMapper = objectMapper;
+        this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
@@ -164,6 +173,7 @@ public class AwsJson11Controller {
         this.bcmDataExportsJsonHandler = bcmDataExportsJsonHandler;
         this.configServiceJsonHandler = configServiceJsonHandler;
         this.cloudTrailJsonHandler = cloudTrailJsonHandler;
+        this.lightsailJsonHandler = lightsailJsonHandler;
         this.cloudControlJsonHandler = cloudControlJsonHandler;
         this.cloudHsmV2JsonHandler = cloudHsmV2JsonHandler;
     }
@@ -189,8 +199,14 @@ public class AwsJson11Controller {
         String action = targetMatch.action();
         LOG.infov("AwsJson11Controller {0} action: {1}", serviceKey, action);
 
+        JsonNode request;
         try {
-            JsonNode request = objectMapper.readTree(body);
+            request = strictBodyReader.readTree(body);
+        } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+
+        try {
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {
@@ -227,6 +243,7 @@ public class AwsJson11Controller {
                 case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
                 case "config" -> configServiceJsonHandler.handle(action, request, region);
                 case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
+                case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
                 default -> null;

@@ -28,7 +28,9 @@ public class Secret {
     private RotationRules rotationRules;
     private Instant lastRotatedDate;
     private Instant nextRotationDate;
+    private String targetAttachmentOwner;
 
+    @RegisterForReflection
     public record RotationRules(
             @JsonProperty("AutomaticallyAfterDays") Integer automaticallyAfterDays,
             @JsonProperty("Duration") String duration,
@@ -38,6 +40,7 @@ public class Secret {
     public Secret() {
     }
 
+    @RegisterForReflection
     public record Tag(
             @JsonProperty("Key") String key,
             @JsonProperty("Value") String value) {
@@ -169,5 +172,13 @@ public class Secret {
 
     public void setNextRotationDate(Instant nextRotationDate) {
         this.nextRotationDate = nextRotationDate;
+    }
+
+    public String getTargetAttachmentOwner() {
+        return targetAttachmentOwner;
+    }
+
+    public void setTargetAttachmentOwner(String targetAttachmentOwner) {
+        this.targetAttachmentOwner = targetAttachmentOwner;
     }
 }

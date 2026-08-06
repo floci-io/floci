@@ -534,6 +534,50 @@ class KmsServiceTest {
     }
 
     @Test
+    void listAliasesFilteredByKeyId() {
+        KmsKey key1 = kmsService.createKey(null, REGION);
+        KmsKey key2 = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/key1-a", key1.getKeyId(), REGION);
+        kmsService.createAlias("alias/key1-b", key1.getKeyId(), REGION);
+        kmsService.createAlias("alias/key2-a", key2.getKeyId(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key1.getKeyId(), REGION);
+        assertEquals(2, filtered.size());
+        assertTrue(filtered.stream().allMatch(a -> key1.getKeyId().equals(a.getTargetKeyId())));
+    }
+
+    @Test
+    void listAliasesFilteredByKeyIdWithArn() {
+        KmsKey key1 = kmsService.createKey(null, REGION);
+        KmsKey key2 = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/key1-a", key1.getKeyId(), REGION);
+        kmsService.createAlias("alias/key2-a", key2.getKeyId(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key1.getArn(), REGION);
+        assertEquals(1, filtered.size());
+        assertEquals("alias/key1-a", filtered.getFirst().getAliasName());
+    }
+
+    @Test
+    void listAliasesFilteredByKeyIdReturnsEmptyWhenNoAliases() {
+        KmsKey key1 = kmsService.createKey(null, REGION);
+        KmsKey key2 = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/key2-a", key2.getKeyId(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key1.getKeyId(), REGION);
+        assertTrue(filtered.isEmpty());
+    }
+
+    @Test
+    void listAliasesFilteredByKeyIdWithAliasCreatedByArn() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/by-arn", key.getArn(), REGION);
+
+        List<KmsAlias> filtered = kmsService.listAliases(key.getKeyId(), REGION);
+        assertEquals(1, filtered.size());
+    }
+
+    @Test
     void encryptAndDecryptWithId() {
         KmsKey key = kmsService.createKey(null, REGION);
         byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);
@@ -1008,6 +1052,40 @@ class KmsServiceTest {
     void putKeyPolicyOnNonExistentKeyThrows() {
         assertThrows(AwsException.class, () ->
                 kmsService.putKeyPolicy("non-existent", "{}", REGION));
+    }
+
+    // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicy() {
+        KmsKey key = kmsService.createKey("list-policy-key", REGION);
+
+        Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), REGION);
+
+        @SuppressWarnings("unchecked")
+        List<String> policyNames = (List<String>) result.get("PolicyNames");
+        assertEquals(1, policyNames.size());
+        assertEquals("default", policyNames.getFirst());
+        assertFalse((Boolean) result.get("Truncated"));
+        // Truncated is always false, so NextMarker must not be emitted at all.
+        assertFalse(result.containsKey("NextMarker"));
+    }
+
+    @Test
+    void listKeyPoliciesResolvesByArn() {
+        // The model documents KeyId for this operation as key ID or key ARN only; alias
+        // acceptance is a Floci-wide resolveKey superset, not this operation's AWS contract.
+        KmsKey key = kmsService.createKey("list-policy-arn", REGION);
+
+        assertEquals(List.of("default"),
+                kmsService.listKeyPolicies(key.getArn(), REGION).get("PolicyNames"));
+    }
+
+    @Test
+    void listKeyPoliciesOnNonExistentKeyThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies("non-existent", REGION));
+        assertEquals("NotFoundException", ex.getErrorCode());
     }
 
     // ── Issue #290 — Key Rotation ───────────────────────────────────────────

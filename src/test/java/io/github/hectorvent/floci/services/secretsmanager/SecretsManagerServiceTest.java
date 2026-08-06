@@ -61,6 +61,30 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void getSecretValueWithMatchingVersionIdAndStage() {
+        service.createSecret("paired", "v1", null, null, null, null, REGION);
+        SecretVersion current = service.getSecretValue("paired", null, null, REGION);
+
+        SecretVersion fetched = service.getSecretValue("paired",
+                current.getVersionId(), "AWSCURRENT", REGION);
+        assertEquals("v1", fetched.getSecretString());
+    }
+
+    @Test
+    void getSecretValueWithMismatchedVersionIdAndStageThrows() {
+        // botocore: when both are supplied they must refer to the same version; moto and
+        // LocalStack both raise InvalidRequestException with this message.
+        service.createSecret("mismatched", "v1", null, null, null, null, REGION);
+        SecretVersion current = service.getSecretValue("mismatched", null, null, REGION);
+
+        AwsException thrown = assertThrows(AwsException.class, () ->
+                service.getSecretValue("mismatched", current.getVersionId(), "AWSPREVIOUS", REGION));
+        assertEquals("InvalidRequestException", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains(
+                "You provided a VersionStage that is not associated to the provided VersionId."));
+    }
+
+    @Test
     void putSecretValueRotatesVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         service.putSecretValue("my-secret", "v2", null, null, REGION, null);
@@ -159,6 +183,34 @@ class SecretsManagerServiceTest {
 
         assertEquals("my-secret", described.getName());
         assertEquals("desc", described.getDescription());
+    }
+
+    @Test
+    void targetAttachmentClaimIsExclusiveAndIdempotentForItsOwner() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+
+        assertTrue(service.claimTargetAttachment("my-secret", "stack/First", REGION));
+        assertFalse(service.claimTargetAttachment("my-secret", "stack/First", REGION));
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.claimTargetAttachment("my-secret", "stack/Second", REGION));
+
+        assertEquals("ResourceExistsException", duplicate.getErrorCode());
+        assertTrue(duplicate.getMessage().contains("already attached"));
+        assertTrue(service.canManageTargetAttachment("my-secret", "stack/First", REGION));
+        assertFalse(service.canManageTargetAttachment("my-secret", "stack/Second", REGION));
+    }
+
+    @Test
+    void targetAttachmentClaimCanOnlyBeReleasedByItsOwner() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+        service.claimTargetAttachment("my-secret", "stack/First", REGION);
+
+        service.releaseTargetAttachment("my-secret", "stack/Second", REGION);
+        assertThrows(AwsException.class,
+                () -> service.claimTargetAttachment("my-secret", "stack/Second", REGION));
+
+        service.releaseTargetAttachment("my-secret", "stack/First", REGION);
+        assertTrue(service.claimTargetAttachment("my-secret", "stack/Second", REGION));
     }
 
     @Test
@@ -333,32 +385,73 @@ class SecretsManagerServiceTest {
         service.createSecret("secret1", "value1", null, null, null, null, REGION);
         service.createSecret("secret2", "value2", null, null, null, null, REGION);
 
-        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
                 List.of("secret1", "secret2"), REGION);
 
+        List<SecretsManagerService.BatchSecretValue> values = result.values();
         assertEquals(2, values.size());
         assertTrue(values.stream().anyMatch(v -> "secret1".equals(v.name()) && "value1".equals(v.secretString())));
         assertTrue(values.stream().anyMatch(v -> "secret2".equals(v.name()) && "value2".equals(v.secretString())));
+
+        assertEquals(0, result.errors().size());
     }
 
     @Test
-    void batchGetSecretValueSkipsDeleted() {
+    void batchGetSecretValueReportsDeletedInErrors() {
         service.createSecret("secret1", "value1", null, null, null, null, REGION);
         service.createSecret("secret2", "value2", null, null, null, null, REGION);
         service.deleteSecret("secret1", 7, false, REGION);
 
-        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
                 List.of("secret1", "secret2"), REGION);
 
+        List<SecretsManagerService.BatchSecretValue> values = result.values();
         assertEquals(1, values.size());
         assertEquals("secret2", values.getFirst().name());
+
+        List<SecretsManagerService.BatchGetSecretValueError> errors = result.errors();
+        assertEquals(1, errors.size());
+        assertEquals("secret1", errors.getFirst().secretId());
+        assertEquals("InvalidRequestException", errors.getFirst().errorCode());
+        assertEquals("You can't perform this operation on the secret because it was marked for deletion.",
+                errors.getFirst().message());
     }
 
     @Test
-    void batchGetSecretValueThrowsIfNotFound() {
+    void batchGetSecretValueReportsMissingCurrentVersionInErrors() {
         service.createSecret("secret1", "value1", null, null, null, null, REGION);
-        assertThrows(AwsException.class, () ->
-                service.batchGetSecretValue(List.of("secret1", "non-existent"), REGION));
+
+        Secret secret = service.describeSecret("secret1", REGION);
+        SecretVersion version = secret.getVersions().get(secret.getCurrentVersionId());
+        version.setVersionStages(List.of());
+
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
+                List.of("secret1"), REGION);
+
+        assertEquals(0, result.values().size());
+
+        List<SecretsManagerService.BatchGetSecretValueError> errors = result.errors();
+        assertEquals(1, errors.size());
+        assertEquals("secret1", errors.getFirst().secretId());
+        assertEquals("ResourceNotFoundException", errors.getFirst().errorCode());
+    }
+
+    @Test
+    void batchGetSecretValueReportsMissingInErrors() {
+        service.createSecret("secret1", "value1", null, null, null, null, REGION);
+
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
+                List.of("secret1", "non-existent"), REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = result.values();
+        assertEquals(1, values.size());
+        assertEquals("secret1", values.getFirst().name());
+
+        List<SecretsManagerService.BatchGetSecretValueError> errors = result.errors();
+        assertEquals(1, errors.size());
+        assertEquals("non-existent", errors.getFirst().secretId());
+        assertEquals("ResourceNotFoundException", errors.getFirst().errorCode());
+        assertEquals("Secrets Manager can't find the specified secret.", errors.getFirst().message());
     }
 
     @Test

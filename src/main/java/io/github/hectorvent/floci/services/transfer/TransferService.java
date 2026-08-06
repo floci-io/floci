@@ -53,7 +53,7 @@ public class TransferService {
                                String securityPolicyName,
                                Map<String, String> tags) {
         String serverId = generateServerId();
-        String arn = "arn:aws:transfer:" + region + ":" + regionResolver.getAccountId() + ":server/" + serverId;
+        String arn = regionResolver.buildArn("transfer", region, "server/" + serverId);
 
         Server server = new Server();
         server.setServerId(serverId);
@@ -180,7 +180,7 @@ public class TransferService {
                     "User " + userName + " already exists on server " + serverId + ".", 400);
         }
 
-        String arn = "arn:aws:transfer:" + region + ":" + regionResolver.getAccountId() + ":user/" + serverId + "/" + userName;
+        String arn = regionResolver.buildArn("transfer", region, "user/" + serverId + "/" + userName);
         User user = new User();
         user.setUserName(userName);
         user.setArn(arn);

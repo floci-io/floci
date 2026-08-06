@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
+import org.jboss.logging.Logger;
+
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
@@ -23,6 +25,7 @@ import java.util.Map;
  */
 public final class XmlParser {
 
+    private static final Logger LOG = Logger.getLogger(XmlParser.class);
     private static final XMLInputFactory FACTORY;
 
     static {
@@ -91,7 +94,9 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+        }
         return result;
     }
 
@@ -160,7 +165,9 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+        }
         return result;
     }
 
@@ -206,7 +213,9 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+        }
         return result;
     }
 
@@ -256,7 +265,57 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * Returns the local names of the direct child elements of the first
+     * {@code parentElement}, in document order, or an empty list when the
+     * parent is absent. Unlike {@link #extractGroups(String, String)}, children
+     * are reported whether they are leaves or containers.
+     *
+     * <pre>{@code
+     * List<String> children = XmlParser.childElementNames(body, "InputSerialization");
+     * // <InputSerialization><CSV>...</CSV></InputSerialization> → [CSV]
+     * }</pre>
+     */
+    public static List<String> childElementNames(String xml, String parentElement) {
+        List<String> result = new ArrayList<>();
+        if (xml == null || xml.isEmpty()) {
+            return result;
+        }
+        try {
+            XMLStreamReader r = FACTORY.createXMLStreamReader(new StringReader(xml));
+            boolean inParent = false;
+            int depth = 0;
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    if (!inParent) {
+                        if (parentElement.equals(r.getLocalName())) {
+                            inParent = true;
+                            depth = 1;
+                        }
+                    } else {
+                        if (depth == 1) {
+                            result.add(r.getLocalName());
+                        }
+                        depth++;
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT && inParent) {
+                    depth--;
+                    if (depth == 0) {
+                        break;
+                    }
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+        }
         return result;
     }
 
@@ -312,7 +371,9 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+        }
         return result;
     }
 }

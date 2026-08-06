@@ -87,7 +87,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-crc64nvme", notNullValue())
+            .header("x-amz-checksum-crc64nvme", nullValue())
             .body(equalTo("Hello World from S3!"));
     }
 
@@ -118,7 +118,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-crc64nvme", notNullValue());
+            .header("x-amz-checksum-crc64nvme", nullValue());
     }
 
     @Test
@@ -204,6 +204,7 @@ class S3IntegrationTest {
 
         // Verify the copy
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting-copy.txt")
         .then()
@@ -241,6 +242,7 @@ class S3IntegrationTest {
 
         // Verify the copy inherits the source checksum (CRC64NVME)
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting-copy-no-override.txt")
         .then()
@@ -274,6 +276,7 @@ class S3IntegrationTest {
 
         // Verify the source object has a SHA256 checksum
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/sha256-source.txt")
         .then()
@@ -293,6 +296,7 @@ class S3IntegrationTest {
 
         // Verify the copy preserves the source's SHA256 checksum
         given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/sha256-copy.txt")
         .then()
@@ -355,6 +359,44 @@ class S3IntegrationTest {
         .then()
             .statusCode(404)
             .body(containsString("NoSuchBucket"));
+    }
+
+    @Test
+    @Order(21)
+    void createBucketAppliesTagsFromCreateBucketConfiguration() {
+        String bucket = "tagged-at-create-bucket";
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <Tags>
+                        <Tag>
+                            <Key>owner</Key>
+                            <Value>data-team</Value>
+                        </Tag>
+                    </Tags>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucket + "?tagging")
+        .then()
+            .statusCode(200)
+            .body(containsString("owner"))
+            .body(containsString("data-team"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
     }
 
     @Test
@@ -476,10 +518,138 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(119)
+    void copyObjectWithPercentEncodedBucketSeparatorSucceeds() {
+        // The AWS SDK for .NET percent-encodes the whole copy source, so a v4 client sends
+        // "bucket%2Ffolder%2Fkey.txt" with no literal slash anywhere in the header.
+        String bucket = "copy-encoded-separator-bucket";
+        String srcKey = "folder/file.txt";
+
+        given().put("/" + bucket).then().statusCode(200);
+        given()
+            .contentType("text/plain")
+            .body("encoded separator")
+        .when()
+            .put("/" + bucket + "/" + srcKey)
+        .then()
+            .statusCode(200);
+
+        // Fully encoded, no leading separator: the .NET wire format.
+        given()
+            .header("x-amz-copy-source", bucket + "%2Ffolder%2Ffile.txt")
+        .when()
+            .put("/" + bucket + "/copied/dotnet.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        // Lowercase %2f, and a leading encoded separator, name the same object.
+        given()
+            .header("x-amz-copy-source", "%2F" + bucket + "%2ffolder%2ffile.txt")
+        .when()
+            .put("/" + bucket + "/copied/lowercase.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        // Mixed: encoded bucket separator, literal slash inside the key.
+        given()
+            .header("x-amz-copy-source", bucket + "%2Ffolder/file.txt")
+        .when()
+            .put("/" + bucket + "/copied/mixed.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        for (String copied : new String[] {"dotnet", "lowercase", "mixed"}) {
+            given()
+            .when()
+                .get("/" + bucket + "/copied/" + copied + ".txt")
+            .then()
+                .statusCode(200)
+                .body(equalTo("encoded separator"));
+            given().delete("/" + bucket + "/copied/" + copied + ".txt");
+        }
+
+        given().delete("/" + bucket + "/" + srcKey);
+        given().delete("/" + bucket);
+    }
+
+    @Test
+    @Order(120)
+    void copyObjectWithQuestionMarkInSourceKeySucceeds() {
+        String sourceBucket = "copy-question-source-bucket";
+        String destBucket = "copy-question-dest-bucket";
+        // The source key contains a literal '?'. Storing it requires a percent-encoded PUT path
+        // (with urlEncodingEnabled(false)) so the '?' is not treated as the query-string delimiter.
+        String rawSrcKey = "folder/file with question ?.txt";
+        String encodedSrcKey = "folder/file%20with%20question%20%3F.txt";
+
+        given().put("/" + sourceBucket).then().statusCode(200);
+        given().put("/" + destBucket).then().statusCode(200);
+
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("copy test")
+        .when()
+            .put("/" + sourceBucket + "/" + encodedSrcKey)
+        .then()
+            .statusCode(200);
+
+        // AWS-style copy source: the key is URL-encoded, so the literal '?' arrives as %3F.
+        given()
+            .header("x-amz-copy-source", "/" + sourceBucket + "/" + encodedSrcKey)
+        .when()
+            .put("/" + destBucket + "/copied/encoded.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        // Lenient case: a raw literal '?' in the copy source (no versionId query) is kept in the key.
+        given()
+            .header("x-amz-copy-source", "/" + sourceBucket + "/" + rawSrcKey)
+        .when()
+            .put("/" + destBucket + "/copied/raw.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .get("/" + destBucket + "/copied/encoded.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("copy test"));
+
+        given()
+        .when()
+            .get("/" + destBucket + "/copied/raw.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("copy test"));
+
+        given().urlEncodingEnabled(false).delete("/" + sourceBucket + "/" + encodedSrcKey);
+        given().delete("/" + destBucket + "/copied/encoded.txt");
+        given().delete("/" + destBucket + "/copied/raw.txt");
+        given().delete("/" + sourceBucket);
+        given().delete("/" + destBucket);
+    }
+
+    @Test
     @Order(24)
     void copyObjectWithMalformedEncodedSourceReturns400() {
         given()
             .header("x-amz-copy-source", "/test-bucket/%ZZinvalid")
+        .when()
+            .put("/test-bucket/dest-key")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+
+        // Decoding still rejects a malformed key reached through an encoded separator.
+        given()
+            .header("x-amz-copy-source", "test-bucket%2F%ZZinvalid")
         .when()
             .put("/test-bucket/dest-key")
         .then()
@@ -492,6 +662,23 @@ class S3IntegrationTest {
     void copyObjectWithEmptyBucketReturns400() {
         given()
             .header("x-amz-copy-source", "/key-only-no-bucket")
+        .when()
+            .put("/test-bucket/dest-key")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+
+        // A source with no separator at all names no bucket, encoded form included.
+        given()
+            .header("x-amz-copy-source", "key-only-no-bucket")
+        .when()
+            .put("/test-bucket/dest-key")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+
+        given()
+            .header("x-amz-copy-source", "%2Fkey-only-no-bucket")
         .when()
             .put("/test-bucket/dest-key")
         .then()
@@ -530,6 +717,62 @@ class S3IntegrationTest {
 
         given().delete("/large-object-bucket/large-file.bin");
         given().delete("/large-object-bucket");
+    }
+
+    @Test
+    @Order(118)
+    void getObjectWithChecksumModeReturnsChecksum() {
+        given()
+            .when()
+            .put("/checksum-mode-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("Hello World from S3!")
+        .when()
+            .put("/checksum-mode-bucket/greeting.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .get("/checksum-mode-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given().delete("/checksum-mode-bucket/greeting.txt");
+        given().delete("/checksum-mode-bucket");
+    }
+
+    @Test
+    @Order(119)
+    void headObjectWithChecksumModeReturnsChecksum() {
+        given()
+            .when()
+            .put("/checksum-mode-head-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("Hello World from S3!")
+        .when()
+            .put("/checksum-mode-head-bucket/greeting.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .head("/checksum-mode-head-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given().delete("/checksum-mode-head-bucket/greeting.txt");
+        given().delete("/checksum-mode-head-bucket");
     }
 
     @Test
@@ -694,11 +937,42 @@ class S3IntegrationTest {
             .header("Content-Length", equalTo("0"))
             .header("Accept-Ranges", equalTo("bytes"))
             .header("x-amz-meta-kind", equalTo("empty"))
+            .header("x-amz-checksum-crc64nvme", nullValue())
             .body(equalTo(""));
 
         given()
         .when()
             .delete("/test-bucket/empty.txt")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(207)
+    void getObjectWithSuffixRangeForEmptyObjectAndChecksumModeIncludesChecksum() {
+        // The empty-object suffix-range path returns via fullObjectResponse (a full 200, not
+        // a 206), so it must honor x-amz-checksum-mode like any other full-object response.
+        given()
+            .header("x-amz-meta-kind", "empty")
+            .body(new byte[0])
+        .when()
+            .put("/test-bucket/empty-checksum.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Range", "bytes=-13")
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .get("/test-bucket/empty-checksum.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Length", equalTo("0"))
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given()
+        .when()
+            .delete("/test-bucket/empty-checksum.txt")
         .then()
             .statusCode(204);
     }
@@ -1853,6 +2127,35 @@ class S3IntegrationTest {
         .then()
             .statusCode(404)
             .body(containsString("NoSuchPublicAccessBlockConfiguration"));
+    }
+
+    @Test
+    @Order(104)
+    void malformedAuthorizationHeaderIsIgnoredWhenAuthEnforcementDisabled() {
+        String bucket = "auth-disabled-bucket";
+        String key = "greeting.txt";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("Hello World from S3!").when().put("/" + bucket + "/" + key).then().statusCode(200);
+        try {
+            given()
+                .header("Authorization", "not-a-valid-signature")
+            .when()
+                .get("/" + bucket + "/" + key)
+            .then()
+                .statusCode(200)
+                .body(equalTo("Hello World from S3!"));
+
+            given()
+                .header("Authorization", "not-a-valid-signature")
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>" + key + "</Key>"));
+        } finally {
+            given().when().delete("/" + bucket + "/" + key);
+            given().when().delete("/" + bucket);
+        }
     }
 
     // --- ListObjectsV2 pagination ---

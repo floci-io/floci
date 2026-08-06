@@ -27,6 +27,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Query-protocol handler for SES actions.
@@ -72,6 +73,10 @@ public class SesQueryHandler {
                 case "SetIdentityMailFromDomain" -> handleSetIdentityMailFromDomain(params, region);
                 case "GetIdentityMailFromDomainAttributes" -> handleGetIdentityMailFromDomainAttributes(params, region);
                 case "GetIdentityDkimAttributes" -> handleGetIdentityDkimAttributes(params, region);
+                case "PutIdentityPolicy" -> handlePutIdentityPolicy(params, region);
+                case "GetIdentityPolicies" -> handleGetIdentityPolicies(params, region);
+                case "ListIdentityPolicies" -> handleListIdentityPolicies(params, region);
+                case "DeleteIdentityPolicy" -> handleDeleteIdentityPolicy(params, region);
                 case "CreateTemplate" -> handleCreateTemplate(params, region);
                 case "UpdateTemplate" -> handleUpdateTemplate(params, region);
                 case "GetTemplate" -> handleGetTemplate(params, region);
@@ -397,6 +402,43 @@ public class SesQueryHandler {
         }
         xml.end("MailFromDomainAttributes");
         return Response.ok(AwsQueryResponse.envelope("GetIdentityMailFromDomainAttributes", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    // --- Identity (sending authorization) policies ---
+
+    private Response handlePutIdentityPolicy(MultivaluedMap<String, String> params, String region) {
+        String identity = requireParam(params, "Identity");
+        String policyName = requireParam(params, "PolicyName");
+        String policy = requireParam(params, "Policy");
+        sesService.putIdentityPolicy(identity, policyName, policy, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("PutIdentityPolicy", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleGetIdentityPolicies(MultivaluedMap<String, String> params, String region) {
+        String identity = requireParam(params, "Identity");
+        List<String> names = extractMembers(params, "PolicyNames");
+        Map<String, String> policies = sesService.getIdentityPolicies(identity, names, region);
+        var xml = new XmlBuilder().start("Policies");
+        policies.forEach((name, doc) -> xml.start("entry").elem("key", name).elem("value", doc).end("entry"));
+        xml.end("Policies");
+        return Response.ok(AwsQueryResponse.envelope("GetIdentityPolicies", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private Response handleListIdentityPolicies(MultivaluedMap<String, String> params, String region) {
+        String identity = requireParam(params, "Identity");
+        var xml = new XmlBuilder().start("PolicyNames");
+        for (String name : sesService.listIdentityPolicyNames(identity, region)) {
+            xml.elem("member", name);
+        }
+        xml.end("PolicyNames");
+        return Response.ok(AwsQueryResponse.envelope("ListIdentityPolicies", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private Response handleDeleteIdentityPolicy(MultivaluedMap<String, String> params, String region) {
+        String identity = requireParam(params, "Identity");
+        String policyName = requireParam(params, "PolicyName");
+        sesService.deleteIdentityPolicy(identity, policyName, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteIdentityPolicy", AwsNamespaces.SES)).build();
     }
 
     // --- Templates ---

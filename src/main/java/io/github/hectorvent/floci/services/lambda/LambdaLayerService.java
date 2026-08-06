@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
@@ -94,7 +95,7 @@ public class LambdaLayerService {
 
         // Build the layer version
         String accountId = regionResolver.getAccountId();
-        String layerArn = String.format("arn:aws:lambda:%s:%s:layer:%s", region, accountId, layerName);
+        String layerArn = AwsArnUtils.Arn.of("lambda", region, accountId, "layer:" + layerName).toString();
         String layerVersionArn = layerArn + ":" + nextVersion;
 
         LambdaLayerVersion layerVersion = new LambdaLayerVersion();
@@ -165,15 +166,21 @@ public class LambdaLayerService {
      */
     public LambdaLayerVersion resolveLayerByArn(String layerVersionArn) {
         // ARN format: arn:aws:lambda:{region}:{account}:layer:{name}:{version}
-        String[] parts = layerVersionArn.split(":");
-        if (parts.length < 8) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(layerVersionArn);
+        } catch (IllegalArgumentException e) {
             return null;
         }
-        String region = parts[3];
-        String layerName = parts[6];
+        String[] resourceParts = arn.resource().split(":");
+        if (resourceParts.length < 3 || !"layer".equals(resourceParts[0])) {
+            return null;
+        }
+        String region = arn.region();
+        String layerName = resourceParts[1];
         long version;
         try {
-            version = Long.parseLong(parts[7]);
+            version = Long.parseLong(resourceParts[2]);
         } catch (NumberFormatException e) {
             return null;
         }

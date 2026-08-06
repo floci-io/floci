@@ -74,6 +74,7 @@ public class CognitoJsonHandler {
             case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
+            case "ResendConfirmationCode" -> handleResendConfirmationCode(request);
             case "AdminConfirmSignUp" -> handleAdminConfirmSignUp(request);
             case "ChangePassword" -> handleChangePassword(request);
             case "ForgotPassword" -> handleForgotPassword(request);
@@ -81,6 +82,7 @@ public class CognitoJsonHandler {
             case "GetUser" -> handleGetUser(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
+            case "GlobalSignOut" -> handleGlobalSignOut(request);
             case "CreateGroup" -> handleCreateGroup(request);
             case "GetGroup" -> handleGetGroup(request);
             case "ListGroups" -> handleListGroups(request);
@@ -91,6 +93,7 @@ public class CognitoJsonHandler {
             case "AdminRemoveUserFromGroup" -> handleAdminRemoveUserFromGroup(request);
             case "AdminListGroupsForUser" -> handleAdminListGroupsForUser(request);
             case "GetTokensFromRefreshToken" -> handleGetTokensFromRefreshToken(request);
+            case "RevokeToken" -> handleRevokeToken(request);
             case "ListUserPoolClientSecrets" -> handleListUserPoolClientSecrets(request);
             case "AddUserPoolClientSecret" -> handleAddUserPoolClientSecret(request);
             case "DeleteUserPoolClientSecret" -> handleDeleteUserPoolClientSecret(request);
@@ -450,6 +453,15 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
+    private Response handleRevokeToken(JsonNode request) {
+        service.revokeToken(
+                request.path("ClientId").asText(null),
+                request.path("Token").asText(null),
+                request.path("ClientSecret").asText(null)
+        );
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Response handleInitiateAuth(JsonNode request) {
         Map<String, String> params = new HashMap<>();
         request.path("AuthParameters").fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().asText()));
@@ -548,6 +560,19 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleResendConfirmationCode(JsonNode request) {
+        Map<String, String> deliveryDetails = service.resendConfirmationCode(
+                request.path("ClientId").asText(),
+                request.path("Username").asText()
+        );
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode delivery = response.putObject("CodeDeliveryDetails");
+        delivery.put("AttributeName", deliveryDetails.get("AttributeName"));
+        delivery.put("DeliveryMedium", deliveryDetails.get("DeliveryMedium"));
+        delivery.put("Destination", deliveryDetails.get("Destination"));
+        return Response.ok(response).build();
+    }
+
     private Response handleAdminConfirmSignUp(JsonNode request) {
         service.adminConfirmSignUp(
                 request.path("UserPoolId").asText(),
@@ -606,6 +631,11 @@ public class CognitoJsonHandler {
         String accessToken = request.path("AccessToken").asText();
         List<String> attributeNames = readStringList(request.path("UserAttributeNames"));
         service.deleteUserAttributes(accessToken, attributeNames);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGlobalSignOut(JsonNode request) {
+        service.globalSignOut(request.path("AccessToken").asText());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

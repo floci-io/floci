@@ -72,6 +72,18 @@ floci:
     persistent-path: ./data
     host-persistent-path: ./data
     prune-volumes-on-delete: false
+    # EFS access-point emulation for the shared local Docker volumes that stand in for EFS file
+    # systems. All opt-in; with the defaults below (and no owner/permission overrides) volumes are
+    # plain named volumes, so existing behaviour is unchanged. Emulates an access point's
+    # RootDirectory.CreationInfo (owner-uid/owner-gid/root-permissions) and PosixUser
+    # (mount-user/mount-group-add).
+    efs:
+      # owner-uid:            # RootDirectory.CreationInfo.OwnerUid applied to the volume root (set with owner-gid)
+      # owner-gid:            # RootDirectory.CreationInfo.OwnerGid applied to the volume root (set with owner-uid)
+      # root-permissions:     # CreationInfo.Permissions, 3-4 octal digits; e.g. "0777", or "2775" for setgid
+      init-image: busybox:stable
+      # mount-user:           # run mounting containers as "uid[:gid]" (access point PosixUser)
+      # mount-group-add:      # supplementary gid added to mounting containers
     wal:
       compaction-interval-ms: 30000
     services:
@@ -94,6 +106,8 @@ floci:
       opensearch:
         flush-interval-ms: 5000
       batch:
+        flush-interval-ms: 5000
+      lightsail:
         flush-interval-ms: 5000
       codepipeline:
         flush-interval-ms: 5000
@@ -120,6 +134,10 @@ floci:
         # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
         # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
+      appsync:
+        flush-interval-ms: 5000
+      rum:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -163,6 +181,7 @@ floci:
 
   protocols:
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
+    reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
   docker:
     log-max-size: "10m"
@@ -182,6 +201,7 @@ floci:
       clear-fifo-deduplication-cache-on-purge: false
     s3:
       enabled: true
+      enforce-auth: false
       default-presign-expiry-seconds: 3600
     dynamodb:
       enabled: true
@@ -200,6 +220,7 @@ floci:
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
+      # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
       hot-reload:
         enabled: false
     apigateway:
@@ -278,6 +299,7 @@ floci:
       enabled: true
     stepfunctions:
       enabled: true
+      allow-plaintext-http: false
     cloudformation:
       enabled: true
     acm:
@@ -344,6 +366,13 @@ floci:
       keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
+      backend: stub
+      proxy:
+        passthrough: false
+        # url: http://localhost:11434/v1
+        # api-key: sk-...
+        # default-model: llama3
+        # model-mapping: "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"
     eks:
       enabled: true
       mock: false
@@ -356,6 +385,19 @@ floci:
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
+      disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+    mwaa:
+      enabled: true
+      mock: false
+      default-postgres-image: "postgres:16-alpine"
+      supported-versions: "2.10.5,2.9.3,2.8.4"
+      default-version: "2.10.5"
+      proxy-base-port: 8700
+      proxy-max-port: 8799
+      data-path: ./data/mwaa
+      keep-running-on-shutdown: false
+      dag-sync-interval-seconds: 30
+      install-requirements: true
     elbv2:
       enabled: true
       mock: false
@@ -399,12 +441,15 @@ floci:
       emit-mode: synchronous
     cloudtrail:
       enabled: true
+    lightsail:
     cloudcontrol:
       enabled: true
     cloudfront:
       enabled: true
     appsync:
       enabled: true
+      schema-worker-threads: 4
+      schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
     iot:
@@ -417,4 +462,5 @@ floci:
     iotdata:
       enabled: true
     cloudhsmv2:
+    rum:
       enabled: true

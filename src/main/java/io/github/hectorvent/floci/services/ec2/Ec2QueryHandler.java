@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -110,6 +111,11 @@ public class Ec2QueryHandler {
                 case "DeleteInternetGateway" -> handleDeleteInternetGateway(params, region);
                 case "AttachInternetGateway" -> handleAttachInternetGateway(params, region);
                 case "DetachInternetGateway" -> handleDetachInternetGateway(params, region);
+                // VPN Gateways. There is no VPN gateway model; an empty set is
+                // AWS-accurate for an account without VPN gateways and unblocks the
+                // CDK VPC context provider, which always issues this describe.
+                case "DescribeVpnGateways" -> handleDescribeVpnGateways();
+
                 // Route Tables
                 case "CreateRouteTable" -> handleCreateRouteTable(params, region);
                 case "DescribeRouteTables" -> handleDescribeRouteTables(params, region);
@@ -157,6 +163,8 @@ public class Ec2QueryHandler {
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
                 case "DeleteVolume" -> handleDeleteVolume(params, region);
+                case "AttachVolume" -> handleAttachVolume(params, region);
+                case "DetachVolume" -> handleDetachVolume(params, region);
                 // Spot Instances
                 case "RequestSpotInstances" -> handleRequestSpotInstances(params, region);
                 case "DescribeSpotInstanceRequests" -> handleDescribeSpotInstanceRequests(params, region);
@@ -354,6 +362,29 @@ public class Ec2QueryHandler {
             }
         }
         return tags;
+    }
+
+    // Apply tags supplied inline on a create call (TagSpecification) to the resource, so
+    // they round-trip on the next Describe* — otherwise the provider sees phantom tag drift.
+    private void applyResourceTags(MultivaluedMap<String, String> p, String region, String resourceType, String resourceId) {
+        List<Tag> tagList = parseTagsForResource(p, resourceType);
+        if (!tagList.isEmpty()) {
+            service.createTags(region, List.of(resourceId), tagList);
+        }
+    }
+
+    // Each rule gets its own copy so mutating one rule's tag list can never leak into the
+    // others authorized in the same batch, and the copy also feeds the response XML.
+    private void applySecurityGroupRuleTags(MultivaluedMap<String, String> p, String region,
+                                            List<SecurityGroupRule> rules) {
+        List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
+        if (ruleTags.isEmpty()) {
+            return;
+        }
+        for (SecurityGroupRule rule : rules) {
+            service.createTags(region, List.of(rule.getSecurityGroupRuleId()), ruleTags);
+            rule.setTags(new ArrayList<>(ruleTags));
+        }
     }
 
     private Response xmlResponse(String xml) {
@@ -992,6 +1023,7 @@ public class Ec2QueryHandler {
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
         Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az);
+        applyResourceTags(p, region, "subnet", subnet.getSubnetId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1044,6 +1076,7 @@ public class Ec2QueryHandler {
         String description = p.getFirst("GroupDescription");
         String vpcId = p.getFirst("VpcId");
         SecurityGroup sg = service.createSecurityGroup(region, groupName, description, vpcId);
+        applyResourceTags(p, region, "security-group", sg.getGroupId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSecurityGroupResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1080,6 +1113,7 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress(region, groupId, perms);
+        applySecurityGroupRuleTags(p, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupIngressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1096,6 +1130,7 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress(region, groupId, perms);
+        applySecurityGroupRuleTags(p, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupEgressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1124,14 +1159,19 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeSecurityGroupRules(MultivaluedMap<String, String> p, String region) {
         Map<String, List<String>> filters = getFilters(p);
-        // The AWS SDK sends the security group id as a filter with name "group-id"
-        String groupId = "";
-        List<String> groupIdFilter = filters.get("group-id");
-        if (groupIdFilter != null && !groupIdFilter.isEmpty()) {
-            groupId = groupIdFilter.get(0);
-        }
-        List<String> ruleIds = getList(p, "SecurityGroupRuleId");
-        List<SecurityGroupRule> rules = service.describeSecurityGroupRules(region, groupId, ruleIds);
+        // The AWS SDK sends the security group id as a filter with name "group-id". Rule ids can
+        // arrive as the SecurityGroupRuleId.N parameter or the "security-group-rule-id" filter;
+        // filters are conjunctive with parameters, so intersect rather than union when both appear.
+        List<String> paramRuleIds = getList(p, "SecurityGroupRuleId");
+        List<String> filterRuleIds = filters.getOrDefault("security-group-rule-id", List.of());
+        List<String> ruleIds = paramRuleIds.isEmpty() || filterRuleIds.isEmpty()
+                ? (paramRuleIds.isEmpty() ? filterRuleIds : paramRuleIds)
+                : paramRuleIds.stream().filter(filterRuleIds::contains).toList();
+        boolean unsatisfiable = !paramRuleIds.isEmpty() && !filterRuleIds.isEmpty() && ruleIds.isEmpty();
+        List<String> groupIds = filters.getOrDefault("group-id", List.of());
+        List<SecurityGroupRule> rules = unsatisfiable
+                ? List.of()
+                : service.describeSecurityGroupRules(region, groupIds, ruleIds);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSecurityGroupRulesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1347,6 +1387,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateInternetGateway(MultivaluedMap<String, String> p, String region) {
         InternetGateway igw = service.createInternetGateway(region);
+        applyResourceTags(p, region, "internet-gateway", igw.getInternetGatewayId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateInternetGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1390,11 +1431,22 @@ public class Ec2QueryHandler {
     private Response handleCreateRouteTable(MultivaluedMap<String, String> p, String region) {
         String vpcId = p.getFirst("VpcId");
         RouteTable rt = service.createRouteTable(region, vpcId);
+        applyResourceTags(p, region, "route-table", rt.getRouteTableId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateRouteTableResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("routeTable").raw(routeTableXml(rt)).end("routeTable")
                 .end("CreateRouteTableResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpnGateways() {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpnGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpnGatewaySet")
+                .end("vpnGatewaySet")
+                .end("DescribeVpnGatewaysResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1442,7 +1494,8 @@ public class Ec2QueryHandler {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
         String gwId = p.getFirst("GatewayId");
-        service.createRoute(region, rtId, dest, gwId);
+        String natGwId = p.getFirst("NatGatewayId");
+        service.createRoute(region, rtId, dest, gwId, natGwId);
         return booleanResponse("CreateRoute");
     }
 
@@ -1566,6 +1619,7 @@ public class Ec2QueryHandler {
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
         Address addr = service.allocateAddress(region);
+        applyResourceTags(p, region, "elastic-ip", addr.getAllocationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2091,7 +2145,7 @@ public class Ec2QueryHandler {
         if (name == null || name.isBlank()) {
             return null;
         }
-        return "arn:aws:iam::" + config.defaultAccountId() + ":instance-profile/" + name;
+        return AwsArnUtils.Arn.of("iam", "", config.defaultAccountId(), "instance-profile/" + name).toString();
     }
 
     private String vpcXml(Vpc vpc) {
@@ -2161,7 +2215,8 @@ public class Ec2QueryHandler {
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
                 .elem("cidrIpv6", rule.getCidrIpv6())
-                .elem("description", rule.getDescription());
+                .elem("description", rule.getDescription())
+                .raw(tagSetXml(rule.getTags()));
         return xml.build();
     }
 
@@ -2191,6 +2246,7 @@ public class Ec2QueryHandler {
             xml.start("item")
                     .elem("destinationCidrBlock", r.getDestinationCidrBlock())
                     .elem("gatewayId", r.getGatewayId())
+                    .elem("natGatewayId", r.getNatGatewayId())
                     .elem("state", r.getState())
                     .elem("origin", r.getOrigin())
                     .end("item");
@@ -2546,6 +2602,39 @@ public class Ec2QueryHandler {
     private Response handleDeleteVolume(MultivaluedMap<String, String> p, String region) {
         service.deleteVolume(region, p.getFirst("VolumeId"));
         return booleanResponse("DeleteVolume");
+    }
+
+    private Response handleAttachVolume(MultivaluedMap<String, String> p, String region) {
+        String volumeId = p.getFirst("VolumeId");
+        String instanceId = p.getFirst("InstanceId");
+        String device = p.getFirst("Device");
+        VolumeAttachment attachment = service.attachVolume(region, volumeId, instanceId, device);
+        return volumeAttachmentResponse("AttachVolume", attachment, "attaching");
+    }
+
+    private Response handleDetachVolume(MultivaluedMap<String, String> p, String region) {
+        String volumeId = p.getFirst("VolumeId");
+        String instanceId = p.getFirst("InstanceId");
+        String device = p.getFirst("Device");
+        boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
+        VolumeAttachment attachment = service.detachVolume(region, volumeId, instanceId, device, force);
+        return volumeAttachmentResponse("DetachVolume", attachment, "detaching");
+    }
+
+    private Response volumeAttachmentResponse(String action, VolumeAttachment attachment, String status) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("volumeId", attachment.getVolumeId())
+                .elem("instanceId", attachment.getInstanceId())
+                .elem("device", attachment.getDevice())
+                .elem("status", status)
+                .elem("deleteOnTermination", String.valueOf(attachment.isDeleteOnTermination()));
+        if (attachment.getAttachTime() != null) {
+            xml.elem("attachTime", ISO_FMT.format(attachment.getAttachTime()));
+        }
+        xml.end(action + "Response");
+        return xmlResponse(xml.build());
     }
 
     private String volumeXml(Volume vol) {

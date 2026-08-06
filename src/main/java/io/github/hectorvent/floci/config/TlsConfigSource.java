@@ -49,6 +49,11 @@ public class TlsConfigSource implements ConfigSource {
     private static final String TLS_DIR = "tls";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    // host.docker.internal: how Lambda containers reach Floci when it runs on the host (not in a container).
+    private static final List<String> DEFAULT_SAN_HOSTNAMES = List.of(
+            "localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
+            "localhost.floci.io", "*.localhost.floci.io", "host.docker.internal");
+
     private final Map<String, String> properties = new HashMap<>();
 
     public TlsConfigSource() {
@@ -57,6 +62,13 @@ public class TlsConfigSource implements ConfigSource {
             LOG.debug("TLS disabled — TlsConfigSource inactive");
             return;
         }
+
+        // BouncyCastle may not be registered yet — this ConfigSource runs before CDI (@Startup beans)
+        // and before quarkus-security's runtime provider registration. Register it up front so BOTH
+        // certificate parsing (isSelfSigned/parseCertificate) and generation work; otherwise
+        // parseCertificate fails "no such provider: BC", isSelfSigned returns false, and the persisted
+        // self-signed certificate is needlessly regenerated on every restart.
+        ensureBouncyCastleRegistered();
 
         String certPath = resolveProperty("floci.tls.cert-path", "");
         String keyPath = resolveProperty("floci.tls.key-path", "");
@@ -77,8 +89,7 @@ public class TlsConfigSource implements ConfigSource {
                 // Extract current hostname configuration
                 List<String> customHostnames = extractCustomHostnames();
                 List<String> currentHostnames = new ArrayList<>();
-                currentHostnames.addAll(List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                        "localhost.floci.io", "*.localhost.floci.io"));
+                currentHostnames.addAll(DEFAULT_SAN_HOSTNAMES);
                 currentHostnames.addAll(customHostnames);
                 
                 // Regenerate when the hostname config changed, or when the existing certificate
@@ -158,20 +169,21 @@ public class TlsConfigSource implements ConfigSource {
         return defaultValue;
     }
 
+    private static void ensureBouncyCastleRegistered() {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+    }
+
     private void generateSelfSignedCert(Path tlsDir, Path certFile, Path keyFile) {
         try {
             Files.createDirectories(tlsDir);
-
-            // BouncyCastle may not be registered yet — ConfigSource runs before CDI
-            if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-                Security.addProvider(new BouncyCastleProvider());
-            }
+            ensureBouncyCastleRegistered();
 
             // Extract custom hostnames and combine with defaults
             List<String> customHostnames = extractCustomHostnames();
             List<String> allSans = new ArrayList<>();
-            allSans.addAll(List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-                    "localhost.floci.io", "*.localhost.floci.io"));
+            allSans.addAll(DEFAULT_SAN_HOSTNAMES);
             allSans.addAll(customHostnames);
 
             CertificateGenerator gen = new CertificateGenerator();

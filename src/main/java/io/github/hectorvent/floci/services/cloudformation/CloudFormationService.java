@@ -112,6 +112,17 @@ public class CloudFormationService {
         stackBackend.deleteForAccount(storageAccount, key(stackName, region));
     }
 
+    /**
+     * Sets a stack's termination protection (CloudFormation {@code UpdateTerminationProtection}).
+     * Returns the stack so the caller can echo its {@code StackId}.
+     */
+    public Stack updateTerminationProtection(String stackName, boolean enabled, String region) {
+        Stack stack = getStackOrThrow(stackName, region);
+        stack.setEnableTerminationProtection(enabled);
+        persistStack(stack);
+        return stack;
+    }
+
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
     public List<Stack> describeStacks(String stackName, String region) {
@@ -289,6 +300,12 @@ public class CloudFormationService {
         Stack stack = resolveStack(stackName, region);
         if (stack == null) {
             return CompletableFuture.completedFuture(null); // Already gone — no-op
+        }
+        if (stack.isEnableTerminationProtection()) {
+            // Real AWS rejects deletion of a protected stack and leaves it unchanged.
+            throw new AwsException("ValidationError",
+                    "Stack [" + stack.getStackId()
+                            + "] cannot be deleted while TerminationProtection is enabled", 400);
         }
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),
@@ -571,13 +588,28 @@ public class CloudFormationService {
             stack.setStatus("ROLLBACK_IN_PROGRESS");
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "ROLLBACK_IN_PROGRESS", failedResource.getStatusReason());
-            rollbackCreatedResources(stack, region);
-            stack.setStatus("ROLLBACK_COMPLETE");
+            List<String> rollbackFailures = rollbackCreatedResources(stack, region);
             stack.setLastUpdatedTime(now());
-            addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE", null);
-            LOG.infov("Stack {0} rolled back to a clean slate (ROLLBACK_COMPLETE)", stack.getStackName());
+            if (rollbackFailures.isEmpty()) {
+                stack.setStatus("ROLLBACK_COMPLETE");
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE", null);
+                LOG.infov("Stack {0} rolled back to a clean slate (ROLLBACK_COMPLETE)", stack.getStackName());
+            } else {
+                String reason = "The following resource(s) failed to roll back: ["
+                        + String.join(", ", rollbackFailures) + "].";
+                stack.setStatus("ROLLBACK_FAILED");
+                stack.setStatusReason(reason);
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "ROLLBACK_FAILED", reason);
+                LOG.errorv("Stack {0} rollback failed: {1}", stack.getStackName(), reason);
+            }
         } else {
+            if ("true".equals(failedResource.getAttributes().remove(
+                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))) {
+                failedResource.setStatus("CREATE_COMPLETE");
+                failedResource.setStatusReason(null);
+            }
             stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
             stack.setLastUpdatedTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
@@ -587,20 +619,38 @@ public class CloudFormationService {
         persistStack(stack);
     }
 
-    /** Deletes every resource successfully created in this execution, in reverse order. */
-    private void rollbackCreatedResources(Stack stack, String region) {
+    /** Deletes every resource created in this execution, in reverse order. */
+    private List<String> rollbackCreatedResources(Stack stack, String region) {
         List<StackResource> resources = new ArrayList<>(stack.getResources().values());
         Collections.reverse(resources);
+        List<String> failedResources = new ArrayList<>();
         for (StackResource resource : resources) {
-            if (resource.getPhysicalId() != null && "CREATE_COMPLETE".equals(resource.getStatus())) {
-                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                        resource.getResourceType(), "DELETE_IN_PROGRESS", null);
-                provisioner.delete(resource.getResourceType(), resource.getPhysicalId(), region);
+            boolean completed = "CREATE_COMPLETE".equals(resource.getStatus());
+            boolean ownedFailedResource = "CREATE_FAILED".equals(resource.getStatus())
+                    && "true".equals(resource.getAttributes().get(
+                            CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+            if (resource.getPhysicalId() == null || (!completed && !ownedFailedResource)) {
+                continue;
+            }
+            addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                    resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+            try {
+                provisioner.delete(resource, region);
                 resource.setStatus("DELETE_COMPLETE");
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
+            } catch (Exception e) {
+                failedResources.add(resource.getLogicalId());
+                resource.setStatus("DELETE_FAILED");
+                resource.setStatusReason(e.getMessage());
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_FAILED", e.getMessage());
+                LOG.warnv("Failed to roll back {0} ({1}) in stack {2}: {3}",
+                        resource.getResourceType(), resource.getPhysicalId(),
+                        stack.getStackName(), e.getMessage());
             }
         }
+        return failedResources;
     }
 
     private void deleteStackResources(Stack stack, String region) {

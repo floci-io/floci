@@ -37,6 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -294,6 +297,51 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void signUpPrefersPhoneDeliveryWhenEmailAndPhoneAreAutoVerified() throws Exception {
+        Response poolResponse = cognitoAction("CreateUserPool", """
+                {
+                  "PoolName": "SignUpPhonePreferredPool",
+                  "AutoVerifiedAttributes": ["email", "phone_number"]
+                }
+                """);
+
+        poolResponse.then().statusCode(200);
+        String userPoolId = poolResponse.jsonPath().getString("UserPool.Id");
+
+        Response clientResponse = cognitoAction("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "signup-phone-preferred-client"
+                }
+                """.formatted(userPoolId));
+
+        clientResponse.then().statusCode(200);
+        String clientId = clientResponse.jsonPath().getString("UserPoolClient.ClientId");
+
+        Response signUpResponse = cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "phone-preferred-user",
+                  "Password": "Password123!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "user@example.com" },
+                    { "Name": "phone_number", "Value": "+15551234567" }
+                  ]
+                }
+                """.formatted(clientId));
+
+        signUpResponse.then().statusCode(200);
+
+        assertEquals("phone_number",
+                signUpResponse.jsonPath().getString("CodeDeliveryDetails.AttributeName"));
+        assertEquals("SMS",
+                signUpResponse.jsonPath().getString("CodeDeliveryDetails.DeliveryMedium"));
+        String destination = signUpResponse.jsonPath().getString("CodeDeliveryDetails.Destination");
+        assertThat(destination, notNullValue());
+        assertThat(destination, containsString("4567"));
+    }
+
+    @Test
     @Order(7)
     void confirmSignUpRequiresValidConfirmationCode() throws Exception {
         given().delete("/_aws/ses").then().statusCode(200);
@@ -411,6 +459,92 @@ class CognitoIntegrationTest {
                 }
                 """.formatted(signUpPoolId, signUpUsername));
         assertEquals("CONFIRMED", confirmedUser.path("UserStatus").asText());
+    }
+
+    @Test
+    void resendConfirmationCodeReplacesTheSignUpCode() throws Exception {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ResendConfirmationCodePool",
+                  "AutoVerifiedAttributes": ["email"]
+                }
+                """);
+        String resendPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "resend-confirmation-code-client"
+                }
+                """.formatted(resendPoolId));
+        String resendClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String resendUsername = "resend+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(resendClientId, resendUsername, resendUsername))
+                .then()
+                .statusCode(200);
+
+        String originalCode = fetchLatestSesVerificationCode(resendUsername);
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        Response resendResponse = cognitoAction("ResendConfirmationCode", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(resendClientId, resendUsername));
+        resendResponse.then().statusCode(200);
+        assertEquals("email",
+                resendResponse.jsonPath().getString("CodeDeliveryDetails.AttributeName"));
+        assertEquals("EMAIL",
+                resendResponse.jsonPath().getString("CodeDeliveryDetails.DeliveryMedium"));
+        assertThat(resendResponse.jsonPath().getString("CodeDeliveryDetails.Destination"),
+                containsString("@"));
+
+        String replacementCode = fetchLatestSesVerificationCode(resendUsername);
+        assertNotEquals(originalCode, replacementCode);
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "%s"
+                }
+                """.formatted(resendClientId, resendUsername, originalCode))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"));
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "%s"
+                }
+                """.formatted(resendClientId, resendUsername, replacementCode))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("ResendConfirmationCode", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(resendClientId, resendUsername))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
     }
 
     @Test

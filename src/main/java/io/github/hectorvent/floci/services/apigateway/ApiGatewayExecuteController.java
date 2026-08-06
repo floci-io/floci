@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
+import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -38,6 +39,7 @@ import org.jboss.logging.Logger;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -265,18 +267,32 @@ public class ApiGatewayExecuteController {
 
         // Find matching resource and method
         List<ApiGatewayResource> resources = apiGatewayService.getResources(region, apiId);
-        ApiGatewayResource matched = matchResource(resources, path);
-        if (matched == null) {
+        List<ApiGatewayResource> matchedResources = matchResources(resources, path);
+        if (matchedResources.isEmpty()) {
             return Response.status(404)
                     .entity(jsonMessage("Not Found"))
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
-        MethodConfig method = matched.getResourceMethods().get(httpMethod.toUpperCase());
-        if (method == null) {
-            method = matched.getResourceMethods().get("ANY");
+        ApiGatewayResource matched = null;
+        MethodConfig method = null;
+        for (ApiGatewayResource r : matchedResources) {
+            if (r.getResourceMethods() != null && !r.getResourceMethods().isEmpty()) {
+                MethodConfig m = r.getResourceMethods().get(httpMethod.toUpperCase());
+                if (m == null) {
+                    m = r.getResourceMethods().get("ANY");
+                }
+                if (m != null) {
+                    matched = r;
+                    method = m;
+                }
+                // Once we match a path that has methods configured, we must not fall back
+                // to less specific sibling resources (e.g. /{proxy+}), even on method mismatch.
+                break;
+            }
         }
-        if (method == null) {
+
+        if (matched == null) {
             return Response.status(405)
                     .entity(jsonMessage("Method Not Allowed"))
                     .type(MediaType.APPLICATION_JSON).build();
@@ -705,14 +721,19 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private void putSingleValueHeaders(ObjectNode event, HttpHeaders headers) {
+    // Package-private for unit testing (see ApiGatewayExecuteControllerTest).
+    void putSingleValueHeaders(ObjectNode event, HttpHeaders headers) {
         ObjectNode headersNode = event.putObject("headers");
         headers.getRequestHeaders().forEach((name, values) -> {
-            if (!values.isEmpty()) headersNode.put(name, values.get(0));
+            // AWS collapses duplicate request headers to the LAST value in the single-value `headers`
+            // map (multiValueHeaders keeps every value). Taking the first value diverged from AWS.
+            if (!values.isEmpty()) {
+                headersNode.put(name, values.get(values.size() - 1));
+            }
         });
     }
 
-    private void putMultiValueHeaders(ObjectNode event, HttpHeaders headers) {
+    void putMultiValueHeaders(ObjectNode event, HttpHeaders headers) {
         ObjectNode mvHeaders = event.putObject("multiValueHeaders");
         headers.getRequestHeaders().forEach((name, values) -> {
             ArrayNode arr = mvHeaders.putArray(name);
@@ -1191,7 +1212,7 @@ public class ApiGatewayExecuteController {
         }
 
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
-            Response authError = enforceJwtAuthorizer(region, apiId, route, headers);
+            Response authError = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
             if (authError != null) return authError;
         }
 
@@ -1269,18 +1290,15 @@ public class ApiGatewayExecuteController {
             Matcher m = ELB_LISTENER_ARN.matcher(integrationUri);
             if (m.matches()) {
                 String albRegion = m.group(1);
-                Integer listenerPort = resolveAlbListenerPort(albRegion, integrationUri);
-                if (listenerPort == null) {
+                AlbListenerEndpoint listenerEndpoint = resolveAlbListenerEndpoint(albRegion, integrationUri);
+                if (listenerEndpoint == null) {
                     LOG.warnv("ALB listener ARN unresolvable for v2 integration: {0}", integrationUri);
                     return Response.status(502)
                             .entity(jsonMessage("Bad Gateway: cannot resolve ALB listener: " + integrationUri))
                             .type(MediaType.APPLICATION_JSON).build();
                 }
-                // Use 127.0.0.1 explicitly: ElbV2DataPlane binds the listener on 0.0.0.0
-                // (IPv4-only). "localhost" resolves to ::1 first on IPv6-preferred systems,
-                // which would fail to connect.
-                String resolvedUrl = "http://127.0.0.1:" + listenerPort + path;
-                effective = withResolvedUri(integration, resolvedUrl);
+                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + path;
+                effective = withResolvedUriAndHost(integration, resolvedUrl, listenerEndpoint.host());
                 LOG.debugv("ALB integration: listener {0} → {1}", integrationUri, resolvedUrl);
             }
         }
@@ -1329,17 +1347,23 @@ public class ApiGatewayExecuteController {
         return rb.build();
     }
 
-    /** Returns the listener's bound port, or null if the ARN is unknown or describeListeners throws. */
-    private Integer resolveAlbListenerPort(String region, String listenerArn) {
+    /** Returns listener endpoint details, or null if the ARN is unknown or lookups fail. */
+    private AlbListenerEndpoint resolveAlbListenerEndpoint(String region, String listenerArn) {
         try {
             List<Listener> matches = elbV2Service.describeListeners(region, null, List.of(listenerArn));
             if (matches.isEmpty()) return null;
-            return matches.get(0).getPort();
+            Listener listener = matches.get(0);
+            List<LoadBalancer> loadBalancers = elbV2Service.describeLoadBalancers(
+                    region, List.of(listener.getLoadBalancerArn()), null, null, null);
+            if (loadBalancers.isEmpty()) return null;
+            return new AlbListenerEndpoint(listener.getPort(), loadBalancers.get(0).getDnsName());
         } catch (Exception e) {
             LOG.warnv("describeListeners failed for {0}: {1}", listenerArn, e.getMessage());
             return null;
         }
     }
+
+    private record AlbListenerEndpoint(int port, String host) {}
 
     /** Shallow copy with {@code integrationUri} replaced; never mutate the stored Integration. */
     private static io.github.hectorvent.floci.services.apigatewayv2.model.Integration withResolvedUri(
@@ -1347,6 +1371,18 @@ public class ApiGatewayExecuteController {
         io.github.hectorvent.floci.services.apigatewayv2.model.Integration copy =
                 new io.github.hectorvent.floci.services.apigatewayv2.model.Integration(original);
         copy.setIntegrationUri(targetUri);
+        return copy;
+    }
+
+    private static io.github.hectorvent.floci.services.apigatewayv2.model.Integration withResolvedUriAndHost(
+            io.github.hectorvent.floci.services.apigatewayv2.model.Integration original, String targetUri, String host) {
+        io.github.hectorvent.floci.services.apigatewayv2.model.Integration copy = withResolvedUri(original, targetUri);
+        Map<String, String> requestParameters = new java.util.LinkedHashMap<>();
+        if (copy.getRequestParameters() != null) {
+            requestParameters.putAll(copy.getRequestParameters());
+        }
+        requestParameters.put("overwrite:header.Host", host);
+        copy.setRequestParameters(requestParameters);
         return copy;
     }
 
@@ -1405,7 +1441,8 @@ public class ApiGatewayExecuteController {
     /** Extracts parameter names from a route template; the pattern itself is constant. */
     private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
 
-    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers) {
+    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
+                                          UriInfo uriInfo) {
         Authorizer authorizer;
         try {
             authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
@@ -1415,7 +1452,7 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
-        String token = extractToken(authorizer, headers);
+        String token = extractToken(authorizer, headers, uriInfo);
         if (token == null) {
             return Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
@@ -1727,7 +1764,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private String extractToken(Authorizer authorizer, HttpHeaders headers) {
+    private String extractToken(Authorizer authorizer, HttpHeaders headers, UriInfo uriInfo) {
         List<String> sources = authorizer.getIdentitySource();
         if (sources == null || sources.isEmpty()) {
             // Default: Authorization header
@@ -1738,6 +1775,10 @@ public class ApiGatewayExecuteController {
             if (source.startsWith("$request.header.")) {
                 String headerName = source.substring("$request.header.".length());
                 String value = headers.getHeaderString(headerName);
+                if (value != null) return stripBearer(value);
+            } else if (source.startsWith("$request.querystring.")) {
+                String paramName = source.substring("$request.querystring.".length());
+                String value = uriInfo.getQueryParameters().getFirst(paramName);
                 if (value != null) return stripBearer(value);
             }
         }
@@ -1874,48 +1915,59 @@ public class ApiGatewayExecuteController {
     // ──────────────────────────── Path matching ────────────────────────────
 
     /**
-     * Finds the best-matching resource for {@code requestPath}.
+     * Finds all matching resources for {@code requestPath}, sorted by specificity.
      * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
      */
-    ApiGatewayResource matchResource(List<ApiGatewayResource> resources, String requestPath) {
+    List<ApiGatewayResource> matchResources(List<ApiGatewayResource> resources, String requestPath) {
+        List<ApiGatewayResource> matches = new ArrayList<>();
         // 1. Exact match
         for (ApiGatewayResource r : resources) {
             if (requestPath.equals(r.getPath())) {
-                return r;
+                matches.add(r);
             }
         }
         // 2. Template path match — /items/{id} matches /items/anything
         for (ApiGatewayResource r : resources) {
             if (r.getPath() != null && r.getPath().contains("{") && !r.getPath().contains("{proxy+}")) {
                 if (pathMatchesTemplate(r.getPath(), requestPath)) {
-                    return r;
+                    matches.add(r);
                 }
             }
         }
         // 3. Proxy+ wildcard — {proxy+} matches longest parent prefix
         // Requires at least one path segment after the parent prefix (except root /{proxy+})
-        ApiGatewayResource best = null;
-        int bestLen = -1;
+        List<ApiGatewayResource> proxyMatches = new ArrayList<>();
         for (ApiGatewayResource r : resources) {
             if (r.getPath() == null || !r.getPath().contains("{proxy+}")) continue;
             String parentPrefix = r.getPath().substring(0, r.getPath().indexOf("{proxy+}"));
             // Root /{proxy+} matches everything including /
             if ("/".equals(parentPrefix)) {
-                if (best == null) {
-                    best = r;
-                    bestLen = 0;
-                }
+                proxyMatches.add(r);
                 continue;
             }
             // Non-root proxy+ requires at least one char after the prefix
             if (requestPath.startsWith(parentPrefix)
-                    && requestPath.length() > parentPrefix.length()
-                    && parentPrefix.length() > bestLen) {
-                best = r;
-                bestLen = parentPrefix.length();
+                    && requestPath.length() > parentPrefix.length()) {
+                proxyMatches.add(r);
             }
         }
-        return best;
+        // Sort proxy matches by parentPrefix length descending
+        proxyMatches.sort((r1, r2) -> {
+            String p1 = r1.getPath().substring(0, r1.getPath().indexOf("{proxy+}"));
+            String p2 = r2.getPath().substring(0, r2.getPath().indexOf("{proxy+}"));
+            return Integer.compare(p2.length(), p1.length());
+        });
+        matches.addAll(proxyMatches);
+        return matches;
+    }
+
+    /**
+     * Finds the best-matching resource for {@code requestPath}.
+     * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
+     */
+    ApiGatewayResource matchResource(List<ApiGatewayResource> resources, String requestPath) {
+        List<ApiGatewayResource> matches = matchResources(resources, requestPath);
+        return matches.isEmpty() ? null : matches.get(0);
     }
 
     /**

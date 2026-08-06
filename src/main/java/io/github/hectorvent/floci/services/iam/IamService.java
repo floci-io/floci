@@ -193,9 +193,21 @@ public class IamService implements SessionAccountLookup {
     }
 
     public IamUser getUser(String userName) {
+        if (userName == null) {
+            throw new AwsException("NoSuchEntity",
+                    "The user with name null cannot be found.", 404);
+        }
         return users.get(userName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "The user with name " + userName + " cannot be found.", 404));
+    }
+
+    /** The IAM user that owns the given access key id, when it is a real stored key. */
+    public Optional<String> findUserNameByAccessKeyId(String accessKeyId) {
+        if (accessKeyId == null) {
+            return Optional.empty();
+        }
+        return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
     public void deleteUser(String userName) {
@@ -483,6 +495,28 @@ public class IamService implements SessionAccountLookup {
         }
         policies.delete(policyArn);
         LOG.infov("Deleted IAM policy: {0}", policyArn);
+    }
+
+    /** The roles, users and groups a managed policy is currently attached to. */
+    public record PolicyEntities(List<IamRole> roles, List<IamUser> users, List<IamGroup> groups) {}
+
+    /**
+     * Lists the entities (roles, users, groups) a managed policy is attached to — the read behind
+     * IAM's ListEntitiesForPolicy and what a caller must detach before {@link #deletePolicy} will
+     * succeed. Attachments are tracked on the principals, so this scans them for the given ARN.
+     */
+    public PolicyEntities listEntitiesForPolicy(String policyArn) {
+        getPolicy(policyArn); // AWS raises NoSuchEntity for an unknown policy ARN; fail fast likewise.
+        List<IamRole> attachedRoles = roles.scan(k -> true).stream()
+                .filter(r -> r.getAttachedPolicyArns().contains(policyArn))
+                .toList();
+        List<IamUser> attachedUsers = users.scan(k -> true).stream()
+                .filter(u -> u.getAttachedPolicyArns().contains(policyArn))
+                .toList();
+        List<IamGroup> attachedGroups = groups.scan(k -> true).stream()
+                .filter(g -> g.getAttachedPolicyArns().contains(policyArn))
+                .toList();
+        return new PolicyEntities(attachedRoles, attachedUsers, attachedGroups);
     }
 
     public List<IamPolicy> listPolicies(String scope, String pathPrefix) {
@@ -951,6 +985,14 @@ public class IamService implements SessionAccountLookup {
             return fromAccessKey;
         }
         return findSessionAnyAccount(accessKeyId).map(SessionCredential::getSecretAccessKey);
+    }
+
+    public Optional<AccessKey> findAccessKey(String accessKeyId) {
+        return accessKeys.get(accessKeyId);
+    }
+
+    public Optional<IamUser> findUser(String userName) {
+        return users.get(userName);
     }
 
     // =========================================================================

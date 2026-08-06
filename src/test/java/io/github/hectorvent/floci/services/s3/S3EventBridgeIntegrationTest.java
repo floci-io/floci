@@ -115,6 +115,13 @@ class S3EventBridgeIntegrationTest {
             .put("/eb-s3-test-bucket?notification")
         .then()
             .statusCode(200);
+
+        given()
+        .when()
+            .get("/eb-s3-test-bucket?notification")
+        .then()
+            .statusCode(200)
+            .body(containsString("<EventBridgeConfiguration"));
     }
 
     @Test
@@ -184,6 +191,13 @@ class S3EventBridgeIntegrationTest {
             .put("/eb-s3-test-bucket?notification")
         .then()
             .statusCode(200);
+
+        given()
+        .when()
+            .get("/eb-s3-test-bucket?notification")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("EventBridgeConfiguration")));
 
         // Drain any leftover messages
         given()

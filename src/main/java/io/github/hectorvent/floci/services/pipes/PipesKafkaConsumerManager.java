@@ -131,13 +131,12 @@ public class PipesKafkaConsumerManager {
         return resolveConsumerGroupId(pipe, kafkaParameters(pipe));
     }
 
-    private KafkaConsumer<byte[], byte[]> createConsumer(Pipe pipe) {
-        String bootstrapServers = resolveBootstrapServers(pipe);
-        String topicName = resolveTopicName(pipe);
+    /** Package-private so {@code PipesKafkaNativeSupportTest} guards the real settings, not a copy. */
+    Properties consumerProperties(Pipe pipe) {
         JsonNode params = kafkaParameters(pipe);
 
         Properties properties = new Properties();
-        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, resolveBootstrapServers(pipe));
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
@@ -145,11 +144,21 @@ public class PipesKafkaConsumerManager {
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, resolveConsumerGroupId(pipe, params));
         properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "floci-pipes-" + UUID.randomUUID());
         properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(resolveBatchSize(pipe, 100)));
+        // On by default (KIP-714). Floci has no reason to push metrics to a user's broker, and it
+        // makes the shaded protobuf serializer reflectively reachable on a path no broker we test
+        // against exercises.
+        properties.put(ConsumerConfig.ENABLE_METRICS_PUSH_CONFIG, "false");
+        return properties;
+    }
+
+    private KafkaConsumer<byte[], byte[]> createConsumer(Pipe pipe) {
+        Properties properties = consumerProperties(pipe);
+        String topicName = resolveTopicName(pipe);
 
         KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(properties);
         consumer.subscribe(List.of(topicName));
         LOG.infov("Pipe {0}: subscribed Kafka consumer to topic {1} via {2}",
-                pipe.getName(), topicName, bootstrapServers);
+                pipe.getName(), topicName, properties.get(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG));
         return consumer;
     }
 
