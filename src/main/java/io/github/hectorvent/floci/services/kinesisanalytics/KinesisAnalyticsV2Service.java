@@ -199,9 +199,14 @@ public class KinesisAnalyticsV2Service {
                 throw e;
             } catch (RuntimeException e) {
                 // Unexpected provisioning failure (e.g. Docker unavailable). Keep the cause in the logs;
-                // don't leak internal details into the AWS envelope.
+                // don't leak internal details into the AWS envelope. "InternalFailure" (no "Exception"
+                // suffix, HTTP 500) is AWS's documented generic error common to every service's API
+                // (e.g. https://docs.aws.amazon.com/comprehend/latest/APIReference/CommonErrors.html) —
+                // it isn't declared per-operation in kinesisanalyticsv2's model (no operation here
+                // declares any 5xx shape at all), so this isn't a code this specific API's model dictates,
+                // it's the AWS-wide platform fallback, same as JsonErrorResponseUtils' own default.
                 LOG.errorv(e, "Failed to start application {0}", applicationName);
-                throw new AwsException("InternalFailureException",
+                throw new AwsException("InternalFailure",
                         "Failed to start application " + applicationName, 500);
             }
         }
@@ -284,8 +289,9 @@ public class KinesisAnalyticsV2Service {
             } catch (AwsException e) {
                 throw e;
             } catch (RuntimeException e) {
+                // Same AWS-wide "InternalFailure" generic 500 as startApplication's catch above.
                 LOG.errorv(e, "Failed to redeploy code for application {0}", applicationName);
-                throw new AwsException("InternalFailureException",
+                throw new AwsException("InternalFailure",
                         "Failed to redeploy application code for " + applicationName, 500);
             }
         }

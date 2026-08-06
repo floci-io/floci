@@ -159,16 +159,20 @@ class KinesisAnalyticsV2ServiceTest {
     @Test
     void startApplicationWrapsProvisioningFailure() {
         // Real mode with a container manager that fails: the AWS envelope must not leak the
-        // internal cause, but the operation must throw.
+        // internal cause, but the operation must throw. "InternalFailure" (no "Exception" suffix) is
+        // AWS's documented generic 500 common to every service's API, not a kinesisanalyticsv2-specific
+        // shape (this service's model declares no 5xx shape at all).
         KinesisAnalyticsV2Service realMode = realModeServiceWithFailingManager();
         realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null);
-        assertThrows(AwsException.class, () -> realMode.startApplication("demo"));
+        AwsException ex = assertThrows(AwsException.class, () -> realMode.startApplication("demo"));
+        assertEquals("InternalFailure", ex.getErrorCode());
+        assertEquals(500, ex.getHttpStatus());
     }
 
     @Test
     void startApplicationPreservesAwsExceptionFromCodeFetch() {
         // A bad application-code S3 location makes startCluster throw AwsException(InvalidArgumentException).
-        // It must propagate as-is (400 client error), not be masked as InternalFailureException (500).
+        // It must propagate as-is (400 client error), not be masked as InternalFailure (500).
         FlinkContainerManager failing = Mockito.mock(FlinkContainerManager.class);
         Mockito.doThrow(new AwsException("InvalidArgumentException",
                         "Unable to fetch application code from s3://b/missing.jar", 400))
@@ -404,6 +408,23 @@ class KinesisAnalyticsV2ServiceTest {
         Mockito.verify(manager).redeployCode(app);
         assertEquals("v2.jar", updated.getCodeS3Key());
         assertEquals(ApplicationStatus.STARTING, updated.getApplicationStatus());
+    }
+
+    @Test
+    void updateApplicationWrapsRedeployFailureAsInternalFailure() {
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        Mockito.doThrow(new RuntimeException("docker unavailable"))
+                .when(manager).redeployCode(Mockito.any());
+        KinesisAnalyticsV2Service realMode = buildService(false, manager);
+        realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
+        FlinkApplication app = realMode.describeApplication("demo");
+        app.setApplicationStatus(ApplicationStatus.RUNNING);
+        app.setTaskManagerContainerId("tm-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> realMode.updateApplication(
+                "demo", 1L, null, "bucket", "v2.jar", null, null));
+        assertEquals("InternalFailure", ex.getErrorCode());
+        assertEquals(500, ex.getHttpStatus());
     }
 
     @Test
