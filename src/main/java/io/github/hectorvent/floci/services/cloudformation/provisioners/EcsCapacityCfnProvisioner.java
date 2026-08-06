@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -13,6 +14,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -72,15 +74,69 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionCapacityProvider(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "Name");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
+        String existingName = r.getPhysicalId();
+        String declaredName = ctx.resolveOptional(props, "Name");
+        // An unnamed provider keeps the name its first execution generated. Minting a fresh one on
+        // every pass left the previous provider behind with nothing referencing it.
+        String name = declaredName != null && !declaredName.isBlank()
+                ? declaredName
+                : (existingName != null && !existingName.isBlank()
+                        ? existingName
+                        : ctx.generatePhysicalName(r.getLogicalId(), 255, false));
+
+        if (existingName != null && !existingName.isBlank() && !existingName.equals(name)) {
+            throw new AwsException("ValidationError",
+                    "Updating Name requires resource replacement, which is not supported.", 400);
         }
+
         Map<String, Object> asgProvider = asgProvider(props, ctx);
         Map<String, String> tags = tags(props, ctx);
-        ecsService.createCapacityProvider(name, asgProvider, tags, ctx.region());
+
+        // UpdateStack re-executes every resource with the physical id it got at create time, and
+        // createCapacityProvider rejects a name that already exists, so an unchanged provider used
+        // to fail the whole update. An empty result also covers a provider removed out of band,
+        // which is recreated rather than reported as a failure.
+        CapacityProvider existing = existingName == null || existingName.isBlank()
+                ? null
+                : ecsService.describeCapacityProviders(List.of(existingName)).stream()
+                        .findFirst().orElse(null);
+
+        if (existing == null) {
+            ecsService.createCapacityProvider(name, asgProvider, tags, ctx.region());
+        } else {
+            if (!Objects.equals(asgArn(existing.getAutoScalingGroupProvider()), asgArn(asgProvider))) {
+                throw new AwsException("ValidationError",
+                        "Updating AutoScalingGroupArn requires resource replacement, which is not "
+                        + "supported.", 400);
+            }
+            ecsService.updateCapacityProvider(name, asgProvider);
+            applyTags(existing, tags);
+        }
         // Ref returns the capacity provider name; AWS exposes no Fn::GetAtt attributes here.
         r.setPhysicalId(name);
+    }
+
+    /** AutoScalingGroupArn is createOnly, so a change to it is a replacement rather than an update. */
+    private static String asgArn(Map<String, Object> asgProvider) {
+        Object arn = asgProvider == null ? null : asgProvider.get("autoScalingGroupArn");
+        return arn == null ? null : arn.toString();
+    }
+
+    /**
+     * Tags are updatable in place. updateCapacityProvider carries only the Auto Scaling settings,
+     * so a tag the template dropped would otherwise survive the update.
+     */
+    private void applyTags(CapacityProvider existing, Map<String, String> tags) {
+        Map<String, String> current = existing.getTags() == null ? Map.of() : existing.getTags();
+        List<String> dropped = current.keySet().stream()
+                .filter(key -> !tags.containsKey(key))
+                .toList();
+        if (!dropped.isEmpty()) {
+            ecsService.untagResource(existing.getCapacityProviderArn(), dropped);
+        }
+        if (!tags.isEmpty()) {
+            ecsService.tagResource(existing.getCapacityProviderArn(), tags);
+        }
     }
 
     private void provisionAssociations(StackResource r, JsonNode props, ProvisionContext ctx) {

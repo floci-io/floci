@@ -66,6 +66,52 @@ class CloudFormationEcsCapacityIntegrationTest {
     }
 
     @Test
+    void stackUpdateReusesTheCapacityProviderItAlreadyCreated() {
+        // UpdateStack re-executes every resource with the physical id it got at create time, and
+        // createCapacityProvider rejects an existing name, so the whole update used to fail. The
+        // aws-bench CDK scenarios redeploy iteratively, which is where this surfaces.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-ecscap-upd-" + suffix;
+        String clusterName = "cap-cluster-upd-" + suffix;
+        String providerName = "cap-provider-upd-" + suffix;
+
+        createStack(stackName, template(clusterName, providerName));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template(clusterName, providerName)
+                    .replace("\"TargetCapacity\": 80", "\"TargetCapacity\": 40")
+                    .replace("{\"Key\": \"owner\", \"Value\": \"platform\"}",
+                             "{\"Key\": \"owner\", \"Value\": \"infra\"}"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        // One provider still, carrying the updated tag value. The updated AutoScalingGroupProvider
+        // is asserted in EcsCapacityCfnProvisionerTest instead: DescribeCapacityProviders does not
+        // serialize autoScalingGroupProvider, so it is not observable here.
+        String providers = describeCapacityProviders(providerName);
+        assertThat(providers, containsString(providerName));
+        assertThat(providers, containsString("infra"));
+        assertThat(providers, not(containsString("platform")));
+    }
+
+    @Test
     void stackDeleteRemovesProviderAndAssociations() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-ecscap-del-" + suffix;

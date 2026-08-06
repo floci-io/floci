@@ -84,6 +84,122 @@ class EcsCapacityCfnProvisionerTest {
         assertEquals("my-stack-Provider", r.getPhysicalId().replaceAll("-[0-9a-f]{12}$", ""));
     }
 
+    private CapacityProvider stored(String name, String asgArn, Map<String, String> tags) {
+        CapacityProvider cp = new CapacityProvider();
+        cp.setName(name);
+        cp.setCapacityProviderArn("arn:aws:ecs:us-east-1:000000000000:capacity-provider/" + name);
+        Map<String, Object> asg = new HashMap<>();
+        asg.put("autoScalingGroupArn", asgArn);
+        cp.setAutoScalingGroupProvider(asg);
+        cp.setTags(new HashMap<>(tags));
+        return cp;
+    }
+
+    @Test
+    void updateReusesTheExistingProviderInsteadOfCreatingIt() {
+        // UpdateStack re-executes the resource with the physical id it already has, and
+        // createCapacityProvider rejects an existing name, so this used to fail the whole update.
+        StackResource r = resource(PROVIDER_TYPE, "Provider");
+        r.setPhysicalId("the-provider");
+        when(ecs.describeCapacityProviders(List.of("the-provider")))
+                .thenReturn(List.of(stored("the-provider", ASG_ARN, Map.of())));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "the-provider");
+        ObjectNode asg = props.putObject("AutoScalingGroupProvider");
+        asg.put("AutoScalingGroupArn", ASG_ARN);
+        asg.put("ManagedDraining", "ENABLED");
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("the-provider", r.getPhysicalId());
+        verify(ecs, never()).createCapacityProvider(anyString(), any(), any(), anyString());
+        ArgumentCaptor<Map<String, Object>> asgCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(ecs).updateCapacityProvider(eq("the-provider"), asgCaptor.capture());
+        assertEquals("ENABLED", asgCaptor.getValue().get("managedDraining"));
+    }
+
+    @Test
+    void anUnnamedProviderKeepsItsGeneratedNameAcrossUpdates() {
+        // A fresh generated name on every pass created a second provider and orphaned the first.
+        StackResource r = resource(PROVIDER_TYPE, "Provider");
+        r.setPhysicalId("my-stack-Provider-abcdef123456");
+        when(ecs.describeCapacityProviders(List.of("my-stack-Provider-abcdef123456")))
+                .thenReturn(List.of(stored("my-stack-Provider-abcdef123456", null, Map.of())));
+
+        provisioner.provision(r, mapper.createObjectNode(), ctx());
+
+        assertEquals("my-stack-Provider-abcdef123456", r.getPhysicalId());
+        verify(ecs, never()).createCapacityProvider(anyString(), any(), any(), anyString());
+        verify(ecs).updateCapacityProvider(eq("my-stack-Provider-abcdef123456"), any());
+    }
+
+    @Test
+    void aProviderRemovedOutOfBandIsRecreated() {
+        StackResource r = resource(PROVIDER_TYPE, "Provider");
+        r.setPhysicalId("the-provider");
+        when(ecs.describeCapacityProviders(List.of("the-provider"))).thenReturn(List.of());
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "the-provider");
+        props.putObject("AutoScalingGroupProvider").put("AutoScalingGroupArn", ASG_ARN);
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ecs).createCapacityProvider(eq("the-provider"), any(), any(), eq("us-east-1"));
+        verify(ecs, never()).updateCapacityProvider(anyString(), any());
+    }
+
+    @Test
+    void changingNameIsRejectedAsAReplacement() {
+        StackResource r = resource(PROVIDER_TYPE, "Provider");
+        r.setPhysicalId("the-provider");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "a-different-provider");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(ecs, never()).createCapacityProvider(anyString(), any(), any(), anyString());
+        verify(ecs, never()).updateCapacityProvider(anyString(), any());
+    }
+
+    @Test
+    void changingAutoScalingGroupArnIsRejectedAsAReplacement() {
+        StackResource r = resource(PROVIDER_TYPE, "Provider");
+        r.setPhysicalId("the-provider");
+        when(ecs.describeCapacityProviders(List.of("the-provider")))
+                .thenReturn(List.of(stored("the-provider", ASG_ARN, Map.of())));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "the-provider");
+        props.putObject("AutoScalingGroupProvider")
+                .put("AutoScalingGroupArn", ASG_ARN.replace("asg-x", "asg-y"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(ecs, never()).updateCapacityProvider(anyString(), any());
+    }
+
+    @Test
+    void updateAppliesTagChangesAndRemovesTheOnesTheTemplateDropped() {
+        // updateCapacityProvider carries only the Auto Scaling settings, so a dropped tag would
+        // otherwise survive the update.
+        StackResource r = resource(PROVIDER_TYPE, "Provider");
+        r.setPhysicalId("the-provider");
+        String arn = "arn:aws:ecs:us-east-1:000000000000:capacity-provider/the-provider";
+        when(ecs.describeCapacityProviders(List.of("the-provider")))
+                .thenReturn(List.of(stored("the-provider", ASG_ARN, Map.of("keep", "1", "drop", "2"))));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "the-provider");
+        props.putObject("AutoScalingGroupProvider").put("AutoScalingGroupArn", ASG_ARN);
+        var tags = props.putArray("Tags");
+        tags.addObject().put("Key", "keep").put("Value", "1");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ecs).untagResource(arn, List.of("drop"));
+        verify(ecs).tagResource(arn, Map.of("keep", "1"));
+    }
+
     /** Greptile P1: ManagedScaling / ManagedTerminationProtection / ManagedDraining were dropped. */
     @Test
     void capacityProviderCarriesFullAutoScalingGroupProvider() {
