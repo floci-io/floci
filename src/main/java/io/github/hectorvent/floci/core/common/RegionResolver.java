@@ -50,6 +50,17 @@ public class RegionResolver {
     }
 
     /**
+     * True when the Authorization header is missing/blank, or present but not a SigV4
+     * "Credential=.../region/..." value (e.g. a bearer JWT) - in both cases resolveRegion
+     * silently returned defaultRegion rather than a region the caller actually specified,
+     * so callers should treat the resolved region as a guess and fall back on lookup miss.
+     */
+    public boolean isRegionUnresolved(HttpHeaders headers) {
+        String auth = headers == null ? null : headers.getHeaderString("Authorization");
+        return auth == null || auth.isEmpty() || !CREDENTIAL_REGION_PATTERN.matcher(auth).find();
+    }
+
+    /**
      * Resolves the region from an X-Amz-Credential value found in
      * presigned URL query parameters.
      * Format: accessKeyID/date/region/service/aws4_request
