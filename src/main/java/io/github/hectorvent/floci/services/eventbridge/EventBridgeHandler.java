@@ -771,7 +771,8 @@ public class EventBridgeHandler {
         }
         for (String field : List.of("BodyParameters", "HeaderParameters", "QueryStringParameters")) {
             for (JsonNode parameter : httpParameters.path(field)) {
-                if (parameter instanceof ObjectNode param && param.path("IsValueSecret").asBoolean(false)) {
+                // IsValueSecret is optional; an omitted flag means "treat as secret" on AWS.
+                if (parameter instanceof ObjectNode param && param.path("IsValueSecret").asBoolean(true)) {
                     param.put("Value", "*");
                 }
             }
