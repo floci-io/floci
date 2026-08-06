@@ -177,7 +177,12 @@ class SesListManagementOptionsV2IntegrationTest {
                 .queryParam("topic", "Sports").queryParam("address", recipient)
         .when().get("/_aws/ses/unsubscribe").then().statusCode(200)
                 .body(org.hamcrest.Matchers.containsString("<form method=\"post\""))
-                .body(org.hamcrest.Matchers.containsString("Unsubscribe"));
+                .body(org.hamcrest.Matchers.containsString("Unsubscribe"))
+                // The form action escapes '&' as '&amp;' for valid HTML, and carries the RFC 8058
+                // one-click parameter so its POST body matches the advertised header.
+                .body(org.hamcrest.Matchers.containsString("&amp;contactList="))
+                .body(org.hamcrest.Matchers.containsString(
+                        "<input type=\"hidden\" name=\"List-Unsubscribe\" value=\"One-Click\">"));
 
         given().header("Authorization", AUTH)
         .when().get("/v2/email/contact-lists/" + LIST + "/contacts/" + recipient)

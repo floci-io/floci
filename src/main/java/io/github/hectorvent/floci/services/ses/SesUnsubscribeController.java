@@ -24,6 +24,11 @@ import java.nio.charset.StandardCharsets;
  * clients or link-preview bots that prefetch the URL would otherwise silently opt the contact out.
  * The actual opt-out runs on {@code POST} (the RFC 8058 one-click request the confirmation form
  * submits), which opts the contact out of the given topic, or the whole list when no topic is given.
+ *
+ * <p>Unlike AWS's opaque hosted token, this endpoint carries the target in readable query parameters
+ * and — like the rest of Floci — is unauthenticated, so a {@code POST} can opt out any contact.
+ * That is acceptable only because Floci is a local emulator for a trusted dev/test network; it must
+ * not be exposed on an untrusted network.
  */
 @Path("/_aws/ses/unsubscribe")
 public class SesUnsubscribeController {
@@ -52,7 +57,11 @@ public class SesUnsubscribeController {
                 + "<body>\n"
                 + "<p>Unsubscribe " + htmlEscape(address) + " from " + htmlEscape(scopeLabel(topic))
                 + " on contact list &#39;" + htmlEscape(contactList) + "&#39;?</p>\n"
-                + "<form method=\"post\" action=\"" + formAction(region, contactList, topic, address) + "\">\n"
+                + "<form method=\"post\" action=\""
+                + htmlEscape(formAction(region, contactList, topic, address)) + "\">\n"
+                // RFC 8058 one-click parameter, so the form's POST body matches the advertised
+                // List-Unsubscribe-Post: List-Unsubscribe=One-Click header.
+                + "<input type=\"hidden\" name=\"List-Unsubscribe\" value=\"One-Click\">\n"
                 + "<button type=\"submit\">Unsubscribe</button>\n"
                 + "</form>\n"
                 + "</body></html>\n";
