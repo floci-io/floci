@@ -157,4 +157,15 @@ class ApiGatewayExecuteControllerTest {
                 """));
         assertEquals("application/json", response.getMediaType().toString());
     }
+
+    @Test
+    void buildProxyResponseDefaultsToJsonWhenContentTypeIsJsonNull() {
+        // A JSON-null Content-Type must fall back to the default, the same as a missing header —
+        // not be coerced to the literal string "null" (an invalid media type).
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,"headers":{"content-type":null},"body":"{}"}
+                """));
+        assertEquals("application/json", response.getMediaType().toString());
+    }
 }

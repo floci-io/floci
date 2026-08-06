@@ -810,11 +810,17 @@ public class ApiGatewayExecuteController {
      * silently misses those, so Content-Type detection needs to scan case-insensitively.
      */
     private static java.util.Optional<String> findHeaderIgnoreCase(JsonNode headersNode, String name) {
-        if (headersNode == null || !headersNode.isObject()) return java.util.Optional.empty();
+        if (headersNode == null || !headersNode.isObject()) {
+            return java.util.Optional.empty();
+        }
         var it = headersNode.fields();
         while (it.hasNext()) {
             var e = it.next();
-            if (e.getKey().equalsIgnoreCase(name)) return java.util.Optional.of(e.getValue().asText());
+            if (e.getKey().equalsIgnoreCase(name)) {
+                return e.getValue().isNull()
+                        ? java.util.Optional.empty()
+                        : java.util.Optional.of(e.getValue().asText());
+            }
         }
         return java.util.Optional.empty();
     }
