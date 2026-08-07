@@ -44,6 +44,8 @@ just test-awscli
 | [`compat-opentofu`](compat-opentofu/)   | OpenTofu   | `./run.sh` |
 | [`compat-terraform`](compat-terraform/) | Terraform  | `./run.sh` |
 
+The Terraform suite uses the standard `hashicorp/aws` provider against Floci's local endpoint. It validates `init`, `validate`, `plan`, `apply`, resource reads, and `destroy` without creating resources in a real AWS account. See the [Terraform with Floci guide](../docs/getting-started/terraform.md) for a copy-paste setup.
+
 ## Prerequisites
 
 - **Floci running** on `http://localhost:4566` (or set `FLOCI_ENDPOINT`)
