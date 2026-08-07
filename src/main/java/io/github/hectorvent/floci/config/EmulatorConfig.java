@@ -594,6 +594,7 @@ public interface EmulatorConfig {
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
+        CloudHsmV2ServiceConfig cloudhsmv2();
         RumServiceConfig rum();
     }
 
@@ -1064,6 +1065,11 @@ public interface EmulatorConfig {
         /** Seconds to wait before transitioning from PENDING_VALIDATION to ISSUED (0 = immediate) */
         @WithDefault("0")
         int validationWaitSeconds();
+    }
+
+    interface CloudHsmV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AthenaServiceConfig {

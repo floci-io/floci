@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
+import io.github.hectorvent.floci.services.cloudhsmv2.CloudHsmV2JsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployJsonHandler;
 import io.github.hectorvent.floci.services.codepipeline.CodePipelineJsonHandler;
@@ -99,6 +100,7 @@ public class AwsJson11Controller {
     private final CloudTrailJsonHandler cloudTrailJsonHandler;
     private final LightsailJsonHandler lightsailJsonHandler;
     private final CloudControlJsonHandler cloudControlJsonHandler;
+    private final CloudHsmV2JsonHandler cloudHsmV2JsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -132,7 +134,8 @@ public class AwsJson11Controller {
                                ConfigServiceJsonHandler configServiceJsonHandler,
                                CloudTrailJsonHandler cloudTrailJsonHandler,
                                LightsailJsonHandler lightsailJsonHandler,
-                               CloudControlJsonHandler cloudControlJsonHandler) {
+                               CloudControlJsonHandler cloudControlJsonHandler,
+                               CloudHsmV2JsonHandler cloudHsmV2JsonHandler){
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -171,6 +174,7 @@ public class AwsJson11Controller {
         this.cloudTrailJsonHandler = cloudTrailJsonHandler;
         this.lightsailJsonHandler = lightsailJsonHandler;
         this.cloudControlJsonHandler = cloudControlJsonHandler;
+        this.cloudHsmV2JsonHandler = cloudHsmV2JsonHandler;
     }
 
     @POST
@@ -240,6 +244,7 @@ public class AwsJson11Controller {
                 case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
+                case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target
