@@ -971,6 +971,25 @@ class CognitoServiceTest {
     }
 
     @Test
+    void adminLinkProviderForUserRejectsMissingSourceFields() {
+        UserPool pool = createPoolAndUser();
+
+        AwsException noProvider = assertThrows(AwsException.class,
+                () -> service.adminLinkProviderForUser(pool.getId(), "alice", "", "google-sub-123"));
+        assertEquals("InvalidParameterException", noProvider.getErrorCode());
+
+        AwsException noUserId = assertThrows(AwsException.class,
+                () -> service.adminLinkProviderForUser(pool.getId(), "alice", "Google", ""));
+        assertEquals("InvalidParameterException", noUserId.getErrorCode());
+
+        AwsException noDestination = assertThrows(AwsException.class,
+                () -> service.adminLinkProviderForUser(pool.getId(), "", "Google", "google-sub-123"));
+        assertEquals("InvalidParameterException", noDestination.getErrorCode());
+
+        assertNull(service.adminGetUser(pool.getId(), "alice").getAttributes().get("identities"));
+    }
+
+    @Test
     void adminLinkProviderForUserReplacesMalformedIdentities() {
         UserPool pool = createPoolAndUser();
         service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("identities", "not-json-at-all"));

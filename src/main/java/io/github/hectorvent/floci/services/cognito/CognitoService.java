@@ -992,31 +992,49 @@ public class CognitoService {
 
     public void adminLinkProviderForUser(String userPoolId, String destinationUsername,
             String sourceProviderName, String sourceUserId) {
-        CognitoUser user = adminGetUser(userPoolId, destinationUsername);
-        String prefix = userPoolId + "::";
-        if (userStore.scan(k -> k.startsWith(prefix)).stream()
-                .anyMatch(u -> hasLinkedIdentity(u, sourceProviderName, sourceUserId))) {
-            throw new AwsException("AliasExistsException",
-                    "Source identity is already linked to a user in this user pool", 400);
+        if (destinationUsername == null || destinationUsername.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "DestinationUser.ProviderAttributeValue is required.", 400);
+        }
+        if (sourceProviderName == null || sourceProviderName.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "SourceUser.ProviderName is required.", 400);
+        }
+        if (sourceUserId == null || sourceUserId.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "SourceUser.ProviderAttributeValue is required.", 400);
         }
 
-        ArrayNode identities = readIdentities(user);
-        identities.addObject()
-                .put("userId", sourceUserId)
-                .put("providerName", sourceProviderName)
-                .put("providerType",
-                        NAMED_PROVIDER_TYPES.contains(sourceProviderName) ? sourceProviderName : null)
-                .putNull("issuer")
-                .put("primary", false)
-                // AWS emits dateCreated in epoch milliseconds, unlike the seconds this
-                // service uses for its own user timestamps.
-                .put("dateCreated", System.currentTimeMillis());
+        UserPool pool = describeUserPool(userPoolId);
+        // The uniqueness check and the write must not interleave with another
+        // link of the same source identity; the pool is the invariant's scope.
+        synchronized (pool) {
+            CognitoUser user = adminGetUser(userPoolId, destinationUsername);
+            String prefix = userPoolId + "::";
+            if (userStore.scan(k -> k.startsWith(prefix)).stream()
+                    .anyMatch(u -> hasLinkedIdentity(u, sourceProviderName, sourceUserId))) {
+                throw new AwsException("AliasExistsException",
+                        "Source identity is already linked to a user in this user pool", 400);
+            }
 
-        user.getAttributes().put(IDENTITIES_ATTRIBUTE, identities.toString());
-        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        userStore.put(userKey(userPoolId, user.getUsername()), user);
-        LOG.infov("Linked {0} identity {1} to user {2} in pool {3}",
-                sourceProviderName, sourceUserId, user.getUsername(), userPoolId);
+            ArrayNode identities = readIdentities(user);
+            identities.addObject()
+                    .put("userId", sourceUserId)
+                    .put("providerName", sourceProviderName)
+                    .put("providerType",
+                            NAMED_PROVIDER_TYPES.contains(sourceProviderName) ? sourceProviderName : null)
+                    .putNull("issuer")
+                    .put("primary", false)
+                    // AWS emits dateCreated in epoch milliseconds, unlike the seconds this
+                    // service uses for its own user timestamps.
+                    .put("dateCreated", System.currentTimeMillis());
+
+            user.getAttributes().put(IDENTITIES_ATTRIBUTE, identities.toString());
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(userPoolId, user.getUsername()), user);
+            LOG.infov("Linked {0} identity {1} to user {2} in pool {3}",
+                    sourceProviderName, sourceUserId, user.getUsername(), userPoolId);
+        }
     }
 
     private boolean hasLinkedIdentity(CognitoUser user, String providerName, String userId) {
