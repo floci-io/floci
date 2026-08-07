@@ -69,14 +69,14 @@ Unsupported syntax never fails the query, so it is worth knowing how each case d
 | Input | Result |
 |---|---|
 | An unsupported command (`stats`, `parse`, ...) | Skipped with a warning in the server log. No aggregation happens |
-| A `filter` whose operator is not `=`, `!=` or `==` — for example `like /ERROR/` or `=~ /ERROR/` | The whole stage is dropped with a warning, so **every** row is returned |
-| A `filter` using `<`, `<=`, `>` or `>=` | The `=` is taken as the operator and the rest of the token becomes part of the field name, which then resolves to nothing — so the row never matches and you get **no** rows. No warning is logged |
+| A `filter` whose operator is not `=`, `!=` or `==` — for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The whole stage is dropped with a warning, so **every** row is returned |
+| A `filter` combining conditions with `and` / `or` — for example `filter level = 'ERROR' and status = 200` | Only the leftmost operator is parsed; the rest of the line becomes the compared value, so nothing matches and you get **no** rows. No warning is logged |
 | A projected field that does not exist | Rendered as an empty string. No warning |
 | A `sort` direction other than `asc` / `desc` | Treated as ascending. No warning |
 
 In short, a query can come back either wider or narrower than intended without any error. When a
-result set looks wrong, check the server log for `Ignoring unsupported Logs Insights ...` — and
-note that the `>=` case above produces no log line at all.
+result set looks wrong, check the server log for `Ignoring unsupported Logs Insights ...` — and note
+that the compound-filter case above produces no log line at all.
 
 For simple substring matching, `FilterLogEvents` is the more predictable option today. Note that
 Floci matches `--filter-pattern` as a plain substring of the message; the real filter-pattern
