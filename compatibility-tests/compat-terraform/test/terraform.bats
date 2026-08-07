@@ -211,3 +211,60 @@ setup() {
     assert_success
     assert_output "GZIP"
 }
+
+@test "Terraform: Application Auto Scaling scalable target created with tags" {
+    run aws_cmd application-autoscaling describe-scalable-targets --service-namespace ecs \
+        --resource-ids service/floci-compat-cluster/floci-compat-service \
+        --query "ScalableTargets[0].MaxCapacity" --output text
+    assert_success
+    assert_output "20"
+
+    run aws_cmd application-autoscaling describe-scalable-targets --service-namespace ecs \
+        --resource-ids service/floci-compat-cluster/floci-compat-service \
+        --query "ScalableTargets[0].ScalableTargetARN" --output text
+    assert_success
+    [[ "$output" == arn:aws:application-autoscaling:* ]]
+
+    run aws_cmd application-autoscaling list-tags-for-resource --resource-arn "$output" \
+        --query "Tags.Environment" --output text
+    assert_success
+    assert_output "compat-test"
+}
+
+@test "Terraform: Application Auto Scaling target-tracking policy round-trips resource_label" {
+    run aws_cmd application-autoscaling describe-scaling-policies --service-namespace ecs \
+        --resource-id service/floci-compat-cluster/floci-compat-service \
+        --query "ScalingPolicies[?PolicyName=='floci-compat-alb-request-count'].TargetTrackingScalingPolicyConfiguration.PredefinedMetricSpecification.ResourceLabel | [0]" \
+        --output text
+    assert_success
+    assert_output "app/floci-compat-alb/abc123/targetgroup/floci-compat-tg/def456"
+
+    run aws_cmd application-autoscaling describe-scaling-policies --service-namespace ecs \
+        --resource-id service/floci-compat-cluster/floci-compat-service \
+        --query "ScalingPolicies[?PolicyName=='floci-compat-alb-request-count'].TargetTrackingScalingPolicyConfiguration.ScaleInCooldown | [0]" \
+        --output text
+    assert_success
+    assert_output "240"
+}
+
+# A successful apply proves very little on its own: a response that silently drops a
+# field still applies cleanly, and only shows up later as perpetual drift. Asserting an
+# empty second plan is what actually catches that class of bug.
+#
+# Scoped to the Application Auto Scaling resources deliberately. A whole-config re-plan
+# currently reports drift on aws_cognito_user_pool, aws_db_instance
+# (auto_minor_version_upgrade) and aws_kinesis_firehose_delivery_stream
+# (s3_backup_mode) — pre-existing and unrelated to these resources. Widen this to the
+# full configuration once those are fixed.
+@test "Terraform: re-planning Application Auto Scaling reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_appautoscaling_target.ecs_service \
+        -target=aws_appautoscaling_policy.ecs_cpu \
+        -target=aws_appautoscaling_policy.ecs_alb_requests
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}
