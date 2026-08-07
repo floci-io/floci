@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -40,6 +42,13 @@ public class CognitoService {
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static final String IDENTITIES_ATTRIBUTE = "identities";
+
+    // AWS provider types that double as the provider name. SAML and OIDC types are only
+    // knowable from a registered IdP, which floci does not model, so they stay null.
+    private static final Set<String> NAMED_PROVIDER_TYPES =
+            Set.of("Facebook", "Google", "LoginWithAmazon", "SignInWithApple");
 
     /**
      * Claim overrides returned by a PreTokenGeneration Lambda trigger.
@@ -979,6 +988,60 @@ public class CognitoService {
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
         LOG.infov("Reset password for user {0} in pool {1}", user.getUsername(), userPoolId);
+    }
+
+    public void adminLinkProviderForUser(String userPoolId, String destinationUsername,
+            String sourceProviderName, String sourceUserId) {
+        CognitoUser user = adminGetUser(userPoolId, destinationUsername);
+        String prefix = userPoolId + "::";
+        if (userStore.scan(k -> k.startsWith(prefix)).stream()
+                .anyMatch(u -> hasLinkedIdentity(u, sourceProviderName, sourceUserId))) {
+            throw new AwsException("AliasExistsException",
+                    "Source identity is already linked to a user in this user pool", 400);
+        }
+
+        ArrayNode identities = readIdentities(user);
+        identities.addObject()
+                .put("userId", sourceUserId)
+                .put("providerName", sourceProviderName)
+                .put("providerType",
+                        NAMED_PROVIDER_TYPES.contains(sourceProviderName) ? sourceProviderName : null)
+                .putNull("issuer")
+                .put("primary", false)
+                // AWS emits dateCreated in epoch milliseconds, unlike the seconds this
+                // service uses for its own user timestamps.
+                .put("dateCreated", System.currentTimeMillis());
+
+        user.getAttributes().put(IDENTITIES_ATTRIBUTE, identities.toString());
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Linked {0} identity {1} to user {2} in pool {3}",
+                sourceProviderName, sourceUserId, user.getUsername(), userPoolId);
+    }
+
+    private boolean hasLinkedIdentity(CognitoUser user, String providerName, String userId) {
+        for (JsonNode identity : readIdentities(user)) {
+            if (providerName.equals(identity.path("providerName").asText())
+                    && userId.equals(identity.path("userId").asText())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private ArrayNode readIdentities(CognitoUser user) {
+        String raw = user.getAttributes().get(IDENTITIES_ATTRIBUTE);
+        if (raw != null && !raw.isBlank()) {
+            try {
+                if (MAPPER.readTree(raw) instanceof ArrayNode stored) {
+                    return stored;
+                }
+                LOG.warnv("Discarding non-array identities attribute for user {0}", user.getUsername());
+            } catch (JsonProcessingException e) {
+                LOG.warnv(e, "Discarding malformed identities attribute for user {0}", user.getUsername());
+            }
+        }
+        return MAPPER.createArrayNode();
     }
 
     public List<CognitoUser> listUsers(String userPoolId, String filter) {

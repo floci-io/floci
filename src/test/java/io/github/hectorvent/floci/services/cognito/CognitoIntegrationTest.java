@@ -39,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
@@ -2290,7 +2291,65 @@ class CognitoIntegrationTest {
         assertEquals(1200L, refreshedIdPayload.path("exp").asLong() - refreshedIdPayload.path("iat").asLong());
     }
 
+    @Test
+    @Order(100)
+    void adminLinkProviderForUserSurfacesIdentityOnAdminGetUser() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "LinkProviderPool"
+                }
+                """);
+        String linkPoolId = poolResponse.path("UserPool").path("Id").asText();
+        String linkUsername = "linked+" + UUID.randomUUID() + "@example.com";
 
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "MessageAction": "SUPPRESS"
+                }
+                """.formatted(linkPoolId, linkUsername))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminLinkProviderForUser", """
+                {
+                  "UserPoolId": "%s",
+                  "DestinationUser": {
+                    "ProviderName": "Cognito",
+                    "ProviderAttributeValue": "%s"
+                  },
+                  "SourceUser": {
+                    "ProviderName": "Google",
+                    "ProviderAttributeName": "Cognito_Subject",
+                    "ProviderAttributeValue": "google-sub-1563"
+                  }
+                }
+                """.formatted(linkPoolId, linkUsername))
+                .then()
+                .statusCode(200)
+                .body(equalTo("{}"));
+
+        JsonNode user = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(linkPoolId, linkUsername));
+
+        String identities = StreamSupport.stream(Spliterators.spliteratorUnknownSize(
+                        user.path("UserAttributes").elements(), 0), false)
+                .filter(n -> "identities".equals(n.path("Name").asText()))
+                .map(n -> n.path("Value").asText())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("identities attribute missing: " + user));
+        JsonNode identity = OBJECT_MAPPER.readTree(identities).get(0);
+        assertEquals("google-sub-1563", identity.path("userId").asText());
+        assertEquals("Google", identity.path("providerName").asText());
+        assertEquals("Google", identity.path("providerType").asText());
+        assertTrue(identity.path("issuer").isNull());
+        assertFalse(identity.path("primary").asBoolean());
+    }
 
     private static JsonNode decodeJwtPayload(String token) throws Exception {
         return decodeJwtPart(token, 1);

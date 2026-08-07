@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
@@ -33,6 +36,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CognitoServiceTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private CognitoService service;
     private InMemoryStorage<String, CognitoUser> userStore;
@@ -939,6 +944,105 @@ class CognitoServiceTest {
 
         assertThrows(AwsException.class, () ->
                 service.adminAddUserToGroup(pool.getId(), "admins", "nonexistent"));
+    }
+
+    // =========================================================================
+    // Issue #1563 — AdminLinkProviderForUser
+    // =========================================================================
+
+    @Test
+    void adminLinkProviderForUserAppendsIdentity() {
+        UserPool pool = createPoolAndUser();
+
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        JsonNode identities = identitiesOf(pool, "alice");
+        assertEquals(1, identities.size());
+        JsonNode identity = identities.get(0);
+        assertEquals("google-sub-123", identity.get("userId").asText());
+        assertEquals("Google", identity.get("providerName").asText());
+        assertEquals("Google", identity.get("providerType").asText());
+        assertTrue(identity.get("issuer").isNull());
+        assertFalse(identity.get("primary").asBoolean());
+        assertTrue(identity.get("dateCreated").isNumber(),
+                "dateCreated must be a JSON number, not a string");
+        assertTrue(identity.get("dateCreated").asLong() > 1_600_000_000_000L,
+                "dateCreated must be epoch milliseconds, not seconds");
+    }
+
+    @Test
+    void adminLinkProviderForUserReplacesMalformedIdentities() {
+        UserPool pool = createPoolAndUser();
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("identities", "not-json-at-all"));
+
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        JsonNode identities = identitiesOf(pool, "alice");
+        assertEquals(1, identities.size());
+        assertEquals("google-sub-123", identities.get(0).get("userId").asText());
+    }
+
+    @Test
+    void adminLinkProviderForUserSecondProviderAppends() {
+        UserPool pool = createPoolAndUser();
+
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+        service.adminLinkProviderForUser(pool.getId(), "alice", "MyOIDCProvider", "oidc-sub-456");
+
+        JsonNode identities = identitiesOf(pool, "alice");
+        assertEquals(2, identities.size());
+        assertEquals("Google", identities.get(0).get("providerName").asText());
+        assertEquals("MyOIDCProvider", identities.get(1).get("providerName").asText());
+        assertTrue(identities.get(1).get("providerType").isNull(),
+                "providerType is unknowable without a registered IdP");
+    }
+
+    @Test
+    void adminLinkProviderForUserDuplicateIdentityThrows() {
+        UserPool pool = createPoolAndUser();
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123"));
+        assertEquals("AliasExistsException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminLinkProviderForUserRelinkToDifferentUserThrows() {
+        UserPool pool = createPoolAndUser();
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), "TempPass1!");
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser(pool.getId(), "bob", "Google", "google-sub-123"));
+        assertEquals("AliasExistsException", ex.getErrorCode());
+        assertEquals(1, identitiesOf(pool, "alice").size(), "the existing link must survive");
+    }
+
+    @Test
+    void adminLinkProviderForUserUnknownUserThrows() {
+        UserPool pool = createPoolAndUser();
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser(pool.getId(), "ghost", "Google", "google-sub-123"));
+        assertEquals("UserNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminLinkProviderForUserUnknownPoolThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser("us-east-1_missing", "alice", "Google", "google-sub-123"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    private JsonNode identitiesOf(UserPool pool, String username) {
+        String raw = service.adminGetUser(pool.getId(), username).getAttributes().get("identities");
+        assertNotNull(raw, "identities attribute should be set");
+        try {
+            return MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new AssertionError("identities is not valid JSON: " + raw, e);
+        }
     }
 
     // =========================================================================
