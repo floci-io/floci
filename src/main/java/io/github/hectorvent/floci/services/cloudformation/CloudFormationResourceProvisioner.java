@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
@@ -654,6 +655,22 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("GroupId", sg.getGroupId());
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
+        }
+
+        // Inline rule properties — previously dropped, leaving the group empty. The mapping is
+        // shared with the standalone SecurityGroupIngress/Egress resource types, which live in
+        // Ec2SecurityGroupRuleCfnProvisioner; this arm joins them when it is extracted.
+        if (props != null && props.has("SecurityGroupIngress")) {
+            for (JsonNode rule : props.get("SecurityGroupIngress")) {
+                ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(),
+                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
+            }
+        }
+        if (props != null && props.has("SecurityGroupEgress")) {
+            for (JsonNode rule : props.get("SecurityGroupEgress")) {
+                ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(),
+                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
+            }
         }
     }
 

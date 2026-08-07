@@ -48,6 +48,8 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
@@ -1454,37 +1456,61 @@ public class Ec2Service implements ContainerTeardown {
         return rules;
     }
 
+    /**
+     * One rule record per peer the permission names — each ipv4 range, each ipv6 range and each
+     * referenced group — as AWS does. Recording the peer, not just protocol and ports, is what lets
+     * {@link #removeRecordedPermission} take out the rule that was asked for rather than the first
+     * one that happens to share a port.
+     */
     private List<SecurityGroupRule> createRules(String region, String groupId, IpPermission perm, boolean egress) {
         List<SecurityGroupRule> rules = new ArrayList<>();
         List<IpRange> ranges = perm.getIpRanges();
-        if (ranges == null || ranges.isEmpty()) {
-            SecurityGroupRule rule = new SecurityGroupRule();
-            rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-            rule.setGroupId(groupId);
-            rule.setGroupOwnerId(accountId);
-            rule.setEgress(egress);
-            rule.setIpProtocol(perm.getIpProtocol());
-            rule.setFromPort(perm.getFromPort());
-            rule.setToPort(perm.getToPort());
-            securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
-            rules.add(rule);
-        } else {
+        if (ranges != null) {
             for (IpRange range : ranges) {
-                SecurityGroupRule rule = new SecurityGroupRule();
-                rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-                rule.setGroupId(groupId);
-                rule.setGroupOwnerId(accountId);
-                rule.setEgress(egress);
-                rule.setIpProtocol(perm.getIpProtocol());
-                rule.setFromPort(perm.getFromPort());
-                rule.setToPort(perm.getToPort());
+                SecurityGroupRule rule = newRule(groupId, egress, perm);
                 rule.setCidrIpv4(range.getCidrIp());
                 rule.setDescription(range.getDescription());
-                securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
                 rules.add(rule);
             }
         }
+        List<Ipv6Range> ranges6 = perm.getIpv6Ranges();
+        if (ranges6 != null) {
+            for (Ipv6Range range : ranges6) {
+                SecurityGroupRule rule = newRule(groupId, egress, perm);
+                rule.setCidrIpv6(range.getCidrIpv6());
+                rule.setDescription(range.getDescription());
+                rules.add(rule);
+            }
+        }
+        List<UserIdGroupPair> pairs = perm.getUserIdGroupPairs();
+        if (pairs != null) {
+            for (UserIdGroupPair pair : pairs) {
+                // UserIdGroupPair has no description field to carry over.
+                SecurityGroupRule rule = newRule(groupId, egress, perm);
+                rule.setReferencedGroupId(pair.getGroupId());
+                rules.add(rule);
+            }
+        }
+        if (rules.isEmpty()) {
+            // A permission naming no peer at all — protocol and ports are its whole identity.
+            rules.add(newRule(groupId, egress, perm));
+        }
+        for (SecurityGroupRule rule : rules) {
+            securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
+        }
         return rules;
+    }
+
+    private SecurityGroupRule newRule(String groupId, boolean egress, IpPermission perm) {
+        SecurityGroupRule rule = new SecurityGroupRule();
+        rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
+        rule.setGroupId(groupId);
+        rule.setGroupOwnerId(accountId);
+        rule.setEgress(egress);
+        rule.setIpProtocol(perm.getIpProtocol());
+        rule.setFromPort(perm.getFromPort());
+        rule.setToPort(perm.getToPort());
+        return rule;
     }
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
@@ -1507,6 +1533,109 @@ public class Ec2Service implements ContainerTeardown {
             next.removeIf(p -> matchesAnyPermission(p, permissions));
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
+        }
+    }
+
+    /**
+     * Removes a single rule by its SecurityGroupRuleId: the stored rule record, then the permission
+     * it describes on the owning group. CloudFormation deletes standalone
+     * {@code AWS::EC2::SecurityGroupIngress}/{@code Egress} resources through here — the
+     * by-permission revoke above matches on protocol and ports alone, so it would also strip the
+     * group's unrelated rules that happen to share them. Returns false when no such rule is
+     * recorded, and succeeds quietly when the group itself is already gone.
+     */
+    public boolean deleteSecurityGroupRule(String region, String securityGroupRuleId) {
+        ensureDefaultResources(region);
+        SecurityGroupRule rule = securityGroupRules.get(key(region, securityGroupRuleId)).orElse(null);
+        if (rule == null) {
+            return false;
+        }
+        securityGroupRules.delete(key(region, securityGroupRuleId));
+        String groupId = rule.getGroupId();
+        if (groupId == null) {
+            return true;
+        }
+        synchronized (lockFor(key(region, groupId))) {
+            SecurityGroup sg = securityGroups.get(key(region, groupId)).orElse(null);
+            if (sg == null) {
+                return true;
+            }
+            List<IpPermission> next = new ArrayList<>(rule.isEgress()
+                    ? sg.getIpPermissionsEgress() : sg.getIpPermissions());
+            if (removeRecordedPermission(next, rule)) {
+                if (rule.isEgress()) {
+                    sg.setIpPermissionsEgress(next);
+                } else {
+                    sg.setIpPermissions(next);
+                }
+                securityGroups.put(key(region, groupId), sg);
+            }
+        }
+        if (!rule.isEgress()) {
+            reconcilePublishedPortsForGroup(region, groupId);
+        }
+        return true;
+    }
+
+    /**
+     * Drops exactly the peer a rule record names — its ipv4 cidr, ipv6 cidr or referenced group —
+     * and the whole permission only once nothing is left in it. Matching on protocol and ports
+     * alone would take out an unrelated rule that happens to share them.
+     */
+    private boolean removeRecordedPermission(List<IpPermission> perms, SecurityGroupRule rule) {
+        for (IpPermission perm : perms) {
+            if (!Objects.equals(perm.getIpProtocol(), rule.getIpProtocol())
+                    || !Objects.equals(perm.getFromPort(), rule.getFromPort())
+                    || !Objects.equals(perm.getToPort(), rule.getToPort())) {
+                continue;
+            }
+            if (rule.getCidrIpv6() != null) {
+                Ipv6Range match6 = perm.getIpv6Ranges().stream()
+                        .filter(r -> rule.getCidrIpv6().equals(r.getCidrIpv6()))
+                        .findFirst().orElse(null);
+                if (match6 == null) {
+                    continue;
+                }
+                perm.getIpv6Ranges().remove(match6);
+                dropIfEmpty(perms, perm);
+                return true;
+            }
+            if (rule.getReferencedGroupId() != null) {
+                UserIdGroupPair matchPair = perm.getUserIdGroupPairs().stream()
+                        .filter(pair -> rule.getReferencedGroupId().equals(pair.getGroupId()))
+                        .findFirst().orElse(null);
+                if (matchPair == null) {
+                    continue;
+                }
+                perm.getUserIdGroupPairs().remove(matchPair);
+                dropIfEmpty(perms, perm);
+                return true;
+            }
+            if (rule.getCidrIpv4() != null) {
+                IpRange match = perm.getIpRanges().stream()
+                        .filter(r -> rule.getCidrIpv4().equals(r.getCidrIp()))
+                        .findFirst().orElse(null);
+                if (match == null) {
+                    continue;
+                }
+                perm.getIpRanges().remove(match);
+                dropIfEmpty(perms, perm);
+                return true;
+            }
+            // A record naming no peer matches only a permission that names none either.
+            if (perm.getIpRanges().isEmpty() && perm.getIpv6Ranges().isEmpty()
+                    && perm.getUserIdGroupPairs().isEmpty()) {
+                perms.remove(perm);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void dropIfEmpty(List<IpPermission> perms, IpPermission perm) {
+        if (perm.getIpRanges().isEmpty() && perm.getIpv6Ranges().isEmpty()
+                && perm.getUserIdGroupPairs().isEmpty()) {
+            perms.remove(perm);
         }
     }
 
