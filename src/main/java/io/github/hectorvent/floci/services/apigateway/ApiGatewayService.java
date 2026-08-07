@@ -692,7 +692,7 @@ public class ApiGatewayService {
         ApiKey key = getApiKey(region, apiKeyId);
         if (patchOperations != null) {
             for (Map<String, String> op : patchOperations) {
-                if (!"replace".equals(op.get("op"))) { continue; }
+                if (!"replace".equals(op.get("op"))) continue;
                 switch (op.getOrDefault("path", "")) {
                     case "/name"        -> key.setName(op.get("value"));
                     case "/description" -> key.setDescription(op.get("value"));
@@ -708,10 +708,19 @@ public class ApiGatewayService {
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
+        Map<String, String> tags = new HashMap<>();
+        if (request.get("tags") instanceof Map<?, ?> rawTags) {
+            rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
+        }
+
+        String customId = tags.get("_custom_id_");
+        String planId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
+
         UsagePlan plan = new UsagePlan();
-        plan.setId(shortId(10));
+        plan.setId(planId);
         plan.setName((String) request.get("name"));
         plan.setDescription((String) request.get("description"));
+        plan.setTags(tags);
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");

@@ -1702,6 +1702,10 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", p.getId());
         node.put("name", p.getName());
+        if (p.getTags() != null && !p.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            p.getTags().forEach(tags::put);
+        }
         return node;
     }
 
