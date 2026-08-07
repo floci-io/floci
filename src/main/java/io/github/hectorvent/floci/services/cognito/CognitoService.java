@@ -50,6 +50,7 @@ public class CognitoService {
     private static final Set<String> NAMED_PROVIDER_TYPES =
             Set.of("Facebook", "Google", "LoginWithAmazon", "SignInWithApple");
 
+
     /**
      * Claim overrides returned by a PreTokenGeneration Lambda trigger.
      * <p>
@@ -990,6 +991,9 @@ public class CognitoService {
         LOG.infov("Reset password for user {0} in pool {1}", user.getUsername(), userPoolId);
     }
 
+    // Serializes adminLinkProviderForUser's check-then-write.
+    private final Object identityLinkLock = new Object();
+
     public void adminLinkProviderForUser(String userPoolId, String destinationUsername,
             String sourceProviderName, String sourceUserId) {
         if (destinationUsername == null || destinationUsername.isEmpty()) {
@@ -1005,10 +1009,11 @@ public class CognitoService {
                     "SourceUser.ProviderAttributeValue is required.", 400);
         }
 
-        UserPool pool = describeUserPool(userPoolId);
         // The uniqueness check and the write must not interleave with another
-        // link of the same source identity; the pool is the invariant's scope.
-        synchronized (pool) {
+        // link of the same source identity. The UserPool object cannot serve as
+        // the monitor — updateUserPool replaces the stored instance — so links
+        // serialize on a dedicated lock.
+        synchronized (identityLinkLock) {
             CognitoUser user = adminGetUser(userPoolId, destinationUsername);
             String prefix = userPoolId + "::";
             if (userStore.scan(k -> k.startsWith(prefix)).stream()
