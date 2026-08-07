@@ -50,6 +50,10 @@ services:
     doc: docs/services/kinesis.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/kinesis/KinesisJsonHandler.java, mode: switch }
+  - service: kinesisanalytics
+    doc: docs/services/kinesisanalytics.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/kinesisanalytics/KinesisAnalyticsV2JsonHandler.java, mode: switch }
   - service: kms
     doc: docs/services/kms.md
     sources:
