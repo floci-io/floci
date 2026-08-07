@@ -1056,4 +1056,40 @@ class IamIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
             .body("ErrorResponse.Error.Message", not(containsString("null")));
     }
+
+    @Test
+    @Order(74)
+    void listPoliciesOmitsDescription() {
+        // AWS's own Policy model documents this explicitly: Description "is included in the
+        // response to the GetPolicy operation. It is not included in the response to the
+        // ListPolicies operation." Unlike GetPolicy/CreatePolicy (which do include it), no
+        // member returned by ListPolicies should ever carry a Description element — checking
+        // the raw response for the tag at all, rather than a specific policy's value, is what
+        // actually pins the shared-helper regression this guards against: folding the element
+        // back into policyXml() unconditionally would reintroduce it for every member, not just
+        // the one this test happens to create.
+        given()
+            .formParam("Action", "CreatePolicy")
+            .formParam("PolicyName", "ListPoliciesOmitCheckPolicy")
+            .formParam("Path", "/")
+            .formParam("PolicyDocument", POLICY_DOCUMENT)
+            .formParam("Description", "Should not appear in ListPolicies")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "ListPolicies")
+            .formParam("Scope", "Local")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("Description")));
+    }
 }
