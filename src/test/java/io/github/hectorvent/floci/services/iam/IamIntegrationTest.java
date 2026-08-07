@@ -689,6 +689,7 @@ class IamIntegrationTest {
             .body("CreatePolicyResponse.CreatePolicyResult.Policy.PolicyName", equalTo("TestPolicy"))
             .body("CreatePolicyResponse.CreatePolicyResult.Policy.PolicyId", startsWith("ANPA"))
             .body("CreatePolicyResponse.CreatePolicyResult.Policy.DefaultVersionId", equalTo("v1"))
+            .body("CreatePolicyResponse.CreatePolicyResult.Policy.Description", equalTo("Test managed policy"))
         .extract()
             .path("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
     }
@@ -705,7 +706,8 @@ class IamIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName", equalTo("TestPolicy"));
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName", equalTo("TestPolicy"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Description", equalTo("Test managed policy"));
     }
 
     @Test

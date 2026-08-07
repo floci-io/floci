@@ -917,6 +917,7 @@ public class IamQueryHandler {
                 .elem("IsAttachable", true)
                 .elem("CreateDate", isoDate(p.getCreateDate()))
                 .elem("UpdateDate", isoDate(p.getUpdateDate()))
+                .elem("Description", p.getDescription())
                 .build();
     }
 
