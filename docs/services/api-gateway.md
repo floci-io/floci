@@ -20,7 +20,7 @@ Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 | **Deployments** | CreateDeployment, GetDeployments |
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers |
-| **API Keys** | CreateApiKey, GetApiKeys |
+| **API Keys** | CreateApiKey, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
 | **Usage Plans** | CreateUsagePlan, GetUsagePlans, DeleteUsagePlan |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, DeleteRequestValidator |
@@ -36,7 +36,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 
 - Deployment detail and lifecycle: `GetDeployment`, `UpdateDeployment`, `DeleteDeployment`
 - Authorizer lifecycle: `UpdateAuthorizer`, `DeleteAuthorizer`, `TestInvokeAuthorizer`
-- API key detail: `GetApiKey`, `UpdateApiKey`, `DeleteApiKey`, `ImportApiKeys`
+- API key detail: `ImportApiKeys`
 - Usage plan detail: `GetUsagePlan`, `UpdateUsagePlan`
 - Model updates and templates: `UpdateModel`, `GetModelTemplate`
 - Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)

@@ -660,6 +660,7 @@ public class ApiGatewayService {
         apiKey.setEnabled(!Boolean.FALSE.equals(request.get("enabled")));
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
+        apiKey.setDescription((String) request.get("description"));
 
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {
@@ -685,6 +686,23 @@ public class ApiGatewayService {
     public void deleteApiKey(String region, String apiKeyId) {
         getApiKey(region, apiKeyId);
         apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
+    }
+
+    public ApiKey updateApiKey(String region, String apiKeyId, List<Map<String, String>> patchOperations) {
+        ApiKey key = getApiKey(region, apiKeyId);
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (!"replace".equals(op.get("op"))) { continue; }
+                switch (op.getOrDefault("path", "")) {
+                    case "/name"        -> key.setName(op.get("value"));
+                    case "/description" -> key.setDescription(op.get("value"));
+                    case "/enabled"     -> key.setEnabled(Boolean.parseBoolean(op.get("value")));
+                }
+            }
+        }
+        key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
+        return key;
     }
 
     // ──────────────────────────── Usage Plans ────────────────────────────
