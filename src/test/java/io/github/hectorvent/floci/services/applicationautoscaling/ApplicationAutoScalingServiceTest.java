@@ -271,6 +271,17 @@ class ApplicationAutoScalingServiceTest {
     }
 
     @Test
+    void listedTagsCannotBeMutatedThroughTheReturnedMap() {
+        String arn = register().getScalableTargetArn();
+
+        Map<String, String> listed = service.listTagsForResource(arn, REGION);
+
+        assertThrows(UnsupportedOperationException.class, () -> listed.put("Sneaky", "yes"),
+                "tags must not be mutable through the map handed back to callers");
+        assertEquals(Map.of("Environment", "dev"), service.listTagsForResource(arn, REGION));
+    }
+
+    @Test
     void tagsOnUnknownArnThrowResourceNotFound() {
         AwsException e = assertThrows(AwsException.class, () -> service.listTagsForResource(
                 "arn:aws:application-autoscaling:us-east-1:000000000000:scalable-target/missing", REGION));

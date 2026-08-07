@@ -153,7 +153,7 @@ public class ApplicationAutoScalingService {
             existing.setSuspendedState(suspendedState);
         }
         if (tags != null && !tags.isEmpty()) {
-            existing.getTags().putAll(tags);
+            existing.putTags(tags);
         }
         targets.put(key, existing);
         LOG.infov("RegisterScalableTarget (update): {0} {1} {2} in {3}",
@@ -299,7 +299,7 @@ public class ApplicationAutoScalingService {
             throw new AwsException("ValidationException", "Tags are required.", 400);
         }
         ScalableTarget target = findTargetByArn(resourceArn, region);
-        target.getTags().putAll(tags);
+        target.putTags(tags);
         targets.put(targetKey(region, target.getServiceNamespace(), target.getResourceId(),
                 target.getScalableDimension()), target);
     }
@@ -309,7 +309,7 @@ public class ApplicationAutoScalingService {
             throw new AwsException("ValidationException", "TagKeys are required.", 400);
         }
         ScalableTarget target = findTargetByArn(resourceArn, region);
-        tagKeys.forEach(target.getTags()::remove);
+        target.removeTags(tagKeys);
         targets.put(targetKey(region, target.getServiceNamespace(), target.getResourceId(),
                 target.getScalableDimension()), target);
     }

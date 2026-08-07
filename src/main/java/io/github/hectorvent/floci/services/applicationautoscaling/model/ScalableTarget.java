@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.applicationautoscaling.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -55,8 +57,21 @@ public class ScalableTarget {
     public SuspendedState getSuspendedState() { return suspendedState; }
     public void setSuspendedState(SuspendedState v) { this.suspendedState = v == null ? new SuspendedState() : v; }
 
-    public Map<String, String> getTags() { return tags; }
+    /** Read-only view; mutate through {@link #putTags} and {@link #removeTags}. */
+    public Map<String, String> getTags() { return Collections.unmodifiableMap(tags); }
 
-    /** Copies defensively so that callers passing an immutable map stay mutable here. */
+    /** Copies defensively so that a caller passing an immutable map stays mutable here. */
     public void setTags(Map<String, String> v) { this.tags = v == null ? new HashMap<>() : new HashMap<>(v); }
+
+    public void putTags(Map<String, String> additional) {
+        if (additional != null) {
+            tags.putAll(additional);
+        }
+    }
+
+    public void removeTags(Collection<String> tagKeys) {
+        if (tagKeys != null) {
+            tagKeys.forEach(tags::remove);
+        }
+    }
 }
