@@ -84,11 +84,15 @@ public class IotDataController {
     @POST
     @Path("/topics/{topic: .+}")
     @Consumes(MediaType.WILDCARD)
-    public Response publish(@PathParam("topic") String topic,
+    public Response publish(@Context HttpHeaders headers,
+                            @PathParam("topic") String topic,
                             @QueryParam("retain") Boolean retain,
                             @QueryParam("qos") Integer qos,
                             byte[] payload) {
-        iotService.publish(topic, payload == null ? new byte[0] : payload, Boolean.TRUE.equals(retain), qos == null ? 0 : qos);
+        // Unsigned data-plane publishes carry no region
+        String authorization = headers.getHeaderString("Authorization");
+        String region = authorization == null || authorization.isBlank() ? null : regionResolver.resolveRegionFromAuth(authorization);
+        iotService.publish(topic, payload == null ? new byte[0] : payload, Boolean.TRUE.equals(retain), qos == null ? 0 : qos, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
