@@ -168,4 +168,29 @@ class ApiGatewayExecuteControllerTest {
                 """));
         assertEquals("application/json", response.getMediaType().toString());
     }
+
+    @Test
+    void buildProxyResponseMatchesContentTypeInMultiValueHeaders() {
+        // multiValueHeaders is a fully valid way to return any header, including Content-Type —
+        // not just repeated ones — and must be scanned the same as headers.
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,"multiValueHeaders":{"content-type":["application/xml"]},"body":"<a/>"}
+                """));
+        assertEquals("application/xml", response.getMediaType().toString());
+    }
+
+    @Test
+    void buildProxyResponseMultiValueHeadersTakesPrecedenceOverHeaders() {
+        // API Gateway merges headers and multiValueHeaders, with multiValueHeaders winning
+        // on conflicts.
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,\
+                "headers":{"Content-Type":"text/plain"},\
+                "multiValueHeaders":{"Content-Type":["application/xml"]},\
+                "body":"<a/>"}
+                """));
+        assertEquals("application/xml", response.getMediaType().toString());
+    }
 }

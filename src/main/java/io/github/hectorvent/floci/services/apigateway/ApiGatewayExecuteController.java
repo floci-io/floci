@@ -44,6 +44,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -793,7 +794,9 @@ public class ApiGatewayExecuteController {
                 String bodyStr = bodyNode.asText();
                 boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
                 byte[] bytes = isBase64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
-                String ct = findHeaderIgnoreCase(respHeaders, "Content-Type").orElse(MediaType.APPLICATION_JSON);
+                String ct = findHeaderIgnoreCase(multiHeaders, "Content-Type")
+                        .or(() -> findHeaderIgnoreCase(respHeaders, "Content-Type"))
+                        .orElse(MediaType.APPLICATION_JSON);
                 builder.entity(bytes).type(ct);
             }
             return builder.build();
@@ -808,21 +811,22 @@ public class ApiGatewayExecuteController {
      * integrations commonly return lowercased names (e.g. the AWS Lambda Web Adapter emits
      * "content-type", not "Content-Type"). A plain JsonNode#path lookup is exact-case and
      * silently misses those, so Content-Type detection needs to scan case-insensitively.
+     * Handles both the "headers" shape (single string value) and the "multiValueHeaders"
+     * shape (array value, first element wins).
      */
-    private static java.util.Optional<String> findHeaderIgnoreCase(JsonNode headersNode, String name) {
+    private static Optional<String> findHeaderIgnoreCase(JsonNode headersNode, String name) {
         if (headersNode == null || !headersNode.isObject()) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         var it = headersNode.fields();
         while (it.hasNext()) {
             var e = it.next();
             if (e.getKey().equalsIgnoreCase(name)) {
-                return e.getValue().isNull()
-                        ? java.util.Optional.empty()
-                        : java.util.Optional.of(e.getValue().asText());
+                JsonNode value = e.getValue().isArray() ? e.getValue().get(0) : e.getValue();
+                return value == null || value.isNull() ? Optional.empty() : Optional.of(value.asText());
             }
         }
-        return java.util.Optional.empty();
+        return Optional.empty();
     }
 
     // ──────────────────────────── AWS (non-proxy) ────────────────────────────
