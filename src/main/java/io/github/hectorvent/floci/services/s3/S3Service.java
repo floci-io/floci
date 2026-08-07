@@ -40,6 +40,8 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class S3Service implements Resettable {
@@ -370,7 +372,9 @@ public class S3Service implements Resettable {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
         }
-        object.setAcl(cannedObjectAclXml(effectiveOptions.getAcl()));
+        object.setAcl(resolveObjectAclXml(effectiveOptions.getAcl(), effectiveOptions.getGrantRead(),
+                effectiveOptions.getGrantWrite(), effectiveOptions.getGrantFullControl(),
+                effectiveOptions.getGrantReadAcp(), effectiveOptions.getGrantWriteAcp()));
         if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
             object.setTags(new HashMap<>(effectiveOptions.getTagging()));
         }
@@ -1738,10 +1742,12 @@ public class S3Service implements Resettable {
         return bucket.getAcl() != null ? bucket.getAcl() : defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
     }
 
-    public void putBucketAcl(String bucketName, String acl) {
+    public void putBucketAcl(String bucketName, String bodyAcl, String cannedAcl, String grantRead,
+                              String grantWrite, String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        bucket.setAcl(acl);
+        String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
+        bucket.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         bucketStore.put(bucketName, bucket);
     }
 
@@ -1750,9 +1756,12 @@ public class S3Service implements Resettable {
         return obj.getAcl() != null ? obj.getAcl() : defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
     }
 
-    public void putObjectAcl(String bucketName, String key, String versionId, String acl) {
+    public void putObjectAcl(String bucketName, String key, String versionId, String bodyAcl, String cannedAcl,
+                              String grantRead, String grantWrite, String grantFullControl,
+                              String grantReadAcp, String grantWriteAcp) {
         S3Object obj = getObject(bucketName, key, versionId);
-        obj.setAcl(acl);
+        String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
+        obj.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         String storeKey = (versionId != null) ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
         objectStore.put(storeKey, obj);
     }
@@ -1909,6 +1918,68 @@ public class S3Service implements Resettable {
                   .end("AccessControlList")
                 .end("AccessControlPolicy")
                 .build();
+    }
+
+    /**
+     * Resolves the ACL to store for an object/bucket from a canned ACL and/or the explicit
+     * ACL grant headers (x-amz-grant-read, x-amz-grant-write, x-amz-grant-full-control,
+     * x-amz-grant-read-acp, x-amz-grant-write-acp). If both are somehow present, the canned ACL
+     * takes precedence - real S3 instead rejects that combination with 400 "Conflicting header
+     * values", but Floci doesn't model that validation yet. Returns null if neither is set, so
+     * callers can fall back to a pre-existing ACL (e.g. an explicit AccessControlPolicy XML body).
+     */
+    String resolveObjectAclXml(String cannedAcl, String grantRead, String grantWrite,
+                                String grantFullControl, String grantReadAcp, String grantWriteAcp) {
+        if (cannedAcl != null && !cannedAcl.isBlank()) {
+            return cannedObjectAclXml(cannedAcl);
+        }
+        if (isBlank(grantRead) && isBlank(grantWrite) && isBlank(grantFullControl)
+                && isBlank(grantReadAcp) && isBlank(grantWriteAcp)) {
+            return null;
+        }
+        List<String> grants = new ArrayList<>();
+        grants.add(ownerFullControlGrant());
+        appendGrantHeader(grants, grantRead, "READ");
+        appendGrantHeader(grants, grantWrite, "WRITE");
+        appendGrantHeader(grants, grantFullControl, "FULL_CONTROL");
+        appendGrantHeader(grants, grantReadAcp, "READ_ACP");
+        appendGrantHeader(grants, grantWriteAcp, "WRITE_ACP");
+        return objectAclXml(grants.toArray(new String[0]));
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    // Matches a single grantee token from an x-amz-grant-* header value, e.g.
+    // uri="http://acs.amazonaws.com/groups/global/AllUsers" or id="<canonical-id>". AWS allows
+    // a comma-separated list of these per header.
+    private static final Pattern GRANTEE_TOKEN_PATTERN = Pattern.compile("(uri|id|emailAddress)=\"([^\"]*)\"");
+
+    private void appendGrantHeader(List<String> grants, String headerValue, String permission) {
+        if (isBlank(headerValue)) {
+            return;
+        }
+        Matcher matcher = GRANTEE_TOKEN_PATTERN.matcher(headerValue);
+        boolean matched = false;
+        while (matcher.find()) {
+            matched = true;
+            grants.add(granteeGrant(matcher.group(1), matcher.group(2), permission));
+        }
+        if (!matched) {
+            throw new AwsException("InvalidArgument", "Malformed ACL grant header: " + headerValue, 400);
+        }
+    }
+
+    private String granteeGrant(String granteeType, String granteeValue, String permission) {
+        return switch (granteeType) {
+            case "uri" -> groupGrant(granteeValue, permission);
+            // Floci has no directory of external accounts, so an explicit CanonicalUser grant is
+            // stored using the caller-supplied ID verbatim as both ID and display name.
+            case "id" -> canonicalUserGrant(granteeValue, granteeValue, permission);
+            default -> throw new AwsException("NotImplemented",
+                    "Explicit ACL grants by emailAddress are not supported.", 501);
+        };
     }
 
     String cannedObjectAclXml(String cannedAcl) {
@@ -2611,6 +2682,11 @@ public class S3Service implements Resettable {
                         .withSseCustomerKey(effectiveOptions.getSseCustomerKey())
                         .withSseCustomerKeyMd5(effectiveOptions.getSseCustomerKeyMd5())
                         .withAcl(effectiveOptions.getAcl())
+                        .withGrantRead(effectiveOptions.getGrantRead())
+                        .withGrantWrite(effectiveOptions.getGrantWrite())
+                        .withGrantFullControl(effectiveOptions.getGrantFullControl())
+                        .withGrantReadAcp(effectiveOptions.getGrantReadAcp())
+                        .withGrantWriteAcp(effectiveOptions.getGrantWriteAcp())
                         .withChecksumAlgorithm(copyChecksumAlgorithm)
                         .withTagging(effectiveTags));
         copy.setETag(source.getETag());

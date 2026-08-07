@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.scheduler.model.SqsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -58,6 +60,71 @@ class ScheduleInvokerTest {
     }
 
     @Test
+    void universalSnsPublishForwardsMessageAttributes() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sns:publish");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"TopicArn\":\"" + TOPIC_ARN + "\","
+                + "\"Message\":\"{}\","
+                + "\"Subject\":\"my-subject\","
+                + "\"MessageAttributes\":{"
+                + "\"EventName\":{\"DataType\":\"String\",\"StringValue\":\"my-subject\"}"
+                + "}}");
+
+        invoker.invoke(target, "us-east-1");
+
+        verify(snsService).publish(
+                eq(TOPIC_ARN), isNull(), isNull(),
+                eq("{}"), eq("my-subject"),
+                argThat((Map<String, MessageAttributeValue> attrs) ->
+                        attrs != null
+                        && attrs.containsKey("EventName")
+                        && "my-subject".equals(attrs.get("EventName").getStringValue())
+                        && "String".equals(attrs.get("EventName").getDataType())),
+                isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void universalSnsPublishForwardsBinaryMessageAttributes() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sns:publish");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        // "aGVsbG8=" is base64 for "hello"
+        target.setInput("{\"TopicArn\":\"" + TOPIC_ARN + "\","
+                + "\"Message\":\"payload\","
+                + "\"MessageAttributes\":{"
+                + "\"BinAttr\":{\"DataType\":\"Binary\",\"BinaryValue\":\"aGVsbG8=\"}"
+                + "}}");
+
+        invoker.invoke(target, "us-east-1");
+
+        verify(snsService).publish(
+                eq(TOPIC_ARN), isNull(), isNull(),
+                eq("payload"), isNull(),
+                argThat((Map<String, MessageAttributeValue> attrs) ->
+                        attrs != null
+                        && attrs.containsKey("BinAttr")
+                        && "Binary".equals(attrs.get("BinAttr").getDataType())
+                        && java.util.Arrays.equals("hello".getBytes(), attrs.get("BinAttr").getBinaryValue())),
+                isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void universalSnsPublishWithNoMessageAttributesPassesNullOrEmpty() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sns:publish");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"TopicArn\":\"" + TOPIC_ARN + "\",\"Message\":\"hello\"}");
+
+        invoker.invoke(target, "us-east-1");
+
+        verify(snsService).publish(eq(TOPIC_ARN), isNull(), isNull(),
+                eq("hello"), isNull(),
+                argThat(attrs -> attrs == null || attrs.isEmpty()),
+                isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
     void universalSnsPublishReadsTopicArnAndMessageFromInput() {
         Target target = new Target();
         target.setArn("arn:aws:scheduler:::aws-sdk:sns:publish");
@@ -68,7 +135,8 @@ class ScheduleInvokerTest {
 
         // The real TopicArn from Input must be used, NOT the universal-target ARN.
         verify(snsService).publish(eq(TOPIC_ARN), isNull(), isNull(),
-                eq("scheduled-universal-target"), isNull(), isNull(),
+                eq("scheduled-universal-target"), isNull(),
+                argThat(attrs -> attrs == null || attrs.isEmpty()),
                 isNull(), isNull(), eq("us-east-1"));
         verify(snsService, never()).publish(eq("arn:aws:scheduler:::aws-sdk:sns:publish"),
                 any(), any(), any(), any());

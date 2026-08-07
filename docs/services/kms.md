@@ -37,6 +37,7 @@
 | `ListResourceTags` | List tags |
 | `GetKeyPolicy` | Get a key's resource policy |
 | `PutKeyPolicy` | Update a key's resource policy |
+| `ListKeyPolicies` | List a key's policy names (always the single `default` policy) |
 | `UpdateKeyDescription` | Update a key's description |
 | `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
 | `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
