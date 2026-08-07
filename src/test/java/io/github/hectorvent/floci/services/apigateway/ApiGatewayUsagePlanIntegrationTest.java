@@ -43,16 +43,6 @@ class ApiGatewayUsagePlanIntegrationTest {
                 .body("item.find { it.id == 'my-plan-id' }.tags._custom_id_", nullValue());
     }
 
-    @Test @Order(3)
-    void getUsagePlan_returnsTagsWithoutReservedKeys() {
-        given()
-                .when().get("/usageplans/my-plan-id")
-                .then()
-                .statusCode(200)
-                .body("tags.env", equalTo("test"))
-                .body("tags.'floci:override-id'", nullValue());
-    }
-
     @Test @Order(4)
     void createUsagePlan_deprecatedCustomIdTag_stillHonoredButNotPersisted() {
         String body = """

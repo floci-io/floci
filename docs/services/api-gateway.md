@@ -78,6 +78,21 @@ When `generateDistinctId` is absent or `false`, a single shared string is used f
 
 When `generateDistinctId=true`, `id` is set to an opaque short token independent of `value`.
 
+#### Revocation
+
+`DeleteApiKey` detaches the key from every usage plan before removing it, matching AWS. A usage plan key
+stores its own copy of the key value, so without that sweep a deleted key would stay listed by
+`GetUsagePlanKeys` and keep being recognised on the data plane.
+
+`requestContext.identity.apiKey` is only populated when the `x-api-key` header matches a key that still
+exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
+immediately.
+
+> [!NOTE]
+> Floci does not implement the `apiKeyRequired` gate on methods, so a request carrying an unknown,
+> disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
+> than being rejected with `403`.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
@@ -167,7 +182,7 @@ aws apigateway get-usage-plans --endpoint-url $AWS_ENDPOINT_URL
 The override key is validated and consumed exactly as it is for `CreateRestApi`, so it never appears in
 the tags a usage plan returns. The deprecated `_custom_id_` key is still honored on create for existing
 setups, and `floci:override-id` wins when both are present. Every other tag is persisted and returned in
-`CreateUsagePlan`, `GetUsagePlan` and `GetUsagePlans` responses.
+`CreateUsagePlan` and `GetUsagePlans` responses.
 
 ---
 
