@@ -2290,7 +2290,64 @@ class CognitoIntegrationTest {
         assertEquals(1200L, refreshedIdPayload.path("exp").asLong() - refreshedIdPayload.path("iat").asLong());
     }
 
+    // ── Issue #2113: InitiateAuth REFRESH_TOKEN_AUTH rejects garbage tokens ─
 
+    @Test
+    @Order(100)
+    void initiateAuthRefreshTokenAuthRejectsInvalidRefreshToken() {
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "invalid-refresh-token" }
+                }
+                """.formatted(clientId))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+    }
+
+    @Test
+    @Order(101)
+    void initiateAuthRefreshTokenAuthRejectsUnknownWellFormedRefreshToken() {
+        // Well-formed shape (poolId|username|clientId|iat|nonce) but for a user that
+        // does not exist in this pool — must still be rejected, not silently accepted.
+        String bogusToken = java.util.Base64.getEncoder().withoutPadding().encodeToString(
+                (poolId + "|nonexistent-user|" + clientId + "|" + System.currentTimeMillis() + "|"
+                        + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8));
+
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s" }
+                }
+                """.formatted(clientId, bogusToken))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+    }
+
+    @Test
+    @Order(102)
+    void initiateAuthRefreshTokenAuthRejectsTokenWithNonNumericIssuedAt() {
+        // Well-formed shape (5 base64 parts), but the issued-at field is not a number.
+        // Must fail with NotAuthorizedException, not a 500 from an unguarded parseLong.
+        String bogusToken = java.util.Base64.getEncoder().withoutPadding().encodeToString(
+                (poolId + "|" + USERNAME + "|" + clientId + "|not-a-number|"
+                        + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8));
+
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s" }
+                }
+                """.formatted(clientId, bogusToken))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+    }
 
     private static JsonNode decodeJwtPayload(String token) throws Exception {
         return decodeJwtPart(token, 1);
