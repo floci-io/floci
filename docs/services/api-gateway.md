@@ -150,21 +150,24 @@ curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 
 ### Usage Plan Tags and Custom IDs
 
-Usage plans support arbitrary tags and the `_custom_id_` tag for deterministic IDs:
+Usage plans accept arbitrary tags, and the same reserved `floci:override-id` tag used for
+[custom API IDs](#custom-api-ids) pins the plan's `id`:
 
 ```bash
 # Create a usage plan with a custom ID and additional tags
 aws apigateway create-usage-plan \
   --name "my-plan" \
-  --tags '{"_custom_id_":"my-plan-id","env":"staging"}' \
+  --tags '{"floci:override-id":"my-plan-id","env":"staging"}' \
   --endpoint-url $AWS_ENDPOINT_URL
 
 # The plan is now accessible at its custom ID
 aws apigateway get-usage-plans --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-When `_custom_id_` is present in the `tags` map, it is used as the usage plan's `id`.
-Tags are persisted and returned in all usage plan responses.
+The override key is validated and consumed exactly as it is for `CreateRestApi`, so it never appears in
+the tags a usage plan returns. The deprecated `_custom_id_` key is still honored on create for existing
+setups, and `floci:override-id` wins when both are present. Every other tag is persisted and returned in
+`CreateUsagePlan`, `GetUsagePlan` and `GetUsagePlans` responses.
 
 ---
 

@@ -744,14 +744,14 @@ public class ApiGatewayService {
             rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
         }
 
-        String customId = tags.get("_custom_id_");
-        String planId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
+        String customId = ReservedTags.extractOverrideApiId(tags);
+        String planId = customId != null ? customId : shortId(10);
 
         UsagePlan plan = new UsagePlan();
         plan.setId(planId);
         plan.setName((String) request.get("name"));
         plan.setDescription((String) request.get("description"));
-        plan.setTags(tags);
+        plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");
