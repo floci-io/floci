@@ -232,23 +232,27 @@ public class ApiGatewayExecuteController {
     Response dispatch(String httpMethod, String apiId, String stageName,
                               String proxy, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         String region = regionResolver.resolveRegion(headers);
+        // True for SigV4-unsigned requests, and also for requests whose Authorization header
+        // isn't a SigV4 credential at all (e.g. a Cognito bearer JWT) - resolveRegion silently
+        // fell back to defaultRegion in both cases, so the resolved region is a guess.
+        boolean regionUnresolved = regionResolver.isRegionUnresolved(headers);
 
         // Check if this is a v2 (HTTP API) or v1 (REST API)
         boolean isV2 = false;
+        String v2Region = regionUnresolved ? apiGatewayV2Service.resolveHttpApiRegion(region, apiId) : region;
         try {
-            apiGatewayV2Service.getApi(region, apiId);
+            apiGatewayV2Service.getApi(v2Region, apiId);
             isV2 = true;
         } catch (AwsException ignored) {
             // Not a v2 API — fall through to v1 handling
         }
 
         if (isV2) {
-            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, region);
+            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, v2Region);
         }
 
-        // Resolve region for unsigned data-plane requests
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null || auth.isBlank()) {
+        // Resolve region for requests whose Authorization header didn't resolve one
+        if (regionUnresolved) {
             region = apiGatewayService.resolveRestApiRegion(region, apiId);
         }
 
