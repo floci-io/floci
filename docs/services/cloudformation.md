@@ -118,6 +118,36 @@ Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's ac
 (determined from the request's access key — see [Multi-Account Isolation](../configuration/multi-account.md)).
 Deleting the stack removes them from that same account.
 
+## Deletion Policies
+
+A resource's [`DeletionPolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)
+attribute is honored on `DeleteStack` and on the rollback of a failed `CreateStack`:
+
+| Value | `DeleteStack` | Rollback of the create that made the resource |
+|---|---|---|
+| `Delete` (default) | deleted | deleted |
+| `Retain` | kept | kept |
+| `RetainExceptOnCreate` | kept | deleted |
+
+A kept resource is reported as `DELETE_SKIPPED` in `DescribeStackEvents` and does not fail the
+deletion — the stack still reaches `DELETE_COMPLETE` while the resource keeps existing. This also
+lets a stack owning a non-empty S3 bucket be deleted, since the bucket is never touched.
+
+Deviations from AWS to be aware of:
+
+- `Snapshot` deletes the resource without taking a snapshot; floci has no snapshot support for the
+  types AWS allows it on.
+- Every resource defaults to `Delete`. AWS instead defaults `AWS::RDS::DBCluster`, and
+  `AWS::RDS::DBInstance` without a `DBClusterIdentifier`, to `Snapshot`.
+- Unrecognized values are treated as `Delete`.
+- An update that removes a resource from the template does not delete it (or consult its policy);
+  only the new template's resources are provisioned. AWS applies `DeletionPolicy` to update-time
+  removals as well.
+- After `DeleteStack` completes, a retained resource's `DELETE_SKIPPED` record is only visible
+  through `DescribeStackEvents` for the deleted stack, not `DescribeStackResources`.
+- `UpdateReplacePolicy`, and the `RetainExceptOnCreate` request parameter of `CreateStack` /
+  `UpdateStack`, are not implemented.
+
 ## StackSets
 
 StackSets deploy a single template into many target accounts and regions:
