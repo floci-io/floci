@@ -636,10 +636,14 @@ public class CloudFormationService {
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
                 provisioner.delete(resource, region);
-                resource.setStatus("DELETE_COMPLETE");
-                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                        resource.getResourceType(), "DELETE_COMPLETE", null);
+                completeResourceDeletion(stack, resource);
             } catch (Exception e) {
+                if (isAlreadyDeleted(e)) {
+                    completeResourceDeletion(stack, resource);
+                    LOG.debugv("Resource {0} ({1}) was already deleted while rolling back stack {2}",
+                            resource.getResourceType(), resource.getPhysicalId(), stack.getStackName());
+                    continue;
+                }
                 failedResources.add(resource.getLogicalId());
                 resource.setStatus("DELETE_FAILED");
                 resource.setStatusReason(e.getMessage());
@@ -671,10 +675,14 @@ public class CloudFormationService {
                         resource.getResourceType(), "DELETE_IN_PROGRESS", null);
                 try {
                     provisioner.delete(resource, region);
-                    resource.setStatus("DELETE_COMPLETE");
-                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                            resource.getResourceType(), "DELETE_COMPLETE", null);
+                    completeResourceDeletion(stack, resource);
                 } catch (Exception e) {
+                    if (isAlreadyDeleted(e)) {
+                        completeResourceDeletion(stack, resource);
+                        LOG.debugv("Resource {0} ({1}) was already deleted while deleting stack {2}",
+                                resource.getResourceType(), resource.getPhysicalId(), stack.getStackName());
+                        continue;
+                    }
                     // AWS leaves the stack in DELETE_FAILED when a managed resource cannot be
                     // deleted (e.g. a non-empty S3 bucket raises BucketNotEmpty). The stack must
                     // not be reported as a successful deletion while the resource still exists.
@@ -717,6 +725,36 @@ public class CloudFormationService {
             stack.setStatus("DELETE_FAILED");
             stack.setStatusReason(e.getMessage());
         }
+    }
+
+    private void completeResourceDeletion(Stack stack, StackResource resource) {
+        resource.setStatus("DELETE_COMPLETE");
+        resource.setStatusReason(null);
+        addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                resource.getResourceType(), "DELETE_COMPLETE", null);
+    }
+
+    /** Returns whether a resource deletion failed solely because the resource is already gone. */
+    private static boolean isAlreadyDeleted(Throwable failure) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable current = failure; current != null && seen.add(current); current = current.getCause()) {
+            if (current instanceof AwsException awsException
+                    && (awsException.getHttpStatus() == 404
+                    || (awsException.getErrorCode() != null
+                    && awsException.getErrorCode().endsWith("NotFoundException")))) {
+                return true;
+            }
+
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("not found") || normalized.contains("does not exist")
+                        || normalized.contains("not exist")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
