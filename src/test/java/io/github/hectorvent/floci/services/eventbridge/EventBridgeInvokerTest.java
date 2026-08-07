@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
@@ -31,6 +32,7 @@ class EventBridgeInvokerTest {
     private BatchService batchService;
     private FirehoseService firehoseService;
     private EventBridgeService eventBridgeService;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
@@ -40,7 +42,9 @@ class EventBridgeInvokerTest {
         batchService = mock(BatchService.class);
         firehoseService = mock(FirehoseService.class);
         eventBridgeService = mock(EventBridgeService.class);
-        when(eventBridgeService.putEvents(anyList(), anyString()))
+        regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(eventBridgeService.putEvents(anyList(), anyString(), any()))
                 .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
         invoker = new EventBridgeInvoker(
                 lambdaService,
@@ -49,6 +53,7 @@ class EventBridgeInvokerTest {
                 batchService,
                 firehoseService,
                 eventBridgeService,
+                regionResolver,
                 new ObjectMapper(),
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
         );
@@ -255,7 +260,7 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, event, "eu-west-1");
 
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
-        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"), isNull());
         List<Map<String, Object>> entries = captor.getValue();
         assertEquals(1, entries.size());
         Map<String, Object> entry = entries.get(0);
@@ -283,7 +288,7 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, event, "eu-west-1");
 
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
-        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"), isNull());
         Map<String, Object> entry = captor.getValue().get(0);
         assertEquals("myapp.orders", entry.get("Source"));
         assertEquals("Order.Created", entry.get("DetailType"));
@@ -303,7 +308,7 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, event, "eu-west-1");
 
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
-        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"), isNull());
         Map<String, Object> entry = captor.getValue().get(0);
         assertEquals("111122223333", entry.get("Account"));
         assertEquals("eu-central-1", entry.get("Region"));
@@ -321,7 +326,7 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, event, "eu-west-1");
 
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
-        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"));
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"), isNull());
         Map<String, Object> entry = captor.getValue().get(0);
         assertFalse(entry.containsKey("Resources"));
         assertEquals("{\"orderId\":\"o-1\"}", entry.get("Detail"));
@@ -338,7 +343,7 @@ class EventBridgeInvokerTest {
 
         invoker.invokeTarget(target, "{\"source\":\"aws.s3\"}", "eu-west-1");
 
-        verify(eventBridgeService, never()).putEvents(anyList(), anyString());
+        verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
     }
 
     @Test
@@ -354,5 +359,93 @@ class EventBridgeInvokerTest {
                 null, null);
 
         assertDoesNotThrow(() -> bare.invokeTarget(target, "{\"detail\":{}}", "eu-west-1"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void invokeTarget_eventBusTargetInAnotherAccount_forwardsUnderArnAccount() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000002:event-bus/other-account-bus",
+                null, null);
+        String event = "{\"source\":\"myapp.orders\",\"detail-type\":\"Order.Created\","
+                + "\"detail\":{\"orderId\":\"o-1\"}}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("eu-west-1"), eq("000000000002"));
+        assertEquals("arn:aws:events:eu-west-1:000000000002:event-bus/other-account-bus",
+                captor.getValue().get(0).get("EventBusName"));
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetInSameAccount_forwardsWithNullAccount() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+
+        invoker.invokeTarget(target, "{\"source\":\"s\",\"detail\":{}}", "eu-west-1");
+
+        verify(eventBridgeService).putEvents(anyList(), eq("eu-west-1"), isNull());
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetWithAccountlessArn_forwardsWithNullAccount() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1::event-bus/my-target-bus",
+                null, null);
+
+        // Distinct from the same-account case: accountId() is "" here, not null.
+        invoker.invokeTarget(target, "{\"source\":\"s\",\"detail\":{}}", "eu-west-1");
+
+        verify(eventBridgeService).putEvents(anyList(), eq("eu-west-1"), isNull());
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetWithScalarJsonInput_dropsWithoutPublishing() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                "\"hello\"", null);
+
+        invoker.invokeTarget(target, "{\"source\":\"myapp.orders\",\"detail\":{}}", "eu-west-1");
+
+        verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetWithArrayInput_dropsWithoutPublishing() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                "[1,2]", null);
+
+        invoker.invokeTarget(target, "{\"source\":\"myapp.orders\",\"detail\":{}}", "eu-west-1");
+
+        verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetWithNumericInput_dropsWithoutPublishing() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                "123", null);
+
+        invoker.invokeTarget(target, "{\"source\":\"myapp.orders\",\"detail\":{}}", "eu-west-1");
+
+        verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetWithScalarEnvelopeDetail_dropsWithoutPublishing() {
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+        // No input override: the scalar arrives on the envelope itself, which the
+        // PutEvents handler permits today.
+        String event = "{\"source\":\"myapp.orders\",\"detail-type\":\"Order.Created\","
+                + "\"detail\":\"hello\"}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
     }
 }

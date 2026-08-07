@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -37,6 +38,7 @@ public class EventBridgeInvoker {
     private final BatchService batchService;
     private final FirehoseService firehoseService;
     private final EventBridgeService eventBridgeService;
+    private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
 
@@ -47,6 +49,7 @@ public class EventBridgeInvoker {
                               BatchService batchService,
                               FirehoseService firehoseService,
                               EventBridgeService eventBridgeService,
+                              RegionResolver regionResolver,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
         this.lambdaService = lambdaService;
@@ -55,6 +58,7 @@ public class EventBridgeInvoker {
         this.batchService = batchService;
         this.firehoseService = firehoseService;
         this.eventBridgeService = eventBridgeService;
+        this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
     }
@@ -64,7 +68,9 @@ public class EventBridgeInvoker {
                        SnsService snsService,
                        ObjectMapper objectMapper,
                        EmulatorConfig config) {
-        this(lambdaService, sqsService, snsService, null, null, null, objectMapper, config);
+        this(lambdaService, sqsService, snsService,
+                null /* batch */, null /* firehose */, null /* eventBridge */, null /* regionResolver */,
+                objectMapper, config);
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
@@ -140,20 +146,29 @@ public class EventBridgeInvoker {
                 boolean inputOverridden = target.getInput() != null
                         || target.getInputPath() != null
                         || target.getInputTransformer() != null;
-                String detailBody;
+                JsonNode detailNode;
                 if (inputOverridden) {
                     try {
-                        objectMapper.readTree(payload);
+                        detailNode = objectMapper.readTree(payload);
                     } catch (Exception e) {
                         LOG.warnv("EventBridge event-bus target {0} requires JSON Detail; dropping non-JSON input: {1}",
                                 arn, e.getMessage());
                         return;
                     }
-                    detailBody = payload;
                 } else {
-                    JsonNode detail = envelope.get("detail");
-                    detailBody = detail != null ? detail.toString() : "{}";
+                    detailNode = envelope.get("detail");
+                    if (detailNode == null) {
+                        detailNode = objectMapper.createObjectNode();
+                    }
                 }
+                // readTree accepts any well-formed JSON value; AWS emits an event only when
+                // Detail is an object, and both arms can produce a scalar or array.
+                if (!detailNode.isObject()) {
+                    LOG.warnv("EventBridge event-bus target {0} requires a JSON object Detail; dropping: {1}",
+                            arn, detailNode);
+                    return;
+                }
+                String detailBody = detailNode.toString();
                 Map<String, Object> entry = new HashMap<>();
                 // putEvents accepts a full event-bus ARN as EventBusName and validates it.
                 entry.put("EventBusName", arn);
@@ -166,9 +181,17 @@ public class EventBridgeInvoker {
                 if (envelope.hasNonNull("resources") && envelope.get("resources").isArray()) {
                     entry.put("Resources", envelope.get("resources"));
                 }
+                // null routes through RequestContext, the only path carrying the legacy-key
+                // fallback; Arn.accountId() is "" when the ARN omits the account segment.
+                String targetAccount = AwsArnUtils.parse(arn).accountId();
+                String currentAccount = regionResolver != null ? regionResolver.getAccountId() : null;
+                String forwardAccount = targetAccount == null || targetAccount.isBlank()
+                        || targetAccount.equals(currentAccount)
+                        ? null
+                        : targetAccount;
                 BUS_TO_BUS_DEPTH.set(depth + 1);
                 try {
-                    var result = eventBridgeService.putEvents(List.of(entry), targetRegion);
+                    var result = eventBridgeService.putEvents(List.of(entry), targetRegion, forwardAccount);
                     if (result.failedCount() > 0) {
                         LOG.warnv("EventBridge event-bus target {0} rejected event: {1}", arn, result.entries());
                     } else {
