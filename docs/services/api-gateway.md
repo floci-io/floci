@@ -30,6 +30,22 @@ Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
+### API Key Behaviour Notes
+
+#### `generateDistinctId`
+
+Controls whether the key's `id` and `value` fields are distinct. AWS's undocumented default behaviour is that they are **the same string** unless `generateDistinctId=true` is explicitly requested.
+
+| `generateDistinctId` | `id` | `value` |
+|---|---|---|
+| absent (default) | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `false` | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `true` | opaque short token (`shortId`) | caller-supplied `value`, or a generated UUID-derived string |
+
+When `generateDistinctId` is absent or `false`, a single shared string is used for both `id` and `value`. If the caller supplies a `value` in the request body, that string is used for both; otherwise a UUID-derived string is generated and assigned to both.
+
+When `generateDistinctId=true`, `id` is set to an opaque short token independent of `value`.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
