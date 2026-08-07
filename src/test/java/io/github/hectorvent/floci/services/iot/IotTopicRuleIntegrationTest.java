@@ -349,6 +349,22 @@ class IotTopicRuleIntegrationTest {
     }
 
     @Test
+    void nonSigV4AuthorizationPublishEvaluatesRulesInEveryRegion() throws Exception {
+        createRepublishRule("eu-west-1", "bearerRule", "devices/regional/bearer", "devices/regional/bearer-republished");
+
+        given()
+            .header("Authorization", "Bearer not-sigv4")
+            .contentType("text/plain")
+            .body("bearer-payload")
+        .when()
+            .post("/topics/devices/regional/bearer")
+        .then()
+            .statusCode(200);
+
+        awaitPublishedEvent("devices/regional/bearer-republished", "bearer-payload".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
     void topicRuleActionTargetsTheRuleRegion() {
         String queueUrl = createQueue("regional-iot-rule-queue", "eu-west-1");
         createQueue("regional-iot-rule-queue", "us-east-1");

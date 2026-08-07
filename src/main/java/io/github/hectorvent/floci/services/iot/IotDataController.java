@@ -89,9 +89,8 @@ public class IotDataController {
                             @QueryParam("retain") Boolean retain,
                             @QueryParam("qos") Integer qos,
                             byte[] payload) {
-        // Unsigned data-plane publishes carry no region
-        String authorization = headers.getHeaderString("Authorization");
-        String region = authorization == null || authorization.isBlank() ? null : regionResolver.resolveRegionFromAuth(authorization);
+        // Unsigned or non-SigV4 publishes carry no usable region; both count as unresolved
+        String region = regionResolver.resolveRegionFromAuthOrNull(headers.getHeaderString("Authorization"));
         iotService.publish(topic, payload == null ? new byte[0] : payload, Boolean.TRUE.equals(retain), qos == null ? 0 : qos, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }

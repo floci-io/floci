@@ -67,6 +67,21 @@ public class RegionResolver {
         return defaultRegion;
     }
 
+
+    /**
+     * Resolves the region from a SigV4 Authorization credential scope, or
+     * null when the header is absent or carries no parseable credential —
+     * for callers that treat an unresolved region differently from the
+     * default region.
+     */
+    public String resolveRegionFromAuthOrNull(String authorizationHeader) {
+        if (authorizationHeader == null || authorizationHeader.isEmpty()) {
+            return null;
+        }
+        Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+
     public String getDefaultRegion() {
         return defaultRegion;
     }
