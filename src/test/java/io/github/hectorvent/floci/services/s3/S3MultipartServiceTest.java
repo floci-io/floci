@@ -95,6 +95,31 @@ class S3MultipartServiceTest {
     }
 
     @Test
+    void completeMultipartUploadAppliesTagging() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "tagged.bin", null,
+                null, null, null, null, null, null, null, null, null,
+                Map.of("token", "abc-123", "teamId", "42"));
+        s3Service.uploadPart("test-bucket", "tagged.bin", upload.getUploadId(), 1, "part1".getBytes());
+
+        s3Service.completeMultipartUpload("test-bucket", "tagged.bin", upload.getUploadId(), List.of(1));
+
+        Map<String, String> tags = s3Service.getObjectTagging("test-bucket", "tagged.bin");
+        assertEquals(2, tags.size());
+        assertEquals("abc-123", tags.get("token"));
+        assertEquals("42", tags.get("teamId"));
+    }
+
+    @Test
+    void completeMultipartUploadWithoutTaggingLeavesObjectUntagged() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "untagged.bin", null);
+        s3Service.uploadPart("test-bucket", "untagged.bin", upload.getUploadId(), 1, "part1".getBytes());
+
+        s3Service.completeMultipartUpload("test-bucket", "untagged.bin", upload.getUploadId(), List.of(1));
+
+        assertTrue(s3Service.getObjectTagging("test-bucket", "untagged.bin").isEmpty());
+    }
+
+    @Test
     void completeMultipartUploadMissingPart() {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "file.bin", null);
         s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), 1, "part1".getBytes());

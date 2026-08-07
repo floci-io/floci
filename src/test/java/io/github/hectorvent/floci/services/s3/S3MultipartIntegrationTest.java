@@ -501,8 +501,67 @@ class S3MultipartIntegrationTest {
 
     @Test
     @Order(18)
+    void multipartUploadAppliesInlineTagging() {
+        String taggedKey = "tagged-multipart.bin";
+        String taggingUploadId = given()
+            .header("x-amz-tagging", "token=abc-123&teamId=42&note=hello%20world")
+        .when()
+            .post("/" + BUCKET + "/" + taggedKey + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .body("TaggedPartData")
+        .when()
+            .put("/" + BUCKET + "/" + taggedKey + "?uploadId=" + taggingUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200);
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
+                </CompleteMultipartUpload>""";
+        given()
+            .contentType("application/xml")
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/" + taggedKey + "?uploadId=" + taggingUploadId)
+        .then()
+            .statusCode(200);
+
+        // Tags from the x-amz-tagging header on CreateMultipartUpload must be present
+        // on the completed object, including URL-decoded values.
+        given()
+        .when()
+            .get("/" + BUCKET + "/" + taggedKey + "?tagging")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>token</Key>"))
+            .body(containsString("<Value>abc-123</Value>"))
+            .body(containsString("<Key>teamId</Key>"))
+            .body(containsString("<Value>42</Value>"))
+            .body(containsString("<Key>note</Key>"))
+            .body(containsString("<Value>hello world</Value>"));
+    }
+
+    @Test
+    @Order(19)
+    void initiateMultipartUploadRejectsMalformedTaggingHeader() {
+        given()
+            .header("x-amz-tagging", "missing-equals-sign")
+        .when()
+            .post("/" + BUCKET + "/bad-tagging.bin?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+    }
+
+    @Test
+    @Order(20)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/tagged-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/copy-dest.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/sse-c-multipart.bin").then().statusCode(204);
