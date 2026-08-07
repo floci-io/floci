@@ -1081,6 +1081,11 @@ class IamIntegrationTest {
         .then()
             .statusCode(200);
 
+        // Asserting only the negative would pass vacuously if ListPolicies ever returned no
+        // members at all (a pagination bug, a scope-filter regression); the positive assertion
+        // proves the created policy is actually present before the absence check means anything.
+        // Matching the element itself, not the bare word "Description", also avoids colliding
+        // with a future policy name/path containing that substring.
         given()
             .formParam("Action", "ListPolicies")
             .formParam("Scope", "Local")
@@ -1090,6 +1095,7 @@ class IamIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(not(containsString("Description")));
+            .body(containsString("ListPoliciesOmitCheckPolicy"))
+            .body(not(containsString("<Description>")));
     }
 }
