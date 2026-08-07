@@ -501,12 +501,14 @@ public class AslExecutor {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         JsonNode lambdaPayload = input;
+        boolean optimizedLambdaInvoke = false;
 
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
             // Direct Lambda ARN: arn:aws:lambda:region:account:function:name[:qualifier]
             functionName = extractLambdaFunctionName(resource);
         } else if (resource.equals("arn:aws:states:::lambda:invoke")) {
             // Optimized Lambda integration — function name and payload come from resolved input
+            optimizedLambdaInvoke = true;
             String fnRef = input.path("FunctionName").asText(null);
             if (fnRef != null) {
                 functionName = extractLambdaFunctionName(fnRef);
@@ -533,10 +535,20 @@ public class AslExecutor {
             }
 
             byte[] responseBytes = result.getPayload();
-            if (responseBytes != null && responseBytes.length > 0) {
-                return objectMapper.readTree(responseBytes);
+            JsonNode functionOutput = responseBytes != null && responseBytes.length > 0
+                    ? objectMapper.readTree(responseBytes)
+                    : NullNode.getInstance();
+
+            // A direct function ARN yields only the function output, while the optimized
+            // integration nests it in the Invoke response metadata.
+            if (!optimizedLambdaInvoke) {
+                return functionOutput;
             }
-            return NullNode.getInstance();
+            ObjectNode invokeResponse = objectMapper.createObjectNode();
+            invokeResponse.put("ExecutedVersion", fn.getVersion());
+            invokeResponse.set("Payload", functionOutput);
+            invokeResponse.put("StatusCode", result.getStatusCode());
+            return invokeResponse;
         }
 
         // DynamoDB optimized integrations (4 actions)
