@@ -184,6 +184,18 @@ public class RuntimeApiServer {
     }
 
     /**
+     * True if at least one extension has completed registration via
+     * {@code /extension/register}. Callers use this to pick the Shutdown-phase grace tier
+     * (see AWS's documented 0/500/2000ms limits): a container with a registered extension
+     * gets the 2s external-extensions budget, otherwise the runtime-only sub-budget.
+     */
+    public boolean hasRegisteredExtensions() {
+        synchronized (lock) {
+            return !extensions.isEmpty();
+        }
+    }
+
+    /**
      * True once a registered extension reported an init or exit error. The execution environment
      * is condemned: {@code WarmPool} must not return this container to the pool or hand it out
      * again, matching real AWS's treatment of both errors as fatal to the environment.
@@ -252,25 +264,48 @@ public class RuntimeApiServer {
         // exhaustion when many warm containers poll concurrently.
         router.get(NEXT_PATH).handler(ctx -> {
             PendingInvocation toDispatch = null;
-            boolean send204 = false;
+            boolean faultedNow = false;
             synchronized (lock) {
-                // `faulted` alongside `stopped`: a condemned environment must not be handed work,
-                // including an invocation that was queued just before the fault was reported.
-                if (stopped || faulted) {
-                    send204 = true;
+                if (faulted) {
+                    // Faulted environment: signal the fault so the runtime exits cleanly rather
+                    // than parking forever. Distinct from `stopped` — stopped is a normal
+                    // teardown, faulted means something invariant-breaking happened upstream.
+                    faultedNow = true;
+                } else if (stopped) {
+                    // Teardown in progress. Park the poll; the container process is being
+                    // SIGTERMed and will exit before the socket closes, matching how real
+                    // AWS Lambda tears an environment down.
+                    waitingContexts.add(ctx);
                 } else {
                     toDispatch = pendingQueue.poll();
                     if (toDispatch == null) {
                         waitingContexts.add(ctx);
+                    } else {
+                        // Move from pendingQueue into inFlight under the same lock: without
+                        // this, a concurrent quiesce() sweeps pendingQueue (empty) and
+                        // inFlight (empty) between the poll here and sendInvocation()'s
+                        // inFlight.put(). The invocation would then never complete.
+                        inFlight.put(toDispatch.getRequestId(), toDispatch);
                     }
                 }
             }
-            if (send204) {
+            if (faultedNow) {
                 ctx.response().setStatusCode(204).end();
             } else if (toDispatch != null) {
-                sendInvocation(ctx, toDispatch);
+                // Re-check under the lock: quiesce() may have run between our lock release
+                // above and here, in which case it atomically set stopped=true AND cleared
+                // inFlight (completing toDispatch's future with ContainerStopped). Delivering
+                // it now would run the handler for a container that's being torn down and
+                // silently discard its /response.
+                boolean alreadyHandled;
+                synchronized (lock) {
+                    alreadyHandled = stopped;
+                }
+                if (!alreadyHandled) {
+                    sendInvocation(ctx, toDispatch);
+                }
             }
-            // else: parked — enqueue() or stop() will dispatch this ctx later.
+            // else: parked — enqueue() or the httpServer close will dispatch/end this ctx.
         });
 
         // POST /runtime/invocation/{requestId}/response — success
@@ -468,22 +503,29 @@ public class RuntimeApiServer {
         });
     }
 
-    public CompletableFuture<Void> stop() {
-        CompletableFuture<Void> closed;
-        List<RoutingContext> contextsToClose204;
+    /**
+     * Mark the server stopped and settle all bookkeeping, without closing the underlying HTTP
+     * server. Idempotent — repeated calls are no-ops.
+     *
+     * Runtime pollers already parked on {@code /invocation/next} stay parked; the caller is
+     * expected to shut the container process down (docker stop → SIGTERM) before invoking
+     * {@link #close()}, so those pollers are terminated by the container exit rather than by
+     * a server-side response. Extensions parked on {@code /event/next} get a {@code Shutdown}
+     * event (this is documented AWS behavior for the Extensions API). Pending and in-flight
+     * invocations are completed with {@code ContainerStopped}.
+     *
+     * Call {@link #close()} afterward to release the port.
+     */
+    public void quiesce() {
         List<Supplier<Future<Void>>> dispatches = new ArrayList<>();
         List<PendingInvocation> invocationsToFailContainerStopped;
+        List<PendingInvocation> inFlightToFail;
 
         synchronized (lock) {
-            if (closeFuture != null) {
-                return closeFuture;
+            if (stopped) {
+                return;
             }
             stopped = true;
-            closed = new CompletableFuture<>();
-            closeFuture = closed;
-
-            contextsToClose204 = new ArrayList<>(waitingContexts);
-            waitingContexts.clear();
 
             ExtensionEvent shutdownEvent = ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN");
             for (RegisteredExtension ext : extensions.values()) {
@@ -505,6 +547,15 @@ public class RuntimeApiServer {
 
             invocationsToFailContainerStopped = new ArrayList<>(pendingQueue);
             pendingQueue.clear();
+            // Snapshot and clear inFlight inside the lock so the NEXT_PATH / enqueue()
+            // dispatch guards, which read stopped and inFlight together under the same
+            // lock, see a consistent post-quiesce state (stopped=true AND inFlight
+            // empty). Sweeping outside the lock leaves a window where the guard sees
+            // stopped=true but a still-present inFlight entry, and a deferred dispatch
+            // could deliver an invocation whose future quiesce is about to complete
+            // with ContainerStopped.
+            inFlightToFail = new ArrayList<>(inFlight.values());
+            inFlight.clear();
         }
 
         Runnable closeServer = () -> {
@@ -562,12 +613,56 @@ public class RuntimeApiServer {
         }
 
         // Complete any in-flight invocations with error.
-        inFlight.values().forEach(inv ->
-                inv.getResultFuture().complete(
-                        new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, inv.getRequestId())));
-        inFlight.clear();
+        for (PendingInvocation inv : inFlightToFail) {
+            inv.getResultFuture().complete(
+                    new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, inv.getRequestId()));
+        }
+    }
 
+    /**
+     * Close the underlying HTTP server, releasing the bound port. Idempotent — the returned
+     * future resolves once the server has actually closed (first call) or immediately with
+     * the same future (subsequent calls). Any parked runtime pollers are terminated by the
+     * underlying channel closing.
+     *
+     * {@link #quiesce()} should be called first so that any registered extensions have the
+     * chance to receive a Shutdown event before their sockets die.
+     */
+    public CompletableFuture<Void> close() {
+        CompletableFuture<Void> closed;
+        synchronized (lock) {
+            if (closeFuture != null) {
+                return closeFuture;
+            }
+            closed = new CompletableFuture<>();
+            closeFuture = closed;
+        }
+
+        if (httpServer != null) {
+            httpServer.close(ar -> {
+                if (ar.succeeded()) {
+                    LOG.debugv("RuntimeApiServer on port {0} closed", String.valueOf(port));
+                    closed.complete(null);
+                } else {
+                    LOG.warnv(ar.cause(), "RuntimeApiServer on port {0} failed to close cleanly", String.valueOf(port));
+                    closed.completeExceptionally(ar.cause());
+                }
+            });
+        } else {
+            closed.complete(null);
+        }
         return closed;
+    }
+
+    /**
+     * Convenience wrapper: {@link #quiesce()} then {@link #close()} back-to-back, matching the
+     * pre-split single-step teardown. Callers that need to SIGTERM the container between the
+     * quiesce and close phases (which is the AWS-faithful teardown) should call the two
+     * methods directly rather than this wrapper.
+     */
+    public CompletableFuture<Void> stop() {
+        quiesce();
+        return close();
     }
 
     public CompletableFuture<InvokeResult> enqueue(PendingInvocation invocation) {
@@ -610,6 +705,14 @@ public class RuntimeApiServer {
                 waitingCtxForInvocation = waitingContexts.poll();
                 if (waitingCtxForInvocation == null) {
                     pendingQueue.offer(invocation);
+                } else {
+                    // Track this invocation as in-flight *inside the lock*, before we release it
+                    // and hand off to Vert.x. Without this, a concurrent quiesce() runs its
+                    // pendingQueue+inFlight sweep between the poll above and sendInvocation()
+                    // (which is what would put it in inFlight otherwise), and the invocation
+                    // never gets completed with ContainerStopped — the caller hangs to the
+                    // function's deadline.
+                    inFlight.put(invocation.getRequestId(), invocation);
                 }
             }
         }
@@ -627,14 +730,27 @@ public class RuntimeApiServer {
         if (waitingCtxForInvocation != null) {
             final RoutingContext waitingCtx = waitingCtxForInvocation;
             vertx.runOnContext(v -> {
-                if (!waitingCtx.response().ended()) {
-                    sendInvocation(waitingCtx, invocation);
-                } else {
-                    // Connection closed between park and dispatch — re-queue.
-                    synchronized (lock) {
+                // Re-check under the lock: quiesce() may have run between our lock release
+                // above and here, in which case it atomically set stopped=true AND cleared
+                // inFlight (completing the caller's future with ContainerStopped). Delivering
+                // the invocation to the runtime now would run the handler for a container
+                // that's being torn down and silently discard its /response.
+                boolean alreadyHandled;
+                boolean shouldRequeue;
+                synchronized (lock) {
+                    alreadyHandled = stopped;
+                    shouldRequeue = !alreadyHandled && waitingCtx.response().ended();
+                    if (shouldRequeue) {
                         pendingQueue.offer(invocation);
                     }
                 }
+                if (alreadyHandled) {
+                    return;
+                }
+                if (!waitingCtx.response().ended()) {
+                    sendInvocation(waitingCtx, invocation);
+                }
+                // else: shouldRequeue handled re-queue under lock; nothing to do here.
             });
         }
         return invocation.getResultFuture();
@@ -666,8 +782,11 @@ public class RuntimeApiServer {
     }
 
     private void sendInvocation(RoutingContext ctx, PendingInvocation invocation) {
-        inFlight.put(invocation.getRequestId(), invocation);
-
+        // The invocation is already in inFlight — both entry points (enqueue() handing
+        // to a parked poller, NEXT_PATH polling from pendingQueue) put it there under
+        // the same lock that removed it from its source queue, so a concurrent
+        // quiesce() cannot observe an empty inFlight for an invocation already
+        // committed to dispatch. No inFlight.put here.
         byte[] payload = invocation.getPayload();
         String body = (payload != null && payload.length > 0)
               ? new String(payload)

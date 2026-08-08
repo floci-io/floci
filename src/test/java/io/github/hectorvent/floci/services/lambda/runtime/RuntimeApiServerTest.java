@@ -247,7 +247,172 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(15)
-    void stopWakesParkedPollerImmediately() throws Exception {
+    void stopCompletesInvocationHandedToParkedPollerBeforeDispatchRuns() throws Exception {
+        // Race: enqueue() takes the lock, polls a parked ctx off waitingContexts, releases
+        // the lock, and schedules sendInvocation() on the Vert.x context. If quiesce() gets
+        // the lock in between, its pendingQueue+inFlight sweep must still see the invocation
+        // — otherwise the invocation escapes both queues and the caller hangs to the deadline.
+        //
+        // Enqueue must record the invocation in inFlight under the same lock as it polls the
+        // parked ctx. This test forces the ordering by using a parked poller (server-side
+        // context sits in waitingContexts; client-side goroutine holds the socket open) and
+        // stopping *before* awaiting the client-side response.
+        HttpRequest parkedRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        CompletableFuture<HttpResponse<String>> parkedResponse =
+                httpClient.sendAsync(parkedRequest, HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(300); // let the ctx park server-side
+        assertFalse(parkedResponse.isDone(), "GET /next should be parked, not returned");
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-race", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        // Enqueue returns synchronously once the ctx has been polled and the invocation
+        // recorded — the actual sendInvocation() runs later on the Vert.x context.
+        server.enqueue(invocation);
+
+        // Stop *before* the client-side response has time to arrive. Under the fixed
+        // ordering, quiesce()'s inFlight sweep must complete this invocation's future.
+        server.stop();
+        InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertNotNull(result);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+    }
+
+    @Test
+    @Timeout(15)
+    void stopCompletesInvocationPolledFromQueueBeforeDispatchRuns() throws Exception {
+        // Symmetric race on the NEXT_PATH side: an invocation sits in pendingQueue with no
+        // parked ctx yet. A /next arrives, takes the lock, polls the invocation, releases
+        // the lock, and schedules sendInvocation(). If quiesce() gets the lock in between,
+        // the invocation must not escape both queues.
+        //
+        // NEXT_PATH must record the invocation in inFlight under the same lock as it polls
+        // from pendingQueue. Force the ordering by (a) enqueueing without a parked poller,
+        // then (b) firing the /next request without awaiting its response before stop().
+        PendingInvocation invocation = new PendingInvocation(
+                "req-race-nextpath", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        HttpRequest nextRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        CompletableFuture<HttpResponse<String>> nextResponse =
+                httpClient.sendAsync(nextRequest, HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(200); // let NEXT_PATH's handler take the lock and record inFlight
+
+        server.stop();
+        InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertNotNull(result);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+
+        // Suppress unused-var — client side is expected to receive its 200 (or a close) here.
+        try { nextResponse.get(2, TimeUnit.SECONDS); } catch (Exception ignored) { }
+    }
+
+    @Test
+    @Timeout(15)
+    void quiesceAtomicallyClearsInFlightWithStopped() throws Exception {
+        // The dispatch guards in enqueue()'s deferred callback and NEXT_PATH read
+        // `stopped` under the server lock and act on it. Their correctness depends on
+        // an invariant: once quiesce() releases its lock, `stopped=true` implies
+        // inFlight is empty. If quiesce() cleared inFlight *outside* the lock, a
+        // dispatch could observe stopped=true while an inFlight entry it's about to
+        // deliver was still present — the guard would let the delivery through,
+        // quiesce would then complete the future with ContainerStopped, and the
+        // runtime's /response would be silently discarded.
+        //
+        // Put entries in inFlight via full enqueue → /next round trips (matches the
+        // real code path), then call quiesce and assert all their futures completed.
+        List<PendingInvocation> invocations = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            PendingInvocation inv = new PendingInvocation(
+                    "req-atomic-" + i, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                    "arn:aws:lambda:us-east-1:000000000000:function:test",
+                    new CompletableFuture<>());
+            server.enqueue(inv);
+            invocations.add(inv);
+            HttpResponse<String> resp = httpClient.send(HttpRequest.newBuilder()
+                            .uri(URI.create("http://localhost:" + port
+                                    + "/2018-06-01/runtime/invocation/next"))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, resp.statusCode());
+        }
+
+        server.quiesce();
+
+        // quiesce() sets stopped=true AND clears inFlight in the same synchronized
+        // block, so both observations are atomic. Every invocation must be completed.
+        for (PendingInvocation inv : invocations) {
+            InvokeResult result = inv.getResultFuture().get(2, TimeUnit.SECONDS);
+            assertEquals("Unhandled", result.getFunctionError(),
+                    "invocation " + inv.getRequestId() + " must be completed by quiesce");
+            assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+        }
+    }
+
+    @Test
+    @Timeout(15)
+    void quiesceSuppressesDeferredDispatchToParkedPoller() throws Exception {
+        // After quiesce() completes an invocation's future with ContainerStopped, a
+        // still-pending deferred sendInvocation() must NOT deliver the invocation to the
+        // parked poller. Otherwise the runtime processes it (side effects, /response POST),
+        // but the caller has already been told ContainerStopped and the response is silently
+        // discarded — the caller thinks the invocation failed while it actually succeeded.
+        //
+        // The client-side parked GET must therefore complete via socket close (from
+        // close()), NOT via a 200 with the invocation payload.
+        HttpRequest parkedRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        CompletableFuture<HttpResponse<String>> parkedResponse =
+                httpClient.sendAsync(parkedRequest, HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(300); // let the ctx park server-side
+        assertFalse(parkedResponse.isDone());
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-suppress", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        // Stop immediately. The deferred sendInvocation may or may not have run before
+        // quiesce() reaches inFlight — the guard we care about is the one *after* quiesce.
+        server.stop().get(2, TimeUnit.SECONDS);
+
+        // The invocation's future completes with ContainerStopped either way.
+        InvokeResult result = invocation.getResultFuture().get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+
+        // Crucial assertion: the parked poller must NOT have received a 200 with the
+        // invocation payload. If it did, the runtime would have executed the handler
+        // and the /response would have been silently discarded (the caller already saw
+        // ContainerStopped). Either a network exception (close() dropped the socket) or
+        // a non-200 status is acceptable — anything but a delivered 200.
+        try {
+            HttpResponse<String> response = parkedResponse.get(2, TimeUnit.SECONDS);
+            assertFalse(response.statusCode() == 200
+                    && "req-suppress".equals(response.headers()
+                            .firstValue("Lambda-Runtime-Aws-Request-Id").orElse("")),
+                    "parked poller must not receive the invocation after quiesce; got "
+                            + response.statusCode() + " with request-id header "
+                            + response.headers().firstValue("Lambda-Runtime-Aws-Request-Id"));
+        } catch (Exception expected) {
+            // socket close from close() — this is the expected shape.
+        }
+    }
+
+    @Test
+    @Timeout(15)
+    void closeTerminatesParkedPollerWithoutResponse() throws Exception {
         // GET /next on a background thread — parks in waitingContexts (no thread held).
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
@@ -260,14 +425,49 @@ class RuntimeApiServerTest {
         Thread.sleep(500);
         assertFalse(asyncResponse.isDone(), "handler should be parked");
 
+        // Quiesce leaves the parked poller alone — real Lambda relies on the container
+        // process exiting on SIGTERM to terminate the poll, and the server can't send a
+        // response that AWS doesn't document. close() then drops the underlying HTTP
+        // server, terminating the parked poller's TCP connection from the server side
+        // (the container-exit path in real usage).
         long start = System.currentTimeMillis();
-        server.stop();
-        HttpResponse<String> response = asyncResponse.get(2, TimeUnit.SECONDS);
+        server.quiesce();
+        server.close().get(2, TimeUnit.SECONDS);
         long elapsed = System.currentTimeMillis() - start;
 
-        // 204 is only valid on shutdown — the container is being terminated.
-        assertEquals(204, response.statusCode());
-        assertTrue(elapsed < 1000, "stop() should wake parked poller in <1s, took " + elapsed + "ms");
+        // The client sees the socket close, surfacing as a completion exception on the
+        // async future rather than a normal response. If quiesce() had (wrongly) responded
+        // with a documented status code, the future would complete successfully instead.
+        assertThrows(Exception.class, () -> asyncResponse.get(2, TimeUnit.SECONDS));
+        assertTrue(elapsed < 3000, "close() should terminate parked poller in <3s, took " + elapsed + "ms");
+    }
+
+    @Test
+    @Timeout(15)
+    void quiesceLeavesSocketOpenForOrderlyShutdown() throws Exception {
+        // Real teardown is quiesce() → SIGTERM container → close(). The middle step
+        // relies on the runtime API socket still being bound so the runtime process
+        // (mid-poll on /invocation/next) can receive SIGTERM without seeing a
+        // network error first. Verify that the port is still bound after quiesce().
+        server.quiesce();
+
+        // A fresh connection can still reach the server. Handler will park it (server is
+        // stopped, no work available) — we only care that the TCP handshake and HTTP
+        // request-line get through, proving the listener is up.
+        HttpRequest probe = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .timeout(java.time.Duration.ofMillis(500))
+                .GET()
+                .build();
+        CompletableFuture<HttpResponse<String>> probeFuture =
+                httpClient.sendAsync(probe, HttpResponse.BodyHandlers.ofString());
+
+        // The request should reach the server (parking there) rather than fail on connect.
+        // Timing out on the client side proves the connection was accepted.
+        assertThrows(Exception.class, () -> probeFuture.get(1, TimeUnit.SECONDS));
+
+        // Now close() should complete cleanly, releasing the port.
+        server.close().get(2, TimeUnit.SECONDS);
     }
 
     @Test

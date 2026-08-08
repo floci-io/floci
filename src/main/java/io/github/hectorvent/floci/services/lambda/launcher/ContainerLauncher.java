@@ -396,17 +396,43 @@ public class ContainerLauncher {
         LOG.infov("Stopping container {0}", handle.getContainerId());
         handle.setState(ContainerState.STOPPED);
 
+        RuntimeApiServer server = handle.getRuntimeApiServer();
+
+        // Quiesce first: stop accepting new work, notify extensions, complete pending
+        // invocations. Existing runtime pollers on /invocation/next stay parked.
+        server.quiesce();
+
+        // Then SIGTERM the container. The runtime library's default SIGTERM handler exits
+        // the process while the runtime API socket is still up, matching real AWS Lambda's
+        // shutdown flow.
+        //
+        // stopTimeoutSeconds is the ceiling docker waits for PID 1 to exit before SIGKILL,
+        // not a grace floor: the runtime typically exits promptly, so `docker stop`
+        // returns shortly after and this value rarely matters end-to-end. Sized against
+        // AWS's documented Shutdown-phase tiers as a defensive upper bound only — 2s
+        // when at least one extension is registered (matching AWS's 2000ms
+        // external-extensions budget), else 1s. NOTE: extensions run as sibling
+        // `docker exec`s (not children of PID 1) and are killed when the container
+        // exits; the 2s ceiling does not provide a guaranteed grace window for
+        // extension shutdown work — only that we will not preempt PID 1 for at least
+        // that long if it happens to be slow.
+        int stopTimeoutSeconds = server.hasRegisteredExtensions() ? 2 : 1;
+        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream(),
+                stopTimeoutSeconds);
+
+        // Only now close the runtime API socket. Any pollers that were still parked when
+        // the container exited get terminated by their end of the connection closing;
+        // this call releases the port for reuse.
         try {
-            handle.getRuntimeApiServer().stop().get(5, TimeUnit.SECONDS);
+            server.close().get(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException e) {
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
         } finally {
-            runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            runtimeApiServerFactory.release(server);
         }
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
     }
 
     /**
