@@ -1573,6 +1573,31 @@ class S3IntegrationTest {
             .statusCode(200)
             .header("ETag", notNullValue())
             .header("x-amz-server-side-encryption", equalTo("AES256"));
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+            .contentType("text/plain")
+            .header("x-amz-server-side-encryption", "aws:kms")
+            .header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId)
+            .body("kms-encrypted-content")
+        .when()
+            .put("/sse-bucket/kms-encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
+
+        given()
+            .contentType("text/plain")
+            .header("x-amz-server-side-encryption", "AES256")
+            .header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId)
+            .body("aes-content")
+        .when()
+            .put("/sse-bucket/aes-with-kms-id.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", nullValue());
     }
 
     @Test
@@ -1584,6 +1609,23 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("AES256"));
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+        .when()
+            .get("/sse-bucket/kms-encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
+
+        given()
+        .when()
+            .get("/sse-bucket/aes-with-kms-id.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", nullValue());
     }
 
     @Test
@@ -1595,6 +1637,15 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("AES256"));
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+        .when()
+            .head("/sse-bucket/kms-encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
     }
 
     @Test
@@ -1614,6 +1665,23 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .header("x-amz-server-side-encryption", equalTo("AES256"));
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        given()
+            .header("x-amz-copy-source", "/sse-bucket/kms-encrypted.txt")
+        .when()
+            .put("/sse-bucket/kms-encrypted-copy.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/sse-bucket/kms-encrypted-copy.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
     }
 
     @Test
@@ -1847,6 +1915,9 @@ class S3IntegrationTest {
     void cleanupSseBucket() {
         given().delete("/sse-bucket/encrypted.txt");
         given().delete("/sse-bucket/encrypted-copy.txt");
+        given().delete("/sse-bucket/aes-with-kms-id.txt");
+        given().delete("/sse-bucket/kms-encrypted.txt");
+        given().delete("/sse-bucket/kms-encrypted-copy.txt");
         given().delete("/sse-bucket/sse-c.txt");
         given().delete("/sse-bucket/sse-c-copy.txt");
         given().delete("/sse-bucket");
