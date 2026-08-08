@@ -450,13 +450,13 @@ public class IamQueryHandler {
         String document = getParam(params, "PolicyDocument");
         Map<String, String> tags = extractTags(params);
         IamPolicy policy = iamService.createPolicy(policyName, path, description, document, tags);
-        String result = new XmlBuilder().start("Policy").raw(policyXml(policy)).end("Policy").build();
+        String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("CreatePolicy", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleGetPolicy(MultivaluedMap<String, String> params) {
         IamPolicy policy = iamService.getPolicy(getParam(params, "PolicyArn"));
-        String result = new XmlBuilder().start("Policy").raw(policyXml(policy)).end("Policy").build();
+        String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("GetPolicy", AwsNamespaces.IAM, result)).build();
     }
 
@@ -470,7 +470,7 @@ public class IamQueryHandler {
                 getParam(params, "Scope"), getParam(params, "PathPrefix"));
         var xml = new XmlBuilder().start("Policies");
         for (IamPolicy p : policyList) {
-            xml.start("member").raw(policyXml(p)).end("member");
+            xml.start("member").raw(policyXml(p, false)).end("member");
         }
         xml.end("Policies").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListPolicies", AwsNamespaces.IAM, xml.build())).build();
@@ -906,7 +906,13 @@ public class IamQueryHandler {
                 .build();
     }
 
-    private String policyXml(IamPolicy p) {
+    /**
+     * {@code includeDescription} is per-operation, not per-policy: AWS's own {@code Policy} model
+     * documents that {@code Description} "is included in the response to the GetPolicy operation.
+     * It is not included in the response to the ListPolicies operation" — CreatePolicy documents
+     * neither inclusion nor exclusion, so it's treated the same as GetPolicy.
+     */
+    private String policyXml(IamPolicy p, boolean includeDescription) {
         return new XmlBuilder()
                 .elem("PolicyName", p.getPolicyName())
                 .elem("PolicyId", p.getPolicyId())
@@ -917,6 +923,7 @@ public class IamQueryHandler {
                 .elem("IsAttachable", true)
                 .elem("CreateDate", isoDate(p.getCreateDate()))
                 .elem("UpdateDate", isoDate(p.getUpdateDate()))
+                .elem("Description", includeDescription ? p.getDescription() : null)
                 .build();
     }
 
