@@ -88,6 +88,13 @@ floci:
     # extra-suffixes:
     #   - localhost.localstack.cloud
 
+    # Transparent endpoint injection: resolve amazonaws.com and every subdomain to
+    # Floci's container IP inside spawned containers, so SDK clients built with
+    # explicit real-AWS endpoints (which override AWS_ENDPOINT_URL) land on the
+    # emulator. Combine with tls.enabled for clients that hardcode https://.
+    # Via env var: FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true
+    spoof-aws-endpoints: false
+
   auth:
     validate-signatures: false               # Set to true to verify S3 presigned URL signatures
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification

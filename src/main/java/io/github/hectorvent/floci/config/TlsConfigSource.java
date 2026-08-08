@@ -89,11 +89,8 @@ public class TlsConfigSource implements ConfigSource {
             // Check if certificate files exist and configuration hasn't changed
             if (Files.exists(certFile) && Files.exists(keyFile)) {
                 // Extract current hostname configuration
-                List<String> customHostnames = extractCustomHostnames();
-                List<String> currentHostnames = new ArrayList<>();
-                currentHostnames.addAll(DEFAULT_SAN_HOSTNAMES);
-                currentHostnames.addAll(customHostnames);
-                
+                List<String> currentHostnames = configuredSanHostnames();
+
                 // Regenerate when the hostname config changed, or when the existing certificate
                 // is a legacy non-self-signed cert (issuer != subject) — those cannot serve as a
                 // trust anchor for clients that install them, so an upgrade must replace them.
@@ -177,16 +174,51 @@ public class TlsConfigSource implements ConfigSource {
         }
     }
 
+    /**
+     * Location of the generated self-signed certificate PEM, for components that
+     * distribute it as a trust anchor (e.g. CodeBuild container trust when
+     * transparent AWS endpoints are enabled).
+     */
+    public static Path selfSignedCertPath(String persistentPath) {
+        return Path.of(persistentPath, TLS_DIR, SELF_SIGNED_CERT_NAME);
+    }
+
+    /**
+     * The full SAN list the self-signed certificate must cover for the current
+     * configuration: defaults, custom hostnames, and — when
+     * {@code floci.dns.spoof-aws-endpoints} is enabled — the AWS endpoint wildcards.
+     * Used both for generation and for the change detection that triggers
+     * regeneration, so flipping the spoof flag regenerates the certificate.
+     */
+    private List<String> configuredSanHostnames() {
+        List<String> sans = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
+        sans.addAll(extractCustomHostnames());
+        sans.addAll(awsSpoofSans());
+        return sans;
+    }
+
+    /**
+     * SANs covering AWS endpoint hostnames spoofed by the embedded DNS server.
+     * Wildcards match a single label, so {@code *.amazonaws.com} covers global
+     * endpoints ({@code sts.amazonaws.com}) and {@code *.<region>.amazonaws.com}
+     * covers regional ones ({@code sts.us-east-1.amazonaws.com}) for the default
+     * region — the only region resolvable this early (pre-CDI, property-based).
+     */
+    private List<String> awsSpoofSans() {
+        if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
+            return List.of();
+        }
+        String region = resolveProperty("floci.default-region", "us-east-1");
+        return List.of("*.amazonaws.com", "*." + region + ".amazonaws.com");
+    }
+
     private void generateSelfSignedCert(Path tlsDir, Path certFile, Path keyFile) {
         try {
             Files.createDirectories(tlsDir);
             ensureBouncyCastleRegistered();
 
             // Extract custom hostnames and combine with defaults
-            List<String> customHostnames = extractCustomHostnames();
-            List<String> allSans = new ArrayList<>();
-            allSans.addAll(DEFAULT_SAN_HOSTNAMES);
-            allSans.addAll(customHostnames);
+            List<String> allSans = configuredSanHostnames();
 
             CertificateGenerator gen = new CertificateGenerator();
             CertificateGenerator.GeneratedCertificate generated = gen.generateSelfSignedCertificate(

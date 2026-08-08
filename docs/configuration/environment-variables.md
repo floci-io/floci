@@ -121,6 +121,17 @@ Floci's embedded DNS server always resolves the following wildcard suffixes to F
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of additional hostname suffixes to resolve to Floci's container IP. Use this for custom domains beyond the built-in ones above (e.g. a private internal suffix). |
+| `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` | `false` | Resolve `amazonaws.com` and every subdomain to Floci's container IP inside spawned containers (transparent endpoint injection). See below. |
+
+### Transparent endpoints
+
+Some tools construct SDK clients with explicit real-AWS endpoints (e.g. `https://sts.us-east-1.amazonaws.com`), which override `AWS_ENDPOINT_URL` — those calls escape the emulator and fail against real AWS. With `FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true`, the embedded DNS server answers A queries for `amazonaws.com` and every subdomain at any depth (`sts.amazonaws.com`, `organizations.us-east-1.amazonaws.com`, virtual-hosted S3 like `my-bucket.s3.us-east-1.amazonaws.com`) with Floci's container IP, matching LocalStack's transparent endpoint injection. All other queries keep the normal forward/fallback behavior.
+
+Combine it with `FLOCI_TLS_ENABLED=true` so hardcoded `https://` endpoints work end to end:
+
+- the TLS proxy already serves HTTPS on port 443, where those clients connect;
+- the generated self-signed certificate additionally covers `*.amazonaws.com` and `*.<default-region>.amazonaws.com` (flipping the flag regenerates the certificate);
+- CodeBuild containers get Floci's certificate staged in and a combined CA bundle — Floci's certificate plus the files referenced by any pre-existing `NODE_EXTRA_CA_CERTS`/`AWS_CA_BUNDLE` — exported through those same variables before any buildspec phase runs, so images that ship their own egress CAs keep working.
 
 ---
 
