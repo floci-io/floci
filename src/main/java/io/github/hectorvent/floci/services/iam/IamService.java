@@ -413,6 +413,24 @@ public class IamService implements SessionAccountLookup {
         roles.put(roleName, role);
     }
 
+    /**
+     * Same as {@link #updateAssumeRolePolicy(String, String)}, but verifies {@code expectedRoleId}
+     * against the resolved role's immutable ID before applying the update, atomically with the
+     * name-based lookup. For callers (e.g. CloudFormation role adoption) that already verified role
+     * identity by ID earlier: without this, a role deleted and recreated under the same name between
+     * that check and this call would silently receive the update meant for the original role.
+     */
+    public void updateAssumeRolePolicy(String roleName, String policyDocument, String expectedRoleId) {
+        IamRole role = getRole(roleName);
+        if (expectedRoleId != null && !expectedRoleId.equals(role.getRoleId())) {
+            throw new AwsException("EntityAlreadyExists",
+                    "Role " + roleName + " was replaced by a different role of the same name; "
+                            + "refusing to apply an update meant for the original role.", 409);
+        }
+        role.setAssumeRolePolicyDocument(policyDocument);
+        roles.put(roleName, role);
+    }
+
     public void tagRole(String roleName, Map<String, String> newTags) {
         IamRole role = getRole(roleName);
         role.getTags().putAll(newTags);
