@@ -228,6 +228,17 @@ public class ApiGatewayExecuteController {
         return dispatch("PATCH", apiId, stageName, proxy, headers, uriInfo, body);
     }
 
+    @OPTIONS
+    @Blocking
+    @Path("/{proxy: .*}")
+    public Response handleOptions(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                  @PathParam("apiId") String apiId,
+                                  @PathParam("stageName") String stageName,
+                                  @PathParam("proxy") String proxy,
+                                  byte[] body) {
+        return dispatch("OPTIONS", apiId, stageName, proxy, headers, uriInfo, body);
+    }
+
     // ──────────────────────────── Core dispatch ────────────────────────────
 
     Response dispatch(String httpMethod, String apiId, String stageName,
