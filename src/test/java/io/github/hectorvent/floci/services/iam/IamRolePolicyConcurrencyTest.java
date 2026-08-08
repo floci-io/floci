@@ -31,6 +31,7 @@ class IamRolePolicyConcurrencyTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("eu-central-1", "000000000000"),
                 false
         );

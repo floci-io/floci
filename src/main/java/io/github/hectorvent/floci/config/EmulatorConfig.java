@@ -788,6 +788,13 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean seedDeployerPrincipal();
+
+        /**
+         * Alias to seed for the default account at startup, so callers that read the account
+         * alias find one without creating it first. Unset means the account has no alias, which
+         * is the AWS default.
+         */
+        Optional<String> accountAlias();
     }
 
     interface MskServiceConfig {

@@ -10,6 +10,12 @@ import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import java.lang.reflect.Constructor;
 import java.time.Instant;
 
+/**
+ * Builds an IamService reflectively because its package-private constructor is not visible from
+ * this package. Nothing here references that constructor at compile time, so a signature change
+ * fails only at run time, and only in the tests that use this helper — keep the parameter list in
+ * step with {@code IamService}.
+ */
 public final class IamServiceTestHelper {
 
     private IamServiceTestHelper() {
@@ -18,6 +24,7 @@ public final class IamServiceTestHelper {
     public static IamService iamServiceWithAccessKey(String accessKeyId, String secretAccessKey) {
         try {
             Constructor<IamService> constructor = IamService.class.getDeclaredConstructor(
+                    StorageBackend.class,
                     StorageBackend.class,
                     StorageBackend.class,
                     StorageBackend.class,
@@ -40,6 +47,7 @@ public final class IamServiceTestHelper {
                     accessKeys,
                     null,
                     null,
+                    null,
                     new RegionResolver("us-east-1", "123456789012")
             );
         } catch (ReflectiveOperationException e) {
@@ -51,6 +59,7 @@ public final class IamServiceTestHelper {
     public static IamService iamServiceWithSessionCredential(String accessKeyId, String secretAccessKey) {
         try {
             Constructor<IamService> constructor = IamService.class.getDeclaredConstructor(
+                    StorageBackend.class,
                     StorageBackend.class,
                     StorageBackend.class,
                     StorageBackend.class,
@@ -75,6 +84,7 @@ public final class IamServiceTestHelper {
                     new InMemoryStorage<>(),
                     null,
                     sessions,
+                    null,
                     new RegionResolver("us-east-1", "123456789012")
             );
         } catch (ReflectiveOperationException e) {

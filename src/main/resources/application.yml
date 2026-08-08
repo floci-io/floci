@@ -231,6 +231,9 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
+                           # without creating it first. Unset means the account has no alias,
+                           # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
     msk:
       enabled: true
       mock: false

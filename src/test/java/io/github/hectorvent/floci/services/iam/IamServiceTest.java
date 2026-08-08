@@ -49,6 +49,7 @@ class IamServiceTest {
                 accessKeys,
                 new InMemoryStorage<>(),
                 sessions,
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 seedDeployerPrincipal
         );
@@ -819,5 +820,98 @@ class IamServiceTest {
 
         List<IamPolicy> all = iamService.listPolicies(null, "/");
         assertEquals(awsOnly.size() + localOnly.size(), all.size());
+    }
+
+    // =========================================================================
+    // Account Aliases
+    // =========================================================================
+
+    @Test
+    void createAndGetAccountAlias() {
+        assertTrue(iamService.getAccountAlias().isEmpty());
+
+        iamService.createAccountAlias("my-account");
+
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    /**
+     * Verified against a live AWS account: creating a free alias while another is set replaces it
+     * rather than failing, which is how the one-alias-per-account rule is actually enforced.
+     */
+    @Test
+    void createAccountAliasReplacesAnExistingOne() {
+        iamService.createAccountAlias("my-account");
+
+        iamService.createAccountAlias("other-account");
+
+        assertEquals("other-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    /** Re-creating the alias the account already holds is the case AWS rejects. */
+    @Test
+    void createAccountAliasRejectsTheAliasAlreadyHeld() {
+        iamService.createAccountAlias("my-account");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.createAccountAlias("my-account"));
+        assertEquals("EntityAlreadyExists", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("my-account"));
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void deleteAccountAliasRejectsAMalformedValue() {
+        iamService.createAccountAlias("my-account");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deleteAccountAlias("Bad_Alias"));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void deleteAccountAlias() {
+        iamService.createAccountAlias("my-account");
+
+        iamService.deleteAccountAlias("my-account");
+
+        assertTrue(iamService.getAccountAlias().isEmpty());
+    }
+
+    @Test
+    void deleteAccountAliasWithMismatchedNameFails() {
+        iamService.createAccountAlias("my-account");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deleteAccountAlias("some-other-alias"));
+        assertEquals("NoSuchEntity", ex.getErrorCode());
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void deleteAccountAliasWhenNoneSetFails() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deleteAccountAlias("my-account"));
+        assertEquals("NoSuchEntity", ex.getErrorCode());
+    }
+
+    @Test
+    void malformedAccountAliasesAreRejected() {
+        for (String alias : List.of("ab", "-leading", "trailing-", "Upper", "under_score", "a".repeat(64))) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> iamService.createAccountAlias(alias), "expected rejection for: " + alias);
+            assertEquals("ValidationError", ex.getErrorCode(), "wrong code for: " + alias);
+        }
+        assertThrows(AwsException.class, () -> iamService.createAccountAlias(null));
+    }
+
+    @Test
+    void accountAliasBoundaryLengthsAreAccepted() {
+        iamService.createAccountAlias("abc");
+        iamService.deleteAccountAlias("abc");
+
+        iamService.createAccountAlias("a".repeat(63));
+        assertEquals("a".repeat(63), iamService.getAccountAlias().orElseThrow());
     }
 }
