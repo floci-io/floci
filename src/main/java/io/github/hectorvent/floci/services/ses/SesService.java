@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfigur
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
@@ -92,6 +93,8 @@ public class SesService {
     // value the (normalized) policy JSON. One store shared by the v1 and v2 policy APIs.
     private final StorageBackend<String, String> policyStore;
     private final StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore;
+    // Custom verification email templates (key cvet::<region>::<name>), shared by the v1 and v2 APIs.
+    private final StorageBackend<String, CustomVerificationEmailTemplate> cvetStore;
     // Guards the one-list-per-account check-then-create so concurrent creates can't both pass.
     private final Object contactListCreateLock = new Object();
     // Serializes contact create/update against contact-list deletion so a concurrent delete
@@ -103,6 +106,10 @@ public class SesService {
     // Serializes receipt-rule-set create (check-then-put) and set-active (clear-then-set) so the
     // one-active-per-region invariant and duplicate-name rejection hold under concurrency.
     private final Object receiptRuleSetLock = new Object();
+    // Serializes custom-verification-template create/update/delete check-then-write so concurrent
+    // creates for the same name can't both succeed and an update can't resurrect a concurrently
+    // deleted template.
+    private final Object cvetMutationLock = new Object();
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -139,6 +146,8 @@ public class SesService {
                 new TypeReference<Map<String, String>>() {});
         this.receiptRuleSetStore = storageFactory.create("ses", "ses-receipt-rule-sets.json",
                 new TypeReference<Map<String, ReceiptRuleSet>>() {});
+        this.cvetStore = storageFactory.create("ses", "ses-custom-verification-templates.json",
+                new TypeReference<Map<String, CustomVerificationEmailTemplate>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
@@ -159,12 +168,13 @@ public class SesService {
                StorageBackend<String, Contact> contactStore,
                StorageBackend<String, String> policyStore,
                StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore,
+               StorageBackend<String, CustomVerificationEmailTemplate> cvetStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, emailStore, accountSettingsStore, templateStore, configSetStore, suppressionStore,
                 accountSuppressionStore, dedicatedIpPoolStore, contactListStore, contactStore, policyStore,
-                receiptRuleSetStore, smtpRelay, objectMapper, null, clock);
+                receiptRuleSetStore, cvetStore, smtpRelay, objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -179,6 +189,7 @@ public class SesService {
                StorageBackend<String, Contact> contactStore,
                StorageBackend<String, String> policyStore,
                StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore,
+               StorageBackend<String, CustomVerificationEmailTemplate> cvetStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Route53Service route53Service,
@@ -195,6 +206,7 @@ public class SesService {
         this.contactStore = contactStore;
         this.policyStore = policyStore;
         this.receiptRuleSetStore = receiptRuleSetStore;
+        this.cvetStore = cvetStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
@@ -1023,6 +1035,143 @@ public class SesService {
                 .thenComparing(EmailTemplate::getTemplateName,
                         Comparator.nullsLast(Comparator.naturalOrder())));
         return all;
+    }
+
+    // ──────────── Custom verification email templates (v1 + v2 shared store) ────────────
+    // Verified against real AWS: the From address must be a verified identity, redirection URLs
+    // must be valid, and the template body is not content-validated. Floci enforces the
+    // From-verified check against its own identity store (it does track verified identities).
+
+    public void createCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+        validateCustomVerificationTemplate(template, region);
+        String key = cvetKey(region, template.getTemplateName());
+        // Lock only the check-then-put so concurrent creates for the same name can't both observe
+        // the key as absent; validation and logging stay outside the lock.
+        synchronized (cvetMutationLock) {
+            if (cvetStore.get(key).isPresent()) {
+                // v1-native code (verified: CustomVerificationEmailTemplateAlreadyExists / 400);
+                // remapV1Exception translates it to AlreadyExistsException / 400 for the v2 boundary.
+                throw new AwsException("CustomVerificationEmailTemplateAlreadyExists",
+                        "Custom verification email template <" + template.getTemplateName() + "> already exists", 400);
+            }
+            cvetStore.put(key, template);
+        }
+        LOG.infov("Created custom verification email template {0} in region {1}",
+                template.getTemplateName(), region);
+    }
+
+    public CustomVerificationEmailTemplate getCustomVerificationEmailTemplate(String templateName, String region) {
+        return cvetStore.get(cvetKey(region, templateName)).orElseThrow(() -> cvetNotFound(templateName));
+    }
+
+    public List<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(String region) {
+        String prefix = "cvet::" + region + "::";
+        return cvetStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(CustomVerificationEmailTemplate::getTemplateName,
+                        Comparator.nullsFirst(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+        // Validate required fields (including TemplateName) before the existence check so a missing or
+        // blank name yields the required-field InvalidParameterValue rather than NotFoundException,
+        // matching createCustomVerificationEmailTemplate.
+        validateCustomVerificationTemplate(template, region);
+        String key = cvetKey(region, template.getTemplateName());
+        // Guard the existence check and the put together so a concurrent delete can't slip between
+        // them and have the update resurrect the just-deleted template.
+        synchronized (cvetMutationLock) {
+            if (cvetStore.get(key).isEmpty()) {
+                throw cvetNotFound(template.getTemplateName());
+            }
+            cvetStore.put(key, template);
+        }
+        LOG.infov("Updated custom verification email template {0} in region {1}",
+                template.getTemplateName(), region);
+    }
+
+    public void deleteCustomVerificationEmailTemplate(String templateName, String region) {
+        String key = cvetKey(region, templateName);
+        // Guard the check-then-delete on the same lock as create/update so the three mutations
+        // serialize against each other.
+        synchronized (cvetMutationLock) {
+            if (cvetStore.get(key).isEmpty()) {
+                throw cvetNotFound(templateName);
+            }
+            cvetStore.delete(key);
+        }
+        LOG.infov("Deleted custom verification email template {0} in region {1}", templateName, region);
+    }
+
+    private void validateCustomVerificationTemplate(CustomVerificationEmailTemplate t, String region) {
+        requireCvetField(t.getTemplateName(), "TemplateName");
+        requireCvetField(t.getFromEmailAddress(), "FromEmailAddress");
+        requireCvetField(t.getTemplateSubject(), "TemplateSubject");
+        requireCvetField(t.getTemplateContent(), "TemplateContent");
+        requireCvetField(t.getSuccessRedirectionURL(), "SuccessRedirectionURL");
+        requireCvetField(t.getFailureRedirectionURL(), "FailureRedirectionURL");
+        if (!isVerifiedSender(t.getFromEmailAddress(), region)) {
+            // v1-native code (verified: FromEmailAddressNotVerified / 400); remapV1Exception
+            // translates it to NotFoundException / 404 for the v2 boundary.
+            throw new AwsException("FromEmailAddressNotVerified",
+                    "The from email address <" + t.getFromEmailAddress() + "> is not verified", 400);
+        }
+        if (!isValidRedirectUrl(t.getSuccessRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", "The success redirection URL is invalid", 400);
+        }
+        if (!isValidRedirectUrl(t.getFailureRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", "The failure redirection URL is invalid", 400);
+        }
+    }
+
+    private boolean isVerifiedSender(String fromEmail, String region) {
+        if (fromEmail == null) {
+            return false;
+        }
+        if (isIdentityVerified(fromEmail, region)) {
+            return true;
+        }
+        int at = fromEmail.indexOf('@');
+        return at >= 0 && at < fromEmail.length() - 1
+                && isIdentityVerified(fromEmail.substring(at + 1), region);
+    }
+
+    private boolean isIdentityVerified(String identity, String region) {
+        Identity id = getIdentityVerificationAttributes(identity, region);
+        return id != null && "Success".equals(id.getVerificationStatus());
+    }
+
+    private static boolean isValidRedirectUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        try {
+            java.net.URI uri = java.net.URI.create(url);
+            String scheme = uri.getScheme();
+            return uri.getHost() != null
+                    && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private static void requireCvetField(String value, String name) {
+        if (value == null || value.isBlank()) {
+            // v1-native code; the v2 controller remaps it to BadRequestException via remapV1Exception,
+            // so the Query API stays consistent with requireParam and v2 behavior is unchanged.
+            throw new AwsException("InvalidParameterValue", name + " is required.", 400);
+        }
+    }
+
+    private static AwsException cvetNotFound(String templateName) {
+        // v1-native code (verified: CustomVerificationEmailTemplateDoesNotExist / 400).
+        // SesController.remapV1Exception translates it to NotFoundException / 404 for the v2 boundary.
+        return new AwsException("CustomVerificationEmailTemplateDoesNotExist",
+                "Custom verification email template <" + templateName + "> does not exist", 400);
+    }
+
+    private static String cvetKey(String region, String templateName) {
+        return "cvet::" + region + "::" + templateName;
     }
 
     public ConfigurationSet createConfigurationSet(ConfigurationSet configSet, String region) {
