@@ -6,28 +6,53 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.configservice.model.Compliance;
+import io.github.hectorvent.floci.services.configservice.model.ComplianceByConfigRule;
+import io.github.hectorvent.floci.services.configservice.model.ComplianceByResource;
+import io.github.hectorvent.floci.services.configservice.model.ComplianceContributorCount;
+import io.github.hectorvent.floci.services.configservice.model.ComplianceSummary;
+import io.github.hectorvent.floci.services.configservice.model.ComplianceSummaryByResourceType;
+import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleEvaluationStatus;
-import io.github.hectorvent.floci.services.configservice.model.ConfigRuleSource;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorder;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorderStatus;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePackStatusDetail;
 import io.github.hectorvent.floci.services.configservice.model.DeliveryChannel;
+import io.github.hectorvent.floci.services.configservice.model.EvaluationModeConfiguration;
+import io.github.hectorvent.floci.services.configservice.model.EvaluationResult;
+import io.github.hectorvent.floci.services.configservice.model.EvaluationResultIdentifier;
+import io.github.hectorvent.floci.services.configservice.model.EvaluationResultQualifier;
+import io.github.hectorvent.floci.services.configservice.model.RetentionConfiguration;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AwsConfigService {
+
+    private static final Set<String> VALID_COMPLIANCE_TYPES =
+            Set.of("COMPLIANT", "NON_COMPLIANT", "NOT_APPLICABLE", "INSUFFICIENT_DATA");
+    private static final String NO_SUCH_CONFIG_RULE_MESSAGE =
+            "The ConfigRule provided in the request is invalid. Please check the configRule name.";
+    private static final String INVALID_NEXT_TOKEN_MESSAGE =
+            "The specified next token is not valid. Specify the nextToken string that was returned "
+                    + "in the previous response to get the next page of results.";
+    private static final int RULE_CONTRIBUTOR_CAP = 25;
+    private static final int RESOURCE_CONTRIBUTOR_CAP = 100;
 
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
@@ -36,15 +61,22 @@ public class AwsConfigService {
     private Map<String, Map<String, ConfigRule>> configRules = new ConcurrentHashMap<>();
     // region -> packName -> pack (nested)
     private Map<String, Map<String, ConformancePack>> conformancePacks = new ConcurrentHashMap<>();
+    // region -> ruleName -> resourceKey("Type|Id") -> evaluation (doubly nested)
+    private Map<String, Map<String, Map<String, ConfigEvaluation>>> evaluations = new ConcurrentHashMap<>();
 
-    // region -> recorder / channel (flat)
+    // region -> recorder / channel / retention (flat)
     private Map<String, ConfigurationRecorder> configurationRecorders = new ConcurrentHashMap<>();
     private Map<String, DeliveryChannel> deliveryChannels = new ConcurrentHashMap<>();
+    private Map<String, RetentionConfiguration> retentionConfigurations = new ConcurrentHashMap<>();
 
     // recorder run-state is transient runtime state (not persisted)
     private final ConcurrentHashMap<String, Boolean> recorderRunning = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> recorderLastStartTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> recorderLastStopTime = new ConcurrentHashMap<>();
+
+    // per-rule evaluation timing is transient runtime state, keyed region + "|" + ruleName
+    private final ConcurrentHashMap<String, Long> ruleFirstActivatedTime = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> ruleLastInvokedTime = new ConcurrentHashMap<>();
 
     // resourceArn -> {tagKey -> tagValue} (flat outer, mutable inner)
     private Map<String, Map<String, String>> tags = new ConcurrentHashMap<>();
@@ -64,15 +96,20 @@ public class AwsConfigService {
                 new TypeReference<Map<String, Map<String, ConfigRule>>>() {});
         this.conformancePacks = storageBacked("config-conformance-packs.json",
                 new TypeReference<Map<String, Map<String, ConformancePack>>>() {});
+        this.evaluations = storageBacked("config-evaluations.json",
+                new TypeReference<Map<String, Map<String, Map<String, ConfigEvaluation>>>>() {});
         this.configurationRecorders = storageBacked("config-recorders.json",
                 new TypeReference<Map<String, ConfigurationRecorder>>() {});
         this.deliveryChannels = storageBacked("config-delivery-channels.json",
                 new TypeReference<Map<String, DeliveryChannel>>() {});
+        this.retentionConfigurations = storageBacked("config-retention.json",
+                new TypeReference<Map<String, RetentionConfiguration>>() {});
         this.tags = storageBacked("config-tags.json",
                 new TypeReference<Map<String, Map<String, String>>>() {});
         normalizeRegionMaps(configRules);
         normalizeRegionMaps(conformancePacks);
         normalizeRegionMaps(tags);
+        normalizeEvaluationMaps();
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference) {
@@ -89,6 +126,18 @@ public class AwsConfigService {
         }
     }
 
+    /** Same as {@link #normalizeRegionMaps} but for the doubly nested evaluations map. */
+    private void normalizeEvaluationMaps() {
+        for (Map.Entry<String, Map<String, Map<String, ConfigEvaluation>>> regionEntry
+                : new ArrayList<>(evaluations.entrySet())) {
+            Map<String, Map<String, ConfigEvaluation>> ruleMaps = new ConcurrentHashMap<>();
+            for (Map.Entry<String, Map<String, ConfigEvaluation>> ruleEntry : regionEntry.getValue().entrySet()) {
+                ruleMaps.put(ruleEntry.getKey(), new ConcurrentHashMap<>(ruleEntry.getValue()));
+            }
+            evaluations.put(regionEntry.getKey(), ruleMaps);
+        }
+    }
+
     /** {@link StorageBackedMap} only flushes on a top-level put, so an in-place mutation of an
      *  inner map must be written back by re-putting the outer entry. */
     private <V> void persistRegion(Map<String, Map<String, V>> resources, String region) {
@@ -100,20 +149,39 @@ public class AwsConfigService {
 
     // --- Config Rules ---
 
-    public ConfigRule putConfigRule(String region, String ruleName, ConfigRuleSource source) {
+    public ConfigRule putConfigRule(String region, ConfigRule requested) {
+        if (requested == null || isBlank(requested.configRuleName())) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ConfigRuleName must be specified.", 400);
+        }
+        if (requested.source() == null || isBlank(requested.source().owner())) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Source with Owner must be specified.", 400);
+        }
+        String ruleName = requested.configRuleName();
         Map<String, ConfigRule> store = rulesFor(region);
         ConfigRule existing = store.get(ruleName);
+        String ruleId;
+        String ruleArn;
+        String state;
         if (existing != null) {
-            ConfigRule updated = new ConfigRule(existing.configRuleName(), existing.configRuleArn(),
-                    existing.configRuleId(), existing.configRuleState(), source);
-            store.put(ruleName, updated);
-            persistRegion(configRules, region);
-            return updated;
+            ruleId = existing.configRuleId();
+            ruleArn = existing.configRuleArn();
+            state = existing.configRuleState();
+        } else {
+            ruleId = "config-rule-" + shortId();
+            ruleArn = AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
+                    "config-rule/" + ruleId).toString();
+            state = isBlank(requested.configRuleState()) ? "ACTIVE" : requested.configRuleState();
+            ruleFirstActivatedTime.putIfAbsent(ruleKey(region, ruleName), now());
         }
-        String ruleId = "config-rule-" + shortId();
-        String ruleArn = AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
-                "config-rule/" + ruleId).toString();
-        ConfigRule rule = new ConfigRule(ruleName, ruleArn, ruleId, "ACTIVE", source);
+        List<EvaluationModeConfiguration> evaluationModes =
+                requested.evaluationModes() == null || requested.evaluationModes().isEmpty()
+                        ? List.of(new EvaluationModeConfiguration("DETECTIVE"))
+                        : requested.evaluationModes();
+        ConfigRule rule = new ConfigRule(ruleName, ruleArn, ruleId, requested.description(),
+                requested.scope(), requested.source(), requested.inputParameters(),
+                requested.maximumExecutionFrequency(), state, requested.createdBy(), evaluationModes);
         store.put(ruleName, rule);
         persistRegion(configRules, region);
         return rule;
@@ -122,50 +190,343 @@ public class AwsConfigService {
     public void deleteConfigRule(String region, String ruleName) {
         Map<String, ConfigRule> store = rulesFor(region);
         if (store.remove(ruleName) == null) {
-            throw new AwsException("NoSuchConfigRuleException",
-                    "The ConfigRule provided in the request is invalid. " +
-                            "Please check the configRule name.", 400);
+            throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
         }
         persistRegion(configRules, region);
+        Map<String, Map<String, ConfigEvaluation>> regionEvaluations = evaluations.get(region);
+        if (regionEvaluations != null && regionEvaluations.remove(ruleName) != null) {
+            persistRegion(evaluations, region);
+        }
+        ruleFirstActivatedTime.remove(ruleKey(region, ruleName));
+        ruleLastInvokedTime.remove(ruleKey(region, ruleName));
     }
 
     public List<ConfigRule> describeConfigRules(String region, List<String> ruleNames) {
         Map<String, ConfigRule> store = rulesFor(region);
-        if (ruleNames == null || ruleNames.isEmpty()) {
-            return new ArrayList<>(store.values());
-        }
         List<ConfigRule> result = new ArrayList<>();
-        for (String name : ruleNames) {
-            ConfigRule rule = store.get(name);
-            if (rule != null) {
+        if (ruleNames == null || ruleNames.isEmpty()) {
+            result.addAll(store.values());
+        } else {
+            for (String name : ruleNames) {
+                ConfigRule rule = store.get(name);
+                if (rule == null) {
+                    throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+                }
                 result.add(rule);
             }
         }
+        result.sort(Comparator.comparing(ConfigRule::configRuleName));
         return result;
     }
 
-    public List<ConfigRuleEvaluationStatus> describeConfigRuleEvaluationStatus(String region, List<String> ruleNames) {
-        List<ConfigRule> rules = describeConfigRules(region, ruleNames);
-        List<ConfigRuleEvaluationStatus> result = new ArrayList<>();
-        for (ConfigRule rule : rules) {
-            result.add(new ConfigRuleEvaluationStatus(
-                    rule.configRuleName(),
-                    rule.configRuleArn(),
-                    rule.configRuleId(),
-                    true));
+    public Paged<ConfigRule> describeConfigRulesPaged(String region, List<String> ruleNames, String nextToken) {
+        return paginate(describeConfigRules(region, ruleNames), null, nextToken,
+                25, 25, "InvalidParameterValueException");
+    }
+
+    public Paged<ConfigRuleEvaluationStatus> describeConfigRuleEvaluationStatus(String region,
+            List<String> ruleNames, Integer limit, String nextToken) {
+        List<ConfigRuleEvaluationStatus> statuses = new ArrayList<>();
+        for (ConfigRule rule : describeConfigRules(region, ruleNames)) {
+            String key = ruleKey(region, rule.configRuleName());
+            Map<String, ConfigEvaluation> ruleEvaluations =
+                    evaluationsFor(region).getOrDefault(rule.configRuleName(), Map.of());
+            Long lastEvaluationTime = ruleEvaluations.values().stream()
+                    .map(ConfigEvaluation::resultRecordedTime)
+                    .filter(Objects::nonNull)
+                    .max(Long::compareTo)
+                    .orElse(ruleLastInvokedTime.get(key));
+            boolean evaluationStarted = !ruleEvaluations.isEmpty() || ruleLastInvokedTime.containsKey(key);
+            statuses.add(new ConfigRuleEvaluationStatus(
+                    rule.configRuleName(), rule.configRuleArn(), rule.configRuleId(),
+                    evaluationStarted, ruleFirstActivatedTime.get(key),
+                    lastEvaluationTime, lastEvaluationTime));
         }
-        return result;
+        return paginate(statuses, limit, nextToken, 150, 150, "InvalidParameterValueException");
     }
 
     public void startConfigRulesEvaluation(String region, List<String> ruleNames) {
         Map<String, ConfigRule> store = rulesFor(region);
         for (String name : ruleNames) {
             if (!store.containsKey(name)) {
-                throw new AwsException("NoSuchConfigRuleException",
-                        "The ConfigRule provided in the request is invalid. " +
-                                "Please check the configRule name.", 400);
+                throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
             }
         }
+        for (String name : ruleNames) {
+            ruleLastInvokedTime.put(ruleKey(region, name), now());
+        }
+    }
+
+    // --- Evaluations ---
+
+    public void putEvaluations(String region, String resultToken, List<ConfigEvaluation> newEvaluations,
+            boolean testMode) {
+        if (isBlank(resultToken)) {
+            throw new AwsException("InvalidResultTokenException",
+                    "The specified ResultToken is not valid.", 400);
+        }
+        if (newEvaluations.size() > 100) {
+            throw new AwsException("InvalidParameterValueException",
+                    "The Evaluations list cannot contain more than 100 items.", 400);
+        }
+        newEvaluations.forEach(this::validateEvaluation);
+        if (testMode) {
+            return;
+        }
+        int separator = resultToken.indexOf(':');
+        String ruleName = separator > 0 ? resultToken.substring(0, separator) : resultToken;
+        requireRule(region, ruleName);
+        storeEvaluations(region, ruleName, newEvaluations);
+    }
+
+    public void putExternalEvaluation(String region, String ruleName, ConfigEvaluation evaluation) {
+        requireRule(region, ruleName);
+        validateEvaluation(evaluation);
+        storeEvaluations(region, ruleName, List.of(evaluation));
+    }
+
+    public void deleteEvaluationResults(String region, String ruleName) {
+        requireRule(region, ruleName);
+        Map<String, Map<String, ConfigEvaluation>> regionEvaluations = evaluations.get(region);
+        if (regionEvaluations != null && regionEvaluations.remove(ruleName) != null) {
+            persistRegion(evaluations, region);
+        }
+    }
+
+    private void validateEvaluation(ConfigEvaluation evaluation) {
+        if (evaluation == null || isBlank(evaluation.complianceResourceType())
+                || isBlank(evaluation.complianceResourceId()) || isBlank(evaluation.complianceType())
+                || evaluation.orderingTimestamp() == null) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Each evaluation must specify ComplianceResourceType, ComplianceResourceId, "
+                            + "ComplianceType and OrderingTimestamp.", 400);
+        }
+        if (!VALID_COMPLIANCE_TYPES.contains(evaluation.complianceType())) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ComplianceType must be one of COMPLIANT, NON_COMPLIANT, NOT_APPLICABLE, "
+                            + "INSUFFICIENT_DATA.", 400);
+        }
+    }
+
+    private void storeEvaluations(String region, String ruleName, List<ConfigEvaluation> newEvaluations) {
+        long recordedTime = now();
+        Map<String, ConfigEvaluation> ruleEvaluations = evaluationsFor(region)
+                .computeIfAbsent(ruleName, r -> new ConcurrentHashMap<>());
+        for (ConfigEvaluation evaluation : newEvaluations) {
+            String key = resourceKey(evaluation.complianceResourceType(), evaluation.complianceResourceId());
+            ruleEvaluations.put(key, new ConfigEvaluation(
+                    evaluation.complianceResourceType(),
+                    evaluation.complianceResourceId(),
+                    evaluation.complianceType(),
+                    evaluation.annotation(),
+                    evaluation.orderingTimestamp(),
+                    recordedTime,
+                    recordedTime));
+        }
+        ruleLastInvokedTime.put(ruleKey(region, ruleName), recordedTime);
+        persistRegion(evaluations, region);
+    }
+
+    // --- Compliance ---
+
+    public Compliance complianceForRule(String region, String ruleName) {
+        List<ConfigEvaluation> applicable = evaluationsFor(region)
+                .getOrDefault(ruleName, Map.of()).values().stream()
+                .filter(e -> !"NOT_APPLICABLE".equals(e.complianceType()))
+                .toList();
+        if (applicable.isEmpty()) {
+            return new Compliance("INSUFFICIENT_DATA", null);
+        }
+        long nonCompliant = applicable.stream()
+                .filter(e -> "NON_COMPLIANT".equals(e.complianceType()))
+                .count();
+        if (nonCompliant > 0) {
+            return new Compliance("NON_COMPLIANT", contributorCount(nonCompliant, RULE_CONTRIBUTOR_CAP));
+        }
+        if (applicable.stream().anyMatch(e -> "INSUFFICIENT_DATA".equals(e.complianceType()))) {
+            return new Compliance("INSUFFICIENT_DATA", null);
+        }
+        return new Compliance("COMPLIANT", null);
+    }
+
+    public Paged<ComplianceByConfigRule> describeComplianceByConfigRule(String region, List<String> ruleNames,
+            List<String> complianceTypes, String nextToken) {
+        List<ComplianceByConfigRule> entries = new ArrayList<>();
+        for (ConfigRule rule : describeConfigRules(region, ruleNames)) {
+            Compliance compliance = complianceForRule(region, rule.configRuleName());
+            if (matchesComplianceFilter(complianceTypes, compliance.complianceType())) {
+                entries.add(new ComplianceByConfigRule(rule.configRuleName(), compliance));
+            }
+        }
+        return paginate(entries, null, nextToken, 25, 25, "InvalidParameterValueException");
+    }
+
+    public Paged<ComplianceByResource> describeComplianceByResource(String region, String resourceType,
+            String resourceId, List<String> complianceTypes, Integer limit, String nextToken) {
+        if (!isBlank(resourceId) && isBlank(resourceType)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ResourceType must be specified when ResourceId is provided.", 400);
+        }
+        List<ComplianceByResource> entries = new ArrayList<>();
+        for (List<ConfigEvaluation> resourceEvaluations
+                : groupEvaluationsByResource(region, resourceType, resourceId).values()) {
+            ConfigEvaluation first = resourceEvaluations.get(0);
+            Compliance compliance = complianceForResource(resourceEvaluations);
+            if (matchesComplianceFilter(complianceTypes, compliance.complianceType())) {
+                entries.add(new ComplianceByResource(first.complianceResourceType(),
+                        first.complianceResourceId(), compliance));
+            }
+        }
+        entries.sort(Comparator.comparing(ComplianceByResource::resourceType)
+                .thenComparing(ComplianceByResource::resourceId));
+        return paginate(entries, limit, nextToken, 10, 100, "InvalidParameterValueException");
+    }
+
+    public Paged<EvaluationResult> getComplianceDetailsByConfigRule(String region, String ruleName,
+            List<String> complianceTypes, Integer limit, String nextToken) {
+        requireRule(region, ruleName);
+        List<EvaluationResult> results = evaluationsFor(region)
+                .getOrDefault(ruleName, Map.of()).values().stream()
+                .filter(e -> matchesComplianceFilter(complianceTypes, e.complianceType()))
+                .sorted(Comparator.comparing(ConfigEvaluation::complianceResourceType)
+                        .thenComparing(ConfigEvaluation::complianceResourceId))
+                .map(e -> toEvaluationResult(ruleName, e))
+                .collect(Collectors.toList());
+        return paginate(results, limit, nextToken, 10, 100, "InvalidParameterValueException");
+    }
+
+    public Paged<EvaluationResult> getComplianceDetailsByResource(String region, String resourceType,
+            String resourceId, List<String> complianceTypes, String nextToken) {
+        if (isBlank(resourceType) || isBlank(resourceId)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ResourceType and ResourceId must be specified.", 400);
+        }
+        String key = resourceKey(resourceType, resourceId);
+        List<EvaluationResult> results = new ArrayList<>();
+        evaluationsFor(region).forEach((ruleName, ruleEvaluations) -> {
+            ConfigEvaluation evaluation = ruleEvaluations.get(key);
+            if (evaluation != null && matchesComplianceFilter(complianceTypes, evaluation.complianceType())) {
+                results.add(toEvaluationResult(ruleName, evaluation));
+            }
+        });
+        results.sort(Comparator.comparing(r ->
+                r.evaluationResultIdentifier().evaluationResultQualifier().configRuleName()));
+        return paginate(results, null, nextToken, 10, 10, "InvalidParameterValueException");
+    }
+
+    public ComplianceSummary getComplianceSummaryByConfigRule(String region) {
+        long compliant = 0;
+        long nonCompliant = 0;
+        for (String ruleName : rulesFor(region).keySet()) {
+            String complianceType = complianceForRule(region, ruleName).complianceType();
+            if ("COMPLIANT".equals(complianceType)) {
+                compliant++;
+            } else if ("NON_COMPLIANT".equals(complianceType)) {
+                nonCompliant++;
+            }
+        }
+        return new ComplianceSummary(contributorCount(compliant, RULE_CONTRIBUTOR_CAP),
+                contributorCount(nonCompliant, RULE_CONTRIBUTOR_CAP), now());
+    }
+
+    public List<ComplianceSummaryByResourceType> getComplianceSummaryByResourceType(String region,
+            List<String> resourceTypes) {
+        if (resourceTypes != null && resourceTypes.size() > 20) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ResourceTypes cannot contain more than 20 items.", 400);
+        }
+        Map<String, long[]> countsByType = new HashMap<>();
+        for (List<ConfigEvaluation> resourceEvaluations
+                : groupEvaluationsByResource(region, null, null).values()) {
+            String type = resourceEvaluations.get(0).complianceResourceType();
+            String complianceType = complianceForResource(resourceEvaluations).complianceType();
+            long[] counts = countsByType.computeIfAbsent(type, t -> new long[2]);
+            if ("COMPLIANT".equals(complianceType)) {
+                counts[0]++;
+            } else if ("NON_COMPLIANT".equals(complianceType)) {
+                counts[1]++;
+            }
+        }
+        long timestamp = now();
+        if (resourceTypes == null || resourceTypes.isEmpty()) {
+            long compliant = countsByType.values().stream().mapToLong(c -> c[0]).sum();
+            long nonCompliant = countsByType.values().stream().mapToLong(c -> c[1]).sum();
+            return List.of(new ComplianceSummaryByResourceType(null, new ComplianceSummary(
+                    contributorCount(compliant, RESOURCE_CONTRIBUTOR_CAP),
+                    contributorCount(nonCompliant, RESOURCE_CONTRIBUTOR_CAP), timestamp)));
+        }
+        List<ComplianceSummaryByResourceType> result = new ArrayList<>();
+        for (String type : resourceTypes) {
+            long[] counts = countsByType.getOrDefault(type, new long[2]);
+            result.add(new ComplianceSummaryByResourceType(type, new ComplianceSummary(
+                    contributorCount(counts[0], RESOURCE_CONTRIBUTOR_CAP),
+                    contributorCount(counts[1], RESOURCE_CONTRIBUTOR_CAP), timestamp)));
+        }
+        return result;
+    }
+
+    private Map<String, List<ConfigEvaluation>> groupEvaluationsByResource(String region,
+            String resourceType, String resourceId) {
+        Map<String, List<ConfigEvaluation>> byResource = new HashMap<>();
+        for (Map<String, ConfigEvaluation> ruleEvaluations : evaluationsFor(region).values()) {
+            for (ConfigEvaluation evaluation : ruleEvaluations.values()) {
+                if (!isBlank(resourceType) && !resourceType.equals(evaluation.complianceResourceType())) {
+                    continue;
+                }
+                if (!isBlank(resourceId) && !resourceId.equals(evaluation.complianceResourceId())) {
+                    continue;
+                }
+                String key = resourceKey(evaluation.complianceResourceType(),
+                        evaluation.complianceResourceId());
+                byResource.computeIfAbsent(key, k -> new ArrayList<>()).add(evaluation);
+            }
+        }
+        return byResource;
+    }
+
+    private Compliance complianceForResource(List<ConfigEvaluation> resourceEvaluations) {
+        long nonCompliant = resourceEvaluations.stream()
+                .filter(e -> "NON_COMPLIANT".equals(e.complianceType()))
+                .count();
+        if (nonCompliant > 0) {
+            return new Compliance("NON_COMPLIANT", contributorCount(nonCompliant, RULE_CONTRIBUTOR_CAP));
+        }
+        if (resourceEvaluations.stream().anyMatch(e -> "INSUFFICIENT_DATA".equals(e.complianceType()))) {
+            return new Compliance("INSUFFICIENT_DATA", null);
+        }
+        if (resourceEvaluations.stream().anyMatch(e -> "COMPLIANT".equals(e.complianceType()))) {
+            return new Compliance("COMPLIANT", null);
+        }
+        return new Compliance("NOT_APPLICABLE", null);
+    }
+
+    private EvaluationResult toEvaluationResult(String ruleName, ConfigEvaluation evaluation) {
+        return new EvaluationResult(
+                new EvaluationResultIdentifier(
+                        new EvaluationResultQualifier(ruleName, evaluation.complianceResourceType(),
+                                evaluation.complianceResourceId(), "DETECTIVE"),
+                        evaluation.orderingTimestamp()),
+                evaluation.complianceType(),
+                evaluation.resultRecordedTime(),
+                evaluation.configRuleInvokedTime(),
+                evaluation.annotation(),
+                null);
+    }
+
+    private static boolean matchesComplianceFilter(List<String> complianceTypes, String complianceType) {
+        return complianceTypes == null || complianceTypes.isEmpty() || complianceTypes.contains(complianceType);
+    }
+
+    private ComplianceContributorCount contributorCount(long count, int cap) {
+        return new ComplianceContributorCount((int) Math.min(count, cap), count > cap);
+    }
+
+    private ConfigRule requireRule(String region, String ruleName) {
+        ConfigRule rule = isBlank(ruleName) ? null : rulesFor(region).get(ruleName);
+        if (rule == null) {
+            throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+        }
+        return rule;
     }
 
     // --- Configuration Recorder ---
@@ -196,6 +557,18 @@ public class AwsConfigService {
         return List.of(recorder);
     }
 
+    public void deleteConfigurationRecorder(String region, String name) {
+        ConfigurationRecorder recorder = configurationRecorders.get(region);
+        if (recorder == null || !recorder.name().equals(name)) {
+            throw new AwsException("NoSuchConfigurationRecorderException",
+                    "Cannot find configuration recorder with the specified name.", 400);
+        }
+        configurationRecorders.remove(region);
+        recorderRunning.remove(region);
+        recorderLastStartTime.remove(region);
+        recorderLastStopTime.remove(region);
+    }
+
     public void startConfigurationRecorder(String region, String name) {
         ConfigurationRecorder recorder = configurationRecorders.get(region);
         if (recorder == null || !recorder.name().equals(name)) {
@@ -203,7 +576,7 @@ public class AwsConfigService {
                     "Cannot find configuration recorder with the specified name.", 400);
         }
         recorderRunning.put(region, true);
-        recorderLastStartTime.put(region, System.currentTimeMillis() / 1000);
+        recorderLastStartTime.put(region, now());
     }
 
     public void stopConfigurationRecorder(String region, String name) {
@@ -213,7 +586,7 @@ public class AwsConfigService {
                     "Cannot find configuration recorder with the specified name.", 400);
         }
         recorderRunning.put(region, false);
-        recorderLastStopTime.put(region, System.currentTimeMillis() / 1000);
+        recorderLastStopTime.put(region, now());
     }
 
     public List<ConfigurationRecorderStatus> describeConfigurationRecorderStatus(String region, List<String> names) {
@@ -275,6 +648,58 @@ public class AwsConfigService {
         return List.of(channel);
     }
 
+    public void deleteDeliveryChannel(String region, String name) {
+        DeliveryChannel channel = deliveryChannels.get(region);
+        if (channel == null || !channel.name().equals(name)) {
+            throw new AwsException("NoSuchDeliveryChannelException",
+                    "Cannot find delivery channel with the specified name.", 400);
+        }
+        if (recorderRunning.getOrDefault(region, false)) {
+            throw new AwsException("LastDeliveryChannelDeleteFailedException",
+                    "You cannot delete the delivery channel you specified because the customer managed "
+                            + "configuration recorder is running.", 400);
+        }
+        deliveryChannels.remove(region);
+    }
+
+    // --- Retention Configuration ---
+
+    public RetentionConfiguration putRetentionConfiguration(String region, Integer retentionPeriodInDays) {
+        if (retentionPeriodInDays == null || retentionPeriodInDays < 30 || retentionPeriodInDays > 2557) {
+            throw new AwsException("InvalidParameterValueException",
+                    "RetentionPeriodInDays must be between 30 and 2557.", 400);
+        }
+        RetentionConfiguration configuration = new RetentionConfiguration("default", retentionPeriodInDays);
+        retentionConfigurations.put(region, configuration);
+        return configuration;
+    }
+
+    public List<RetentionConfiguration> describeRetentionConfigurations(String region, List<String> names) {
+        RetentionConfiguration configuration = retentionConfigurations.get(region);
+        if (names != null && !names.isEmpty()) {
+            for (String name : names) {
+                if (configuration == null || !configuration.name().equals(name)) {
+                    throw new AwsException("NoSuchRetentionConfigurationException",
+                            "Cannot find retention configuration with the specified name.", 400);
+                }
+            }
+        }
+        return configuration == null ? Collections.emptyList() : List.of(configuration);
+    }
+
+    public void deleteRetentionConfiguration(String region, String name) {
+        if (isBlank(name)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "RetentionConfigurationName must be specified.", 400);
+        }
+        RetentionConfiguration configuration = retentionConfigurations.get(region);
+        if (configuration == null || !configuration.name().equals(name)) {
+            throw new AwsException("NoSuchRetentionConfigurationException",
+                    "Cannot find retention configuration with the specified name.", 400);
+        }
+        retentionConfigurations.remove(region);
+    }
+
     // --- Conformance Packs ---
 
     public ConformancePack putConformancePack(String region, String packName,
@@ -308,33 +733,41 @@ public class AwsConfigService {
 
     public List<ConformancePack> describeConformancePacks(String region, List<String> names) {
         Map<String, ConformancePack> store = packsFor(region);
-        if (names == null || names.isEmpty()) {
-            return new ArrayList<>(store.values());
-        }
         List<ConformancePack> result = new ArrayList<>();
-        for (String name : names) {
-            ConformancePack pack = store.get(name);
-            if (pack == null) {
-                throw new AwsException("NoSuchConformancePackException",
-                        "Conformance pack '" + name + "' does not exist.", 400);
+        if (names == null || names.isEmpty()) {
+            result.addAll(store.values());
+        } else {
+            for (String name : names) {
+                ConformancePack pack = store.get(name);
+                if (pack == null) {
+                    throw new AwsException("NoSuchConformancePackException",
+                            "Conformance pack '" + name + "' does not exist.", 400);
+                }
+                result.add(pack);
             }
-            result.add(pack);
         }
+        result.sort(Comparator.comparing(ConformancePack::conformancePackName));
         return result;
     }
 
-    public List<ConformancePackStatusDetail> describeConformancePackStatus(String region, List<String> names) {
-        List<ConformancePack> packs = describeConformancePacks(region, names);
+    public Paged<ConformancePack> describeConformancePacksPaged(String region, List<String> names,
+            Integer limit, String nextToken) {
+        return paginate(describeConformancePacks(region, names), limit, nextToken,
+                20, 20, "InvalidLimitException");
+    }
+
+    public Paged<ConformancePackStatusDetail> describeConformancePackStatus(String region, List<String> names,
+            Integer limit, String nextToken) {
         List<ConformancePackStatusDetail> result = new ArrayList<>();
-        for (ConformancePack pack : packs) {
+        for (ConformancePack pack : describeConformancePacks(region, names)) {
             result.add(new ConformancePackStatusDetail(
                     pack.conformancePackName(),
                     pack.conformancePackId(),
                     pack.conformancePackArn(),
                     "CREATE_SUCCESSFUL",
-                    System.currentTimeMillis() / 1000));
+                    now()));
         }
-        return result;
+        return paginate(result, limit, nextToken, 20, 20, "InvalidLimitException");
     }
 
     // --- Tagging ---
@@ -362,6 +795,38 @@ public class AwsConfigService {
                 .collect(Collectors.toList());
     }
 
+    // --- Pagination ---
+
+    public record Paged<T>(List<T> items, String nextToken) {}
+
+    /** Offset-as-NextToken pagination over a pre-sorted list. A null or zero limit falls back to
+     *  the default page size; limits outside [1, maxLimit] fail with the op-specific error code. */
+    private <T> Paged<T> paginate(List<T> items, Integer limit, String nextToken,
+            int defaultPageSize, int maxLimit, String limitErrorCode) {
+        int pageSize = defaultPageSize;
+        if (limit != null && limit != 0) {
+            if (limit < 0 || limit > maxLimit) {
+                throw new AwsException(limitErrorCode,
+                        "Limit must be between 0 and " + maxLimit + ".", 400);
+            }
+            pageSize = limit;
+        }
+        int offset = 0;
+        if (nextToken != null && !nextToken.isEmpty()) {
+            try {
+                offset = Integer.parseInt(nextToken);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidNextTokenException", INVALID_NEXT_TOKEN_MESSAGE, 400);
+            }
+            if (offset < 0 || offset > items.size()) {
+                throw new AwsException("InvalidNextTokenException", INVALID_NEXT_TOKEN_MESSAGE, 400);
+            }
+        }
+        int end = Math.min(offset + pageSize, items.size());
+        List<T> page = new ArrayList<>(items.subList(offset, end));
+        return new Paged<>(page, end < items.size() ? String.valueOf(end) : null);
+    }
+
     // --- Helpers ---
 
     private Map<String, ConfigRule> rulesFor(String region) {
@@ -370,6 +835,26 @@ public class AwsConfigService {
 
     private Map<String, ConformancePack> packsFor(String region) {
         return conformancePacks.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private Map<String, Map<String, ConfigEvaluation>> evaluationsFor(String region) {
+        return evaluations.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private static String resourceKey(String resourceType, String resourceId) {
+        return resourceType + "|" + resourceId;
+    }
+
+    private static String ruleKey(String region, String ruleName) {
+        return region + "|" + ruleName;
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    private static long now() {
+        return System.currentTimeMillis() / 1000;
     }
 
     private static String shortId() {

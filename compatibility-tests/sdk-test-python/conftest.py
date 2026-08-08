@@ -146,6 +146,12 @@ def cloudformation_client(aws_config, client_config):
 
 
 @pytest.fixture
+def config_client(aws_config, client_config):
+    """Create AWS Config client."""
+    return boto3.client("config", config=client_config, **aws_config)
+
+
+@pytest.fixture
 def acm_client(aws_config, client_config):
     """Create ACM client."""
     return boto3.client("acm", config=client_config, **aws_config)

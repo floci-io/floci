@@ -10,9 +10,9 @@ import java.util.List;
 @RegisterForReflection
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record ConfigRuleSource(
-        @JsonProperty("Owner") String owner,
-        @JsonProperty("SourceIdentifier") String sourceIdentifier,
-        @JsonProperty("SourceDetails") List<SourceDetail> sourceDetails,
-        @JsonProperty("CustomPolicyDetails") CustomPolicyDetails customPolicyDetails) {
+public record Scope(
+        @JsonProperty("ComplianceResourceTypes") List<String> complianceResourceTypes,
+        @JsonProperty("TagKey") String tagKey,
+        @JsonProperty("TagValue") String tagValue,
+        @JsonProperty("ComplianceResourceId") String complianceResourceId) {
 }

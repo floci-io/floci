@@ -33,10 +33,23 @@ class ConfigRuleIntegrationTest {
                 {
                     "ConfigRule": {
                         "ConfigRuleName": "rule-crud-test",
+                        "Description": "Ensure S3 access points block public access",
+                        "Scope": {
+                            "ComplianceResourceTypes": ["AWS::S3::AccessPoint"],
+                            "TagKey": "env"
+                        },
                         "Source": {
                             "Owner": "AWS",
-                            "SourceIdentifier": "S3_ACCESS_POINT_PUBLIC_ACCESS_BLOCKS"
-                        }
+                            "SourceIdentifier": "S3_ACCESS_POINT_PUBLIC_ACCESS_BLOCKS",
+                            "SourceDetails": [
+                                {
+                                    "EventSource": "aws.config",
+                                    "MessageType": "ScheduledNotification"
+                                }
+                            ]
+                        },
+                        "InputParameters": "{\\"mode\\":\\"strict\\"}",
+                        "MaximumExecutionFrequency": "TwentyFour_Hours"
                     }
                 }
                 """)
@@ -64,8 +77,16 @@ class ConfigRuleIntegrationTest {
             .body("ConfigRules[0].ConfigRuleArn", notNullValue())
             .body("ConfigRules[0].ConfigRuleId", notNullValue())
             .body("ConfigRules[0].ConfigRuleState", equalTo("ACTIVE"))
+            .body("ConfigRules[0].Description", equalTo("Ensure S3 access points block public access"))
+            .body("ConfigRules[0].Scope.ComplianceResourceTypes", contains("AWS::S3::AccessPoint"))
+            .body("ConfigRules[0].Scope.TagKey", equalTo("env"))
             .body("ConfigRules[0].Source.Owner", equalTo("AWS"))
-            .body("ConfigRules[0].Source.SourceIdentifier", equalTo("S3_ACCESS_POINT_PUBLIC_ACCESS_BLOCKS"));
+            .body("ConfigRules[0].Source.SourceIdentifier", equalTo("S3_ACCESS_POINT_PUBLIC_ACCESS_BLOCKS"))
+            .body("ConfigRules[0].Source.SourceDetails[0].EventSource", equalTo("aws.config"))
+            .body("ConfigRules[0].Source.SourceDetails[0].MessageType", equalTo("ScheduledNotification"))
+            .body("ConfigRules[0].InputParameters", equalTo("{\"mode\":\"strict\"}"))
+            .body("ConfigRules[0].MaximumExecutionFrequency", equalTo("TwentyFour_Hours"))
+            .body("ConfigRules[0].EvaluationModes[0].Mode", equalTo("DETECTIVE"));
 
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRules")
@@ -80,6 +101,22 @@ class ConfigRuleIntegrationTest {
 
     @Test
     @Order(3)
+    void describeConfigRulesUnknownName() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRules")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigRuleNames": ["no-such-rule"]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchConfigRuleException"));
+    }
+
+    @Test
+    @Order(4)
     void describeComplianceByConfigRule() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DescribeComplianceByConfigRule")
@@ -97,7 +134,7 @@ class ConfigRuleIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void putConfigRuleUpdate() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "PutConfigRule")
@@ -128,12 +165,14 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ConfigRules[0].Source.Owner", equalTo("CUSTOM_LAMBDA"));
+            .body("ConfigRules[0].Source.Owner", equalTo("CUSTOM_LAMBDA"))
+            .body("ConfigRules[0].ConfigRuleArn", notNullValue())
+            .body("ConfigRules[0].ConfigRuleId", notNullValue());
     }
 
     @Test
-    @Order(5)
-    void describeConfigRuleEvaluationStatus() {
+    @Order(6)
+    void describeConfigRuleEvaluationStatusBeforeStart() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRuleEvaluationStatus")
             .contentType(CONTENT_TYPE)
@@ -148,11 +187,13 @@ class ConfigRuleIntegrationTest {
             .body("ConfigRulesEvaluationStatus[0].ConfigRuleName", equalTo("rule-crud-test"))
             .body("ConfigRulesEvaluationStatus[0].ConfigRuleArn", notNullValue())
             .body("ConfigRulesEvaluationStatus[0].ConfigRuleId", notNullValue())
-            .body("ConfigRulesEvaluationStatus[0].FirstEvaluationStarted", equalTo(true));
+            .body("ConfigRulesEvaluationStatus[0].FirstEvaluationStarted", equalTo(false))
+            .body("ConfigRulesEvaluationStatus[0].FirstActivatedTime", notNullValue())
+            .body("ConfigRulesEvaluationStatus[0].LastSuccessfulInvocationTime", nullValue());
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void startConfigRulesEvaluation() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "StartConfigRulesEvaluation")
@@ -164,10 +205,23 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRuleEvaluationStatus")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigRuleNames": ["rule-crud-test"]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigRulesEvaluationStatus[0].FirstEvaluationStarted", equalTo(true))
+            .body("ConfigRulesEvaluationStatus[0].LastSuccessfulInvocationTime", notNullValue());
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void startConfigRulesEvaluationNonexistent() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "StartConfigRulesEvaluation")
@@ -183,7 +237,7 @@ class ConfigRuleIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void deleteConfigRule() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DeleteConfigRule")
@@ -198,7 +252,7 @@ class ConfigRuleIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void deleteNonexistentConfigRule() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DeleteConfigRule")
