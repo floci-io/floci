@@ -469,7 +469,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_AUTOSCALING_ENABLED` | `true` | Enable the Auto Scaling service |
 | `FLOCI_SERVICES_CODEBUILD_ENABLED` | `true` | Enable the CodeBuild service |
 | `FLOCI_SERVICES_CODEBUILD_DOCKER_NETWORK` | _(none)_ | Docker network for CodeBuild build containers |
-| `FLOCI_SERVICES_CODEBUILD_CURATED_IMAGE_SUBSTITUTE` | `public.ecr.aws/codebuild/amazonlinux-x86_64-standard:5.0` | Image run in place of curated `aws/codebuild/*` names that AWS does not publish publicly (the Ubuntu `standard` family); Amazon Linux curated names map to their public.ecr.aws mirrors directly |
+| `FLOCI_SERVICES_CODEBUILD_CURATED_IMAGE_SUBSTITUTE` | _(newest public Amazon Linux standard for the host arch)_ | Image run in place of curated `aws/codebuild/*` names that AWS does not publish publicly (the Ubuntu `standard` family); Amazon Linux curated names map to their public.ecr.aws mirrors directly |
 | `FLOCI_SERVICES_CODEDEPLOY_ENABLED` | `true` | Enable the CodeDeploy service |
 | `FLOCI_SERVICES_NETWORKFIREWALL_ENABLED` | `true` | Enable the AWS Network Firewall service |
 | `FLOCI_SERVICES_SERVICEQUOTAS_ENABLED` | `true` | Enable the Service Quotas service |

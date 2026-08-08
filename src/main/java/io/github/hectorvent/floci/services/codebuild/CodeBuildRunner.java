@@ -494,7 +494,8 @@ public class CodeBuildRunner implements ContainerTeardown {
     /**
      * Curated {@code aws/codebuild/*} names are not directly pullable: the Amazon Linux
      * family has public.ecr.aws mirrors, while the Ubuntu {@code standard} family is not
-     * published to any public registry and runs the configured substitute image instead.
+     * published to any public registry and runs the configured substitute — by default
+     * the newest public Amazon Linux standard image for the host architecture.
      */
     String resolveCuratedImage(String image) {
         if (image == null || !image.startsWith("aws/codebuild/")) {
@@ -504,10 +505,19 @@ public class CodeBuildRunner implements ContainerTeardown {
         if (name.startsWith("amazonlinux")) {
             return "public.ecr.aws/codebuild/" + name;
         }
-        String substitute = config.services().codebuild().curatedImageSubstitute();
+        String substitute = config.services().codebuild().curatedImageSubstitute()
+                .orElseGet(() -> defaultCuratedSubstitute(System.getProperty("os.arch", "")));
         LOG.infov("Curated image {0} is not publicly distributed; running {1} instead",
                 image, substitute);
         return substitute;
+    }
+
+    /** The x86_64 and aarch64 Amazon Linux standard lines version independently. */
+    static String defaultCuratedSubstitute(String osArch) {
+        boolean arm = osArch.contains("aarch64") || osArch.contains("arm");
+        return arm
+                ? "public.ecr.aws/codebuild/amazonlinux-aarch64-standard:4.0"
+                : "public.ecr.aws/codebuild/amazonlinux-x86_64-standard:6.0";
     }
 
     // Copies files from the local workspace into the container's working directory.

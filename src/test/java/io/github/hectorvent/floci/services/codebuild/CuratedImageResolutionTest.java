@@ -16,11 +16,15 @@ import static org.mockito.Mockito.when;
  */
 class CuratedImageResolutionTest {
 
-    private CodeBuildRunner runner() {
+    private CodeBuildRunner runner(String substitute) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().codebuild().curatedImageSubstitute())
-                .thenReturn("public.ecr.aws/codebuild/amazonlinux-x86_64-standard:5.0");
+                .thenReturn(java.util.Optional.ofNullable(substitute));
         return new CodeBuildRunner(null, null, null, null, null, null, null, config, null, null);
+    }
+
+    private CodeBuildRunner runner() {
+        return runner(null);
     }
 
     @Test
@@ -30,9 +34,24 @@ class CuratedImageResolutionTest {
     }
 
     @Test
-    void ubuntuStandardFamilyFallsBackToSubstitute() {
-        assertEquals("public.ecr.aws/codebuild/amazonlinux-x86_64-standard:5.0",
-                runner().resolveCuratedImage("aws/codebuild/standard:7.0"));
+    void ubuntuStandardFamilyFallsBackToArchAwareDefault() {
+        String resolved = runner().resolveCuratedImage("aws/codebuild/standard:7.0");
+        assertEquals(CodeBuildRunner.defaultCuratedSubstitute(System.getProperty("os.arch", "")),
+                resolved);
+    }
+
+    @Test
+    void configuredSubstituteWinsOverArchDefault() {
+        assertEquals("my-registry/custom-build:1",
+                runner("my-registry/custom-build:1").resolveCuratedImage("aws/codebuild/standard:7.0"));
+    }
+
+    @Test
+    void defaultSubstituteFollowsHostArchitecture() {
+        assertEquals("public.ecr.aws/codebuild/amazonlinux-x86_64-standard:6.0",
+                CodeBuildRunner.defaultCuratedSubstitute("amd64"));
+        assertEquals("public.ecr.aws/codebuild/amazonlinux-aarch64-standard:4.0",
+                CodeBuildRunner.defaultCuratedSubstitute("aarch64"));
     }
 
     @Test
