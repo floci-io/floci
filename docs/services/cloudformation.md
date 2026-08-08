@@ -22,6 +22,7 @@
 | `DescribeStackResources` | Get all resources in a stack |
 | `ListStackResources` | List resource summaries |
 | `GetTemplate` | Retrieve the template body |
+| `GetTemplateSummary` | Summarize a template's Parameters, Resources and Transform sections, by StackName, TemplateBody or TemplateURL |
 | `ValidateTemplate` | Accepted; returns success without validating (stub) |
 | `ListStacks` | List stacks by status |
 | `ListExports` | - |
