@@ -593,7 +593,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    private void createTarFromDir(Path dir, ByteArrayOutputStream out) throws IOException {
+    void createTarFromDir(Path dir, ByteArrayOutputStream out) throws IOException {
         try (TarArchiveOutputStream tar = newTarStream(out);
              var stream = Files.walk(dir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
@@ -606,7 +606,15 @@ public class CodeBuildRunner implements ContainerTeardown {
                 } else {
                     TarArchiveEntry entry = new TarArchiveEntry(entryName);
                     entry.setSize(Files.size(path));
-                    entry.setMode(0644);
+                    int mode;
+                    try {
+                        mode = posixMode(Files.getPosixFilePermissions(path));
+                    } catch (UnsupportedOperationException e) {
+                        LOG.debugv("Filesystem does not support POSIX permissions for {0}: {1}",
+                                path, e.getMessage());
+                        mode = 0644;
+                    }
+                    entry.setMode(mode);
                     tar.putArchiveEntry(entry);
                     try (var fis = Files.newInputStream(path)) {
                         fis.transferTo(tar);
@@ -843,6 +851,17 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
         }
         return permissions;
+    }
+
+    private static int posixMode(Set<PosixFilePermission> permissions) {
+        PosixFilePermission[] bits = PosixFilePermission.values();
+        int mode = 0;
+        for (int i = 0; i < bits.length; i++) {
+            if (permissions.contains(bits[i])) {
+                mode |= 0400 >> i;
+            }
+        }
+        return mode;
     }
 
     private void beginPhase(Build build, String phaseType) {
