@@ -11,11 +11,13 @@ import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionProfile;
 import io.github.hectorvent.floci.services.cloudfront.model.Invalidation;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.MonitoringSubscription;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
@@ -31,6 +33,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -39,6 +42,10 @@ public class CloudFrontService {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final Set<String> OAC_ORIGIN_TYPES =
+            Set.of("s3", "mediastore", "mediapackagev2", "lambda");
+    private static final Set<String> OAC_SIGNING_BEHAVIORS =
+            Set.of("always", "never", "no-override");
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -103,6 +110,7 @@ public class CloudFrontService {
     // ── Distributions ─────────────────────────────────────────────────────────
 
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
+        ensureAliasesAvailable(dist.getConfig(), null);
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
@@ -129,6 +137,7 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        ensureAliasesAvailable(updated.getConfig(), id);
         updated.setId(id);
         updated.setArn(existing.getArn());
         updated.setDomainName(existing.getDomainName());
@@ -155,6 +164,17 @@ public class CloudFrontService {
         tagStore.delete("distribution/" + id);
     }
 
+    /**
+     * Removes a distribution and its associated invalidations/tags without the disable/If-Match guards
+     * enforced by {@link #deleteDistribution(String, String)}. Used by CloudFormation stack deletion,
+     * which owns the resource lifecycle at the stack level.
+     */
+    public synchronized void removeDistribution(String id) {
+        distStore.delete(id);
+        invalidationStore.delete(id);
+        tagStore.delete("distribution/" + id);
+    }
+
     public List<Distribution> listDistributions(String marker, int maxItems) {
         List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
@@ -175,21 +195,136 @@ public class CloudFrontService {
     }
 
     public synchronized void associateAlias(String targetDistributionId, String alias) {
+        if (alias == null || alias.isBlank()) {
+            throw new AwsException("InvalidArgument", "The alias must not be empty.", 400);
+        }
         Distribution dist = getDistribution(targetDistributionId);
-        List<String> aliases = dist.getConfig() != null ? dist.getConfig().getAliases() : null;
+        if (dist.getConfig() == null) {
+            throw new AwsException("InvalidArgument", "The target distribution has no configuration.", 400);
+        }
+        for (Distribution candidate : distStore.scan(k -> true)) {
+            if (targetDistributionId.equals(candidate.getId()) || candidate.getConfig() == null
+                    || candidate.getConfig().getAliases() == null) {
+                continue;
+            }
+            List<String> previousAliases = candidate.getConfig().getAliases();
+            List<String> remaining = new ArrayList<>(previousAliases);
+            remaining.removeIf(existing -> alias.equalsIgnoreCase(existing));
+            if (remaining.size() != previousAliases.size()) {
+                candidate.getConfig().setAliases(remaining);
+                candidate.setEtag(UUID.randomUUID().toString());
+                candidate.setLastModifiedTime(Instant.now());
+                distStore.put(candidate.getId(), candidate);
+            }
+        }
+
+        List<String> aliases = dist.getConfig().getAliases();
         if (aliases == null) {
             aliases = new ArrayList<>();
         } else {
             aliases = new ArrayList<>(aliases);
         }
-        if (!aliases.contains(alias)) {
-            aliases.add(alias);
-        }
-        if (dist.getConfig() != null) {
-            dist.getConfig().setAliases(aliases);
-        }
+        aliases.removeIf(existing -> alias.equalsIgnoreCase(existing));
+        aliases.add(alias);
+        dist.getConfig().setAliases(aliases);
         dist.setEtag(UUID.randomUUID().toString());
+        dist.setLastModifiedTime(Instant.now());
         distStore.put(targetDistributionId, dist);
+    }
+
+    /**
+     * Finds the distribution whose data-plane requests should be served for the given {@code Host}
+     * header. A distribution matches when the host equals its assigned CloudFront domain name
+     * ({@code <id>.cloudfront.net}) or one of its alternate domain names (CNAME aliases). Any port
+     * suffix is ignored and matching is case-insensitive. Returns {@code null} when nothing matches.
+     */
+    public Distribution findByHost(String host) {
+        if (host == null || host.isBlank()) {
+            return null;
+        }
+        String hostname = stripPort(host);
+        List<Distribution> distributions = new ArrayList<>(distStore.scan(k -> true));
+        for (Distribution dist : distributions) {
+            if (hostname.equalsIgnoreCase(dist.getDomainName())) {
+                return dist;
+            }
+        }
+        for (Distribution dist : distributions) {
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg != null && cfg.getAliases() != null) {
+                for (String alias : cfg.getAliases()) {
+                    if (hostname.equalsIgnoreCase(alias)) {
+                        return dist;
+                    }
+                }
+            }
+        }
+        Distribution best = null;
+        int bestSpecificity = -1;
+        for (Distribution dist : distributions) {
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg == null || cfg.getAliases() == null) {
+                continue;
+            }
+            for (String alias : cfg.getAliases()) {
+                if (wildcardAliasMatches(alias, hostname) && alias.length() > bestSpecificity) {
+                    best = dist;
+                    bestSpecificity = alias.length();
+                }
+            }
+        }
+        return best;
+    }
+
+    private void ensureAliasesAvailable(DistributionConfig config, String currentDistributionId) {
+        if (config == null || config.getAliases() == null) {
+            return;
+        }
+        for (String requested : config.getAliases()) {
+            if (requested == null || requested.isBlank()) {
+                continue;
+            }
+            for (Distribution existing : distStore.scan(k -> true)) {
+                if (existing.getId().equals(currentDistributionId) || existing.getConfig() == null
+                        || existing.getConfig().getAliases() == null) {
+                    continue;
+                }
+                for (String assigned : existing.getConfig().getAliases()) {
+                    if (requested.equalsIgnoreCase(assigned)) {
+                        throw new AwsException("CNAMEAlreadyExists",
+                                "The CNAME you provided is already associated with a different resource.", 409);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean wildcardAliasMatches(String alias, String hostname) {
+        if (alias == null || !alias.startsWith("*.") || hostname == null) {
+            return false;
+        }
+        String suffix = alias.substring(1);          // ".example.com"
+        if (hostname.length() <= suffix.length()
+                || !hostname.regionMatches(true, hostname.length() - suffix.length(),
+                        suffix, 0, suffix.length())) {
+            return false;
+        }
+        // A CloudFront wildcard replaces exactly one label, so the part standing in for the "*"
+        // must not itself contain a dot: "*.example.com" covers marketing.example.com but not
+        // marketing.product.example.com. AWS is explicit that names at a level higher or lower
+        // than the wildcard are not covered.
+        return hostname.lastIndexOf('.', hostname.length() - suffix.length() - 1) < 0;
+    }
+
+    private static String stripPort(String host) {
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) {
+            String maybePort = host.substring(colon + 1);
+            if (!maybePort.isEmpty() && maybePort.chars().allMatch(Character::isDigit)) {
+                return host.substring(0, colon);
+            }
+        }
+        return host;
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
@@ -414,6 +549,7 @@ public class CloudFrontService {
     // ── Origin Access Control ─────────────────────────────────────────────────
 
     public synchronized OriginAccessControl createOriginAccessControl(OriginAccessControl oac) {
+        validateOriginAccessControl(oac);
         oac.setId(UUID.randomUUID().toString());
         oac.setEtag(UUID.randomUUID().toString());
         oac.setLastModifiedTime(Instant.now());
@@ -434,6 +570,7 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        validateOriginAccessControl(updated);
         updated.setId(id);
         updated.setEtag(UUID.randomUUID().toString());
         updated.setLastModifiedTime(Instant.now());
@@ -446,6 +583,11 @@ public class CloudFrontService {
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        if (originAccessControlInUse(id)) {
+            throw new AwsException("OriginAccessControlInUse",
+                    "Cannot delete the origin access control because it's in use by one or more distributions.",
+                    409);
         }
         oacStore.delete(id);
     }
@@ -514,6 +656,10 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        if (originAccessIdentityInUse(id)) {
+            throw new AwsException("CloudFrontOriginAccessIdentityInUse",
+                    "The Origin Access Identity specified is already in use.", 409);
+        }
         oaiStore.delete(id);
     }
 
@@ -534,6 +680,84 @@ public class CloudFrontService {
             return all.subList(0, maxItems);
         }
         return all;
+    }
+
+    private static void validateOriginAccessControl(OriginAccessControl oac) {
+        if (oac == null) {
+            throw new AwsException("InvalidArgument",
+                    "The origin access control configuration is required.", 400);
+        }
+        if (oac.getName() == null || oac.getName().isBlank()) {
+            throw new AwsException("InvalidArgument", "The parameter Name is required.", 400);
+        }
+        if (oac.getName().length() > 64) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter Name must be 64 characters or fewer.", 400);
+        }
+        if (!"sigv4".equals(oac.getSigningProtocol())) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter SigningProtocol must be sigv4.", 400);
+        }
+        if (oac.getSigningBehavior() == null
+                || !OAC_SIGNING_BEHAVIORS.contains(oac.getSigningBehavior())) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter SigningBehavior must be one of always, never, or no-override.",
+                    400);
+        }
+        if (oac.getOriginAccessControlOriginType() == null
+                || !OAC_ORIGIN_TYPES.contains(oac.getOriginAccessControlOriginType())) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter OriginAccessControlOriginType must be one of s3, mediastore, "
+                            + "mediapackagev2, or lambda.",
+                    400);
+        }
+    }
+
+    private boolean originAccessControlInUse(String id) {
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            DistributionConfig config = distribution.getConfig();
+            if (config == null || config.getOrigins() == null) {
+                continue;
+            }
+            for (Origin origin : config.getOrigins()) {
+                if (origin != null && id.equals(origin.getOriginAccessControlId())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean originAccessIdentityInUse(String id) {
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            DistributionConfig config = distribution.getConfig();
+            if (config == null || config.getOrigins() == null) {
+                continue;
+            }
+            for (Origin origin : config.getOrigins()) {
+                if (origin != null && originAccessIdentityMatches(
+                        origin.getS3OriginConfig() != null
+                                ? origin.getS3OriginConfig().get("OriginAccessIdentity")
+                                : null,
+                        id)) {
+                    return true;
+                }
+            }
+        }
+        for (StreamingDistribution distribution : streamingDistStore.scan(k -> true)) {
+            if (originAccessIdentityMatches(distribution.getS3OriginAccessIdentity(), id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean originAccessIdentityMatches(String reference, String id) {
+        if (reference == null || reference.isBlank()) {
+            return false;
+        }
+        String normalized = reference.startsWith("/") ? reference.substring(1) : reference;
+        return normalized.equals("origin-access-identity/cloudfront/" + id);
     }
 
     // ── CloudFront Functions ──────────────────────────────────────────────────
@@ -599,14 +823,14 @@ public class CloudFrontService {
         functionStore.delete(name);
     }
 
-    public List<CloudFrontFunction> listFunctions(String stage) {
+    public List<CloudFrontFunction> listFunctions(String stage, String marker, int maxItems) {
         List<CloudFrontFunction> all = new ArrayList<>(functionStore.scan(k -> true));
         if (stage != null && !stage.isEmpty()) {
             all = all.stream().filter(f -> stage.equals(f.getStage())).toList();
             all = new ArrayList<>(all);
         }
         all.sort((a, b) -> a.getName().compareTo(b.getName()));
-        return all;
+        return paginate(all, marker, maxItems, CloudFrontFunction::getName);
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
