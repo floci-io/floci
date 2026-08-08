@@ -64,7 +64,9 @@ SDK waiters, and Terraform's `aws_ecs_service` all converge normally. A deleted
 `rolloutState` is `COMPLETED` once `runningCount` reaches `desiredCount`, and
 `IN_PROGRESS` before that. The deployment `id` is derived from the service ARN and its
 task definition, so it is stable across calls and across restarts, and rolls over when
-the task definition changes.
+the task definition changes. `createdAt` tracks the deployment rather than the service:
+it is the service's creation time until a task-definition change starts a new
+deployment, and moves with it thereafter.
 
 Known differences from AWS:
 
@@ -75,6 +77,8 @@ Known differences from AWS:
   `deploymentController`, and `ECS` is the AWS default.
 - `pendingCount` is always `0`, matching the top-level service field.
 - `forceNewDeployment` does not mint a new deployment `id`.
+- `updatedAt` equals `createdAt`. AWS advances it as a rollout progresses; Floci has no
+  intermediate rollout state to report.
 
 #### Unknown services
 

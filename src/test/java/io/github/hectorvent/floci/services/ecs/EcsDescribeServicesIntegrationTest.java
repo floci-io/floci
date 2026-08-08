@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.config.JsonPathConfig;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for the two {@code DescribeServices} response fields that AWS's
@@ -53,6 +55,17 @@ class EcsDescribeServicesIntegrationTest {
     private static void registerTaskDef(String family) {
         call("RegisterTaskDefinition", "{\"family\":\"" + family + "\","
                 + "\"containerDefinitions\":[{\"name\":\"web\",\"image\":\"nginx\",\"memory\":128}]}");
+    }
+
+    /**
+     * Epoch seconds carry 10 significant digits, more than a float holds. RestAssured's default
+     * number type is FLOAT_AND_DOUBLE, which silently rounds two timestamps a second apart to the
+     * same value, so read them as BigDecimal.
+     */
+    private static double epochSeconds(Response response, String path) {
+        return ((java.math.BigDecimal) response
+                .jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
+                .get(path)).doubleValue();
     }
 
     private static Response describe(String cluster, String service) {
@@ -127,6 +140,35 @@ class EcsDescribeServicesIntegrationTest {
         String after = describe("dep-cluster-5", "dep-svc-5").path("services[0].deployments[0].id");
         assertNotEquals(before, after,
                 "a new task definition is a new deployment and must get a new id");
+    }
+
+    @Test
+    void newDeploymentCarriesItsOwnStartTimeNotTheServiceCreationTime() throws Exception {
+        // A task-definition change mints a new deployment id, so the timestamps have to move with
+        // it. Reporting the service's creation time would contradict the new id and misrepresent
+        // when the deployment actually started.
+        seedClusterAndTaskDef("dep-cluster-11", "dep-td-11a");
+        call("CreateService", "{\"cluster\":\"dep-cluster-11\",\"serviceName\":\"dep-svc-11\","
+                + "\"taskDefinition\":\"dep-td-11a\",\"desiredCount\":0}");
+
+        Response before = describe("dep-cluster-11", "dep-svc-11");
+        double createdAtBefore = epochSeconds(before, "services[0].deployments[0].createdAt");
+        String idBefore = before.path("services[0].deployments[0].id");
+
+        Thread.sleep(1100);
+        registerTaskDef("dep-td-11b");
+        call("UpdateService", "{\"cluster\":\"dep-cluster-11\",\"service\":\"dep-svc-11\","
+                + "\"taskDefinition\":\"dep-td-11b\"}");
+
+        Response after = describe("dep-cluster-11", "dep-svc-11");
+        double createdAtAfter = epochSeconds(after, "services[0].deployments[0].createdAt");
+        double serviceCreatedAt = epochSeconds(after, "services[0].createdAt");
+
+        assertNotEquals(idBefore, after.path("services[0].deployments[0].id"));
+        assertTrue(createdAtAfter > createdAtBefore,
+                "a new deployment must carry a later createdAt than the one it replaced");
+        assertTrue(createdAtAfter > serviceCreatedAt,
+                "the deployment started after the service was created, so its createdAt must be later");
     }
 
     @Test

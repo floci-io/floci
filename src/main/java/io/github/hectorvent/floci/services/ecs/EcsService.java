@@ -707,6 +707,7 @@ public class EcsService implements ContainerTeardown {
         svc.setNetworkConfiguration(networkConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
+        svc.setLastDeploymentAt(svc.getCreatedAt());
         if (tags != null && !tags.isEmpty()) {
             svc.setTags(new LinkedHashMap<>(tags));
         }
@@ -747,6 +748,7 @@ public class EcsService implements ContainerTeardown {
         if (taskDefinition != null) {
             resolveTaskDefinitionOrThrow(taskDefinition, region);
             svc.setTaskDefinition(taskDefinition);
+            svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, taskDefinition, region);
         }
         services.put(key, svc);
@@ -1317,8 +1319,14 @@ public class EcsService implements ContainerTeardown {
         d.setRolloutStateReason("ECS deployment " + deploymentId
                 + (converged ? " completed." : " in progress."));
         d.setLaunchType(svc.getLaunchType());
-        d.setCreatedAt(svc.getCreatedAt());
-        d.setUpdatedAt(svc.getCreatedAt());
+        // The deployment's own start time, not the service's: a task-definition change mints a
+        // new deployment id, so reporting service creation here would contradict it. Older
+        // persisted services predate the field and fall back to the service creation time.
+        Instant startedAt = svc.getLastDeploymentAt() != null
+                ? svc.getLastDeploymentAt()
+                : svc.getCreatedAt();
+        d.setCreatedAt(startedAt);
+        d.setUpdatedAt(startedAt);
         return List.of(d);
     }
 
