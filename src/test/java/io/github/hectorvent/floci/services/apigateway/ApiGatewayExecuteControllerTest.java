@@ -210,7 +210,7 @@ class ApiGatewayExecuteControllerTest {
         HttpHeaders headers = mock(HttpHeaders.class);
 
         when(regionResolver.resolveRegion(headers)).thenReturn("us-east-1");
-        when(regionResolver.isRegionUnresolved(headers)).thenReturn(true);
+        // resolveRegionFromAuthOrNull is unstubbed and returns null by default, i.e. unresolved.
         // The API was actually created in eu-west-1; the default-region lookup must miss...
         when(apiGatewayV2Service.getApi("us-east-1", "abc123")).thenThrow(
                 new AwsException("NotFoundException", "Invalid API id specified", 404));
@@ -242,7 +242,9 @@ class ApiGatewayExecuteControllerTest {
         HttpHeaders headers = mock(HttpHeaders.class);
 
         when(regionResolver.resolveRegion(headers)).thenReturn("us-east-1");
-        when(regionResolver.isRegionUnresolved(headers)).thenReturn(false);
+        when(headers.getHeaderString("Authorization")).thenReturn(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260215/us-east-1/execute-api/aws4_request");
+        when(regionResolver.resolveRegionFromAuthOrNull(anyString())).thenReturn("us-east-1");
         when(apiGatewayV2Service.getApi("us-east-1", "abc123")).thenReturn(new Api());
         when(apiGatewayV2Service.findMatchingRoute("us-east-1", "abc123", "GET", "/hello"))
                 .thenReturn(null);
@@ -266,7 +268,7 @@ class ApiGatewayExecuteControllerTest {
         // must be treated the same as a missing header: resolveRegion silently defaulted,
         // so the v1 REST path also needs to fall back to scanning for the real region. Uses
         // the real RegionResolver (not a mock) so the test exercises the actual header-parsing
-        // logic in isRegionUnresolved, not just a stubbed answer.
+        // logic in resolveRegionFromAuthOrNull, not just a stubbed answer.
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         ApiGatewayV2Service apiGatewayV2Service = mock(ApiGatewayV2Service.class);
         ApiGatewayService apiGatewayService = mock(ApiGatewayService.class);

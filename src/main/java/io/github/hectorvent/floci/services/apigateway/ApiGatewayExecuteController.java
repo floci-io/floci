@@ -236,7 +236,8 @@ public class ApiGatewayExecuteController {
         // True for SigV4-unsigned requests, and also for requests whose Authorization header
         // isn't a SigV4 credential at all (e.g. a Cognito bearer JWT) - resolveRegion silently
         // fell back to defaultRegion in both cases, so the resolved region is a guess.
-        boolean regionUnresolved = regionResolver.isRegionUnresolved(headers);
+        boolean regionUnresolved = regionResolver.resolveRegionFromAuthOrNull(
+                headers == null ? null : headers.getHeaderString("Authorization")) == null;
 
         // Check if this is a v2 (HTTP API) or v1 (REST API)
         boolean isV2 = false;
