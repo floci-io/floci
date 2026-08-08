@@ -1087,6 +1087,32 @@ public class DynamoDbJsonHandler {
 
     private Response handleUpdateTable(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
+        JsonNode replicaUpdates = request.path("ReplicaUpdates");
+        List<String> addRegions = new ArrayList<>();
+        List<String> removeRegions = new ArrayList<>();
+        List<String> updateRegions = new ArrayList<>();
+        if (replicaUpdates.isArray()) {
+            for (JsonNode update : replicaUpdates) {
+                JsonNode create = update.path("Create");
+                if (create.isObject()) {
+                    String replicaRegion = create.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    addRegions.add(replicaRegion);
+                }
+                JsonNode delete = update.path("Delete");
+                if (delete.isObject()) {
+                    String replicaRegion = delete.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    removeRegions.add(replicaRegion);
+                }
+                JsonNode updateNode = update.path("Update");
+                if (updateNode.isObject()) {
+                    String replicaRegion = updateNode.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    updateRegions.add(replicaRegion);
+                }
+            }
+        }
         Long readCapacity = null;
         Long writeCapacity = null;
         JsonNode pt = request.path("ProvisionedThroughput");
@@ -1147,6 +1173,11 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
+            dynamoDbService.validateReplicaUpdates(
+                    tableName, addRegions, removeRegions, updateRegions, region);
+        }
+
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
                 gsiCreates, gsiDeletes, newAttrDefs, region);
 
@@ -1195,9 +1226,19 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
+            table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, updateRegions, region);
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
+    }
+
+    private static void validateReplicaRegion(String replicaRegion) {
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationException", "Replica RegionName must not be empty", 400);
+        }
     }
 
     private Response handleDescribeTimeToLive(JsonNode request, String region) {
@@ -1861,6 +1902,22 @@ public class DynamoDbJsonHandler {
         warmThroughput.put("ReadUnitsPerSecond", 0);
         warmThroughput.put("WriteUnitsPerSecond", 0);
         node.set("WarmThroughput", warmThroughput);
+
+        // Global-table replicas. In a single-process emulator every region is served by this same
+        // table, so a replica is metadata; AWS reports each as an ACTIVE Replica and marks the table
+        // a 2019.11.21 global table.
+        List<String> replicaRegions = table.getReplicaRegions();
+        if (replicaRegions != null && !replicaRegions.isEmpty()) {
+            ArrayNode replicas = objectMapper.createArrayNode();
+            for (String replicaRegion : replicaRegions) {
+                ObjectNode replica = objectMapper.createObjectNode();
+                replica.put("RegionName", replicaRegion);
+                replica.put("ReplicaStatus", "ACTIVE");
+                replicas.add(replica);
+            }
+            node.set("Replicas", replicas);
+            node.put("GlobalTableVersion", "2019.11.21");
+        }
 
         ArrayNode keySchemaArray = objectMapper.createArrayNode();
         for (var ks : table.getKeySchema()) {

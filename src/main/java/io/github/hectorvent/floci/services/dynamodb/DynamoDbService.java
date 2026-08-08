@@ -1287,6 +1287,80 @@ public class DynamoDbService {
         return table;
     }
 
+    // --- Global-table replicas ---
+
+    /**
+     * Applies global-table replica changes (the {@code ReplicaUpdates} of UpdateTable, and the
+     * legacy {@code dynamodb.Table.replicationRegions} replica custom resource). This single-process
+     * emulator serves every region from the same table, so a replica is tracked as metadata and
+     * surfaced by DescribeTable as an ACTIVE Replica; no cross-region copy is performed. Regions are
+     * de-duplicated and adding an existing / removing an absent one is a no-op, keeping repeated
+     * applies idempotent.
+     */
+    public TableDefinition applyReplicaUpdates(String tableName, List<String> addRegions,
+                                               List<String> removeRegions, String region) {
+        return applyReplicaUpdates(tableName, addRegions, removeRegions, Collections.emptyList(), region);
+    }
+
+    public TableDefinition applyReplicaUpdates(String tableName, List<String> addRegions,
+                                               List<String> removeRegions, List<String> updateRegions, String region) {
+        TableDefinition table = validateReplicaUpdatesAndGetTable(
+                tableName, addRegions, removeRegions, updateRegions, region);
+        List<String> replicas = new ArrayList<>(table.getReplicaRegions());
+        if (removeRegions != null) {
+            replicas.removeAll(removeRegions);
+        }
+        if (addRegions != null) {
+            for (String r : addRegions) {
+                if (r != null && !r.isBlank() && !replicas.contains(r)) {
+                    replicas.add(r);
+                }
+            }
+        }
+        table.setReplicaRegions(replicas);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        tableStore.put(regionKey(region, canonicalTableName), table);
+        LOG.infov("Updated replicas for table {0} in region {1}: {2}", canonicalTableName, region, replicas);
+        return table;
+    }
+
+    public void validateReplicaUpdates(String tableName, List<String> addRegions,
+                                       List<String> removeRegions, List<String> updateRegions, String region) {
+        validateReplicaUpdatesAndGetTable(tableName, addRegions, removeRegions, updateRegions, region);
+    }
+
+    private TableDefinition validateReplicaUpdatesAndGetTable(
+            String tableName, List<String> addRegions, List<String> removeRegions,
+            List<String> updateRegions, String region) {
+        validateReplicaRegions(addRegions);
+        validateReplicaRegions(removeRegions);
+        validateReplicaRegions(updateRegions);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        if (updateRegions != null) {
+            for (String replicaRegion : updateRegions) {
+                if (!table.getReplicaRegions().contains(replicaRegion)) {
+                    throw new AwsException("ValidationException",
+                            "Replica " + replicaRegion + " does not exist", 400);
+                }
+            }
+        }
+        return table;
+    }
+
+    private static void validateReplicaRegions(List<String> replicaRegions) {
+        if (replicaRegions == null) {
+            return;
+        }
+        for (String replicaRegion : replicaRegions) {
+            if (replicaRegion == null || replicaRegion.isBlank()) {
+                throw new AwsException("ValidationException", "Replica RegionName must not be empty", 400);
+            }
+        }
+    }
+
     // --- TTL ---
 
     public void updateTimeToLive(String tableName, String ttlAttributeName, boolean enabled, String region) {
