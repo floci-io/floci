@@ -73,6 +73,8 @@ public class RdsQueryHandler {
                 case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params);
                 case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params);
                 case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params);
+                case "CreateDBSnapshot" -> handleCreateDbSnapshot(params);
+                case "RestoreDBInstanceFromDBSnapshot" -> handleRestoreDbInstanceFromDbSnapshot(params);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
                 case "DescribeDBProxies" -> handleDescribeDbProxies(params);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
@@ -598,6 +600,57 @@ public class RdsQueryHandler {
 
     // ── Snapshots & Proxies (not modeled — empty lists) ───────────────────────
 
+    private Response handleCreateDbSnapshot(MultivaluedMap<String, String> params) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        String instanceId = params.getFirst("DBInstanceIdentifier");
+        if (snapshotId == null || snapshotId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBSnapshotIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        if (instanceId == null || instanceId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = service.createDbSnapshot(snapshotId, instanceId);
+            String result = dbSnapshotXml(snapshot);
+            return Response.ok(AwsQueryResponse.envelope("CreateDBSnapshot", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleRestoreDbInstanceFromDbSnapshot(MultivaluedMap<String, String> params) {
+        String instanceId = params.getFirst("DBInstanceIdentifier");
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        if (instanceId == null || instanceId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        if (snapshotId == null || snapshotId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBSnapshotIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        String dbInstanceClass = params.getFirst("DBInstanceClass");
+        String availabilityZone = params.getFirst("AvailabilityZone");
+        String multiAzStr = params.getFirst("MultiAZ");
+        boolean multiAz = multiAzStr != null && Boolean.parseBoolean(multiAzStr);
+        String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
+
+        java.util.List<String> vpcSecurityGroupIds = new java.util.ArrayList<>();
+        for (int i = 1; ; i++) {
+            String sg = params.getFirst("VpcSecurityGroupIds.VpcSecurityGroupId." + i);
+            if (sg == null) break;
+            vpcSecurityGroupIds.add(sg);
+        }
+
+        java.util.Map<String, String> tags = parseTags(params);
+
+        try {
+            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags);
+            String result = dbInstanceXml(instance);
+            return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
     private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params) {
         // DB snapshots are not modeled; return the RDS Query API's wire-accurate empty
         // result (empty <DBSnapshots> wrapper, no <Marker>) so SDK clients complete the
@@ -626,6 +679,26 @@ public class RdsQueryHandler {
 
     private String dbInstanceXml(DbInstance i) {
         return new XmlBuilder().start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance").build();
+    }
+
+    private String dbSnapshotXml(io.github.hectorvent.floci.services.rds.model.DbSnapshot s) {
+        String engineStr = s.getEngine() != null ? s.getEngine().name().toLowerCase() : "";
+        XmlBuilder xml = new XmlBuilder().start("DBSnapshot")
+                .elem("DBSnapshotIdentifier", s.getDbSnapshotIdentifier())
+                .elem("DBInstanceIdentifier", s.getDbInstanceIdentifier())
+                .elem("SnapshotCreateTime", s.getSnapshotCreateTime() != null ? s.getSnapshotCreateTime().toString() : "")
+                .elem("Engine", engineStr)
+                .elem("EngineVersion", s.getEngineVersion())
+                .elem("AllocatedStorage", s.getAllocatedStorage())
+                .elem("Status", s.getStatus())
+                .elem("MasterUsername", s.getMasterUsername());
+        if (s.getAvailabilityZone() != null) xml.elem("AvailabilityZone", s.getAvailabilityZone());
+        if (s.getVpcId() != null) xml.elem("VpcId", s.getVpcId());
+        xml.elem("InstanceCreateTime", s.getInstanceCreateTime() != null ? s.getInstanceCreateTime().toString() : "")
+                .elem("Port", s.getPort())
+                .elem("IAMDatabaseAuthenticationEnabled", s.isIamDatabaseAuthenticationEnabled());
+        if (s.getDbiResourceId() != null) xml.elem("DbiResourceId", s.getDbiResourceId());
+        return xml.end("DBSnapshot").build();
     }
 
     private String dbInstanceInnerXml(DbInstance i) {

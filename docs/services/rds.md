@@ -37,6 +37,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBClusterParameterGroup` | - |
 | `ModifyDBClusterParameterGroup` | - |
 | `DescribeDBClusterParameters` | - |
+| `CreateDBSnapshot` | - |
+| `RestoreDBInstanceFromDBSnapshot` | - |
 | `DescribeDBSnapshots` | - |
 | `DescribeDBProxies` | - |
 | `DescribeDBClusterSnapshots` | - |

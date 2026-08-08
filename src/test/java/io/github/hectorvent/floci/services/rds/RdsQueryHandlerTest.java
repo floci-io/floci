@@ -771,18 +771,49 @@ class RdsQueryHandlerTest {
     }
 
     @Test
-    void describeDbSubnetGroups_missingNameReturnsNotFoundFault() {
-        when(service.listDbSubnetGroups("does-not-exist", null))
-                .thenThrow(new AwsException("DBSubnetGroupNotFoundFault",
-                        "DB subnet group does-not-exist not found.", 404));
+    void createDbSnapshot_success() {
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setDbInstanceIdentifier("mydb");
+        snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        when(service.createDbSnapshot("mysnap", "mydb")).thenReturn(snapshot);
 
         MultivaluedMap<String, String> p = params();
-        p.add("DBSubnetGroupName", "does-not-exist");
+        p.add("DBSnapshotIdentifier", "mysnap");
+        p.add("DBInstanceIdentifier", "mydb");
+        Response response = handler.handle("CreateDBSnapshot", p);
 
-        Response response = handler.handle("DescribeDBSubnetGroups", p);
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CreateDBSnapshotResult>"));
+        assertTrue(body.contains("<DBSnapshotIdentifier>mysnap</DBSnapshotIdentifier>"));
+        assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
+        assertTrue(body.contains("<Engine>postgres</Engine>"));
+    }
 
-        assertEquals(404, response.getStatus());
-        assertTrue(((String) response.getEntity()).contains("DBSubnetGroupNotFoundFault"));
+    @Test
+    void restoreDbInstanceFromDbSnapshot_success() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod"))))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("DBSnapshotIdentifier", "mysnap");
+        p.add("DBInstanceClass", "db.t3.large");
+        p.add("AvailabilityZone", "us-east-1a");
+        p.add("MultiAZ", "true");
+        p.add("DBSubnetGroupName", "my-subnets");
+        p.add("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-123");
+        p.add("Tags.Tag.1.Key", "Env");
+        p.add("Tags.Tag.1.Value", "Prod");
+
+        Response response = handler.handle("RestoreDBInstanceFromDBSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<RestoreDBInstanceFromDBSnapshotResult>"));
+        assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
