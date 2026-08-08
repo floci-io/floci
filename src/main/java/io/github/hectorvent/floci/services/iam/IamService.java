@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -31,6 +32,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * Core IAM business logic — users, groups, roles, policies, access keys, instance profiles.
@@ -52,6 +55,11 @@ public class IamService implements SessionAccountLookup {
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
+    private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
+    private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
+    private static final String AMAZONAWS_DOMAIN = ".amazonaws.com";
+    /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
+    private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
 
     private final StorageBackend<String, IamUser> users;
     private final StorageBackend<String, IamGroup> groups;
@@ -60,6 +68,8 @@ public class IamService implements SessionAccountLookup {
     private final StorageBackend<String, AccessKey> accessKeys;
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
+    /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
+    private final StorageBackend<String, String> serviceLinkedRoleDeletions;
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
 
@@ -80,6 +90,7 @@ public class IamService implements SessionAccountLookup {
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal()
         );
@@ -105,6 +116,20 @@ public class IamService implements SessionAccountLookup {
                StorageBackend<String, SessionCredential> sessions,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
+                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal);
+    }
+
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, String> serviceLinkedRoleDeletions,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -112,6 +137,7 @@ public class IamService implements SessionAccountLookup {
         this.accessKeys = accessKeys;
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
+        this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
     }
@@ -391,6 +417,97 @@ public class IamService implements SessionAccountLookup {
         }
         roles.delete(roleName);
         LOG.infov("Deleted IAM role: {0}", roleName);
+    }
+
+    /**
+     * The linked service — not the caller and not the principal string — chooses the role-name
+     * prefix, so {@code lex.amazonaws.com} yields {@code AWSServiceRoleForLexBots} and the real name
+     * cannot be computed from the principal. The emulator mints a deterministic stand-in from the
+     * principal's labels instead; callers need the create to succeed and the role to be readable
+     * afterwards, which this satisfies, but the name will not match AWS for most services.
+     *
+     * <p>A {@code CustomSuffix} is joined with an underscore because that is the separator callers
+     * parse back out: Terraform recovers {@code custom_suffix} by splitting the role name on
+     * {@code _}, and that attribute forces replacement, so a name without one never converges.
+     */
+    public IamRole createServiceLinkedRole(String awsServiceName, String customSuffix, String description) {
+        if (awsServiceName == null || !SERVICE_PRINCIPAL_PATTERN.matcher(awsServiceName).matches()) {
+            throw new AwsException("InvalidInput",
+                    "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400);
+        }
+        String roleName = SERVICE_LINKED_ROLE_NAME_PREFIX + derivedServiceName(awsServiceName)
+                + (customSuffix == null || customSuffix.isEmpty() ? "" : "_" + customSuffix);
+        // createRole would answer EntityAlreadyExists, which this action does not document; the
+        // duplicate-suffix case is an InvalidInput as far as its published error list is concerned.
+        if (roles.get(roleName).isPresent()) {
+            throw new AwsException("InvalidInput",
+                    "A role named " + roleName + " already exists; supply a different CustomSuffix.", 400);
+        }
+        String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"" + awsServiceName + "\"},\"Action\":\"sts:AssumeRole\"}]}";
+        return createRole(roleName, SERVICE_LINKED_ROLE_PATH + awsServiceName + "/",
+                trustPolicy, description, 0, Map.of());
+    }
+
+    /**
+     * Deletion is synchronous here, so the task the caller is handed back is already complete —
+     * {@link #getServiceLinkedRoleDeletionStatus} answers SUCCEEDED for it immediately.
+     */
+    public String deleteServiceLinkedRole(String roleName) {
+        if (roleName == null) {
+            throw new AwsException("NoSuchEntity", "The request must include RoleName.", 404);
+        }
+        IamRole role = getRole(roleName);
+        String path = role.getPath();
+        // Nothing stops a caller creating an ordinary role directly under the service-role prefix,
+        // so the principal segment has to be present, not merely the prefix.
+        String servicePrincipal = path.startsWith(SERVICE_LINKED_ROLE_PATH)
+                        && path.length() > SERVICE_LINKED_ROLE_PATH.length()
+                ? path.substring(SERVICE_LINKED_ROLE_PATH.length(), path.length() - 1)
+                : "";
+        // Same published-error-list test as the create side: this action documents only
+        // NoSuchEntity, LimitExceeded and ServiceFailure, so InvalidInput would be off-contract.
+        if (servicePrincipal.isEmpty()) {
+            throw new AwsException("NoSuchEntity",
+                    "There is no service-linked role with name " + roleName + ".", 404);
+        }
+        deleteRole(roleName);
+
+        String deletionTaskId = "task" + SERVICE_LINKED_ROLE_PATH + servicePrincipal + "/"
+                + roleName + "/" + UUID.randomUUID();
+        serviceLinkedRoleDeletions.put(deletionTaskId, roleName);
+        return deletionTaskId;
+    }
+
+    /**
+     * Every dot- and hyphen-separated label contributes, because the leading one alone is not unique:
+     * {@code rds.amazonaws.com} and {@code rds.application-autoscaling.amazonaws.com} are separate
+     * roles on AWS, and a config declaring both must not collide on one name here.
+     */
+    private static String derivedServiceName(String awsServiceName) {
+        String core = awsServiceName == null ? "" : awsServiceName;
+        if (core.endsWith(AMAZONAWS_DOMAIN)) {
+            core = core.substring(0, core.length() - AMAZONAWS_DOMAIN.length());
+        }
+        StringBuilder derived = new StringBuilder();
+        for (String segment : core.split("[.-]")) {
+            if (!segment.isEmpty()) {
+                derived.append(Character.toUpperCase(segment.charAt(0))).append(segment.substring(1));
+            }
+        }
+        if (derived.isEmpty()) {
+            throw new AwsException("InvalidInput",
+                    "The request must include a valid AWSServiceName, for example es.amazonaws.com.", 400);
+        }
+        return derived.toString();
+    }
+
+    public String getServiceLinkedRoleDeletionStatus(String deletionTaskId) {
+        if (deletionTaskId == null || serviceLinkedRoleDeletions.get(deletionTaskId).isEmpty()) {
+            throw new AwsException("NoSuchEntity",
+                    "The deletion task with id " + deletionTaskId + " cannot be found.", 404);
+        }
+        return "SUCCEEDED";
     }
 
     public List<IamRole> listRoles(String pathPrefix) {

@@ -82,6 +82,7 @@ public class AwsQueryController {
             "CreateGroup", "GetGroup", "DeleteGroup", "ListGroups",
             "AddUserToGroup", "RemoveUserFromGroup", "ListGroupsForUser",
             "CreateRole", "GetRole", "DeleteRole", "ListRoles", "UpdateRole",
+            "CreateServiceLinkedRole", "DeleteServiceLinkedRole", "GetServiceLinkedRoleDeletionStatus",
             "CreatePolicy", "GetPolicy", "DeletePolicy", "ListPolicies", "ListEntitiesForPolicy",
             "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion",
             "ListPolicyVersions", "SetDefaultPolicyVersion",

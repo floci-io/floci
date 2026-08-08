@@ -82,6 +82,9 @@ public class IamQueryHandler {
             case "DeleteRole" -> handleDeleteRole(params);
             case "ListRoles" -> handleListRoles(params);
             case "UpdateRole" -> handleUpdateRole(params);
+            case "CreateServiceLinkedRole" -> handleCreateServiceLinkedRole(params);
+            case "DeleteServiceLinkedRole" -> handleDeleteServiceLinkedRole(params);
+            case "GetServiceLinkedRoleDeletionStatus" -> handleGetServiceLinkedRoleDeletionStatus(params);
             case "UpdateAssumeRolePolicy" -> handleUpdateAssumeRolePolicy(params);
             case "TagRole" -> handleTagRole(params);
             case "UntagRole" -> handleUntagRole(params);
@@ -397,6 +400,27 @@ public class IamQueryHandler {
     private Response handleDeleteRole(MultivaluedMap<String, String> params) {
         iamService.deleteRole(getParam(params, "RoleName"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteRole", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleCreateServiceLinkedRole(MultivaluedMap<String, String> params) {
+        IamRole role = iamService.createServiceLinkedRole(
+                getParam(params, "AWSServiceName"),
+                getParam(params, "CustomSuffix"),
+                getParam(params, "Description"));
+        String result = new XmlBuilder().start("Role").raw(roleXml(role)).end("Role").build();
+        return Response.ok(AwsQueryResponse.envelope("CreateServiceLinkedRole", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleDeleteServiceLinkedRole(MultivaluedMap<String, String> params) {
+        String deletionTaskId = iamService.deleteServiceLinkedRole(getParam(params, "RoleName"));
+        String result = new XmlBuilder().elem("DeletionTaskId", deletionTaskId).build();
+        return Response.ok(AwsQueryResponse.envelope("DeleteServiceLinkedRole", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetServiceLinkedRoleDeletionStatus(MultivaluedMap<String, String> params) {
+        String status = iamService.getServiceLinkedRoleDeletionStatus(getParam(params, "DeletionTaskId"));
+        String result = new XmlBuilder().elem("Status", status).build();
+        return Response.ok(AwsQueryResponse.envelope("GetServiceLinkedRoleDeletionStatus", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleListRoles(MultivaluedMap<String, String> params) {

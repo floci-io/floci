@@ -38,6 +38,9 @@
 | DeleteRole | Deletes an IAM role from the local IAM store. |
 | ListRoles | Lists IAM roles in the local account. |
 | UpdateRole | Updates mutable IAM role fields. |
+| CreateServiceLinkedRole | Creates a role under /aws-service-role/ for a service principal. |
+| DeleteServiceLinkedRole | Deletes a service-linked role and returns a deletion task id. |
+| GetServiceLinkedRoleDeletionStatus | Returns the status of a service-linked role deletion. |
 | UpdateAssumeRolePolicy | Replaces a role's assume-role policy document. |
 | TagRole | Adds tags to an IAM role. |
 | UntagRole | Removes tags from an IAM role. |
