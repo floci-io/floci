@@ -75,7 +75,9 @@ public class WebSocketHandler {
      */
     void init(@Observes Router router) {
         router.route("/ws/*").handler(this::handleWebSocketUpgrade);
-        LOG.debug("Registered WebSocket handler on /ws/*");
+        // Also accept AWS-native connect URLs: {apiId}.execute-api.{region}.localhost:4566/{stage}
+        router.route().handler(this::handleSubdomainWebSocketUpgrade);
+        LOG.debug("Registered WebSocket handler on /ws/* and execute-api subdomains");
     }
 
     /**
@@ -102,6 +104,61 @@ public class WebSocketHandler {
         // Resolve region from the request Authorization header
         String region = resolveRegionFromVertxRequest(ctx);
 
+        startConnect(ctx, apiId, region, stageName);
+    }
+
+    /**
+     * Handle a WebSocket upgrade addressed to an AWS-native execute-api subdomain host
+     * ({@code {apiId}.execute-api.{region}.localhost:4566/{stage}}). Unlike the path form,
+     * the region is taken from the host — the $connect upgrade carries no SigV4 header to
+     * derive it from. Requests that are not WebSocket upgrades, or whose host is not an
+     * execute-api subdomain, are passed through untouched.
+     */
+    private void handleSubdomainWebSocketUpgrade(RoutingContext ctx) {
+        if (!isWebSocketUpgrade(ctx)) {
+            ctx.next();
+            return;
+        }
+        ExecuteApiHost parsed = parseExecuteApiHost(ctx.request().getHeader("Host"));
+        if (parsed == null) {
+            ctx.next();
+            return;
+        }
+
+        // Region comes from the host; fall back to the default when the host omits it.
+        String region = parsed.region() != null ? parsed.region() : regionResolver.getDefaultRegion();
+
+        // The stage is the first path segment: /{stage}[/...]
+        String stageName = firstPathSegment(ctx.request().path());
+        if (stageName == null) {
+            ctx.response().setStatusCode(403).end();
+            return;
+        }
+
+        startConnect(ctx, parsed.apiId(), region, stageName);
+    }
+
+    /** True when the request is a WebSocket upgrade (carries {@code Upgrade: websocket}). */
+    private static boolean isWebSocketUpgrade(RoutingContext ctx) {
+        return "websocket".equalsIgnoreCase(ctx.request().getHeader("Upgrade"));
+    }
+
+    /** Returns the first path segment (e.g. {@code /prod/x} → {@code prod}), or null if none. */
+    private static String firstPathSegment(String path) {
+        if (path == null) {
+            return null;
+        }
+        String p = path.startsWith("/") ? path.substring(1) : path;
+        int slash = p.indexOf('/');
+        String seg = slash >= 0 ? p.substring(0, slash) : p;
+        return seg.isEmpty() ? null : seg;
+    }
+
+    /**
+     * Validate the API/stage and run the $connect lifecycle for a resolved (apiId, region, stageName).
+     * Shared by the path-based ({@code /ws/{apiId}/{stage}}) and subdomain-based upgrade entry points.
+     */
+    private void startConnect(RoutingContext ctx, String apiId, String region, String stageName) {
         // Validate the API exists and is a WEBSOCKET protocol API
         Api api;
         try {
@@ -686,6 +743,69 @@ public class WebSocketHandler {
         // Use a simple JAX-RS HttpHeaders adapter to delegate to RegionResolver
         jakarta.ws.rs.core.HttpHeaders headers = new SimpleHttpHeaders(authHeader);
         return regionResolver.resolveRegion(headers);
+    }
+
+    private static final String EXECUTE_API_LABEL = "execute-api";
+
+    /**
+     * Parses an {@code execute-api} subdomain host into its API ID and region.
+     *
+     * <p>AWS addresses a WebSocket API as {@code {apiId}.execute-api.{region}.amazonaws.com}.
+     * The local equivalents are {@code {apiId}.execute-api.{region}.localhost:4566} (region present)
+     * and {@code {apiId}.execute-api.localhost:4566} (region omitted). The region is needed for the
+     * $connect upgrade because, unlike the Management API, it carries no SigV4 Authorization header
+     * to derive the region from.
+     *
+     * <p>Examples:
+     * <ul>
+     *   <li>{@code abc123.execute-api.ap-northeast-2.localhost:4566} → (abc123, ap-northeast-2)</li>
+     *   <li>{@code abc123.execute-api.us-east-1.amazonaws.com} → (abc123, us-east-1)</li>
+     *   <li>{@code abc123.execute-api.localhost:4566} → (abc123, null)</li>
+     *   <li>{@code localhost:4566}, {@code my-bucket.localhost:4566} → null</li>
+     * </ul>
+     *
+     * @return the parsed host, or {@code null} if the host is not an execute-api subdomain
+     */
+    static ExecuteApiHost parseExecuteApiHost(String host) {
+        if (host == null) {
+            return null;
+        }
+        String hostname = stripPort(host);
+
+        int firstDot = hostname.indexOf('.');
+        if (firstDot <= 0) {
+            return null;
+        }
+        String apiId = hostname.substring(0, firstDot);
+        String remainder = hostname.substring(firstDot + 1);
+
+        String prefix = EXECUTE_API_LABEL + ".";
+        if (!remainder.toLowerCase().startsWith(prefix)) {
+            return null;
+        }
+
+        // The label right after "execute-api." is the region — but only when more labels
+        // follow it (e.g. ".localhost" / ".amazonaws.com"). If nothing follows, region is absent.
+        String afterExecuteApi = remainder.substring(prefix.length());
+        int nextDot = afterExecuteApi.indexOf('.');
+        String region = nextDot > 0 ? afterExecuteApi.substring(0, nextDot) : null;
+
+        return new ExecuteApiHost(apiId, region);
+    }
+
+    private static String stripPort(String host) {
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) {
+            String maybePort = host.substring(colon + 1);
+            if (!maybePort.isEmpty() && maybePort.chars().allMatch(Character::isDigit)) {
+                return host.substring(0, colon);
+            }
+        }
+        return host;
+    }
+
+    /** Parsed execute-api subdomain host. {@code region} is null when the host omits it. */
+    record ExecuteApiHost(String apiId, String region) {
     }
 
     /**
