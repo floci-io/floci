@@ -182,20 +182,13 @@ public class S3VectorsService {
                     break;
                 case "cosine":
                 default:
-                    distance = calculateCosineSimilarity(queryVector, v.getData());
+                    distance = calculateCosineDistance(queryVector, v.getData());
                     break;
             }
             results.add(new QueryResult(v, distance));
         }
 
-        // Sorting:
-        // For Euclidean distance, smaller distance is closer (ascending)
-        // For Cosine similarity, larger score is closer (descending)
-        if ("euclidean".equals(metric)) {
-            results.sort(Comparator.comparingDouble(QueryResult::getDistance));
-        } else {
-            results.sort((r1, r2) -> Double.compare(r2.getDistance(), r1.getDistance()));
-        }
+        results.sort(Comparator.comparingDouble(QueryResult::getDistance));
 
         return results.stream().limit(topK).collect(Collectors.toList());
     }
@@ -214,6 +207,11 @@ public class S3VectorsService {
         }
         if (normA == 0.0 || normB == 0.0) return 0.0;
         return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+    private double calculateCosineDistance(List<Float> v1, List<Float> v2) {
+        double similarity = calculateCosineSimilarity(v1, v2);
+        return 1.0 - Math.max(-1.0, Math.min(1.0, similarity));
     }
 
     private double calculateEuclideanDistance(List<Float> v1, List<Float> v2) {

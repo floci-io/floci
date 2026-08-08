@@ -204,20 +204,23 @@ class S3VectorsIntegrationTest {
                     "vectorBucketName": "%s",
                     "indexName": "%s",
                     "queryVector": {
-                        "float32": [1.0, 0.1, 0.0]
+                        "float32": [1.0, 0.0, 0.0]
                     },
-                    "topK": 1,
-                    "returnMetadata": true
+                    "topK": 2,
+                    "returnMetadata": true,
+                    "returnDistance": true
                 }
                 """.formatted(BUCKET_NAME, INDEX_NAME))
         .when()
             .post("/QueryVectors")
         .then()
             .statusCode(200)
-            .body("vectors", hasSize(1))
+            .body("vectors", hasSize(2))
             .body("vectors[0].key", equalTo("v1"))
-            .body("vectors[0].distance", notNullValue())
-            .body("vectors[0].metadata.label", equalTo("first"));
+            .body("vectors[0].distance", equalTo(0.0f))
+            .body("vectors[0].metadata.label", equalTo("first"))
+            .body("vectors[1].key", equalTo("v2"))
+            .body("vectors[1].distance", equalTo(1.0f));
     }
 
     @Test
