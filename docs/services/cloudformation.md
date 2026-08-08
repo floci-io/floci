@@ -75,6 +75,7 @@ cross-resource references.
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account` |
 | API Gateway v2 | `Api`, `Route`, `Integration`, `Stage`, `Deployment` |
 | Step Functions | `StateMachine` |
+| CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool`, `UserPoolClient` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
