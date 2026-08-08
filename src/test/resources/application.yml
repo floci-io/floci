@@ -271,6 +271,7 @@ floci:
       mock: true
     codebuild:
       enabled: true
+      # max-concurrent-builds: 4
       # docker-network: floci-network
     batch:
       enabled: true

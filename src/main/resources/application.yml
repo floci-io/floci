@@ -488,6 +488,7 @@ floci:
     codebuild:
       enabled: true
       # curated-image-substitute: public.ecr.aws/codebuild/amazonlinux-x86_64-standard:6.0
+      # max-concurrent-builds: 4
       # docker-network: floci-network
     batch:
       enabled: true

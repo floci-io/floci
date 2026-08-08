@@ -63,6 +63,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
@@ -143,6 +144,13 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
+
+    // Single shared gate bounding how many builds hold a staged workspace on disk at
+    // once, sized from maxConcurrentBuilds. Null when unbounded — no permit is taken and
+    // behaviour matches an unconstrained host. Resolved lazily and once so the config is
+    // only read when a build actually runs.
+    private Semaphore buildSlots;
+    private boolean buildSlotsResolved;
 
     @Inject
     public CodeBuildRunner(DockerClient dockerClient,
@@ -257,6 +265,50 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     private void runBuild(String region, Build build, Project project,
+                          String buildspecOverride, AtomicBoolean stopFlag) {
+        try {
+            withBuildSlot(() -> runBuildBody(region, build, project, buildspecOverride, stopFlag));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            finishStopped(build);
+        }
+    }
+
+    // Runs the build body while holding a concurrency permit when a cap is configured,
+    // so no more than maxConcurrentBuilds workspaces are staged on disk at once. The
+    // permit is acquired before the body starts (before its workspace is created) and
+    // released once the body returns (after its workspace is deleted). Unbounded runs
+    // the body directly with no permit — zero behaviour change from an unbounded host.
+    // Interruption while waiting for a permit aborts before the body runs; the caller
+    // stops the build.
+    void withBuildSlot(Runnable body) throws InterruptedException {
+        Semaphore slots = buildSlots();
+        if (slots == null) {
+            body.run();
+            return;
+        }
+        slots.acquire();
+        try {
+            body.run();
+        } finally {
+            slots.release();
+        }
+    }
+
+    synchronized Semaphore buildSlots() {
+        if (!buildSlotsResolved) {
+            buildSlots = config == null
+                    ? null
+                    : config.services().codebuild().maxConcurrentBuilds()
+                            .filter(max -> max > 0)
+                            .map(Semaphore::new)
+                            .orElse(null);
+            buildSlotsResolved = true;
+        }
+        return buildSlots;
+    }
+
+    private void runBuildBody(String region, Build build, Project project,
                           String buildspecOverride, AtomicBoolean stopFlag) {
         String buildId = build.getId();
         Path workspace = null;

@@ -910,6 +910,15 @@ public interface EmulatorConfig {
          * architecture.
          */
         Optional<String> curatedImageSubstitute();
+
+        /**
+         * Maximum number of builds allowed to stage a workspace on disk at once. Real
+         * CodeBuild enforces an account-level concurrent-build limit; on a constrained
+         * host a low cap keeps a fan-out stage (e.g. bootstrapping many targets at once)
+         * from exhausting disk. Unset means unbounded — every build runs as soon as it
+         * starts, matching a well-resourced host.
+         */
+        Optional<Integer> maxConcurrentBuilds();
     }
 
     interface BatchServiceConfig {
