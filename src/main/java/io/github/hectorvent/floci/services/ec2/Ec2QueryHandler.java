@@ -826,15 +826,64 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    // The common AWS interface-endpoint services, as short names. Rendered as
+    // com.amazonaws.<region>.<name>. CDK's InterfaceVpcEndpoint (lookupSupportedAzs)
+    // calls DescribeVpcEndpointServices at synth time; an empty set aborts synth.
+    private static final List<String> INTERFACE_ENDPOINT_SERVICES = List.of(
+            "ec2", "ec2messages", "ssm", "ssmmessages", "logs", "monitoring", "sts",
+            "secretsmanager", "kms", "ecr.api", "ecr.dkr", "ecs", "ecs-agent", "ecs-telemetry",
+            "elasticloadbalancing", "sns", "sqs", "kinesis-streams", "kinesis-firehose",
+            "states", "events", "lambda", "glue", "athena", "iot.data", "execute-api");
+
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
+        List<String> requested = getList(p, "ServiceName");
+        List<String> azNames = service.describeAvailabilityZones(region).stream()
+                .map(z -> z.get("zoneName")).toList();
+
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .start("serviceNameSet")
-                .end("serviceNameSet")
-                .start("serviceDetailSet")
-                .end("serviceDetailSet")
-                .end("DescribeVpcEndpointServicesResponse");
+                .start("serviceNameSet");
+        List<String> fullNames = new ArrayList<>();
+        // An explicit ServiceName filter wins: the emulator supports any
+        // interface service in every AZ, so echo exactly what was asked. CDK's
+        // InterfaceVpcEndpoint queries a specific (often custom) service name
+        // and fails if the response omits it or lists no AZs.
+        if (!requested.isEmpty()) {
+            fullNames.addAll(requested);
+        } else {
+            // S3 has both a Gateway and an Interface offering; keep it in the set.
+            for (String name : INTERFACE_ENDPOINT_SERVICES) {
+                fullNames.add("com.amazonaws." + region + "." + name);
+            }
+            fullNames.add("com.amazonaws." + region + ".s3");
+        }
+        for (String full : fullNames) {
+            xml.elem("item", full);
+        }
+        xml.end("serviceNameSet").start("serviceDetailSet");
+        for (String full : fullNames) {
+            // S3 is the one service with both offerings, and AWS reports both
+            // types on its single service detail. Everything else is Interface.
+            List<String> serviceTypes = full.endsWith(".s3")
+                    ? List.of("Gateway", "Interface")
+                    : List.of("Interface");
+            xml.start("item")
+                    .elem("serviceName", full)
+                    .start("serviceType");
+            for (String serviceType : serviceTypes) {
+                xml.start("item").elem("serviceType", serviceType).end("item");
+            }
+            xml.end("serviceType")
+                    .start("availabilityZoneSet");
+            for (String az : azNames) xml.elem("item", az);
+            xml.end("availabilityZoneSet")
+                    .elem("owner", "amazon")
+                    .elem("acceptanceRequired", "false")
+                    .elem("managesVpcEndpoints", "false")
+                    .end("item");
+        }
+        xml.end("serviceDetailSet").end("DescribeVpcEndpointServicesResponse");
         return xmlResponse(xml.build());
     }
 
