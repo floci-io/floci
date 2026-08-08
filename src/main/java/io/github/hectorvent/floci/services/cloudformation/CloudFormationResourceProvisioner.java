@@ -401,6 +401,38 @@ public class CloudFormationResourceProvisioner {
     }
 
     /**
+     * Provision a single resource with no enclosing CloudFormation stack — the Cloud Control
+     * {@code CreateResource} path. Cloud Control DesiredState carries resolved values (no
+     * intrinsics), so a minimal template engine suffices. Reuses the same 114-type provisioning
+     * that CloudFormation stacks use, so any type a stack can create, Cloud Control can too.
+     */
+    public StackResource provisionStandalone(String resourceType, JsonNode properties, String region, String accountId) {
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
+                accountId, region, "cloudcontrol", "cloudcontrol",
+                Map.of(), new HashMap<>(), new HashMap<>(), Map.of(), Map.of(), objectMapper, name -> null);
+        return provision("resource", resourceType, properties, engine, region, accountId, "cloudcontrol");
+    }
+
+    /** Delete a resource by type + physical id — the Cloud Control {@code DeleteResource} path. */
+    public void deleteStandalone(String resourceType, String identifier, String region) {
+        deleteStandalone(resourceType, identifier, region, Map.of());
+    }
+
+    /**
+     * As above, with the attributes recorded when the resource was created. Custom resources, EKS
+     * nodegroups and IAM inline policies cannot be deleted from type and physical id alone, so
+     * without these their delete silently no-ops.
+     */
+    public void deleteStandalone(String resourceType, String identifier, String region,
+                                 Map<String, String> attributes) {
+        StackResource resource = new StackResource();
+        resource.setResourceType(resourceType);
+        resource.setPhysicalId(identifier);
+        resource.setAttributes(new HashMap<>(attributes == null ? Map.of() : attributes));
+        delete(resource, region);
+    }
+
+    /**
      * Deletes a provisioned resource. Custom resources are re-invoked with {@code RequestType=Delete}
      * (using the ServiceToken + properties stashed at create time); everything else delegates to the
      * type-keyed {@link #delete(String, String, String)}.
