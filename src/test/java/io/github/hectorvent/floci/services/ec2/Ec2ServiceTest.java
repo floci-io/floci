@@ -30,7 +30,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -412,6 +416,54 @@ class Ec2ServiceTest {
 
         assertEquals(1, snapshots.size());
         assertEquals("snap-owned", snapshots.getFirst().getSnapshotId());
+    }
+
+    @Test
+    void createImageRebootsTheSourceInstanceUnlessNoRebootIsSet() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2Service service = liveService(containerManager, mock(AmiImageResolver.class));
+        String instanceId = runOne(service, "ami-src");
+
+        service.createImage("us-east-1", instanceId, "with-reboot", null, false);
+        verify(containerManager).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+
+        service.createImage("us-east-1", instanceId, "without-reboot", null, true);
+        // Still one: NoReboot=true opted the second call out.
+        verify(containerManager, times(1)).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+    }
+
+    @Test
+    void runInstancesOnACreatedImageResolvesTheSourceGuest() {
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), resolver);
+        String instanceId = runOne(service, "ami-src");
+
+        String createdAmi = service.createImage("us-east-1", instanceId, "captured", null, true)
+                .getImageId();
+        String chainedAmi = service.createImage("us-east-1", runOne(service, createdAmi),
+                "captured-again", null, true).getImageId();
+
+        runOne(service, createdAmi);
+        runOne(service, chainedAmi);
+
+        // Every launch resolves through to the catalog id; the generated ami-* ids are
+        // unknown to the resolver and would otherwise fall back to the default guest.
+        verify(resolver, times(4)).resolveImage("ami-src");
+        verify(resolver, never()).resolveImage(createdAmi);
+        verify(resolver, never()).resolveImage(chainedAmi);
+    }
+
+    private static String runOne(Ec2Service service, String imageId) {
+        return service.runInstances("us-east-1", imageId, "t3.micro", 1, 1, null,
+                List.of(), null, null, List.of(), null, null)
+                .getInstances().getFirst().getInstanceId();
+    }
+
+    /** mock=false so the container-manager and resolver interactions actually happen. */
+    private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver) {
+        return new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                resolver, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
     }
 
     private static BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {
