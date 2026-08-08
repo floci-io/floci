@@ -71,6 +71,30 @@ public class CodeBuildRunner implements ContainerTeardown {
     private static final String PHASE_END_SENTINEL = "___FLOCI_PHASE_END___";
     private static final List<String> SHELL_PHASES = List.of("INSTALL", "PRE_BUILD", "BUILD", "POST_BUILD");
 
+    // Wrapper for the bash driver: each command entry runs in its own child shell
+    // that first restores the variable and cwd snapshot of the previous entry, sources
+    // the entry, then snapshots again. declare -p re-declares variables with their
+    // export flags intact; readonly variables (the r flag) are filtered out so the
+    // restore never errors. The snapshot only runs if the entry's shell survives it,
+    // so a failing entry keeps the last successful entry's state — like the real
+    // CodeBuild agent, which never leaks set -e/-u/-x or exit across entries while
+    // unexported variables and the working directory do persist.
+    private static final String BASH_DRIVER_PRELUDE = """
+            export ___FLOCI_DIR="/tmp/.floci-session-$$"
+            mkdir -p "$___FLOCI_DIR"
+            cat > "$___FLOCI_DIR/wrapper" <<'___FLOCI_WRAPPER_EOF___'
+            [ -f "$___FLOCI_DIR/state" ] && . "$___FLOCI_DIR/state" >/dev/null 2>&1
+            [ -f "$___FLOCI_DIR/cwd" ] && cd "$(cat "$___FLOCI_DIR/cwd")" 2>/dev/null
+            :
+            . "$___FLOCI_DIR/cmd"
+            ___floci_entry_rc=$?
+            set +e +u +x 2>/dev/null
+            { declare -p | grep -Ev '^declare -[a-zA-Z]*r'; } > "$___FLOCI_DIR/state" 2>/dev/null
+            pwd > "$___FLOCI_DIR/cwd"
+            exit "$___floci_entry_rc"
+            ___FLOCI_WRAPPER_EOF___
+            """;
+
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -263,13 +287,19 @@ public class CodeBuildRunner implements ContainerTeardown {
             // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
             copySourceToContainer(containerId, workspace, containerSrcDir);
 
-            // INSTALL through POST_BUILD run in one persistent shell session so shell
-            // variables (exported or not) and the working directory carry across phases,
-            // matching real CodeBuild. Per-phase status, timing, contexts and skip
-            // decisions come from sentinel lines the generated script emits.
+            PhaseResult bashProbe = runPhase(containerId, "/", envList,
+                    List.of("command -v bash >/dev/null 2>&1"), timeoutMinutes, stopFlag);
+            if (bashProbe.stopped()) { finishStopped(build); return; }
+            boolean bashAvailable = !bashProbe.failed();
+
+            // INSTALL through POST_BUILD run in one docker exec so shell variables
+            // (exported or not) and the working directory carry across phases like on
+            // real CodeBuild, while shell options set by one command entry never leak
+            // into the next. Per-phase status, timing, contexts and skip decisions
+            // come from sentinel lines the generated script emits.
             if (stopFlag.get()) { finishStopped(build); return; }
             PhaseResult phasesResult = runPhaseSession(containerId, containerSrcDir, envList,
-                    buildspec, build, timeoutMinutes, stopFlag);
+                    buildspec, build, bashAvailable, timeoutMinutes, stopFlag);
             if (phasesResult.stopped()) { finishStopped(build); return; }
             if (phasesResult.failed()) {
                 buildFailed = true;
@@ -654,32 +684,52 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    // One script for all buildspec phases, run in a single shell so unexported
-    // variables and cwd persist. Each command is guarded so a phase stops at its
-    // first failing command; PRE_BUILD and BUILD are skipped once an earlier phase
-    // failed while INSTALL and POST_BUILD always run, mirroring the previous
-    // Java-side decisions. Sentinel lines report each phase's outcome to the runner.
+    // One driver script for all buildspec phases, run in a single docker exec so
+    // state persists across phases. With bash available (all curated CodeBuild
+    // images), each command entry runs in its own child shell with a variable+cwd
+    // snapshot restored between entries — shell options (set -e/-u/-x) and exit
+    // never leak from one entry into the next, matching the real CodeBuild agent.
+    // Without bash the entries run inline in the single driver shell (sh fallback).
+    // A phase stops at its first failing entry; PRE_BUILD and BUILD are skipped once
+    // an earlier phase failed while INSTALL and POST_BUILD always run, mirroring the
+    // previous Java-side decisions. Sentinel lines report each phase's outcome.
     static String phaseSessionScript(List<String> installCommands, List<String> preBuildCommands,
-                                     List<String> buildCommands, List<String> postBuildCommands) {
-        StringBuilder script = new StringBuilder("___floci_failed=0\n");
-        appendPhaseScript(script, "INSTALL", installCommands, false);
-        appendPhaseScript(script, "PRE_BUILD", preBuildCommands, true);
-        appendPhaseScript(script, "BUILD", buildCommands, true);
-        appendPhaseScript(script, "POST_BUILD", postBuildCommands, false);
+                                     List<String> buildCommands, List<String> postBuildCommands,
+                                     boolean bashAvailable) {
+        StringBuilder script = new StringBuilder();
+        if (bashAvailable) {
+            script.append(BASH_DRIVER_PRELUDE);
+        }
+        script.append("___floci_failed=0\n");
+        appendPhaseScript(script, "INSTALL", installCommands, false, bashAvailable);
+        appendPhaseScript(script, "PRE_BUILD", preBuildCommands, true, bashAvailable);
+        appendPhaseScript(script, "BUILD", buildCommands, true, bashAvailable);
+        appendPhaseScript(script, "POST_BUILD", postBuildCommands, false, bashAvailable);
+        if (bashAvailable) {
+            script.append("rm -rf \"$___FLOCI_DIR\"\n");
+        }
         return script.toString();
     }
 
     private static void appendPhaseScript(StringBuilder script, String phase,
-                                          List<String> commands, boolean skipAfterFailure) {
+                                          List<String> commands, boolean skipAfterFailure,
+                                          boolean isolatedEntries) {
         if (skipAfterFailure) {
             script.append("if [ \"$___floci_failed\" -eq 0 ]; then\n");
         }
         script.append("echo \"").append(PHASE_START_SENTINEL).append(' ').append(phase).append("\"\n");
         script.append("___floci_rc=0\n");
         for (String command : commands) {
-            script.append("if [ \"$___floci_rc\" -eq 0 ]; then\n")
-                    .append(command).append('\n')
-                    .append("___floci_rc=$?\n")
+            script.append("if [ \"$___floci_rc\" -eq 0 ]; then\n");
+            if (isolatedEntries) {
+                script.append("cat > \"$___FLOCI_DIR/cmd\" <<'___FLOCI_CMD_EOF___'\n")
+                        .append(command).append('\n')
+                        .append("___FLOCI_CMD_EOF___\n")
+                        .append("bash \"$___FLOCI_DIR/wrapper\"\n");
+            } else {
+                script.append(command).append('\n');
+            }
+            script.append("___floci_rc=$?\n")
                     .append("fi\n");
         }
         script.append("echo \"").append(PHASE_END_SENTINEL).append(' ').append(phase)
@@ -694,11 +744,11 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     private PhaseResult runPhaseSession(String containerId, String workDir, List<String> env,
-                                        ParsedBuildspec buildspec, Build build,
+                                        ParsedBuildspec buildspec, Build build, boolean bashAvailable,
                                         int timeoutMinutes, AtomicBoolean stopFlag) {
         String script = phaseSessionScript(buildspec.installCommands(), buildspec.preBuildCommands(),
-                buildspec.buildCommands(), buildspec.postBuildCommands());
-        String[] cmd = {"sh", "-c", script};
+                buildspec.buildCommands(), buildspec.postBuildCommands(), bashAvailable);
+        String[] cmd = {bashAvailable ? "bash" : "sh", "-c", script};
         PhaseSession session = new PhaseSession(build);
 
         try {

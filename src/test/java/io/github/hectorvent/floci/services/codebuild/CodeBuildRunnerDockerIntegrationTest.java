@@ -21,14 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Runs real builds in Docker containers to verify that all buildspec phases share
  * one shell session — unexported variables and the working directory persist across
- * phases like on real CodeBuild — while per-phase status, duration and failure
- * contexts on the Build object keep working.
+ * phases like on real CodeBuild, while shell options (set -e) set by one command
+ * entry never leak into the next — and that per-phase status, duration and failure
+ * contexts on the Build object keep working. The bash image exercises the primary
+ * per-entry child-shell driver; busybox (no bash) exercises the sh fallback.
  */
 @QuarkusTest
 class CodeBuildRunnerDockerIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String BASH_IMAGE = "public.ecr.aws/docker/library/bash:latest";
+    private static final String SH_IMAGE = "public.ecr.aws/docker/library/busybox:latest";
 
     @Inject
     DockerClient dockerClient;
@@ -46,19 +49,24 @@ class CodeBuildRunnerDockerIntegrationTest {
     @Test
     void shellStateAndWorkingDirectoryPersistAcrossPhases() {
         String project = "shell-state-" + Long.toString(System.nanoTime(), 36);
-        createProject(project);
+        createProject(project, BASH_IMAGE);
         String buildId = startBuild(project, """
                 version: 0.2
                 phases:
                   pre_build:
                     commands:
-                      - ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
+                      - set -e && ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
                       - mkdir -p subdir
                       - cd subdir
                   build:
                     commands:
+                      - |
+                        false 2> /dev/null
+                        status=$?
+                        if [ $status -ne 0 ]; then MIGRATION="no"; else MIGRATION="yes"; fi
                       - if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then echo external; fi
                       - test "$ENABLE_EXTERNAL_PIPELINE_ACCOUNT" = "no"
+                      - test "$MIGRATION" = "no"
                       - test "$(pwd)" = "/codebuild/output/src/src/subdir"
                   post_build:
                     commands:
@@ -80,7 +88,7 @@ class CodeBuildRunnerDockerIntegrationTest {
     @Test
     void failingBuildPhaseReportsContextAndStillRunsPostBuild() {
         String project = "build-fail-" + Long.toString(System.nanoTime(), 36);
-        createProject(project);
+        createProject(project, BASH_IMAGE);
         String buildId = startBuild(project, """
                 version: 0.2
                 phases:
@@ -90,7 +98,7 @@ class CodeBuildRunnerDockerIntegrationTest {
                   build:
                     commands:
                       - echo before-failure
-                      - false
+                      - set -e && false
                       - echo never-reached
                   post_build:
                     commands:
@@ -121,7 +129,7 @@ class CodeBuildRunnerDockerIntegrationTest {
     @Test
     void failedInstallSkipsPreBuildAndBuildButRunsPostBuild() {
         String project = "install-fail-" + Long.toString(System.nanoTime(), 36);
-        createProject(project);
+        createProject(project, BASH_IMAGE);
         String buildId = startBuild(project, """
                 version: 0.2
                 phases:
@@ -155,7 +163,31 @@ class CodeBuildRunnerDockerIntegrationTest {
                 "POST_BUILD should have actually run, not been skipped");
     }
 
-    private void createProject(String name) {
+    @Test
+    void shFallbackStillSharesShellStateWhenBashIsAbsent() {
+        String project = "sh-fallback-" + Long.toString(System.nanoTime(), 36);
+        createProject(project, SH_IMAGE);
+        String buildId = startBuild(project, """
+                version: 0.2
+                phases:
+                  pre_build:
+                    commands:
+                      - ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
+                      - mkdir -p subdir
+                      - cd subdir
+                  build:
+                    commands:
+                      - test "$ENABLE_EXTERNAL_PIPELINE_ACCOUNT" = "no"
+                      - test "$(pwd)" = "/codebuild/output/src/src/subdir"
+                """);
+
+        Map<String, Object> build = awaitBuild(buildId);
+
+        assertEquals("SUCCEEDED", build.get("buildStatus"));
+        assertEquals("SUCCEEDED", phase(build, "BUILD").get("phaseStatus"));
+    }
+
+    private void createProject(String name, String image) {
         given()
             .header("X-Amz-Target", "CodeBuild_20161006.CreateProject")
             .contentType(CONTENT_TYPE)
@@ -171,7 +203,7 @@ class CodeBuildRunnerDockerIntegrationTest {
                     },
                     "serviceRole": "arn:aws:iam::000000000000:role/codebuild-role"
                 }
-                """.formatted(name, IMAGE))
+                """.formatted(name, image))
         .when()
             .post("/")
         .then()
