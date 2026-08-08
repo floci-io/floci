@@ -246,11 +246,41 @@ class EksServiceTest {
     }
 
     @Test
-    void createClusterValidatesSubnetsInRequestRegionNotDefaultRegion() {
-        // testConfig() always reports defaultRegion = "us-east-1". Here the
-        // *request's* region (via RegionResolver) is "eu-west-2", where the
-        // subnet actually exists. Validation must check eu-west-2, not fall
-        // back to the app's configured default region.
+    void createClusterResolvesVpcIdFromTheSubnets() {
+        // The second half of #1942: resourcesVpcConfig.vpcId came back blank.
+        //
+        // CreateCluster does not carry a vpcId — real EKS derives it from the
+        // subnets, and so should this. requireSubnet already returns the
+        // resolved Subnet, which carries the vpcId; it was simply discarded.
+        StorageFactory storageFactory = new StorageFactory(null, null) {
+            @Override
+            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return new InMemoryStorage<>();
+            }
+        };
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                realEc2Service());
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("vpc-id-cluster");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        Cluster cluster = service.createCluster(req);
+
+        assertEquals("vpc-default", cluster.getResourcesVpcConfig().getVpcId());
+    }
+
+    @Test
+    void createClusterBuildsArnFromRequestRegionNotDefaultRegion() {
+        // testConfig() always reports defaultRegion = "us-east-1"; the request's
+        // region is eu-west-2. This pins the ARN only — see the test below for
+        // the validation half.
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> StorageBackend<String, V> create(String serviceName, String fileName,
@@ -259,8 +289,8 @@ class EksServiceTest {
             }
         };
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
-        Ec2Service ec2Service = realEc2Service();
-        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                realEc2Service());
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of("subnet-default-a"));
@@ -274,6 +304,54 @@ class EksServiceTest {
 
         assertEquals("cross-region-cluster", cluster.getName());
         assertTrue(cluster.getArn().contains("eu-west-2"));
+    }
+
+    @Test
+    void createClusterValidatesSubnetsInRequestRegionNotDefaultRegion() {
+        // A subnet that exists in the DEFAULT region and nowhere else.
+        //
+        // The distinction matters: requireSubnet() calls ensureDefaultResources()
+        // on whatever region it is handed, which seeds subnet-default-a/b/c
+        // there on the spot. So a default subnet id resolves in EVERY region and
+        // cannot discriminate between "validated against the request region" and
+        // "validated against the configured default" — a test written with one
+        // passes with or without the fix.
+        //
+        // An explicitly created subnet is not seeded anywhere else, so asking
+        // for it from a different region is the only thing that pins the
+        // behaviour.
+        StorageFactory storageFactory = new StorageFactory(null, null) {
+            @Override
+            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return new InMemoryStorage<>();
+            }
+        };
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String usEastOnlySubnet = ec2Service
+                .createSubnet("us-east-1", "vpc-default", "172.31.200.0/24", "us-east-1a")
+                .getSubnetId();
+
+        // The request is for eu-west-2, where that subnet does not exist.
+        RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service);
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(usEastOnlySubnet));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("wrong-region-subnet-cluster");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        // Resolving against config.defaultRegion() would find it in us-east-1
+        // and let the cluster through, which is the bug.
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(service.listClusters().isEmpty());
     }
 
     @Test
