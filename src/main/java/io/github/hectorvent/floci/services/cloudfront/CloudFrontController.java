@@ -25,6 +25,16 @@ public class CloudFrontController {
 
     private static final String NS = AwsNamespaces.CLOUDFRONT;
     private static final String XML = "application/xml";
+    private static final String GEO_RESTRICTION = "GeoRestriction";
+    private static final String ORIGIN_GROUPS = "OriginGroups";
+    private static final String ITEMS = "Items";
+    private static final String LOCATION = "Location";
+    private static final String LOCATIONS = "Locations";
+    private static final String QUANTITY = "Quantity";
+    private static final String RESTRICTION_TYPE = "RestrictionType";
+    private static final String RESTRICTIONS = "Restrictions";
+    private static final String DEFAULT_GEO_RESTRICTION_TYPE = "none";
+    private static final int EMPTY_QUANTITY = 0;
 
     private static final XMLInputFactory XML_FACTORY;
 
@@ -1748,6 +1758,7 @@ public class CloudFrontController {
         List<Origin> origins = cfg.getOrigins();
         xml.raw(xmlQuantityItems("Origins", "Origin", origins != null ? origins.size() : 0,
                 origins != null ? origins.stream().map(this::xmlOrigin).toList() : List.of()));
+        xml.raw(xmlEmptyOriginGroups());
 
         if (cfg.getDefaultCacheBehavior() != null) {
             xml.raw(xmlDefaultCacheBehavior(cfg.getDefaultCacheBehavior()));
@@ -1780,8 +1791,67 @@ public class CloudFrontController {
         xml.end("Aliases");
 
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
+        xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
 
         return xml.build();
+    }
+
+    private String xmlEmptyOriginGroups() {
+        // Presence-only OriginGroups is intentional for Terraform compatibility; round-tripping groups is deferred.
+        return new XmlBuilder()
+                .start(ORIGIN_GROUPS)
+                .elem(QUANTITY, EMPTY_QUANTITY)
+                .end(ORIGIN_GROUPS)
+                .build();
+    }
+
+    private String xmlRestrictions(Map<String, Object> geoRestriction) {
+        String restrictionType = DEFAULT_GEO_RESTRICTION_TYPE;
+        int quantity = EMPTY_QUANTITY;
+        List<String> locations = List.of();
+        if (geoRestriction != null) {
+            restrictionType = String.valueOf(
+                    geoRestriction.getOrDefault(RESTRICTION_TYPE, DEFAULT_GEO_RESTRICTION_TYPE));
+            locations = stringList(geoRestriction.get(LOCATIONS));
+            quantity = parseInt(geoRestriction.get(QUANTITY), EMPTY_QUANTITY);
+            if (quantity == EMPTY_QUANTITY && !locations.isEmpty()) {
+                quantity = locations.size();
+            }
+        }
+
+        XmlBuilder xml = new XmlBuilder()
+                .start(RESTRICTIONS)
+                .start(GEO_RESTRICTION)
+                .elem(RESTRICTION_TYPE, restrictionType)
+                .elem(QUANTITY, quantity);
+        if (!locations.isEmpty()) {
+            xml.start(ITEMS);
+            for (String location : locations) {
+                xml.elem(LOCATION, location);
+            }
+            xml.end(ITEMS);
+        }
+        return xml.end(GEO_RESTRICTION)
+                .end(RESTRICTIONS)
+                .build();
+    }
+
+    private List<String> stringList(Object value) {
+        if (value instanceof List<?> list) {
+            return list.stream().map(String::valueOf).toList();
+        }
+        return List.of();
+    }
+
+    private int parseInt(Object value, int defaultValue) {
+        if (value == null) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value.toString());
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     private String xmlOrigin(Origin o) {
@@ -1912,6 +1982,7 @@ public class CloudFrontController {
                         "<Origin><Id>" + XmlBuilder.escape(o.getId()) + "</Id><DomainName>"
                                 + XmlBuilder.escape(o.getDomainName()) + "</DomainName></Origin>").toList()
                         : List.of()));
+        xml.raw(xmlEmptyOriginGroups());
 
         List<String> aliases = cfg != null ? cfg.getAliases() : null;
         int aliasCount = aliases != null ? aliases.size() : 0;
@@ -1926,6 +1997,7 @@ public class CloudFrontController {
         xml.end("Aliases");
 
         xml.raw(xmlViewerCertificate(cfg != null ? cfg.getViewerCertificate() : null));
+        xml.raw(xmlRestrictions(cfg != null ? cfg.getGeoRestriction() : null));
 
         xml.end("DistributionSummary");
         return xml.build();
@@ -2106,8 +2178,22 @@ public class CloudFrontController {
         cfg.setCacheBehaviors(parseCacheBehaviors(body));
         cfg.setAliases(parseAliases(body));
         cfg.setViewerCertificate(parseViewerCertificate(body));
+        cfg.setGeoRestriction(parseGeoRestriction(body));
 
         return cfg;
+    }
+
+    private Map<String, Object> parseGeoRestriction(String body) {
+        List<Map<String, String>> groups = XmlParser.extractGroups(body, GEO_RESTRICTION);
+        if (groups.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> geoRestriction = new LinkedHashMap<>(groups.getFirst());
+        List<String> locations = XmlParser.extractAll(body, LOCATION);
+        if (!locations.isEmpty()) {
+            geoRestriction.put(LOCATIONS, locations);
+        }
+        return geoRestriction;
     }
 
     private List<Origin> parseOrigins(String body) {
