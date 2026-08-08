@@ -2430,14 +2430,18 @@ public class DynamoDbService {
 
         return switch (op) {
             case "EQ" -> {
-                if (attrValue == null) yield false;
-                yield ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr != null ? compareAttr : attrValue) == 0
-                        && actual != null && actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield false;
+                }
+                // Deep equality, so set/list/map values compare by content rather than
+                // collapsing to an empty scalar and matching everything.
+                yield attributeValuesEqual(attrValue, compareAttr);
             }
             case "NE" -> {
-                if (attrValue == null) yield true;
-                if (actual == null || compareValue == null) yield true;
-                yield !actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield true;
+                }
+                yield !attributeValuesEqual(attrValue, compareAttr);
             }
             case "NULL" -> attrValue == null;
             case "NOT_NULL" -> attrValue != null;
