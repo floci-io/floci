@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 531.25 156.71">
+  <!-- Generator: Adobe Illustrator 30.4.0, SVG Export Plug-In . SVG Version: 2.1.4 Build 226)  -->
+  <defs>
+    <filter id="logoGlow" x="-20%" y="-40%" width="140%" height="180%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 1 0 0 0 0 0.6 0 0 0 0 0 0 0 0 .55 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="shineGradient" x1="-120" y1="0" x2="120" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset=".45" stop-color="#fff" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".8"/>
+      <stop offset=".55" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <style>
+      .st0 {
+        fill: #151515;
+      }
+
+      .st1 {
+        fill: #FF9900;
+      }
+
+      .st2 {
+        isolation: isolate;
+      }
+
+      .st3 {
+        fill: #151515;
+      }
+
+      .st4 {
+        fill: #262425;
+      }
+
+      #logoBuild {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: logoBreath 5s ease-in-out 2.7s infinite;
+      }
+
+      .logo-piece {
+        opacity: 0;
+        animation: reveal .5s ease forwards;
+      }
+
+      .cloud-a { animation-delay: .55s; }
+      .cloud-b { animation-delay: .75s; }
+      .word-a { animation-delay: 1.72s; }
+      .word-b { animation-delay: 1.92s; }
+      .word-c { animation-delay: 2.12s; }
+      .word-d { animation-delay: 2.32s; }
+
+      .guide-path {
+        fill: none;
+        opacity: 1;
+        stroke-opacity: .9;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-dasharray: 1;
+        stroke-dashoffset: 1;
+        vector-effect: non-scaling-stroke;
+        animation: drawLine 1.25s cubic-bezier(.34, .01, .14, 1) forwards,
+          guideFade .42s ease forwards;
+      }
+
+      .guide-dark {
+        stroke: #151515;
+        stroke-width: 2.6;
+      }
+
+      .guide-word {
+        stroke: #262425;
+        stroke-width: 2;
+      }
+
+      .guide-cloud-a { animation-delay: .08s, 1.25s; }
+      .guide-cloud-b { animation-delay: .24s, 1.45s; }
+      .guide-word-a { animation-delay: 1.18s, 2.28s; }
+      .guide-word-b { animation-delay: 1.36s, 2.48s; }
+      .guide-word-c { animation-delay: 1.54s, 2.68s; }
+      .guide-word-d { animation-delay: 1.72s, 2.88s; }
+
+      .dot-pop {
+        opacity: 0;
+        filter: url(#logoGlow);
+        transform: scale(.15);
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: dotPop .8s cubic-bezier(.17, .89, .28, 1.28) forwards,
+          softPulse 3.2s ease-in-out 2.2s infinite;
+      }
+
+      .dot-cloud { animation-delay: 1.45s, 3.1s; }
+      .dot-i { animation-delay: 2.62s, 3.45s; }
+
+      .cloud-shadow {
+        opacity: 0;
+        animation: shadowIn .8s ease 1.2s forwards;
+      }
+
+      .shine {
+        opacity: 0;
+        mix-blend-mode: screen;
+        animation: shineSweep 2.4s ease-in-out 2.8s infinite;
+      }
+
+      @keyframes drawLine {
+        to { stroke-dashoffset: 0; }
+      }
+
+      @keyframes guideFade {
+        from { opacity: 1; stroke-opacity: .9; }
+        to { opacity: 0; stroke-opacity: 0; }
+      }
+
+      @keyframes reveal {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+
+      @keyframes dotPop {
+        0% { opacity: 0; transform: scale(.15); }
+        62% { opacity: 1; transform: scale(1.18); }
+        100% { opacity: 1; transform: scale(1); }
+      }
+
+      @keyframes softPulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.08); }
+      }
+
+      @keyframes shadowIn {
+        from { opacity: 0; transform: translateY(4px) scale(.94); }
+        to { opacity: .14; transform: translateY(0) scale(1); }
+      }
+
+      @keyframes shineSweep {
+        0%, 18% { opacity: 0; transform: translateX(-220px); }
+        30% { opacity: .7; }
+        54% { opacity: 0; transform: translateX(560px); }
+        100% { opacity: 0; transform: translateX(560px); }
+      }
+
+      @keyframes logoBreath {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.008); }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #logoBuild,
+        #logoBuild *,
+        .shine {
+          animation: none !important;
+          opacity: 1;
+          stroke-dashoffset: 0;
+          transform: none;
+        }
+
+        .guide-path {
+          opacity: 0;
+        }
+
+        .shine {
+          opacity: 0;
+        }
+      }
+    </style>
+  </defs>
+  <g id="logoBuild">
+    <ellipse class="cloud-shadow" cx="89" cy="149.5" rx="75" ry="5.8"/>
+    <g id="finalWordmark" class="st2">
+      <g class="st2">
+        <path class="st4 logo-piece word-a" d="M305.44,141.35h-15.94V39.04h-17.08c-13.18,0-16.75,7.81-16.59,17.4v8.95h17.4v13.34h-17.4v62.62h-15.94v-62.62h-14.64v-13.34h14.64v-7.16c0-20.66,8.95-34.16,29.6-34.16h35.95v117.28Z"/>
+        <path class="st4 logo-piece word-b" d="M324.31,103.29c0-24.07,18.22-39.85,39.85-39.85s40.01,15.78,40.01,39.85-18.38,40.01-40.01,40.01-39.85-15.94-39.85-40.01ZM388.24,103.29c0-14.64-11.06-24.89-24.07-24.89s-23.91,10.25-23.91,24.89,10.9,25.05,23.91,25.05,24.07-10.25,24.07-25.05Z"/>
+        <path class="st4 logo-piece word-c" d="M418,103.29c0-24.07,19.03-39.85,40.99-39.85,12.36,0,22.93,5.04,29.6,13.01l-10.57,9.92c-4.39-4.88-11.06-7.97-18.71-7.97-14.15,0-25.38,10.41-25.38,24.89s11.22,25.05,25.38,25.05c7.65,0,14.31-3.09,18.71-7.97l10.57,9.92c-6.67,7.97-17.24,13.01-29.6,13.01-21.96,0-40.99-15.94-40.99-40.01Z"/>
+        <path class="st4 logo-piece word-d" d="M502.91,37.74c0-5.86,5.04-10.25,10.9-10.25s10.9,4.39,10.9,10.25-4.88,10.25-10.9,10.25-10.9-4.39-10.9-10.25ZM505.84,141.35v-75.96h15.94v75.96h-15.94Z"/>
+      </g>
+    </g>
+    <g id="finalMark">
+      <path class="st0 logo-piece cloud-a" d="M44.46,52.16l-1.44,9.05c-.1.64-35.57,8.08-30.51,43.05,2.04,14.08,14.69,31.06,31.94,31.22l84.34.78c3.64.03,7.49.5,9.97,2.81,1.69,1.57,1.95,6.1-.29,9.22l-83.49.43c-22.68.12-43.45-11.19-51.76-32.9-8.64-22.56.61-49.48,22.58-59.54,5.11-2.34,7.7-4,8.39-9.37l10.28,5.24h-.01ZM44.46,52.16l-10.28-5.24c1.94-15.09,10.61-28.25,23.15-36.38C74.85-.82,94.57-3.69,115.01,5.35c14.93,6.6,26.96,21.97,32.12,39.33,26.07,3.63,46.19,26.18,40.75,53.8-3.06.86-9.18-1.15-11.34-3.72,1.28-12.11-3.1-22.27-10.75-29.43-8.19-7.67-17.88-9.28-30.09-8.04-.09-25.91-19.81-43.97-43.82-45.33-22.91-1.29-43.59,16.13-47.42,40.2h0Z"/>
+      <ellipse class="st1 dot-pop dot-cloud" cx="173.57" cy="127.13" rx="20.36" ry="20.4"/>
+    </g>
+    <ellipse class="st1 dot-pop dot-i" cx="513.02" cy="37.71" rx="13.22" ry="13.25"/>
+    <g id="drawGuides">
+      <path class="guide-path guide-dark guide-cloud-a" pathLength="1" d="M44.46,52.16l-1.44,9.05c-.1.64-35.57,8.08-30.51,43.05,2.04,14.08,14.69,31.06,31.94,31.22l84.34.78c3.64.03,7.49.5,9.97,2.81,1.69,1.57,1.95,6.1-.29,9.22l-83.49.43c-22.68.12-43.45-11.19-51.76-32.9-8.64-22.56.61-49.48,22.58-59.54,5.11-2.34,7.7-4,8.39-9.37l10.28,5.24h-.01Z"/>
+      <path class="guide-path guide-dark guide-cloud-b" pathLength="1" d="M44.46,52.16l-10.28-5.24c1.94-15.09,10.61-28.25,23.15-36.38C74.85-.82,94.57-3.69,115.01,5.35c14.93,6.6,26.96,21.97,32.12,39.33,26.07,3.63,46.19,26.18,40.75,53.8-3.06.86-9.18-1.15-11.34-3.72,1.28-12.11-3.1-22.27-10.75-29.43-8.19-7.67-17.88-9.28-30.09-8.04-.09-25.91-19.81-43.97-43.82-45.33-22.91-1.29-43.59,16.13-47.42,40.2h0Z"/>
+      <path class="guide-path guide-word guide-word-a" pathLength="1" d="M305.44,141.35h-15.94V39.04h-17.08c-13.18,0-16.75,7.81-16.59,17.4v8.95h17.4v13.34h-17.4v62.62h-15.94v-62.62h-14.64v-13.34h14.64v-7.16c0-20.66,8.95-34.16,29.6-34.16h35.95v117.28Z"/>
+      <path class="guide-path guide-word guide-word-b" pathLength="1" d="M324.31,103.29c0-24.07,18.22-39.85,39.85-39.85s40.01,15.78,40.01,39.85-18.38,40.01-40.01,40.01-39.85-15.94-39.85-40.01ZM388.24,103.29c0-14.64-11.06-24.89-24.07-24.89s-23.91,10.25-23.91,24.89,10.9,25.05,23.91,25.05,24.07-10.25,24.07-25.05Z"/>
+      <path class="guide-path guide-word guide-word-c" pathLength="1" d="M418,103.29c0-24.07,19.03-39.85,40.99-39.85,12.36,0,22.93,5.04,29.6,13.01l-10.57,9.92c-4.39-4.88-11.06-7.97-18.71-7.97-14.15,0-25.38,10.41-25.38,24.89s11.22,25.05,25.38,25.05c7.65,0,14.31-3.09,18.71-7.97l10.57,9.92c-6.67,7.97-17.24,13.01-29.6,13.01-21.96,0-40.99-15.94-40.99-40.01Z"/>
+      <path class="guide-path guide-word guide-word-d" pathLength="1" d="M502.91,37.74c0-5.86,5.04-10.25,10.9-10.25s10.9,4.39,10.9,10.25-4.88,10.25-10.9,10.25-10.9-4.39-10.9-10.25ZM505.84,141.35v-75.96h15.94v75.96h-15.94Z"/>
+    </g>
+    <rect class="shine" x="-80" y="0" width="120" height="156.71" fill="url(#shineGradient)" transform="skewX(-18)"/>
+  </g>
+</svg>
