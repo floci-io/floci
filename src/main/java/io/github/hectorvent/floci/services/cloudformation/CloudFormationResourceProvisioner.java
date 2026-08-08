@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
+import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -968,20 +969,22 @@ public class CloudFormationResourceProvisioner {
             name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
         }
         String launchConfigName = resolveOptional(props, "LaunchConfigurationName", engine);
+        String launchTemplateId = null;
         String launchTemplateName = null;
         String launchTemplateVersion = null;
         if (props != null && props.has("LaunchTemplate")) {
             JsonNode lt = props.get("LaunchTemplate");
+            // Id and name are distinct lookup keys in Auto Scaling: passing an lt- id in the name slot
+            // never matches a stored template.
+            launchTemplateId = engine.resolve(lt.path("LaunchTemplateId"));
             launchTemplateName = engine.resolve(lt.path("LaunchTemplateName"));
-            if (launchTemplateName == null || launchTemplateName.isBlank()) {
-                launchTemplateName = engine.resolve(lt.path("LaunchTemplateId"));
-            }
             launchTemplateVersion = engine.resolve(lt.path("Version"));
         }
 
         var asg = autoScalingService.createAutoScalingGroup(region, name,
-                blankToNull(launchConfigName), null, blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
-                null,
+                blankToNull(launchConfigName),
+                blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
+                resolveMixedInstancesPolicy(props, engine),
                 parseIntProp(props, "MinSize", engine, 0),
                 parseIntProp(props, "MaxSize", engine, 0),
                 parseIntProp(props, "DesiredCapacity", engine, 0),
@@ -998,6 +1001,72 @@ public class CloudFormationResourceProvisioner {
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
+    }
+
+    /**
+     * Builds the {@code MixedInstancesPolicy} of an Auto Scaling group from template properties, in the
+     * same shape the Query API parser produces. Returns {@code null} when the property is absent, so
+     * that the group falls back to its {@code LaunchTemplate} or {@code LaunchConfigurationName}.
+     */
+    private MixedInstancesPolicy resolveMixedInstancesPolicy(JsonNode props,
+                                                             CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("MixedInstancesPolicy") || props.get("MixedInstancesPolicy").isNull()) {
+            return null;
+        }
+        JsonNode policyNode = props.get("MixedInstancesPolicy");
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+
+        JsonNode launchTemplateNode = policyNode.path("LaunchTemplate");
+        if (launchTemplateNode.isObject()) {
+            MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
+            JsonNode specNode = launchTemplateNode.path("LaunchTemplateSpecification");
+            if (specNode.isObject()) {
+                var specification = new MixedInstancesPolicy.LaunchTemplateSpecification();
+                specification.setLaunchTemplateId(blankToNull(engine.resolve(specNode.path("LaunchTemplateId"))));
+                specification.setLaunchTemplateName(blankToNull(engine.resolve(specNode.path("LaunchTemplateName"))));
+                specification.setVersion(blankToNull(engine.resolve(specNode.path("Version"))));
+                launchTemplate.setLaunchTemplateSpecification(specification);
+            }
+            for (JsonNode overrideNode : launchTemplateNode.path("Overrides")) {
+                String instanceType = engine.resolve(overrideNode.path("InstanceType"));
+                if (instanceType != null && !instanceType.isBlank()) {
+                    var override = new MixedInstancesPolicy.LaunchTemplateOverride();
+                    override.setInstanceType(instanceType);
+                    launchTemplate.getOverrides().add(override);
+                }
+            }
+            policy.setLaunchTemplate(launchTemplate);
+        }
+
+        JsonNode distributionNode = policyNode.path("InstancesDistribution");
+        if (distributionNode.isObject()) {
+            var distribution = new MixedInstancesPolicy.InstancesDistribution();
+            distribution.setOnDemandBaseCapacity(parseOptionalInt("OnDemandBaseCapacity",
+                    engine.resolve(distributionNode.path("OnDemandBaseCapacity"))));
+            distribution.setOnDemandPercentageAboveBaseCapacity(
+                    parseOptionalInt("OnDemandPercentageAboveBaseCapacity",
+                            engine.resolve(distributionNode.path("OnDemandPercentageAboveBaseCapacity"))));
+            distribution.setSpotAllocationStrategy(
+                    blankToNull(engine.resolve(distributionNode.path("SpotAllocationStrategy"))));
+            policy.setInstancesDistribution(distribution);
+        }
+        return policy;
+    }
+
+    /**
+     * Reads an optional integer property. A value that is present but not a number is a template
+     * error, and AWS rejects it rather than treating it as absent.
+     */
+    private Integer parseOptionalInt(String field, String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "Value of property " + field + " must be an integer.", 400);
+        }
     }
 
     private Map<String, String> resolveAsgTags(JsonNode props, CloudFormationTemplateEngine engine) {

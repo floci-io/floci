@@ -107,6 +107,21 @@ because their backing services are not implemented. A `SecretId` change is appli
 than reproducing CloudFormation's replacement event sequence; failed changes restore affected secret
 data and attachment ownership.
 
+## Auto Scaling Launch Template Resolution
+
+`AWS::AutoScaling::AutoScalingGroup` resolves its launch template through any of the shapes AWS
+accepts, not only by name:
+
+- `LaunchTemplate` with `LaunchTemplateId` **or** `LaunchTemplateName` (plus an optional `Version`).
+  The id and name are distinct lookup keys, so an `lt-` id is matched as an id rather than being
+  treated as a name.
+- A `Ref` to an in-stack `AWS::EC2::LaunchTemplate`, whose `Ref` returns the `lt-` id and whose
+  `Fn::GetAtt LatestVersionNumber` supplies the version.
+- `MixedInstancesPolicy` → `LaunchTemplate` → `LaunchTemplateSpecification`, including
+  `Overrides[].InstanceType` and `InstancesDistribution` (`OnDemandBaseCapacity`,
+  `OnDemandPercentageAboveBaseCapacity`, `SpotAllocationStrategy`). A non-integer where AWS expects
+  a number fails the stack rather than being dropped.
+
 ## Lambda Stack Updates
 
 `AWS::Lambda::Function` resources are reconciled during `UpdateStack` in the same shape as CloudFormation/CDK deployments:
