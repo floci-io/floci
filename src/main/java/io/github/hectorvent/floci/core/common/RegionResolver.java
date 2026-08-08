@@ -86,6 +86,10 @@ public class RegionResolver {
         return defaultRegion;
     }
 
+    public String getDefaultAccountId() {
+        return defaultAccountId;
+    }
+
     /**
      * Returns the account ID for the current request when called from a request context,
      * or the configured default account ID otherwise (async workers, startup, tests).

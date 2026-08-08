@@ -282,8 +282,8 @@ public class AwsQueryController {
             case "sns" -> snsQueryHandler.handle(action, formParams, region);
             case "iam" -> iamQueryHandler.handle(action, formParams, authorization);
             case "sts" -> stsQueryHandler.handle(action, formParams);
-            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams);
-            case "rds" -> { 
+            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams, region);
+            case "rds" -> {
                 // Neptune signs requests with "rds" credential scope (same wire protocol).
                 // Route to Neptune when Engine=neptune (create ops) or when the cluster/instance
                 // already exists in Neptune storage (describe/modify/delete ops).

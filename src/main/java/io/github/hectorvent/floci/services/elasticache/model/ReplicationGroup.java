@@ -18,6 +18,8 @@ public class ReplicationGroup {
     private int proxyPort;
     private String authToken; // stored plain-text for PASSWORD auth validation in the proxy
     private Set<String> associatedUserIds = new HashSet<>();
+    private String arn;
+    private String region;
 
     // Transient fields — not persisted, restored on container restart
     private transient String containerId;
@@ -75,4 +77,10 @@ public class ReplicationGroup {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public String getArn() { return arn; }
+    public void setArn(String arn) { this.arn = arn; }
+
+    public String getRegion() { return region; }
+    public void setRegion(String region) { this.region = region; }
 }
