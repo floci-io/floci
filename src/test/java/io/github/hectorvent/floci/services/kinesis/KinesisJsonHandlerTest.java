@@ -9,10 +9,15 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.time.Instant;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KinesisJsonHandlerTest {
 
@@ -21,11 +26,12 @@ class KinesisJsonHandlerTest {
     private static final String STREAM_ARN = "arn:aws:kinesis:us-east-1:123456789012:stream/test-stream";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private KinesisService service;
     private KinesisJsonHandler handler;
 
     @BeforeEach
     void setUp() {
-        KinesisService service = new KinesisService(
+        service = new KinesisService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT)
@@ -54,6 +60,59 @@ class KinesisJsonHandlerTest {
         assertThat(resp.getStatus(), is(200));
         ObjectNode desc = (ObjectNode) responseEntity(resp).get("StreamDescription");
         assertEquals("test-stream", desc.get("StreamName").asText());
+    }
+
+    @Test
+    void describeStreamSerializesCreationTimestampAsPlainDecimal() throws Exception {
+        createStream("test-stream");
+        service.describeStream("test-stream", REGION)
+                .setStreamCreationTimestamp(Instant.ofEpochMilli(1_785_732_980_986L));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ObjectNode desc = (ObjectNode) responseEntity(handler.handle("DescribeStream", req, REGION))
+                .get("StreamDescription");
+
+        assertPlainDecimalTimestamp(desc, "1785732980.986");
+    }
+
+    @Test
+    void describeStreamSummarySerializesCreationTimestampAsPlainDecimal() throws Exception {
+        createStream("test-stream");
+        service.describeStream("test-stream", REGION)
+                .setStreamCreationTimestamp(Instant.ofEpochMilli(1_785_732_980_986L));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ObjectNode summary = (ObjectNode) responseEntity(handler.handle("DescribeStreamSummary", req, REGION))
+                .get("StreamDescriptionSummary");
+
+        assertPlainDecimalTimestamp(summary, "1785732980.986");
+    }
+
+    @Test
+    void wholeSecondCreationTimestampRemainsNumeric() throws Exception {
+        createStream("test-stream");
+        service.describeStream("test-stream", REGION)
+                .setStreamCreationTimestamp(Instant.ofEpochMilli(1_785_732_980_000L));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ObjectNode desc = (ObjectNode) responseEntity(handler.handle("DescribeStream", req, REGION))
+                .get("StreamDescription");
+
+        assertPlainDecimalTimestamp(desc, "1785732980.000");
+    }
+
+    private void assertPlainDecimalTimestamp(ObjectNode description, String expected) throws Exception {
+        var timestamp = description.get("StreamCreationTimestamp");
+        assertTrue(timestamp.isNumber());
+        assertEquals(new BigDecimal(expected), timestamp.decimalValue());
+
+        String serialized = MAPPER.writeValueAsString(timestamp);
+        assertEquals(expected, serialized);
+        assertFalse(serialized.contains("E"));
+        assertFalse(serialized.contains("e"));
     }
 
     @Test

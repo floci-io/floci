@@ -10,7 +10,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -21,6 +23,9 @@ import static org.junit.jupiter.api.Assertions.*;
 class KinesisIntegrationTest {
 
     private static final String KINESIS_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Pattern CREATION_TIMESTAMP_PATTERN = Pattern.compile(
+            "\\\"StreamCreationTimestamp\\\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)(?=\\s*[,}])");
 
     @BeforeAll
     static void configureRestAssured() {
@@ -87,6 +92,37 @@ class KinesisIntegrationTest {
         .then()
             .statusCode(200)
             .body("Shards.size()", equalTo(2));
+    }
+
+    @Test
+    @Order(4)
+    void describeStreamReturnsPlainDecimalCreationTimestamp() throws Exception {
+        String responseBody = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        var matcher = CREATION_TIMESTAMP_PATTERN.matcher(responseBody);
+        assertTrue(matcher.find(), "timestamp must be serialized as a plain JSON decimal: " + responseBody);
+        String timestampLexeme = matcher.group(1);
+        BigDecimal timestamp = new BigDecimal(timestampLexeme);
+        assertTrue(timestamp.signum() > 0);
+        assertTrue(timestamp.stripTrailingZeros().scale() <= 3);
+
+        JsonNode timestampNode = MAPPER.readTree(responseBody)
+                .path("StreamDescription")
+                .path("StreamCreationTimestamp");
+        assertTrue(timestampNode.isNumber());
+        assertEquals(timestamp, timestampNode.decimalValue());
+        assertFalse(timestampLexeme.contains("E"));
+        assertFalse(timestampLexeme.contains("e"));
     }
 
     @Test
