@@ -36,7 +36,7 @@ class InlineZipCfnResponseModuleTest {
 
     @Test
     void nodeZipCarriesRequirableCfnResponseModule() throws Exception {
-        Map<String, String> entries = unzip(CloudFormationResourceProvisioner.sourceToZipBase64(
+        Map<String, String> entries = unzip(InlineZipPackager.sourceToZipBase64(
                 "exports.handler = async () => {};", "index.handler", "nodejs22.x"));
 
         assertEquals("exports.handler = async () => {};", entries.get("index.js"));
@@ -51,7 +51,7 @@ class InlineZipCfnResponseModuleTest {
 
     @Test
     void pythonZipCarriesCfnresponseModule() throws Exception {
-        Map<String, String> entries = unzip(CloudFormationResourceProvisioner.sourceToZipBase64(
+        Map<String, String> entries = unzip(InlineZipPackager.sourceToZipBase64(
                 "def handler(event, context):\n    pass\n", "index.handler", "python3.12"));
 
         assertTrue(entries.containsKey("index.py"));
