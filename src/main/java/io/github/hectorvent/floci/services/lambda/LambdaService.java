@@ -1262,6 +1262,25 @@ public class LambdaService {
         return "snapshots/" + account + "/" + fn.getFunctionName();
     }
 
+    /** Stable, account-scoped S3 key for a published layer version's archive. */
+    public static String layerObjectKey(String accountId, String layerName, long version) {
+        var account = accountId != null ? accountId : "000000000000";
+        return "layers/" + account + "/" + layerName + "/" + version;
+    }
+
+    /** Percent-encodes each path segment of a bucket path or object key for use in a URL. */
+    public static String encodeObjectPath(String path) {
+        var encoded = new StringBuilder();
+        for (var segment : path.split("/", -1)) {
+            if (!encoded.isEmpty()) {
+                encoded.append('/');
+            }
+            encoded.append(java.net.URLEncoder.encode(segment, java.nio.charset.StandardCharsets.UTF_8)
+                    .replace("+", "%20"));
+        }
+        return encoded.toString();
+    }
+
     private void extractZipCode(LambdaFunction fn, String zipFileBase64, String region) {
         extractZipCodeBytes(fn, Base64.getDecoder().decode(zipFileBase64), region);
     }
@@ -1313,8 +1332,25 @@ public class LambdaService {
     }
 
     private void storeDeploymentPackage(LambdaFunction fn, byte[] zipBytes, String region) {
+        boolean stored = putTasksObjectQuietly(s3Service, region, codeObjectKey(fn), zipBytes,
+                "deployment package for " + fn.getFunctionName());
+        if (!stored && requiresStoredTasksObject(config)) {
+            throw new AwsException("ServiceException",
+                    "Could not store the deployment package for '" + fn.getFunctionName()
+                            + "' in Floci's S3, which the kubernetes Lambda executor needs to "
+                            + "launch pods. The function was not deployed.", 500);
+        }
+    }
+
+    /**
+     * Best-effort put into the per-region tasks bucket, shared by function-code and
+     * layer-archive storage. Returns whether the object was stored so a caller whose
+     * executor depends on it can fail loudly instead of silently succeeding.
+     */
+    static boolean putTasksObjectQuietly(S3Service s3Service, String region, String key,
+                                         byte[] zipBytes, String what) {
         if (s3Service == null) {
-            return;
+            return false;
         }
         String bucket = tasksBucketName(region);
         try {
@@ -1326,13 +1362,22 @@ public class LambdaService {
                     throw e;
                 }
             }
-            s3Service.putObject(bucket, codeObjectKey(fn), zipBytes,
-                    "application/zip", java.util.Map.of());
+            s3Service.putObject(bucket, key, zipBytes, "application/zip", java.util.Map.of());
+            return true;
         } catch (Exception e) {
-            // Never fail a deploy because the convenience copy failed.
-            LOG.warnv("Could not store deployment package for {0}: {1}",
-                    fn.getFunctionName(), e.getMessage());
+            LOG.warnv("Could not store {0}: {1}", what, e.getMessage());
+            return false;
         }
+    }
+
+    /**
+     * Whether the tasks-bucket copy is load-bearing for the active executor. The
+     * kubernetes executor's pods download code and layers from it, so a store failure
+     * must fail the deploy rather than surface later as broken cold starts.
+     */
+    static boolean requiresStoredTasksObject(EmulatorConfig config) {
+        return config != null
+                && "kubernetes".equalsIgnoreCase(config.services().lambda().executor().trim());
     }
 
     private void extractZipCodeFromS3(LambdaFunction fn, String s3Bucket, String s3Key, String region) {

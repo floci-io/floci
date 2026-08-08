@@ -77,6 +77,8 @@ class LambdaLayerIntegrationTest {
             .body("CompatibleArchitectures", hasItem("x86_64"))
             .body("Content.CodeSize", greaterThan(0))
             .body("Content.CodeSha256", not(emptyString()))
+            .body("Content.Location", containsString("awslambda-us-east-1-tasks/layers/"))
+            .body("Content.Location", endsWith("/" + LAYER_NAME + "/1"))
             .body("CreatedDate", not(emptyString()));
     }
 
@@ -291,6 +293,31 @@ class LambdaLayerIntegrationTest {
             .delete("/2018-10-31/layers/" + LAYER_NAME + "/versions/99")
         .then()
             .statusCode(204);
+    }
+
+    // ── Stored layer archive in Floci's S3 ────────────────────────────────────
+
+    @Test
+    @Order(17)
+    void layerArchive_version2_isDownloadableFromTasksBucket() {
+        // Publish stores the archive in Floci's S3; the kubernetes executor's init
+        // container downloads it from exactly this path. Version 2 is still present here.
+        given()
+        .when()
+            .get("/awslambda-us-east-1-tasks/layers/000000000000/" + LAYER_NAME + "/2")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(18)
+    void layerArchive_version1_isDeletedWithTheVersion() {
+        // Version 1 was deleted at @Order(13); its stored archive must be gone too.
+        given()
+        .when()
+            .get("/awslambda-us-east-1-tasks/layers/000000000000/" + LAYER_NAME + "/1")
+        .then()
+            .statusCode(404);
     }
 
     // ── PublishLayerVersion validation ────────────────────────────────────────

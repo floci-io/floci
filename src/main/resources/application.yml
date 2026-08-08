@@ -13,6 +13,11 @@ quarkus:
       max-body-size: ${floci.max-request-size}M
   datasource:
     active: false
+  kubernetes-client:
+    devservices:
+      # Never auto-start a test API server; the kubernetes Lambda executor
+      # connects to a real cluster (in-cluster config or kubeconfig) only.
+      enabled: false
   security:
      security-providers: BC
   shutdown:
@@ -221,6 +226,13 @@ floci:
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
       # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
+      executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      # kubernetes:
+      #   namespace: default                  # Namespace Lambda pods are created in
+      #   labels:                             # Extra pod labels, key=value entries
+      #     - team=platform
+      #   floci-address:                      # Host/IP pods use to reach Floci; auto-detected in-cluster
+      #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
       hot-reload:
         enabled: false
     apigateway:

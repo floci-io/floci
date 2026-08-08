@@ -40,6 +40,14 @@ public class LaunchedContainerAwsEnv {
      *                           credentials from there. Empty = inject placeholder credentials.
      */
     public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir) {
+        return sdkBaselineEnv(region, awsConfigMountDir, reachableEndpoint.baseUrl());
+    }
+
+    /**
+     * Variant for launchers whose workloads reach Floci at an address other than the
+     * Docker-reachable one (e.g. Kubernetes pods reaching Floci's pod IP).
+     */
+    public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir, String flociEndpoint) {
         List<String> env = new ArrayList<>();
         env.add("AWS_DEFAULT_REGION=" + region);
         env.add("AWS_REGION=" + region);
@@ -58,7 +66,6 @@ public class LaunchedContainerAwsEnv {
             env.add("AWS_SECRET_ACCESS_KEY=" + (sk != null ? sk : "test"));
             env.add("AWS_SESSION_TOKEN=" + (st != null ? st : "test"));
         }
-        String flociEndpoint = reachableEndpoint.baseUrl();
         env.add("FLOCI_HOSTNAME=" + URI.create(flociEndpoint).getHost());
         env.add("FLOCI_ENDPOINT=" + flociEndpoint);
         env.add("AWS_ENDPOINT_URL=" + flociEndpoint);

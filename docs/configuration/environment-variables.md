@@ -199,6 +199,11 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | _(none)_ | Docker network for Lambda containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | _(none)_ | Explicit host/IP Lambda containers use to reach the Runtime API, bypassing auto-detection (e.g. rootless Podman) |
 | `FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH` | _(none)_ | Host path bind-mounted read-only at `/opt/aws-config` inside Lambda containers for real credential discovery |
+| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend for Lambda environments: `docker` (containers) or `kubernetes` (pods) |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | _(none)_ | Extra pod labels as comma-separated `key=value` entries |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | _(none)_ | Host/IP Lambda pods use to reach Floci; auto-detected when Floci runs in-cluster |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code into the pod (needs `sh`, `wget`, `unzip`) |
 
 ### API Gateway
 

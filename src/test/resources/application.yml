@@ -6,6 +6,9 @@ quarkus:
       max-body-size: ${floci.max-request-size}M
   datasource:
     active: false
+  kubernetes-client:
+    devservices:
+      enabled: false
 
 floci:
   base-url: "http://localhost:4566"

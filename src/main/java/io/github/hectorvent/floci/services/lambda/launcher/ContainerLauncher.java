@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactor
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Typed;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -39,6 +40,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -52,7 +54,8 @@ import java.util.concurrent.TimeoutException;
  * rather than a bind mount, so it works when Floci itself runs inside Docker.
  */
 @ApplicationScoped
-public class ContainerLauncher {
+@Typed(ContainerLauncher.class)
+public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     private static final Logger LOG = Logger.getLogger(ContainerLauncher.class);
     private static final String TASK_DIR = "/var/task";
@@ -65,7 +68,8 @@ public class ContainerLauncher {
      */
     private static final String FLOCI_CA_DIR = "/etc";
     private static final String FLOCI_CA_FILE_NAME = "floci-ca.crt";
-    private static final String FLOCI_CA_CONTAINER_PATH = FLOCI_CA_DIR + "/" + FLOCI_CA_FILE_NAME;
+    /** Shared with the kubernetes executor, which mounts the CA ConfigMap at the same path. */
+    public static final String FLOCI_CA_CONTAINER_PATH = FLOCI_CA_DIR + "/" + FLOCI_CA_FILE_NAME;
     /** Self-signed cert filename produced by {@code TlsConfigSource} under {persistent-path}/tls/. */
     private static final String SELF_SIGNED_CERT_NAME = "floci-selfsigned.crt";
 
@@ -387,6 +391,16 @@ public class ContainerLauncher {
             if (containerId != null) {
                 try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
             }
+            // Stop the server before releasing its port, or the still-listening Vert.x server
+            // makes a later cold start that reuses the port serve this runtime too.
+            try {
+                runtimeApiServer.stop().get(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (Exception stopFailure) {
+                LOG.debugv("Runtime API server stop failed during launch cleanup: {0}",
+                        stopFailure.getMessage());
+            }
             try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
             throw e;
         }
@@ -400,11 +414,19 @@ public class ContainerLauncher {
             handle.getRuntimeApiServer().stop().get(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        } catch (ExecutionException | TimeoutException e) {
+        } catch (ExecutionException | TimeoutException | CancellationException e) {
+            // CancellationException is unchecked; catch it so a cancelled stop future
+            // cannot skip the container teardown below.
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
         } finally {
-            runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            // Guarded so a throwing release cannot skip the container teardown below.
+            try {
+                runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            } catch (Exception e) {
+                LOG.warnv("Runtime API port release failed for container {0}: {1}",
+                        handle.getContainerId(), e.getMessage());
+            }
         }
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
     }
@@ -780,8 +802,8 @@ public class ContainerLauncher {
      * {@code floci.tls.cert-path} that points at a leaf/server certificate is accepted but only pins
      * that exact certificate (it cannot validate a chain it signs), so a warning is logged.
      */
-    static Optional<Path> resolveFlociCaCertPath(boolean tlsEnabled, Optional<String> userCertPath,
-                                                 String persistentPath) {
+    public static Optional<Path> resolveFlociCaCertPath(boolean tlsEnabled, Optional<String> userCertPath,
+                                                        String persistentPath) {
         if (!tlsEnabled) {
             return Optional.empty();
         }
@@ -837,7 +859,7 @@ public class ContainerLauncher {
      * which breaks every external HTTPS call (curl, openssl, requests/botocore) the Lambda makes.
      * Returns an empty list when no CA cert is available (TLS off).
      */
-    static List<String> flociCaEnv(Optional<Path> caCert) {
+    public static List<String> flociCaEnv(Optional<Path> caCert) {
         if (caCert.isEmpty()) {
             return List.of();
         }

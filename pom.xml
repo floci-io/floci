@@ -140,6 +140,12 @@
         </dependency>
 
 
+        <!-- Kubernetes client for the Lambda kubernetes executor -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-kubernetes-client</artifactId>
+        </dependency>
+
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>
             <groupId>com.github.docker-java</groupId>
@@ -268,6 +274,17 @@
             <groupId>org.awaitility</groupId>
             <artifactId>awaitility</artifactId>
             <version>4.2.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-server-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.25.3</version>
             <scope>test</scope>
         </dependency>
         <dependency>

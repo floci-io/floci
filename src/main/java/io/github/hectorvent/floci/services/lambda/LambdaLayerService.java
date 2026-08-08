@@ -112,9 +112,31 @@ public class LambdaLayerService {
         layerVersion.setCodeSha256(codeSha256);
         layerVersion.setCodeLocalPath(layerPath.toAbsolutePath().normalize().toString());
 
+        // Store the archive before persisting the version so a load-bearing store failure
+        // (kubernetes executor) fails the publish instead of leaving a version pods cannot use.
+        boolean stored = storeLayerArchive(region, accountId, layerName, nextVersion, zipBytes);
+        if (!stored && LambdaService.requiresStoredTasksObject(config)) {
+            throw new AwsException("ServiceException",
+                    "Could not store the layer archive for '" + layerName + "' v" + nextVersion
+                            + " in Floci's S3, which the kubernetes Lambda executor needs. The "
+                            + "layer version was not published.", 500);
+        }
+        layerVersion.setArchiveStored(stored);
         layerStore.save(region, layerVersion);
         LOG.infov("Published layer version: {0} v{1} in region {2}", layerName, nextVersion, region);
         return layerVersion;
+    }
+
+    /**
+     * Keeps the exact layer archive in Floci's S3 so GetLayerVersion can serve a real
+     * Content.Location and the kubernetes executor's init container can download it.
+     * Best-effort unless the active Lambda executor requires stored tasks-bucket objects.
+     */
+    private boolean storeLayerArchive(String region, String accountId, String layerName,
+                                      long version, byte[] zipBytes) {
+        return LambdaService.putTasksObjectQuietly(s3Service, region,
+                LambdaService.layerObjectKey(accountId, layerName, version), zipBytes,
+                "layer archive for " + layerName + " v" + version);
     }
 
     /**
@@ -157,7 +179,22 @@ public class LambdaLayerService {
         }
 
         layerStore.delete(region, layerName, versionNumber);
+        deleteLayerArchive(region, lv);
         LOG.infov("Deleted layer version: {0} v{1} in region {2}", layerName, versionNumber, region);
+    }
+
+    private void deleteLayerArchive(String region, LambdaLayerVersion lv) {
+        if (s3Service == null) {
+            return;
+        }
+        try {
+            var account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
+            s3Service.deleteObject(LambdaService.tasksBucketName(region),
+                    LambdaService.layerObjectKey(account, lv.getLayerName(), lv.getVersion()));
+        } catch (Exception e) {
+            LOG.debugv("Could not delete stored layer archive for {0} v{1}: {2}",
+                    lv.getLayerName(), lv.getVersion(), e.getMessage());
+        }
     }
 
     /**

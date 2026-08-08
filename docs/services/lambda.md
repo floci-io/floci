@@ -197,6 +197,11 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
+| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | *(unset)* | Extra pod labels as comma-separated `key=value` entries |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | *(unset)* | Host/IP pods use to reach Floci; auto-detected when Floci runs in-cluster |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code (needs `sh`, `wget`, `unzip`) |
 
 ### Runtime API host override
 
@@ -221,7 +226,8 @@ for a full rootless Podman walkthrough.
 
 ### Docker socket requirement
 
-Lambda requires the Docker socket. Mount it in your compose file:
+With the default `docker` executor, Lambda requires the Docker socket. Mount it
+in your compose file:
 
 ```yaml
 services:
@@ -229,6 +235,169 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 ```
+
+If mounting the Docker socket is not acceptable (for example on a hardened
+Kubernetes cluster), use the [Kubernetes executor](#kubernetes-executor)
+instead — it needs no privileged access and no socket.
+
+### Kubernetes executor
+
+Set `FLOCI_SERVICES_LAMBDA_EXECUTOR=kubernetes` to run each Lambda execution
+environment as a Kubernetes pod instead of a Docker container. This is designed
+for CI/CD clusters where privileged containers and `docker.sock` access are not
+allowed. Floci talks to the cluster through the standard Kubernetes API: when
+running inside the cluster it uses its ServiceAccount, and when running outside
+it uses your local kubeconfig.
+
+How an invocation works:
+
+1. On a cold start Floci creates a pod from the function's runtime image
+   (`public.ecr.aws/lambda/*`, same mapping as the Docker executor).
+2. An init container (`busybox` by default) downloads the function's deployment
+   package — and any layers — from Floci's S3 over HTTP and unpacks them into
+   shared `emptyDir` volumes at `/var/task` and `/opt`.
+3. The runtime container polls Floci's Lambda Runtime API
+   (`AWS_LAMBDA_RUNTIME_API`) exactly like a Docker container would.
+4. Warm pods are reused across invocations and reaped after
+   `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` of inactivity.
+   Pods left behind by a crashed Floci are swept on startup via the
+   `app.kubernetes.io/managed-by=floci` label.
+
+Lambda pods connect **back** to Floci on the main port (4566) and the Runtime
+API port range (9200–9299), so those ports must be reachable from pods in the
+namespace. When Floci runs in-cluster this works out of the box (pod-to-pod
+traffic); when Floci runs outside the cluster, set
+`FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` to an address the cluster's
+pods can reach (for example your machine's LAN IP for a `kind` cluster).
+
+#### Required RBAC
+
+The ServiceAccount Floci runs under needs these permissions in the Lambda
+namespace. The manifest below is complete, so applying it as-is (together
+with the Deployment in the next section) yields a working setup:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: floci
+  namespace: floci
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: floci-lambda
+  namespace: floci
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "watch"]
+  # Only needed when FLOCI_TLS_ENABLED=true (CA cert is shared via a ConfigMap)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: floci-lambda
+  namespace: floci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: floci-lambda
+subjects:
+  - kind: ServiceAccount
+    name: floci
+    namespace: floci
+```
+
+#### Running Floci in-cluster
+
+A minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
+`floci` ServiceAccount):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: floci
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: floci }
+  template:
+    metadata:
+      labels: { app: floci }
+    spec:
+      serviceAccountName: floci
+      # Required when a Service named `floci` exists in the namespace: service
+      # links inject FLOCI_PORT=tcp://<ip>:4566, which collides with Floci's
+      # FLOCI_* configuration convention and fails startup.
+      enableServiceLinks: false
+      containers:
+        - name: floci
+          image: floci/floci:latest
+          env:
+            - name: FLOCI_SERVICES_LAMBDA_EXECUTOR
+              value: kubernetes
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE
+              value: floci
+          ports:
+            - containerPort: 4566
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: floci
+spec:
+  selector: { app: floci }
+  ports:
+    - port: 4566
+      targetPort: 4566
+```
+
+Lambda pods reach Floci by pod IP, so the Runtime API ports need no Service
+entries; only clients of the emulator itself use port 4566.
+
+#### Limitations
+
+- Hot reload (both bind-mount and Reactive S3 Sync bind variants) and
+  `FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH` rely on bind mounts and are not
+  supported; hot-reload functions fail to launch with a clear error.
+- `Image` package type URIs are passed to the kubelet unchanged. Images in
+  Floci's emulated ECR registry are not pullable by cluster nodes — pre-load
+  them onto the nodes (e.g. `kind load docker-image`) or use a real registry.
+- Lambda pods carry no `imagePullSecrets`. If your runtime or init images come
+  from an authenticated registry, attach the pull secret to the namespace's
+  `default` ServiceAccount
+  (`kubectl patch serviceaccount default -p '{"imagePullSecrets":[{"name":"<secret>"}]}'`)
+  so the kubelet uses it for every pod in the namespace.
+- A cold start waits up to 300 seconds for the pod to reach `Running` (broken
+  images and failing init containers are detected and reported much earlier).
+- The init container downloads code and layers over plain HTTP on the
+  emulator port even when `FLOCI_TLS_ENABLED=true`. busybox `wget` cannot
+  complete a TLS handshake with Floci, and the Runtime API traffic on the
+  same pod network is plain HTTP anyway. Use a NetworkPolicy if the pod
+  network is part of your threat model.
+- With `FLOCI_TLS_ENABLED=true`, AWS SDK calls made from inside the function
+  fail TLS verification when pods reach Floci by pod IP, because the
+  self-signed certificate carries no SAN for dynamic pod IPs. Set
+  `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` to a hostname covered by
+  the certificate, or provide your own certificate via `floci.tls.cert-path`.
+- Prefer an IP for `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS`. With a
+  bare hostname, S3 SDKs inside functions may use virtual-hosted-style
+  addressing (`bucket.<hostname>`), and nothing in the cluster resolves those
+  subdomains.
+- IPv6-only clusters are not supported. Floci advertises an IPv4 address to
+  pods and fails fast when none is available.
+- Each Floci instance sweeps all `managed-by=floci` Lambda pods in its
+  namespace at startup; run multiple Floci instances in separate namespaces.
+- Layers published by Floci versions before this feature have no stored
+  archive; re-publish them once to make them downloadable by pods.
 
 ### S3 virtual-hosted-style addressing inside Lambda containers
 
