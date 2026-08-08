@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -65,6 +66,16 @@ public class IamQueryHandler {
             // Identity providers & server certificates (read-only, not modeled)
             case "ListSAMLProviders" -> handleListSAMLProviders(params);
             case "ListOpenIDConnectProviders" -> handleListOpenIDConnectProviders(params);
+            case "CreateOpenIDConnectProvider" -> handleCreateOpenIDConnectProvider(params);
+            case "GetOpenIDConnectProvider" -> handleGetOpenIDConnectProvider(params);
+            case "DeleteOpenIDConnectProvider" -> handleDeleteOpenIDConnectProvider(params);
+            case "AddClientIDToOpenIDConnectProvider" -> handleAddClientIDToOpenIDConnectProvider(params);
+            case "RemoveClientIDFromOpenIDConnectProvider" ->
+                    handleRemoveClientIDFromOpenIDConnectProvider(params);
+            case "UpdateOpenIDConnectProviderThumbprint" -> handleUpdateOpenIDConnectProviderThumbprint(params);
+            case "TagOpenIDConnectProvider" -> handleTagOpenIDConnectProvider(params);
+            case "UntagOpenIDConnectProvider" -> handleUntagOpenIDConnectProvider(params);
+            case "ListOpenIDConnectProviderTags" -> handleListOpenIDConnectProviderTags(params);
             case "ListServerCertificates" -> handleListServerCertificates(params);
 
             // Groups
@@ -286,13 +297,97 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("ListSAMLProviders", AwsNamespaces.IAM, result)).build();
     }
 
+    // ListOpenIDConnectProviders is not paginated and carries only ARNs — the client fetches
+    // the rest with GetOpenIDConnectProvider.
     private Response handleListOpenIDConnectProviders(MultivaluedMap<String, String> params) {
-        // OIDC identity providers are not modeled; return the wire-accurate empty
-        // list (ListOpenIDConnectProviders is not paginated).
+        var xml = new XmlBuilder().start("OpenIDConnectProviderList");
+        for (OpenIDConnectProvider provider : iamService.listOpenIDConnectProviders()) {
+            xml.start("member").elem("Arn", provider.getArn()).end("member");
+        }
+        xml.end("OpenIDConnectProviderList");
+        return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviders", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleCreateOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                getParam(params, "Url"),
+                getMemberList(params, "ClientIDList"),
+                getMemberList(params, "ThumbprintList"),
+                extractTags(params));
+        var xml = new XmlBuilder().elem("OpenIDConnectProviderArn", provider.getArn());
+        if (!provider.getTags().isEmpty()) {
+            xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
+        }
+        return Response.ok(AwsQueryResponse.envelope("CreateOpenIDConnectProvider", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    // The response carries no ARN: AWS echoes back the scheme-less Url, and the caller already
+    // knows the ARN it asked for.
+    private Response handleGetOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        OpenIDConnectProvider provider =
+                iamService.getOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"));
+        var xml = new XmlBuilder().elem("Url", provider.getUrl());
+        xml.start("ClientIDList");
+        for (String clientId : provider.getClientIdList()) {
+            xml.elem("member", clientId);
+        }
+        xml.end("ClientIDList").start("ThumbprintList");
+        for (String thumbprint : provider.getThumbprintList()) {
+            xml.elem("member", thumbprint);
+        }
+        xml.end("ThumbprintList")
+                .elem("CreateDate", isoDate(provider.getCreateDate()));
+        if (!provider.getTags().isEmpty()) {
+            xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetOpenIDConnectProvider", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDeleteOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.deleteOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleAddClientIDToOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.addClientIdToOpenIDConnectProvider(
+                getParam(params, "OpenIDConnectProviderArn"), getParam(params, "ClientID"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "AddClientIDToOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleRemoveClientIDFromOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.removeClientIdFromOpenIDConnectProvider(
+                getParam(params, "OpenIDConnectProviderArn"), getParam(params, "ClientID"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "RemoveClientIDFromOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUpdateOpenIDConnectProviderThumbprint(MultivaluedMap<String, String> params) {
+        iamService.updateOpenIDConnectProviderThumbprint(
+                getParam(params, "OpenIDConnectProviderArn"), getMemberList(params, "ThumbprintList"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "UpdateOpenIDConnectProviderThumbprint", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleTagOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.tagOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"), extractTags(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("TagOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUntagOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.untagOpenIDConnectProvider(
+                getParam(params, "OpenIDConnectProviderArn"), extractTagKeys(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListOpenIDConnectProviderTags(MultivaluedMap<String, String> params) {
+        Map<String, String> providerTags =
+                iamService.listOpenIDConnectProviderTags(getParam(params, "OpenIDConnectProviderArn"));
         String result = new XmlBuilder()
-                .start("OpenIDConnectProviderList").end("OpenIDConnectProviderList")
+                .start("Tags").raw(tagsXml(providerTags)).end("Tags")
+                .elem("IsTruncated", false)
                 .build();
-        return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviders", AwsNamespaces.IAM, result)).build();
+        return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviderTags", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleListServerCertificates(MultivaluedMap<String, String> params) {
@@ -1000,6 +1095,16 @@ public class IamQueryHandler {
             tags.put(key, value != null ? value : "");
         }
         return tags;
+    }
+
+    private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = params.getFirst(name + ".member." + i);
+            if (value == null) break;
+            values.add(value);
+        }
+        return values;
     }
 
     private List<String> extractTagKeys(MultivaluedMap<String, String> params) {
