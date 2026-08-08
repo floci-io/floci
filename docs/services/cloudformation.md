@@ -8,13 +8,13 @@
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `DescribeStacks` | Get stack status and outputs |
+| `DescribeStacks` | Get stack status, parameters, and outputs |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources |
 | `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
-| `DescribeChangeSet` | Get change set details (no computed diff/preview) |
+| `DescribeChangeSet` | Get change set details with a computed Add/Modify/Remove resource diff |
 | `ExecuteChangeSet` | Apply a change set |
 | `DeleteChangeSet` | Delete a change set |
 | `ListChangeSets` | List change sets for a stack |

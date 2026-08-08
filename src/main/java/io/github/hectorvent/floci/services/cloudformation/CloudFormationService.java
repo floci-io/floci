@@ -300,6 +300,57 @@ public class CloudFormationService implements ResourceProvider {
         return cs;
     }
 
+    /**
+     * Computes the per-resource changes a change set would apply, by diffing its template against
+     * the stack's currently deployed template. CREATE-type change sets (and stacks that have never
+     * executed a template) report every resource as an Add.
+     */
+    public List<ResourceChange> computeChangeSetChanges(ChangeSet cs, String region) {
+        Stack stack = getStackOrThrow(cs.getStackName(), region, regionResolver.getAccountId());
+        try {
+            JsonNode newResources = parseTemplate(cs.getTemplateBody()).path("Resources");
+            boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
+                    || stack.getTemplateBody() == null;
+            JsonNode oldResources = createType
+                    ? objectMapper.createObjectNode()
+                    : parseTemplate(stack.getTemplateBody()).path("Resources");
+            List<ResourceChange> changes = new ArrayList<>();
+            newResources.fields().forEachRemaining(e -> {
+                String logicalId = e.getKey();
+                String resourceType = e.getValue().path("Type").asText();
+                JsonNode oldDef = oldResources.get(logicalId);
+                if (oldDef == null) {
+                    changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
+                } else if (!oldDef.equals(e.getValue())) {
+                    changes.add(new ResourceChange("Modify", logicalId,
+                            resourcePhysicalId(stack, logicalId), resourceType, "False"));
+                }
+            });
+            oldResources.fields().forEachRemaining(e -> {
+                if (!newResources.has(e.getKey())) {
+                    changes.add(new ResourceChange("Remove", e.getKey(),
+                            resourcePhysicalId(stack, e.getKey()),
+                            e.getValue().path("Type").asText(), null));
+                }
+            });
+            return changes;
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ValidationError",
+                    "Unable to compute changes for change set " + cs.getChangeSetName()
+                            + ": " + e.getMessage(), 400);
+        }
+    }
+
+    public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
+                                 String resourceType, String replacement) {}
+
+    private String resourcePhysicalId(Stack stack, String logicalId) {
+        StackResource resource = stack.getResources().get(logicalId);
+        return resource != null ? resource.getPhysicalId() : null;
+    }
+
     // ── ExecuteChangeSet ──────────────────────────────────────────────────────
 
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region) {
@@ -650,6 +701,8 @@ public class CloudFormationService implements ResourceProvider {
 
             // Merge default parameter values from the template with caller-supplied params
             Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
+            stack.getParameters().clear();
+            stack.getParameters().putAll(resolvedParams);
 
             // Resolve conditions first
             Map<String, Boolean> conditions = resolveConditions(template, resolvedParams, stack, region, accountId);
