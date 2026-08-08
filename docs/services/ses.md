@@ -37,7 +37,9 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `SetIdentityHeadersInNotificationsEnabled` | Toggle headers-in-notifications per notification type |
 | `SetIdentityMailFromDomain`         | Set or clear the MAIL FROM domain for an identity         |
 | `GetIdentityMailFromDomainAttributes` | Read MAIL FROM domain settings                          |
-| `GetIdentityDkimAttributes`         | Return DKIM status for identities                         |
+| `GetIdentityDkimAttributes`         | Return DKIM status for identities (an email inherits its domain's DKIM) |
+| `SetIdentityDkimEnabled`            | Enable or disable DKIM signing for an identity            |
+| `VerifyDomainDkim`                  | Return a domain's (stable) DKIM CNAME tokens              |
 | `PutIdentityPolicy`                 | Create or replace a sending-authorization policy on an identity |
 | `GetIdentityPolicies`               | Return the requested policies for an identity             |
 | `ListIdentityPolicies`              | List an identity's policy names                           |
@@ -186,6 +188,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/identities/{emailIdentity}` | `GetEmailIdentity` |
 | `DELETE` | `/v2/email/identities/{emailIdentity}` | `DeleteEmailIdentity` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/dkim` | `PutEmailIdentityDkimAttributes` |
+| `PUT` | `/v2/email/identities/{emailIdentity}/dkim/signing` | `PutEmailIdentityDkimSigningAttributes` (Easy DKIM / BYODKIM) |
 | `PUT` | `/v2/email/identities/{emailIdentity}/feedback` | `PutEmailIdentityFeedbackAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/mail-from` | `PutEmailIdentityMailFromAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/configuration-set` | `PutEmailIdentityConfigurationSetAttributes` |
@@ -263,3 +266,5 @@ Suppressed recipients are filtered out of the SMTP relay step (non-suppressed re
 Tag operations support these ARN forms: `arn:aws:ses:<region>:<account>:configuration-set/<name>`, `arn:aws:ses:<region>:<account>:template/<name>`, and `arn:aws:ses:<region>:<account>:identity/<email-or-domain>`. Tags supplied to `CreateConfigurationSet`, `CreateEmailTemplate`, and `CreateEmailIdentity` are reachable through `ListTagsForResource`; `UpdateEmailTemplate` does not modify tags. Other resource types return `NotFoundException`.
 
 Identity, identity-policy, template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a policy written with `PutIdentityPolicy` (v1) is returned by `GetEmailIdentityPolicies` (v2), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.
+
+DKIM follows AWS's domain-centric model. A **domain** identity carries DKIM tokens (generated at verification, stable across `VerifyDomainDkim` calls); its `DkimVerificationStatus` tracks **DNS record detection** — it transitions to `Success` when the expected `<token>._domainkey.<domain>` CNAMEs are present in the Route53 emulation, not when DKIM is enabled. An **email** identity has no DKIM of its own: its `DkimAttributes` (`SigningEnabled`, `Status`, `Tokens`) are inherited from its parent domain identity when one is registered. The parent is the exact domain after the `@` (verified against AWS): a verified `example.com` covers `user@example.com` but not `user@mail.example.com` unless `mail.example.com` is itself a registered identity. `SetIdentityDkimEnabled` / `PutEmailIdentityDkimAttributes` only toggle the signing flag (they no longer force the verification status); `PutEmailIdentityDkimSigningAttributes` sets the signing origin (`AWS_SES` Easy DKIM — regenerating tokens when the key length changes — or `EXTERNAL` BYODKIM).
