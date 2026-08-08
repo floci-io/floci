@@ -361,6 +361,8 @@ class SamTransformProcessor {
         ObjectNode lambdaResource = createLambdaFunction(logicalId, roleLogicalId, properties, hasExplicitRole);
         resources.set(logicalId, lambdaResource);
 
+        expandAutoPublishAlias(logicalId, properties, resources);
+
         JsonNode events = properties.path("Events");
         if (events.isObject()) {
             Iterator<Map.Entry<String, JsonNode>> eventFields = events.fields();
@@ -369,6 +371,61 @@ class SamTransformProcessor {
                 expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources);
             }
         }
+    }
+
+    /**
+     * Expands {@code AutoPublishAlias} into the {@code AWS::Lambda::Version} +
+     * {@code AWS::Lambda::Alias} pair real SAM generates, so an alias-qualified invoke
+     * ({@code <function>:production}) resolves instead of failing with "Alias not found".
+     * Without this the property is silently dropped and the deploy still reports
+     * CREATE_COMPLETE, so the failure only surfaces later, at invoke time.
+     *
+     * <p>The alias name is normally a literal, but SAM also allows an intrinsic (e.g.
+     * {@code !Ref StageName}). The node is passed through to {@code Name} either way so the
+     * template engine resolves it at provision time; only the generated logical id needs a
+     * literal, and it drops the suffix when the value isn't textual.
+     *
+     * <p>The {@code Ref}s on {@code FunctionName} give {@code topologicalSort} the edges it needs
+     * — function → version and function → alias — so no explicit {@code DependsOn} is needed.
+     * There is no version → alias edge while {@code FunctionVersion} is the literal
+     * {@code $LATEST}; none is required, since the alias does not reference the version. It
+     * returns with the {@code Fn::GetAtt} form once #1987 lands.
+     */
+    private void expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode resources) {
+        JsonNode aliasName = properties.path("AutoPublishAlias");
+        if (aliasName.isMissingNode() || aliasName.isNull()
+                || (aliasName.isTextual() && aliasName.asText().isBlank())) {
+            return;
+        }
+
+        String versionId = uniqueId(functionLogicalId + "Version", resources);
+        ObjectNode versionDef = objectMapper.createObjectNode();
+        versionDef.put("Type", "AWS::Lambda::Version");
+        ObjectNode versionProps = objectMapper.createObjectNode();
+        versionProps.set("FunctionName", ref(functionLogicalId));
+        versionDef.set("Properties", versionProps);
+        resources.set(versionId, versionDef);
+
+        // Alias names may legally contain '-' and '_', neither of which is valid in a
+        // CloudFormation logical id, so the suffix goes through the same sanitize() every other
+        // derived id in this file uses.
+        String aliasSuffix = aliasName.isTextual() ? sanitize(aliasName.asText()) : "";
+        String aliasId = uniqueId(functionLogicalId + "Alias" + aliasSuffix, resources);
+        ObjectNode aliasDef = objectMapper.createObjectNode();
+        aliasDef.put("Type", "AWS::Lambda::Alias");
+        ObjectNode aliasProps = objectMapper.createObjectNode();
+        aliasProps.set("FunctionName", ref(functionLogicalId));
+        aliasProps.set("Name", aliasName.deepCopy());
+        // Real SAM points the alias at the published version (Fn::GetAtt <Version>.Version).
+        // Floci cannot invoke a published version: the snapshot carries no code path, so a
+        // version-qualified invoke times out on a cold start (#1987) and silently runs $LATEST's
+        // code when a warm container happens to exist (#1988). Aiming the alias there would break
+        // the alias-qualified invoke this expansion exists to enable, so point it at $LATEST — the
+        // alias resolves and runs the function's code, which is the behavior callers depend on.
+        // Switch to the GetAtt form once #1987 lands.
+        aliasProps.put("FunctionVersion", "$LATEST");
+        aliasDef.set("Properties", aliasProps);
+        resources.set(aliasId, aliasDef);
     }
 
     private ObjectNode createExecutionRole(JsonNode properties) {
