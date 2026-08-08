@@ -93,6 +93,7 @@ public class IamQueryHandler {
             case "DeletePolicy" -> handleDeletePolicy(params);
             case "ListPolicies" -> handleListPolicies(params);
             case "ListEntitiesForPolicy" -> handleListEntitiesForPolicy(params);
+            case "GetAccountSummary" -> handleGetAccountSummary(params);
             case "CreatePolicyVersion" -> handleCreatePolicyVersion(params);
             case "GetPolicyVersion" -> handleGetPolicyVersion(params);
             case "DeletePolicyVersion" -> handleDeletePolicyVersion(params);
@@ -495,6 +496,15 @@ public class IamQueryHandler {
         }
         xml.end("PolicyRoles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListEntitiesForPolicy", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleGetAccountSummary(MultivaluedMap<String, String> params) {
+        var xml = new XmlBuilder().start("SummaryMap");
+        for (Map.Entry<String, Long> entry : iamService.getAccountSummary().entrySet()) {
+            xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
+        }
+        xml.end("SummaryMap");
+        return Response.ok(AwsQueryResponse.envelope("GetAccountSummary", AwsNamespaces.IAM, xml.build())).build();
     }
 
     private Response handleCreatePolicyVersion(MultivaluedMap<String, String> params) {

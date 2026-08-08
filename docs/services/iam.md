@@ -141,6 +141,12 @@
 |--------|-------------|
 | SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
 
+### Account
+
+| Action | Description |
+|--------|-------------|
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. Resources Floci does not track (MFA devices, SAML/OIDC providers, server certificates) are reported as zero rather than omitted. |
+
 ## AWS Managed Policies
 
 Floci seeds a catalog of commonly-used AWS managed policies at startup. These are attachable immediately without any setup:

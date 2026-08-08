@@ -554,6 +554,64 @@ public class IamService implements SessionAccountLookup {
         return result;
     }
 
+    /**
+     * Entity counts and quotas backing GetAccountSummary. Covers all 34 documented SummaryMap
+     * keys; quota values are cross-checked against AWS's published IAM service quotas
+     * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
+     * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
+     * not track at all (MFA devices, SAML/OIDC providers, server certificates, account password -
+     * all stub-empty elsewhere in this handler) are reported as zero rather than omitted, so
+     * callers indexing into the full AWS field set don't hit a missing-key error.
+     */
+    public Map<String, Long> getAccountSummary() {
+        long localPolicyCount = 0;
+        long policyVersionsInUse = 0;
+        for (IamPolicy policy : policies.scan(k -> true)) {
+            if (policy.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+                continue;
+            }
+            localPolicyCount++;
+            policyVersionsInUse += policy.getVersions().size();
+        }
+
+        Map<String, Long> summary = new LinkedHashMap<>();
+        summary.put("Users", (long) listUsers(null).size());
+        summary.put("UsersQuota", 5000L);
+        summary.put("Groups", (long) listGroups(null).size());
+        summary.put("GroupsQuota", 300L);
+        summary.put("GroupsPerUserQuota", 10L);
+        summary.put("Roles", (long) listRoles(null).size());
+        summary.put("RolesQuota", 1000L);
+        summary.put("AssumeRolePolicySizeQuota", 2048L);
+        summary.put("Policies", localPolicyCount);
+        summary.put("PoliciesQuota", 1500L);
+        summary.put("PolicySizeQuota", 6144L);
+        summary.put("PolicyVersionsInUse", policyVersionsInUse);
+        summary.put("PolicyVersionsInUseQuota", 10000L);
+        summary.put("VersionsPerPolicyQuota", 5L);
+        summary.put("InstanceProfiles", (long) listInstanceProfiles(null).size());
+        summary.put("InstanceProfilesQuota", 1000L);
+        summary.put("AttachedPoliciesPerUserQuota", 10L);
+        summary.put("AttachedPoliciesPerGroupQuota", 10L);
+        summary.put("AttachedPoliciesPerRoleQuota", 10L);
+        summary.put("GroupPolicySizeQuota", 5120L);
+        summary.put("UserPolicySizeQuota", 2048L);
+        summary.put("RolePolicySizeQuota", 10240L);
+        summary.put("AccessKeysPerUserQuota", 2L);
+        summary.put("SigningCertificatesPerUserQuota", 2L);
+        summary.put("ServerCertificates", 0L);
+        summary.put("ServerCertificatesQuota", 20L);
+        summary.put("Providers", 0L);
+        summary.put("MFADevices", 0L);
+        summary.put("MFADevicesInUse", 0L);
+        summary.put("AccountMFAEnabled", 0L);
+        summary.put("AccountAccessKeysPresent", 0L);
+        summary.put("AccountSigningCertificatesPresent", 0L);
+        summary.put("AccountPasswordPresent", 0L);
+        summary.put("GlobalEndpointTokenVersion", 1L);
+        return summary;
+    }
+
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
