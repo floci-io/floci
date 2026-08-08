@@ -883,6 +883,9 @@ public interface EmulatorConfig {
         @WithDefault("mariadb:11")
         String defaultMariadbImage();
 
+        /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
+        Optional<String> endpointHost();
+
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
     }
