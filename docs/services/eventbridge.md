@@ -34,6 +34,11 @@
 | `UpdateArchive` | - |
 | `DeleteArchive` | - |
 | `ListArchives` | - |
+| `CreateConnection` | Create a connection for API destinations (credential values are stored but never returned) |
+| `DescribeConnection` | Get connection details with credential values stripped |
+| `UpdateConnection` | Update connection description, auth type, or auth parameters |
+| `DeleteConnection` | Delete a connection |
+| `ListConnections` | List connections, optionally filtered by name prefix or state |
 | `StartReplay` | - |
 | `DescribeReplay` | - |
 | `CancelReplay` | - |
