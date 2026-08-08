@@ -146,6 +146,25 @@ public interface EmulatorConfig {
          */
         @WithDefault("8.8.8.8,8.8.4.4")
         List<String> containerFallbackServers();
+
+        /**
+         * When {@code true}, the embedded DNS server also answers A queries for
+         * {@code amazonaws.com} and every subdomain (any depth: {@code sts.amazonaws.com},
+         * {@code organizations.us-east-1.amazonaws.com}, virtual-hosted S3 like
+         * {@code bucket.s3.us-east-1.amazonaws.com}) with Floci's container IP —
+         * LocalStack-style transparent endpoint injection. Tools that construct SDK
+         * clients with explicit real-AWS endpoints (overriding {@code AWS_ENDPOINT_URL})
+         * then land on Floci instead of escaping to real AWS.
+         *
+         * <p>Combine with {@code floci.tls.enabled=true} so hardcoded {@code https://}
+         * endpoints are served on port 443 with a certificate covering the AWS wildcards,
+         * and spawned CodeBuild containers trust it automatically.
+         *
+         * <p>Off by default: it hijacks all real-AWS traffic from spawned containers.
+         * Env: {@code FLOCI_DNS_SPOOF_AWS_ENDPOINTS}
+         */
+        @WithDefault("false")
+        boolean spoofAwsEndpoints();
     }
 
     interface SecurityConfig {
