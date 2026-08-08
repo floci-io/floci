@@ -333,6 +333,19 @@ public class ApiGatewayV2Service {
         routeStore.delete(routeKey(region, apiId, routeId));
     }
 
+    /** Restores a route with its original ID for a higher-level transactional rollback. */
+    public void restoreRoute(String region, String apiId, Route route) {
+        getApi(region, apiId);
+        Route restored = new Route();
+        restored.setRouteId(route.getRouteId());
+        restored.setRouteKey(route.getRouteKey());
+        restored.setAuthorizationType(route.getAuthorizationType());
+        restored.setAuthorizerId(route.getAuthorizerId());
+        restored.setTarget(route.getTarget());
+        restored.setRouteResponseSelectionExpression(route.getRouteResponseSelectionExpression());
+        routeStore.put(routeKey(region, apiId, restored.getRouteId()), restored);
+    }
+
     public Route updateRoute(String region, String apiId, String routeId, Map<String, Object> request) {
         Route route = getRoute(region, apiId, routeId);
 
@@ -469,6 +482,13 @@ public class ApiGatewayV2Service {
     public void deleteIntegration(String region, String apiId, String integrationId) {
         getIntegration(region, apiId, integrationId);
         integrationStore.delete(integrationKey(region, apiId, integrationId));
+    }
+
+    /** Restores an integration with its original ID for a higher-level transactional rollback. */
+    public void restoreIntegration(String region, String apiId, Integration integration) {
+        getApi(region, apiId);
+        integrationStore.put(integrationKey(region, apiId, integration.getIntegrationId()),
+                new Integration(integration));
     }
 
     public Integration updateIntegration(String region, String apiId, String integrationId,
