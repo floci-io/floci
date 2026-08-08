@@ -347,6 +347,49 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchRetriesWithNextPortWhenDockerReportsHostPortCollision() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        when(harness.portAllocator.allocate(anyInt(), anyInt())).thenReturn(2201, 2202);
+        when(harness.lifecycleManager.create(any(ContainerSpec.class)))
+                .thenReturn("container-conflict", TEST_CONTAINER_ID);
+        when(harness.lifecycleManager.startCreated(anyString(), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Bind for 0.0.0.0:2201 failed: port is already allocated"))
+                .thenReturn(null);
+
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.12");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        Instance instance = instance("i-port-collision");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        assertEquals(2202, instance.getSshHostPort());
+        verify(harness.lifecycleManager).removeIfExists("container-conflict");
+        verify(harness.portAllocator).markReserved(2201);
+        verify(harness.builder).withPortBinding(22, 2201);
+        verify(harness.builder).withPortBinding(22, 2202);
+    }
+
+    @Test
+    void launchReleasesPortAndCleansUpContainerAfterNonRetryableStartFailure() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Docker daemon unavailable"));
+
+        Instance instance = instance("i-start-failure");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator).release(2201);
+    }
+
+    @Test
     void launchMarksInstanceRunningBeforeUserDataCompletes() throws Exception {
         Ec2ContainerManager.containerBridgeIpAttempts = 2;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;
@@ -408,7 +451,7 @@ class Ec2ContainerManagerTest {
                 config,
                 metadataServer,
                 mock(Ec2PortForwardManager.class));
-        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder);
+        return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder, portAllocator);
     }
 
     private static Instance instance(String instanceId) {
@@ -440,10 +483,12 @@ class Ec2ContainerManagerTest {
     }
 
     private record LaunchHarness(Ec2ContainerManager manager,
+                                 ContainerLifecycleManager lifecycleManager,
                                  DockerClient dockerClient,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
-                                 ContainerBuilder.Builder builder) {
+                                 ContainerBuilder.Builder builder,
+                                 PortAllocator portAllocator) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();
             ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));

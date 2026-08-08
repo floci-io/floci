@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -51,6 +52,21 @@ class Ec2ServiceTest {
         service.terminateInstances("us-east-1", List.of(instanceId));
         assertFalse(service.isInstanceContainerRunning(instanceId));
         verifyNoInteractions(containerManager);
+    }
+
+    @Test
+    void awaitContainerLaunchReportsTerminatedContainer() {
+        Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Instance instance = new Instance();
+        instance.setInstanceId("i-terminated");
+        instance.setState(InstanceState.terminated());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.awaitContainerLaunch(instance));
+
+        assertEquals("InstanceLaunchFailure", error.getErrorCode());
+        assertTrue(error.getMessage().contains("terminated during container launch"));
     }
 
     @Test
