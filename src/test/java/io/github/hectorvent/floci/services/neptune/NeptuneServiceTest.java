@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerHan
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneInstance;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -41,7 +43,7 @@ class NeptuneServiceTest {
         proxyManager = mock(NeptuneProxyManager.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
-        RegionResolver regionResolver = mock(RegionResolver.class);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         neptuneConfig = mock(EmulatorConfig.NeptuneServiceConfig.class);
@@ -53,10 +55,6 @@ class NeptuneServiceTest {
         when(neptuneConfig.defaultImage()).thenReturn("tinkerpop/gremlin-server:3.7");
         when(neptuneConfig.defaultNeo4jImage()).thenReturn("neo4j:5");
         when(config.hostname()).thenReturn(Optional.of("localhost"));
-
-        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
-        when(regionResolver.buildArn(anyString(), anyString(), anyString()))
-                .thenReturn("arn:aws:neptune:us-east-1:000000000000:cluster:c");
 
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(inv -> new InMemoryStorage<>());
@@ -141,6 +139,32 @@ class NeptuneServiceTest {
         NeptuneCluster recovered = service.createDbCluster("c2", "1.3.2.1", false);
         assertEquals(18182, recovered.getProxyPort(),
                 "Port from the failed create must be released so the next cluster reuses it");
+    }
+
+    @Test
+    void listDbClustersMatchesByArnButNotForeignArn() {
+        NeptuneCluster cluster = service.createDbCluster("my-cluster", "1.3.2.1", false);
+
+        String arn = cluster.getDbClusterArn();
+        assertEquals(1, service.listDbClusters(arn).size());
+        assertTrue(service.listDbClusters(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(service.listDbClusters(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbInstancesMatchesByArnButNotForeignArn() {
+        service.createDbCluster("my-cluster", "1.3.2.1", false);
+        NeptuneInstance instance = service.createDbInstance(
+                "my-instance", "my-cluster", "db.r5.large", null, false);
+
+        String arn = instance.getDbInstanceArn();
+        assertEquals(1, service.listDbInstances(arn).size());
+        assertTrue(service.listDbInstances(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(service.listDbInstances(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
     }
 
     @Test

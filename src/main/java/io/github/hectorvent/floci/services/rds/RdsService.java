@@ -523,6 +523,15 @@ public class RdsService implements Resettable {
 
     public Collection<DbInstance> listDbInstances(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // DBInstanceIdentifier also accepts an ARN per the AWS model. Match the
+            // full ARN against each instance's stored ARN rather than reducing it to
+            // the bare identifier, so a cross-account or cross-region ARN does not
+            // resolve a same-named local instance.
+            if (filterId.startsWith("arn:")) {
+                return instances.scan(k -> true).stream()
+                        .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
+                        .toList();
+            }
             return instances.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return instances.scan(k -> true);
@@ -747,6 +756,15 @@ public class RdsService implements Resettable {
 
     public Collection<DbCluster> listDbClusters(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // DBClusterIdentifier also accepts an ARN per the AWS model. Match the
+            // full ARN against each cluster's stored ARN rather than reducing it to
+            // the bare identifier, so a cross-account or cross-region ARN does not
+            // resolve a same-named local cluster.
+            if (filterId.startsWith("arn:")) {
+                return clusters.scan(k -> true).stream()
+                        .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
+                        .toList();
+            }
             return clusters.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return clusters.scan(k -> true);
