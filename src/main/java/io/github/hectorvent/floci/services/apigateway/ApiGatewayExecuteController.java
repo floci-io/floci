@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.Integration;
 import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
@@ -583,9 +584,15 @@ public class ApiGatewayExecuteController {
             boolean planCoversStage = plan.getApiStages().stream()
                     .anyMatch(s -> apiId.equals(s.apiId()) && stageName.equals(s.stage()));
             if (!planCoversStage) continue;
-            // Check if any key in this plan matches the header value
+            // Check if any key in this plan matches the header value. The usage plan key holds a copy
+            // of the value, so the key itself must still exist and be enabled for the match to count.
             for (UsagePlanKey planKey : apiGatewayService.getUsagePlanKeys(region, plan.getId())) {
-                if (keyHeader.equals(planKey.getValue())) {
+                if (!keyHeader.equals(planKey.getValue())) {
+                    continue;
+                }
+                if (apiGatewayService.findApiKey(region, planKey.getId())
+                        .filter(ApiKey::isEnabled)
+                        .isPresent()) {
                     return planKey.getValue();
                 }
             }
