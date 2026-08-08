@@ -133,6 +133,104 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     }
 
     @Test
+    void mapCannotSpecifyBothMaxConcurrencyFields() {
+        String def = mapDefinition("", "\"MaxConcurrency\":2,"
+                + "\"MaxConcurrencyPath\":\"$.limit\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrency"));
+    }
+
+    @Test
+    void mapMaxConcurrencyMustBeANonNegativeInteger() {
+        String def = mapDefinition("", "\"MaxConcurrency\":-1,");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrency"));
+    }
+
+    @Test
+    void jsonataMapRejectsMaxConcurrencyPath() {
+        String def = mapDefinition("\"QueryLanguage\":\"JSONata\",",
+                "\"MaxConcurrencyPath\":\"$.limit\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrencyPath"));
+    }
+
+    @Test
+    void jsonataMapAcceptsMaxConcurrencyExpression() {
+        String def = mapDefinition("\"QueryLanguage\":\"JSONata\",",
+                "\"MaxConcurrency\":\"{% $states.input.limit %}\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void nestedMapMaxConcurrencyIsValidatedAtItsStructuredPath() {
+        String def = "{\"StartAt\":\"Outer\",\"States\":{\"Outer\":{\"Type\":\"Map\","
+                + "\"ItemProcessor\":{\"StartAt\":\"Inner\",\"States\":{"
+                + "\"Inner\":{\"Type\":\"Map\",\"MaxConcurrency\":-1,"
+                + "\"ItemProcessor\":{\"StartAt\":\"P\",\"States\":{"
+                + "\"P\":{\"Type\":\"Pass\",\"End\":true}}},\"End\":true}}},"
+                + "\"End\":true}}}";
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/Outer/ItemProcessor/States/Inner/MaxConcurrency"));
+    }
+
+    @Test
+    void maxConcurrencyPathMustSelectASingleNode() {
+        String def = mapDefinition("", "\"MaxConcurrencyPath\":\"$.limits[*]\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrencyPath"));
+    }
+
+    @Test
+    void maxConcurrencyLargerThanIntegerRangeIsAcceptedAndRuntimeCapped() {
+        String def = mapDefinition("", "\"MaxConcurrency\":9223372036854775807,");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
     void unsupportedItemReaderResource_returnsFailWithSchemaError() {
         given().contentType(CT).header("X-Amz-Target", TARGET)
                 .body("{\"definition\":\"" + MAP_WITH_UNSUPPORTED_ITEM_READER_RESOURCE + "\"}")
@@ -300,5 +398,22 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", containsString("ValidationException"));
+    }
+
+    private static String mapDefinition(String topLevelFields, String concurrencyFields) {
+        return "{" + topLevelFields
+                + "\"StartAt\":\"M\",\"States\":{\"M\":{\"Type\":\"Map\","
+                + concurrencyFields
+                + "\"ItemProcessor\":{\"StartAt\":\"P\",\"States\":{"
+                + "\"P\":{\"Type\":\"Pass\",\"End\":true}}},\"End\":true}}}";
+    }
+
+    private static String definitionRequest(String definition) {
+        String escaped = definition.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
+        return "{\"definition\":\"" + escaped + "\"}";
     }
 }
