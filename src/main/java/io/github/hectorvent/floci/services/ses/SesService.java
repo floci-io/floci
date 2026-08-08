@@ -1390,9 +1390,12 @@ public class SesService {
         }
     }
 
-    // Verified against AWS: RuleSetName must match ^[a-zA-Z0-9_.-]+$ (a character outside that set is
-    // a Smithy ValidationError), and must additionally be <= 64 chars and start/end with an
-    // alphanumeric (otherwise a service-level "Not a valid ruleSetName" InvalidParameterValue).
+    // These RuleSetName constraints are not in the botocore model: service-2.json (SES 2010-12-01)
+    // declares ReceiptRuleSetName as a bare {"type": "string"} with no pattern or length. They were
+    // established by probing real SES in us-west-2 via boto3 (2026-08): a character outside
+    // ^[a-zA-Z0-9_.-]+$ is a Smithy ValidationError, and a name that is >64 chars or does not
+    // start/end with an alphanumeric is a service-level "Not a valid ruleSetName" InvalidParameterValue.
+    // Re-verify against live SES (not the model, which can't confirm it) if these ever need to change.
     private static final Pattern RULE_SET_NAME_CHARS = Pattern.compile("^[a-zA-Z0-9_.-]+$");
 
     private static void requireRuleSetName(String name) {
