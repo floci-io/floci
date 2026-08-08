@@ -49,6 +49,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +66,10 @@ import java.util.zip.ZipOutputStream;
 public class CodeBuildRunner implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildRunner.class);
+
+    private static final String PHASE_START_SENTINEL = "___FLOCI_PHASE_START___";
+    private static final String PHASE_END_SENTINEL = "___FLOCI_PHASE_END___";
+    private static final List<String> SHELL_PHASES = List.of("INSTALL", "PRE_BUILD", "BUILD", "POST_BUILD");
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -258,68 +263,16 @@ public class CodeBuildRunner implements ContainerTeardown {
             // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
             copySourceToContainer(containerId, workspace, containerSrcDir);
 
-            // INSTALL
+            // INSTALL through POST_BUILD run in one persistent shell session so shell
+            // variables (exported or not) and the working directory carry across phases,
+            // matching real CodeBuild. Per-phase status, timing, contexts and skip
+            // decisions come from sentinel lines the generated script emits.
             if (stopFlag.get()) { finishStopped(build); return; }
-            beginPhase(build, "INSTALL");
-            build.setCurrentPhase("INSTALL");
-            PhaseResult installResult = runPhase(containerId, containerSrcDir, envList,
-                    buildspec.installCommands(), timeoutMinutes, stopFlag);
-            if (installResult.stopped()) { finishStopped(build); return; }
-            if (installResult.failed()) {
-                completePhaseWithError(build, "INSTALL", "FAILED", installResult.errorMessage());
+            PhaseResult phasesResult = runPhaseSession(containerId, containerSrcDir, envList,
+                    buildspec, build, timeoutMinutes, stopFlag);
+            if (phasesResult.stopped()) { finishStopped(build); return; }
+            if (phasesResult.failed()) {
                 buildFailed = true;
-            } else {
-                completePhase(build, "INSTALL", "SUCCEEDED");
-            }
-
-            // PRE_BUILD
-            if (!buildFailed) {
-                if (stopFlag.get()) { finishStopped(build); return; }
-                beginPhase(build, "PRE_BUILD");
-                build.setCurrentPhase("PRE_BUILD");
-                PhaseResult preBuildResult = runPhase(containerId, containerSrcDir, envList,
-                        buildspec.preBuildCommands(), timeoutMinutes, stopFlag);
-                if (preBuildResult.stopped()) { finishStopped(build); return; }
-                if (preBuildResult.failed()) {
-                    completePhaseWithError(build, "PRE_BUILD", "FAILED", preBuildResult.errorMessage());
-                    buildFailed = true;
-                } else {
-                    completePhase(build, "PRE_BUILD", "SUCCEEDED");
-                }
-            } else {
-                skipPhase(build, "PRE_BUILD");
-            }
-
-            // BUILD
-            if (!buildFailed) {
-                if (stopFlag.get()) { finishStopped(build); return; }
-                beginPhase(build, "BUILD");
-                build.setCurrentPhase("BUILD");
-                PhaseResult buildResult = runPhase(containerId, containerSrcDir, envList,
-                        buildspec.buildCommands(), timeoutMinutes, stopFlag);
-                if (buildResult.stopped()) { finishStopped(build); return; }
-                if (buildResult.failed()) {
-                    completePhaseWithError(build, "BUILD", "FAILED", buildResult.errorMessage());
-                    buildFailed = true;
-                } else {
-                    completePhase(build, "BUILD", "SUCCEEDED");
-                }
-            } else {
-                skipPhase(build, "BUILD");
-            }
-
-            // POST_BUILD — always runs unless container was killed
-            if (stopFlag.get()) { finishStopped(build); return; }
-            beginPhase(build, "POST_BUILD");
-            build.setCurrentPhase("POST_BUILD");
-            PhaseResult postBuildResult = runPhase(containerId, containerSrcDir, envList,
-                    buildspec.postBuildCommands(), timeoutMinutes, stopFlag);
-            if (postBuildResult.stopped()) { finishStopped(build); return; }
-            if (postBuildResult.failed()) {
-                completePhaseWithError(build, "POST_BUILD", "FAILED", postBuildResult.errorMessage());
-                buildFailed = true;
-            } else {
-                completePhase(build, "POST_BUILD", "SUCCEEDED");
             }
 
             // UPLOAD_ARTIFACTS
@@ -701,6 +654,104 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    // One script for all buildspec phases, run in a single shell so unexported
+    // variables and cwd persist. Each command is guarded so a phase stops at its
+    // first failing command; PRE_BUILD and BUILD are skipped once an earlier phase
+    // failed while INSTALL and POST_BUILD always run, mirroring the previous
+    // Java-side decisions. Sentinel lines report each phase's outcome to the runner.
+    static String phaseSessionScript(List<String> installCommands, List<String> preBuildCommands,
+                                     List<String> buildCommands, List<String> postBuildCommands) {
+        StringBuilder script = new StringBuilder("___floci_failed=0\n");
+        appendPhaseScript(script, "INSTALL", installCommands, false);
+        appendPhaseScript(script, "PRE_BUILD", preBuildCommands, true);
+        appendPhaseScript(script, "BUILD", buildCommands, true);
+        appendPhaseScript(script, "POST_BUILD", postBuildCommands, false);
+        return script.toString();
+    }
+
+    private static void appendPhaseScript(StringBuilder script, String phase,
+                                          List<String> commands, boolean skipAfterFailure) {
+        if (skipAfterFailure) {
+            script.append("if [ \"$___floci_failed\" -eq 0 ]; then\n");
+        }
+        script.append("echo \"").append(PHASE_START_SENTINEL).append(' ').append(phase).append("\"\n");
+        script.append("___floci_rc=0\n");
+        for (String command : commands) {
+            script.append("if [ \"$___floci_rc\" -eq 0 ]; then\n")
+                    .append(command).append('\n')
+                    .append("___floci_rc=$?\n")
+                    .append("fi\n");
+        }
+        script.append("echo \"").append(PHASE_END_SENTINEL).append(' ').append(phase)
+                .append(" $___floci_rc\"\n");
+        script.append("[ \"$___floci_rc\" -eq 0 ] || ___floci_failed=1\n");
+        if (skipAfterFailure) {
+            script.append("else\n");
+            script.append("echo \"").append(PHASE_END_SENTINEL).append(' ').append(phase)
+                    .append(" SKIPPED\"\n");
+            script.append("fi\n");
+        }
+    }
+
+    private PhaseResult runPhaseSession(String containerId, String workDir, List<String> env,
+                                        ParsedBuildspec buildspec, Build build,
+                                        int timeoutMinutes, AtomicBoolean stopFlag) {
+        String script = phaseSessionScript(buildspec.installCommands(), buildspec.preBuildCommands(),
+                buildspec.buildCommands(), buildspec.postBuildCommands());
+        String[] cmd = {"sh", "-c", script};
+        PhaseSession session = new PhaseSession(build);
+
+        try {
+            String execId = dockerClient.execCreateCmd(containerId)
+                    .withCmd(cmd)
+                    .withWorkingDir(workDir)
+                    .withEnv(env)
+                    .withAttachStdout(true)
+                    .withAttachStderr(true)
+                    .exec()
+                    .getId();
+
+            CountDownLatch latch = new CountDownLatch(1);
+
+            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+                @Override
+                public void onNext(Frame frame) {
+                    if (frame.getPayload() != null) {
+                        session.accept(frame.getPayload());
+                    }
+                }
+                @Override
+                public void onComplete() { latch.countDown(); }
+                @Override
+                public void onError(Throwable t) { latch.countDown(); }
+            });
+
+            boolean completed = latch.await(timeoutMinutes, TimeUnit.MINUTES);
+            if (stopFlag.get()) {
+                return PhaseResult.ofStopped();
+            }
+            if (!completed) {
+                String message = "Phase timed out after " + timeoutMinutes + " minutes";
+                session.finish(null, message);
+                return PhaseResult.ofFailure(message);
+            }
+
+            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
+            boolean anyPhaseFailed = session.finish(exitCode, null);
+            return anyPhaseFailed ? PhaseResult.ofFailure(null) : PhaseResult.ofSuccess();
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return PhaseResult.ofStopped();
+        } catch (Exception e) {
+            if (stopFlag.get()) {
+                return PhaseResult.ofStopped();
+            }
+            session.finish(null, e.getMessage());
+            return PhaseResult.ofFailure(e.getMessage());
+        }
+    }
+
     private void uploadArtifacts(String region, Build build, Project project,
                                  ParsedArtifacts artifacts, Path workspace) throws IOException {
         String type = artifacts.type();
@@ -942,6 +993,133 @@ public class CodeBuildRunner implements ContainerTeardown {
         if (filename.endsWith(".xml")) { return "application/xml"; }
         if (filename.endsWith(".html")) { return "text/html"; }
         return "text/plain";
+    }
+
+    // Parses the streamed session output line by line: sentinel lines drive phase
+    // begin/complete/skip bookkeeping on the Build, everything else is buffered as
+    // the running phase's log tail for the FAILED context message. finish() settles
+    // phases the shell never reported on (premature exit, timeout, exec error).
+    private class PhaseSession {
+
+        private final Build build;
+        private final ByteArrayOutputStream pendingLine = new ByteArrayOutputStream();
+        private final StringBuilder phaseOutput = new StringBuilder();
+        private final Set<String> endedPhases = new HashSet<>();
+        private String runningPhase;
+        private boolean anyPhaseFailed;
+        private boolean finished;
+
+        PhaseSession(Build build) {
+            this.build = build;
+        }
+
+        synchronized void accept(byte[] payload) {
+            if (finished) {
+                return;
+            }
+            for (byte b : payload) {
+                if (b == '\n') {
+                    handleLine(pendingLine.toString(StandardCharsets.UTF_8));
+                    pendingLine.reset();
+                } else {
+                    pendingLine.write(b);
+                }
+            }
+        }
+
+        private void handleLine(String line) {
+            String stripped = line.stripTrailing();
+            if (stripped.startsWith(PHASE_START_SENTINEL + " ")) {
+                runningPhase = stripped.substring(PHASE_START_SENTINEL.length() + 1).trim();
+                phaseOutput.setLength(0);
+                beginPhase(build, runningPhase);
+                return;
+            }
+            if (stripped.startsWith(PHASE_END_SENTINEL + " ")) {
+                String[] parts = stripped.substring(PHASE_END_SENTINEL.length() + 1).trim().split("\\s+");
+                if (parts.length >= 2) {
+                    endPhase(parts[0], parts[1]);
+                }
+                return;
+            }
+            phaseOutput.append(line).append('\n');
+            if (phaseOutput.length() > 8192) {
+                phaseOutput.delete(0, phaseOutput.length() - 4096);
+            }
+        }
+
+        private void endPhase(String phase, String result) {
+            endedPhases.add(phase);
+            if (phase.equals(runningPhase)) {
+                runningPhase = null;
+            }
+            if ("SKIPPED".equals(result)) {
+                skipPhase(build, phase);
+                return;
+            }
+            long exitCode;
+            try {
+                exitCode = Long.parseLong(result);
+            } catch (NumberFormatException e) {
+                LOG.warnv("Unparseable exit code {0} for phase {1} of build {2}", result, phase, build.getId());
+                exitCode = -1;
+            }
+            if (exitCode == 0) {
+                completePhase(build, phase, "SUCCEEDED");
+            } else {
+                completePhaseWithError(build, phase, "FAILED", failureMessage(exitCode));
+                anyPhaseFailed = true;
+            }
+            phaseOutput.setLength(0);
+        }
+
+        private String failureMessage(long exitCode) {
+            String output = phaseOutput.toString();
+            String message = "Exit code " + exitCode;
+            if (!output.isBlank()) {
+                String trimmed = output.stripTrailing();
+                message += ": " + trimmed.substring(Math.max(0, trimmed.length() - 512));
+            }
+            return message;
+        }
+
+        synchronized boolean finish(Long execExitCode, String sessionErrorMessage) {
+            if (pendingLine.size() > 0) {
+                handleLine(pendingLine.toString(StandardCharsets.UTF_8));
+                pendingLine.reset();
+            }
+            finished = true;
+            boolean unattributedError = sessionErrorMessage != null
+                    || execExitCode == null || execExitCode != 0;
+            for (String phase : SHELL_PHASES) {
+                if (endedPhases.contains(phase)) {
+                    continue;
+                }
+                endedPhases.add(phase);
+                boolean started = phase.equals(runningPhase);
+                if (!started && !unattributedError) {
+                    skipPhase(build, phase);
+                    continue;
+                }
+                if (!started) {
+                    beginPhase(build, phase);
+                }
+                if (unattributedError) {
+                    String message = sessionErrorMessage != null
+                            ? sessionErrorMessage
+                            : failureMessage(execExitCode != null ? execExitCode : -1);
+                    completePhaseWithError(build, phase, "FAILED", message);
+                    anyPhaseFailed = true;
+                    unattributedError = false;
+                } else {
+                    completePhase(build, phase, "SUCCEEDED");
+                }
+                if (started) {
+                    runningPhase = null;
+                }
+            }
+            return anyPhaseFailed;
+        }
     }
 
     private enum PhaseStatus { SUCCEEDED, FAILED, STOPPED }
