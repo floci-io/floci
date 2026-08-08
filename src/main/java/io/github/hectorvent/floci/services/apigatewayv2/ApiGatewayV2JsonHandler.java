@@ -577,6 +577,10 @@ public class ApiGatewayV2JsonHandler {
         node.put("RouteKey", r.getRouteKey());
         node.put("AuthorizationType", r.getAuthorizationType());
         if (r.getAuthorizerId() != null) node.put("AuthorizerId", r.getAuthorizerId());
+        if (r.getAuthorizationScopes() != null && !r.getAuthorizationScopes().isEmpty()) {
+            ArrayNode scopes = node.putArray("AuthorizationScopes");
+            r.getAuthorizationScopes().forEach(scopes::add);
+        }
         if (r.getTarget() != null) node.put("Target", r.getTarget());
         if (r.getRouteResponseSelectionExpression() != null) {
             node.put("RouteResponseSelectionExpression", r.getRouteResponseSelectionExpression());

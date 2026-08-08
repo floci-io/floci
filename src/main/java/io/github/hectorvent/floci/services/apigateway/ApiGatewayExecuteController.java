@@ -1235,9 +1235,13 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
+        Map<String, Object> validatedJwtClaims = null;
+        List<String> validatedJwtScopes = null;
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
-            Response authError = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
-            if (authError != null) return authError;
+            JwtEnforcement enforcement = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
+            if (enforcement.error() != null) return enforcement.error();
+            validatedJwtClaims = enforcement.claims();
+            validatedJwtScopes = enforcement.scopes();
         }
 
         if ("CUSTOM".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
@@ -1268,7 +1272,7 @@ public class ApiGatewayExecuteController {
         if (integrationType == null || integrationType.isEmpty()) integrationType = "AWS_PROXY";
 
         if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
-            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName);
+            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName, validatedJwtClaims);
         }
 
         String functionName = functionNameFromUri(integration.getIntegrationUri());
@@ -1280,7 +1284,7 @@ public class ApiGatewayExecuteController {
 
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, stageName, headers, uriInfo, body, requestId);
+                validatedJwtClaims, validatedJwtScopes, apiId, stageName, headers, uriInfo, body, requestId);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1304,7 +1308,8 @@ public class ApiGatewayExecuteController {
     private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,
                                           HttpHeaders headers, UriInfo uriInfo, byte[] body,
-                                          String apiId, String stageName) {
+                                          String apiId, String stageName,
+                                          Map<String, Object> validatedJwtClaims) {
         // CDK HttpAlbIntegration sets integrationUri to an ALB listener ARN. Resolve it
         // to the listener's bound localhost port so HttpProxyInvoker (which assumes a
         // concrete http(s) URL) can forward through the listener's data plane.
@@ -1337,14 +1342,10 @@ public class ApiGatewayExecuteController {
         }
         Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
 
-        Map<String, Object> claims = Map.of();
-        if ("JWT".equalsIgnoreCase(route.getAuthorizationType())) {
-            String token = extractBearerToken(headers);
-            if (token != null) {
-                Map<String, Object> parsed = parseAllJwtClaims(token);
-                if (parsed != null) claims = parsed;
-            }
-        }
+        // Same trust model as the AWS_PROXY path: only claims that dispatchV2 derived
+        // after successful enforceJwtAuthorizer are exposed to $context.authorizer.claims.*
+        // parameter mapping. A JWT route without a backing authorizer gets none.
+        Map<String, Object> claims = validatedJwtClaims != null ? validatedJwtClaims : Map.of();
 
         String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
@@ -1410,13 +1411,6 @@ public class ApiGatewayExecuteController {
         return copy;
     }
 
-    private static String extractBearerToken(HttpHeaders headers) {
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null) return null;
-        if (auth.startsWith("Bearer ")) return auth.substring("Bearer ".length()).trim();
-        return null;
-    }
-
     /** Extracts ALL JWT claims as a Map<String,Object> for use as $context.authorizer.claims.X source values. */
     private Map<String, Object> parseAllJwtClaims(String token) {
         try {
@@ -1465,43 +1459,59 @@ public class ApiGatewayExecuteController {
     /** Extracts parameter names from a route template; the pattern itself is constant. */
     private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
 
-    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
-                                          UriInfo uriInfo) {
+    /**
+     * Outcome of JWT enforcement: exactly one of {@code error} (denial Response) or
+     * {@code claims} (full claims of the token that passed validation) is non-null,
+     * so the proxy event can only ever carry claims the enforcement step accepted —
+     * derived from the same authorizer snapshot and extracted token, with no re-lookup.
+     * {@code scopes} is the validated token's full scope list when the route carries
+     * {@code authorizationScopes}, and null otherwise — mirroring how real API Gateway
+     * only surfaces {@code jwt.scopes} on scoped routes (verified against AWS 2026-08).
+     */
+    private record JwtEnforcement(Response error, Map<String, Object> claims, List<String> scopes) {
+        static JwtEnforcement denied(Response error) { return new JwtEnforcement(error, null, null); }
+        static JwtEnforcement authorized(Map<String, Object> claims, List<String> scopes) {
+            return new JwtEnforcement(null, claims, scopes);
+        }
+    }
+
+    private JwtEnforcement enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
+                                                UriInfo uriInfo) {
         Authorizer authorizer;
         try {
             authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
         } catch (AwsException e) {
-            return Response.status(500)
+            return JwtEnforcement.denied(Response.status(500)
                     .entity(jsonMessage("Authorizer not found"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         String token = extractToken(authorizer, headers, uriInfo);
         if (token == null) {
-            return Response.status(401)
+            return JwtEnforcement.denied(Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         JwtClaims claims = parseJwtClaims(token);
         if (claims == null) {
-            return Response.status(401)
+            return JwtEnforcement.denied(Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         if (claims.exp > 0 && claims.exp < System.currentTimeMillis() / 1000) {
-            return Response.status(401)
+            return JwtEnforcement.denied(Response.status(401)
                     .entity(jsonMessage("The incoming token has expired"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build());
         }
 
         if (authorizer.getJwtConfiguration() != null) {
             String issuer = authorizer.getJwtConfiguration().issuer();
             if (issuer != null && !issuer.isBlank() && !issuer.equals(claims.iss)) {
-                return Response.status(401)
+                return JwtEnforcement.denied(Response.status(401)
                         .entity(jsonMessage("Unauthorized"))
-                        .type(MediaType.APPLICATION_JSON).build();
+                        .type(MediaType.APPLICATION_JSON).build());
             }
 
             List<String> audiences = authorizer.getJwtConfiguration().audience();
@@ -1511,14 +1521,40 @@ public class ApiGatewayExecuteController {
                 boolean audMatch = audiences.stream().anyMatch(a ->
                         a.equals(claims.aud) || a.equals(claims.clientId));
                 if (!audMatch) {
-                    return Response.status(401)
+                    return JwtEnforcement.denied(Response.status(401)
                             .entity(jsonMessage("Unauthorized"))
-                            .type(MediaType.APPLICATION_JSON).build();
+                            .type(MediaType.APPLICATION_JSON).build());
                 }
             }
         }
 
-        return null; // authorized
+        Map<String, Object> allClaims = parseAllJwtClaims(token);
+        if (allClaims == null) {
+            // parseJwtClaims above already decoded this token, so this only happens for
+            // exotic payloads (e.g. a non-object JSON body). Keep the record's contract:
+            // authorized always carries a non-null map; empty means "no claims to expose".
+            LOG.debugv("JWT validated but full-claims extraction failed; exposing no claims: api {0}, authorizer {1}",
+                    apiId, route.getAuthorizerId());
+            allClaims = Map.of();
+        }
+
+        // Real API Gateway behavior (verified against AWS): a route with
+        // authorizationScopes rejects tokens whose scope/scp claim matches none of
+        // them with 403 {"message":"Forbidden"}, and surfaces the token's FULL scope
+        // list (not the intersection) as jwt.scopes. Routes without
+        // authorizationScopes always render jwt.scopes as null, even when the token
+        // carries a scope claim.
+        List<String> routeScopes = route.getAuthorizationScopes();
+        List<String> tokenScopes = null;
+        if (routeScopes != null && !routeScopes.isEmpty()) {
+            tokenScopes = deriveJwtScopes(allClaims);
+            if (tokenScopes == null || tokenScopes.stream().noneMatch(routeScopes::contains)) {
+                return JwtEnforcement.denied(Response.status(403)
+                        .entity(jsonMessage("Forbidden"))
+                        .type(MediaType.APPLICATION_JSON).build());
+            }
+        }
+        return JwtEnforcement.authorized(allClaims, tokenScopes);
     }
 
     // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
@@ -1815,6 +1851,50 @@ public class ApiGatewayExecuteController {
         return value;
     }
 
+    /**
+     * Renders a claim value the way API Gateway's payload 2.0 JWT authorizer context
+     * does: strings as-is, numbers/booleans via toString, arrays as a space-separated
+     * bracket form (e.g. {@code cognito:groups} → {@code "[admin poweruser]"} — not
+     * JSON), null-valued claims omitted, nested objects as JSON as a fallback.
+     */
+    private String renderClaimValue(Object v) {
+        if (v == null) return null;
+        if (v instanceof String s) return s;
+        if (v instanceof java.util.Collection<?> c) {
+            return c.stream().map(String::valueOf)
+                    .collect(java.util.stream.Collectors.joining(" ", "[", "]"));
+        }
+        if (v instanceof Map<?, ?>) {
+            try {
+                return objectMapper.writeValueAsString(v);
+            } catch (Exception e) {
+                return String.valueOf(v);
+            }
+        }
+        return String.valueOf(v);
+    }
+
+    /**
+     * Extracts the token's scope list from its claims: the {@code scp} claim (array,
+     * or space-separated string) wins, else the {@code scope} claim (space-separated
+     * string — the form Cognito access tokens use, e.g. {@code "read write"} →
+     * {@code ["read", "write"]}). Returns null when the token carries neither.
+     * Used both to match a route's {@code authorizationScopes} and to surface
+     * {@code jwt.scopes} on scoped routes (the claim pair API Gateway evaluates).
+     */
+    private List<String> deriveJwtScopes(Map<String, Object> claims) {
+        for (String key : List.of("scp", "scope")) {
+            Object v = claims.get(key);
+            if (v instanceof java.util.Collection<?> c && !c.isEmpty()) {
+                return c.stream().map(String::valueOf).toList();
+            }
+            if (v instanceof String s && !s.isBlank()) {
+                return List.of(s.trim().split("\\s+"));
+            }
+        }
+        return null;
+    }
+
     private record JwtClaims(String iss, String aud, String clientId, long exp) {}
 
     private JwtClaims parseJwtClaims(String token) {
@@ -1846,6 +1926,7 @@ public class ApiGatewayExecuteController {
     }
 
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
+                                     Map<String, Object> validatedJwtClaims, List<String> validatedJwtScopes,
                                      String apiId, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
@@ -1895,6 +1976,27 @@ public class ApiGatewayExecuteController {
         http.put("sourceIp", "127.0.0.1");
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
+
+        // JWT authorizer context: dispatch passes claims (and, for routes with
+        // authorizationScopes, the token's scope list) only for routes whose token
+        // enforceJwtAuthorizer actually validated (same authorizationType + authorizerId
+        // gate), so this method never parses the Authorization header itself and
+        // unvalidated tokens can never surface as trusted authorizer context. Values
+        // are stringified like the payload 2.0 wire format (see renderClaimValue).
+        if (validatedJwtClaims != null && !validatedJwtClaims.isEmpty()) {
+            ObjectNode jwtNode = ctx.putObject("authorizer").putObject("jwt");
+            ObjectNode claimsNode = jwtNode.putObject("claims");
+            validatedJwtClaims.forEach((k, v) -> {
+                String rendered = renderClaimValue(v);
+                if (rendered != null) claimsNode.put(k, rendered);
+            });
+            if (validatedJwtScopes == null) {
+                jwtNode.putNull("scopes");
+            } else {
+                ArrayNode scopesNode = jwtNode.putArray("scopes");
+                validatedJwtScopes.forEach(scopesNode::add);
+            }
+        }
 
         if (body != null && body.length > 0) {
             event.put("body", new String(body));

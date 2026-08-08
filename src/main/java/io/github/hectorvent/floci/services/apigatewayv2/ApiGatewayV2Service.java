@@ -310,6 +310,9 @@ public class ApiGatewayV2Service {
         route.setRouteKey((String) request.get("routeKey"));
         route.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         route.setAuthorizerId((String) request.get("authorizerId"));
+        @SuppressWarnings("unchecked")
+        List<String> authorizationScopes = (List<String>) request.get("authorizationScopes");
+        route.setAuthorizationScopes(authorizationScopes);
         route.setTarget((String) request.get("target"));
         route.setRouteResponseSelectionExpression((String) request.get("routeResponseSelectionExpression"));
 
@@ -344,6 +347,11 @@ public class ApiGatewayV2Service {
         }
         if (request.containsKey("authorizerId") && request.get("authorizerId") != null) {
             route.setAuthorizerId((String) request.get("authorizerId"));
+        }
+        if (request.containsKey("authorizationScopes") && request.get("authorizationScopes") != null) {
+            @SuppressWarnings("unchecked")
+            List<String> authorizationScopes = (List<String>) request.get("authorizationScopes");
+            route.setAuthorizationScopes(authorizationScopes);
         }
         if (request.containsKey("target") && request.get("target") != null) {
             route.setTarget((String) request.get("target"));
