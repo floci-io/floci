@@ -19,7 +19,10 @@ public final class VerificationCode {
         SIGNUP_CONFIRMATION,
         PASSWORD_RESET,
         SMS_MFA,
-        ATTRIBUTE_VERIFICATION
+        // Attribute verification is keyed per attribute so email and phone_number codes
+        // rate-limit and overwrite independently, matching AWS.
+        EMAIL_ATTRIBUTE_VERIFICATION,
+        PHONE_ATTRIBUTE_VERIFICATION
     }
 
     private final String userPoolId;

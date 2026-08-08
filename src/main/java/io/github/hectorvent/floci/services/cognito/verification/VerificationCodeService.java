@@ -86,8 +86,9 @@ public final class VerificationCodeService {
     }
 
     /**
-     * Validate a code. On success, marks it consumed and removes it. On any
-     * failure, throws {@link VerificationCodeException} with the specific
+     * Validate a code. On success, marks it consumed and retains the tombstone
+     * until it expires or a new code replaces it. On any failure, throws
+     * {@link VerificationCodeException} with the specific
      * {@link VerificationCodeException.Kind}.
      *
      * <p>Note: not thread-safe under concurrent {@code consume()} of the same
@@ -101,13 +102,13 @@ public final class VerificationCodeService {
         VerificationCode vc = store.get(key).orElseThrow(() -> new VerificationCodeException(
             VerificationCodeException.Kind.NOT_FOUND,
             "Invalid verification code provided, please try again"));
-        if (vc.isConsumed()) {
-            throw new VerificationCodeException(
-                VerificationCodeException.Kind.NOT_FOUND,
-                "Invalid verification code provided, please try again");
-        }
         if (vc.isExpired(clock.instant())) {
             store.delete(key);
+            throw new VerificationCodeException(
+                VerificationCodeException.Kind.EXPIRED,
+                "Invalid code provided, please request a code again");
+        }
+        if (vc.isConsumed()) {
             throw new VerificationCodeException(
                 VerificationCodeException.Kind.EXPIRED,
                 "Invalid code provided, please request a code again");
@@ -136,7 +137,7 @@ public final class VerificationCodeService {
         }
 
         vc.markConsumed();
-        store.delete(key);
+        store.put(key, vc);
     }
 
     /** Remove any active code for the (pool, user, purpose). Idempotent. */
