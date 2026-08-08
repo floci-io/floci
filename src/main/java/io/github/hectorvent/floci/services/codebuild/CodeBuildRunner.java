@@ -38,14 +38,18 @@ import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -178,7 +182,56 @@ public class CodeBuildRunner implements ContainerTeardown {
     public void startBuild(String region, Build build, Project project, String buildspecOverride) {
         AtomicBoolean stopFlag = new AtomicBoolean(false);
         stopFlags.put(build.getId(), stopFlag);
-        Thread.ofVirtual().start(() -> runBuild(region, build, project, buildspecOverride, stopFlag));
+        Thread.ofVirtual().start(() -> {
+            try {
+                runBuild(region, build, project, buildspecOverride, stopFlag);
+            } catch (Throwable t) {
+                failBuildOnUncaughtError(build, t);
+            }
+        });
+    }
+
+    // A build thread must never die leaving its Build IN_PROGRESS: CodePipeline
+    // actions poll buildComplete and would wedge forever. Errors (e.g. OutOfMemory)
+    // bypass runBuild's own Exception handling, so this outer net records the
+    // failure and releases whatever the aborted cleanup left behind.
+    void failBuildOnUncaughtError(Build build, Throwable t) {
+        LOG.error("Build thread for " + build.getId() + " died unexpectedly", t);
+        stopFlags.remove(build.getId());
+        String containerId = runningContainers.remove(build.getId());
+        if (containerId != null) {
+            try {
+                lifecycleManager.stopAndRemove(containerId, null);
+            } catch (Exception e) {
+                LOG.warnv("Could not stop container {0} of failed build {1}: {2}",
+                        containerId, build.getId(), e.getMessage());
+            }
+        }
+        if (Boolean.TRUE.equals(build.getBuildComplete())) {
+            return;
+        }
+        double now = System.currentTimeMillis() / 1000.0;
+        if (build.getPhases() == null) {
+            build.setPhases(new ArrayList<>());
+        }
+        BuildPhase phase = build.getPhases().stream()
+                .filter(p -> "IN_PROGRESS".equals(p.getPhaseStatus()))
+                .reduce((first, second) -> second)
+                .orElse(null);
+        if (phase == null) {
+            phase = new BuildPhase();
+            phase.setPhaseType("COMPLETED");
+            phase.setStartTime(now);
+            build.getPhases().add(phase);
+        }
+        phase.setPhaseStatus("FAILED");
+        phase.setEndTime(now);
+        phase.setDurationInSeconds(Math.round(now - (phase.getStartTime() != null ? phase.getStartTime() : now)));
+        phase.setContexts(List.of(Map.of("statusCode", "FAULT_ERROR", "message", t.toString())));
+        build.setEndTime(now);
+        build.setBuildComplete(true);
+        build.setBuildStatus("FAILED");
+        build.setCurrentPhase("COMPLETED");
     }
 
     public void stopBuild(String buildId) {
@@ -676,7 +729,10 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     // Copies files from the local workspace into the container's working directory.
-    // Skips silently when the workspace is empty (e.g. NO_SOURCE builds).
+    // Skips silently when the workspace is empty (e.g. NO_SOURCE builds). The tar is
+    // staged on disk instead of in memory: a source tree can be several GB (LZA hands
+    // its whole built monorepo, node_modules included, to the toolkit build) and an
+    // in-memory tar of it exhausts the heap.
     private void copySourceToContainer(String containerId, Path sourceDir, String remotePath) {
         try {
             if (!Files.exists(sourceDir)) return;
@@ -686,12 +742,20 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
             if (!hasFiles) return;
 
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            createTarFromDir(sourceDir, bos);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(remotePath)
-                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
-                    .exec();
+            Path tarFile = Files.createTempFile("floci-codebuild-src-", ".tar");
+            try {
+                try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+                    createTarFromDir(sourceDir, out);
+                }
+                try (InputStream in = new BufferedInputStream(Files.newInputStream(tarFile))) {
+                    dockerClient.copyArchiveToContainerCmd(containerId)
+                            .withRemotePath(remotePath)
+                            .withTarInputStream(in)
+                            .exec();
+                }
+            } finally {
+                Files.deleteIfExists(tarFile);
+            }
         } catch (Exception e) {
             LOG.warnv("Could not copy source to container {0}: {1}", containerId, e.getMessage());
         }
@@ -733,7 +797,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                     Files.createDirectories(target);
                 } else {
                     Files.createDirectories(target.getParent());
-                    Files.write(target, tar.readAllBytes());
+                    Files.copy(tar, target, StandardCopyOption.REPLACE_EXISTING);
                 }
             }
         } catch (Exception e) {
@@ -741,7 +805,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    void createTarFromDir(Path dir, ByteArrayOutputStream out) throws IOException {
+    void createTarFromDir(Path dir, OutputStream out) throws IOException {
         try (TarArchiveOutputStream tar = newTarStream(out);
              var stream = Files.walk(dir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
@@ -773,7 +837,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    private static TarArchiveOutputStream newTarStream(ByteArrayOutputStream out) {
+    private static TarArchiveOutputStream newTarStream(OutputStream out) {
         TarArchiveOutputStream tar = new TarArchiveOutputStream(out);
         tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
         tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_STAR);

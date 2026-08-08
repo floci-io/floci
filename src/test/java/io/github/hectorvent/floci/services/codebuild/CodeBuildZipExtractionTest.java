@@ -7,7 +7,8 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.ByteArrayInputStream;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -71,13 +72,18 @@ class CodeBuildZipExtractionTest {
             zip = baos.toByteArray();
         }
         CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null);
-        runner.extractZip(zip, tempDir);
+        Path sourceDir = Files.createDirectories(tempDir.resolve("source"));
+        runner.extractZip(zip, sourceDir);
 
-        var tarBytes = new ByteArrayOutputStream();
-        runner.createTarFromDir(tempDir, tarBytes);
+        // The runner streams the tar to a disk-backed file rather than buffering it in
+        // memory; round-trip through a real file like copySourceToContainer does.
+        Path tarFile = tempDir.resolve("source.tar");
+        try (var out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+            runner.createTarFromDir(sourceDir, out);
+        }
 
         Map<String, Integer> modes = new HashMap<>();
-        try (var tar = new TarArchiveInputStream(new ByteArrayInputStream(tarBytes.toByteArray()))) {
+        try (var tar = new TarArchiveInputStream(new BufferedInputStream(Files.newInputStream(tarFile)))) {
             TarArchiveEntry entry;
             while ((entry = tar.getNextEntry()) != null) {
                 if (!entry.isDirectory()) {
