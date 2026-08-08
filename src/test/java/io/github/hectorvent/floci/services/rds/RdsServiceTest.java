@@ -503,6 +503,219 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbClusterAppliesServerlessV2Scaling() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.0, 16.0, 600);
+
+        assertEquals(0.0, cluster.getServerlessV2MinCapacity());
+        assertEquals(16.0, cluster.getServerlessV2MaxCapacity());
+        assertEquals(600, cluster.getServerlessV2SecondsUntilAutoPause());
+    }
+
+    @Test
+    void createDbClusterRejectsServerlessV2ScalingForNonAuroraEngines() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        for (String engine : List.of("postgres", "mysql", "mariadb")) {
+            String clusterId = "cluster-" + engine;
+            AwsException exception = assertThrows(AwsException.class,
+                    () -> rdsService.createDbCluster(
+                            clusterId, engine, null, "admin", "password", "dbname",
+                            false, null, null, null, false, "us-east-1",
+                            0.5, 16.0, null));
+
+            assertEquals("InvalidParameterCombination", exception.getErrorCode());
+            assertEquals(400, exception.getHttpStatus());
+            assertEquals(
+                    "Parameters that must not be used together were used together. "
+                            + "Remove one of the conflicting parameters and try again.",
+                    exception.getMessage());
+            assertTrue(rdsService.listDbClusters(clusterId).isEmpty());
+        }
+    }
+
+    @Test
+    void createDbClusterDefaultsAndClearsServerlessV2AutoPauseInterval() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster autoPauseCluster = rdsService.createDbCluster(
+                "auto-pause", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.0, 16.0);
+        DbCluster alwaysActiveCluster = rdsService.createDbCluster(
+                "always-active", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.5, 16.0, 600);
+
+        assertEquals(300, autoPauseCluster.getServerlessV2SecondsUntilAutoPause());
+        assertNull(alwaysActiveCluster.getServerlessV2SecondsUntilAutoPause());
+    }
+
+    @Test
+    void modifyDbClusterAppliesServerlessV2ScalingConfiguration() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.0, 16.0, 600);
+
+        DbCluster widerRange = rdsService.modifyDbCluster(
+                "cluster1", null, null, null, 32.0, null);
+
+        assertEquals(0.0, widerRange.getServerlessV2MinCapacity());
+        assertEquals(32.0, widerRange.getServerlessV2MaxCapacity());
+        assertEquals(600, widerRange.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster longerAutoPause = rdsService.modifyDbCluster(
+                "cluster1", null, null, null, null, 900);
+
+        assertEquals(0.0, longerAutoPause.getServerlessV2MinCapacity());
+        assertEquals(32.0, longerAutoPause.getServerlessV2MaxCapacity());
+        assertEquals(900, longerAutoPause.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster alwaysActiveCluster = rdsService.modifyDbCluster(
+                "cluster1", null, null, 0.5, null, null);
+        assertEquals(0.5, alwaysActiveCluster.getServerlessV2MinCapacity());
+        assertEquals(32.0, alwaysActiveCluster.getServerlessV2MaxCapacity());
+        assertNull(alwaysActiveCluster.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster autoPauseAgain = rdsService.modifyDbCluster(
+                "cluster1", null, null, 0.0, null, null);
+        assertEquals(300, autoPauseAgain.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster passwordOnlyChange = rdsService.modifyDbCluster(
+                "cluster1", "new-password", null);
+        assertEquals(0.0, passwordOnlyChange.getServerlessV2MinCapacity());
+        assertEquals(32.0, passwordOnlyChange.getServerlessV2MaxCapacity());
+        assertEquals(300, passwordOnlyChange.getServerlessV2SecondsUntilAutoPause());
+    }
+
+    @Test
+    void modifyDbClusterRejectsServerlessV2ScalingForNonAuroraCluster() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster(
+                "cluster1", "postgres", "16.3", "admin", "original-password",
+                "dbname", false, null);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyDbCluster(
+                        "cluster1", "new-password", true, 0.5, 16.0, null));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals(
+                "Parameters that must not be used together were used together. "
+                        + "Remove one of the conflicting parameters and try again.",
+                exception.getMessage());
+        assertEquals("original-password", cluster.getMasterPassword());
+        assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterCanAddServerlessV2ScalingToExistingAuroraCluster() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        DbCluster cluster = rdsService.modifyDbCluster(
+                "cluster1", null, null, 0.5, 16.0, null);
+
+        assertEquals("aurora-postgresql", cluster.getEngineIdentifier());
+        assertEquals(0.5, cluster.getServerlessV2MinCapacity());
+        assertEquals(16.0, cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterRejectsScalingWhenPersistedEngineIdentityIsMissing() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster(
+                "cluster1", "aurora-postgresql", "16.3", "admin", "password",
+                "dbname", false, null);
+        cluster.setEngineIdentifier(null);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyDbCluster(
+                        "cluster1", null, null, 0.5, 16.0, null));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterRejectsPartialScalingWithoutAnExistingConfiguration() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", false, null);
+
+        assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "cluster1", "new-password", true, null, 16.0, null));
+
+        assertEquals("original-password", cluster.getMasterPassword());
+        assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterValidatesScalingBeforeApplyingOtherChanges() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", false, null);
+
+        assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "cluster1", "new-password", true, 0.0, 16.0, 299));
+
+        assertEquals("original-password", cluster.getMasterPassword());
+        assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void serverlessV2CapacityValidationEnforcesAcuConstraints() {
+        // Non-half-step increment.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.3, 16.0));
+        // Above the 256-ACU ceiling.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, 300.0));
+        // AWS requires MaxCapacity to be greater than 0.5 ACUs.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.0, 0.5));
+        // Non-finite values are not valid AWS Query numbers.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(Double.NaN, 16.0));
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, Double.NaN));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2Capacity(0.5, Double.POSITIVE_INFINITY));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2Capacity(Double.NEGATIVE_INFINITY, 16.0));
+        // MaxCapacity below MinCapacity.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(16.0, 8.0));
+        // Valid: 0 (auto-pause), the 256 ceiling, and half-step values.
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(0.0, 256.0));
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(0.5, 128.0));
+        // Both null is a no-op (not a Serverless v2 cluster).
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(null, null));
+        // A create-time or otherwise incomplete effective configuration requires both bounds.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, null));
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(null, 16.0));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, 299));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, 86_401));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2ScalingConfiguration(null, null, 300));
+        assertEquals(300,
+                rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, null));
+        assertEquals(86_400,
+                rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, 86_400));
+        assertNull(rdsService.validateServerlessV2ScalingConfiguration(0.5, 16.0, 600));
+    }
+
+    @Test
     void mockModeCreatesClusterInstanceAvailableWithoutContainer() {
         when(config.services().rds().mock()).thenReturn(true);
         rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",

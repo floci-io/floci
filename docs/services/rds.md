@@ -96,6 +96,29 @@ services:
     deleted under mock leave their containers and volumes behind, and resources created in mock
     mode are restored with fresh, empty containers when loaded in real mode.
 
+## Aurora Serverless v2 scaling
+
+`CreateDBCluster`, `ModifyDBCluster`, and `DescribeDBClusters` support the AWS
+`ServerlessV2ScalingConfiguration` Query shape for `aurora-mysql` and `aurora-postgresql`
+clusters. Requests that apply this configuration to another engine fail with
+`InvalidParameterCombination`.
+
+The minimum and maximum capacities use half-ACU increments; the maximum must be at least 1 ACU and
+no greater than 256 ACUs. AWS's actual maximum depends on the Aurora engine and platform version,
+while Floci currently applies the 256-ACU ceiling uniformly.
+
+When `MinCapacity` is zero, `SecondsUntilAutoPause` accepts 300–86,400 seconds and defaults to 300.
+Changing the minimum to a nonzero value removes the auto-pause interval, matching the AWS response
+shape. AWS limits zero-capacity auto-pause to compatible Aurora versions; Floci does not currently
+enforce that version matrix. `ModifyDBCluster` accepts partial scaling updates and preserves omitted
+values. `AWS::RDS::DBCluster` creation also maps the equivalent CloudFormation property.
+
+If a persisted cluster record does not contain its original AWS engine identifier, Floci rejects a
+new scaling configuration instead of assuming that the cluster is Aurora.
+
+This is control-plane compatibility: Floci persists and returns the scaling configuration, but it
+does not resize or automatically pause the backing Docker container.
+
 ## Examples
 
 ```bash
