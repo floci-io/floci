@@ -10,6 +10,8 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.Matchers.containsString;
 
@@ -221,6 +223,64 @@ class Ec2IntegrationTest {
             .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
             .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-0abcdef1234567892"))
             .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("x86_64"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageSatisfiesAnInfixWildcardName() {
+        // Truncating at the first wildcard produced "unmatched-vendor-20260101", which does not
+        // satisfy the pattern the caller asked for.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-*-20.04-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, startsWith("unmatched-vendor-"));
+        assertThat(name, containsString("-20.04-"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageHonorsOtherRequestedFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-arm-*")
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "arm64")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageIsWithheldWhenItCannotSatisfyTheRequest() {
+        // The synthesized description is fixed, so a description filter it cannot meet must yield
+        // an empty result rather than an AMI that violates the request.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-none-*")
+            .formParam("Filter.2.Name", "description")
+            .formParam("Filter.2.Value.1", "a description no synthesized image carries")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<imageId>")));
     }
 
     @Test

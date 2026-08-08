@@ -1276,6 +1276,22 @@ public class Ec2QueryHandler {
         List<String> owners = getList(p, "Owner");
         Map<String, List<String>> filters = getFilters(p);
         List<Image> images = service.describeImages(region, imageIds, owners, filters);
+        // CDK's MachineImage.lookup is a synth-time context provider that queries
+        // by a `name` wildcard and aborts `cdk deploy` if the response is empty.
+        // When a wildcard name filter matches no seeded AMI, synthesize one that
+        // satisfies it, so the lookup resolves — the exact id is a runtime detail.
+        if (images.isEmpty() && imageIds.isEmpty() && filters.containsKey("name")) {
+            String namePattern = filters.get("name").stream().findFirst().orElse("");
+            if (namePattern.contains("*") || namePattern.contains("?")) {
+                Image synthesized = synthesizeLookupImage(namePattern, filters, owners);
+                // Only hand it back if it satisfies everything that was asked for. Returning an
+                // AMI that violates the request is worse than the empty result the lookup would
+                // otherwise get, and the caller cannot tell the difference.
+                if (service.imageMatchesFilters(synthesized, filters)) {
+                    images = List.of(synthesized);
+                }
+            }
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeImagesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1302,6 +1318,44 @@ public class Ec2QueryHandler {
         }
         xml.end("imagesSet").end("DescribeImagesResponse");
         return xmlResponse(xml.build());
+    }
+
+    /** Build an AMI that satisfies a lookup's name-wildcard + owner/arch filters.
+     * Deterministic id (pattern hash) so repeated lookups resolve identically. */
+    /** Stands in for a wildcard when turning a lookup pattern into a concrete name. */
+    private static final String SYNTH_WILDCARD_TOKEN = "20260101";
+
+    /** The requested value for a scalar filter, so the synthesized image satisfies it. */
+    private static String firstFilterValue(Map<String, List<String>> filters, String name, String fallback) {
+        return filters.getOrDefault(name, List.of()).stream()
+                .filter(v -> v != null && !v.contains("*"))
+                .findFirst()
+                .orElse(fallback);
+    }
+
+    private Image synthesizeLookupImage(String namePattern, Map<String, List<String>> filters, List<String> owners) {
+        Image img = new Image();
+        // 17 hex chars after "ami-", deterministic from the pattern.
+        String hash = String.format("%08x", namePattern.hashCode() & 0x7fffffff);
+        String id17 = (hash + hash + hash).substring(0, 17);
+        img.setImageId("ami-" + id17);
+        // Substitute each wildcard rather than truncating at the first one, so an infix pattern
+        // like ubuntu-*-20.04-* yields a name that still satisfies it. Truncating produced
+        // "ubuntu-20260101", which does not.
+        img.setName(namePattern.replace("*", SYNTH_WILDCARD_TOKEN));
+        img.setState(firstFilterValue(filters, "state", "available"));
+        String owner = filters.getOrDefault("owner-id", owners).stream().findFirst().orElse("137112412989");
+        img.setOwnerId(owner);
+        img.setImageOwnerAlias(firstFilterValue(filters, "owner-alias", "amazon"));
+        img.setPublic(true);
+        img.setArchitecture(firstFilterValue(filters, "architecture", "x86_64"));
+        img.setRootDeviceType(firstFilterValue(filters, "root-device-type", "ebs"));
+        img.setRootDeviceName(firstFilterValue(filters, "root-device-name", "/dev/xvda"));
+        img.setVirtualizationType(firstFilterValue(filters, "virtualization-type", "hvm"));
+        img.setHypervisor(firstFilterValue(filters, "hypervisor", "xen"));
+        img.setDescription("Synthesized AMI for MachineImage.lookup(" + namePattern + ")");
+        img.setCreationDate("2026-01-01T00:00:00.000Z");
+        return img;
     }
 
     private Response handleRegisterImage(MultivaluedMap<String, String> p, String region) {
