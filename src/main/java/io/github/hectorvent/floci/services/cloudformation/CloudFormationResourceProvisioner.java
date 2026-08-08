@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
@@ -113,7 +114,6 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_CODE_IDENTITY_ATTR = "FlociLambdaCodeIdentity";
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
-    static final String ROLLBACK_OWNED_ATTR = "__FlociRollbackOwned";
     static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
     private static final String INLINE_CLEANUP_POLICY_NAME_ATTR = "__FlociInlineCleanupPolicyName";
     private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
@@ -287,7 +287,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::LayerVersion" ->
                         provisionLambdaLayerVersion(resource, properties, engine, region, stackName);
-                case "AWS::IAM::Role" -> provisionIamRole(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::User" -> provisionIamUser(resource, properties, engine, stackName);
                 case "AWS::IAM::AccessKey" -> provisionIamAccessKey(resource, properties, engine);
                 case "AWS::IAM::Policy" -> provisionIamInlinePolicy(resource, properties, engine, stackName);
@@ -488,10 +487,9 @@ public class CloudFormationResourceProvisioner {
             case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
             case "AWS::DynamoDB::Table" -> deleteDynamoTableSafe(physicalId, region);
             case "AWS::Lambda::Function" -> deleteLambdaFunctionSafe(physicalId, region);
-            case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
             // AWS::IAM::Policy is inline: it is removed together with its owning principal (see
-            // deleteRoleSafe), or precisely via the StackResource-aware delete path. Nothing to do
-            // here when only the physical id (policy name) is known, as on rollback.
+            // IamRoleCfnProvisioner#delete), or precisely via the StackResource-aware delete path.
+            // Nothing to do here when only the physical id (policy name) is known, as on rollback.
             case "AWS::IAM::Policy" -> { }
             case "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
             case "AWS::IAM::InstanceProfile" -> iamService.deleteInstanceProfile(physicalId);
@@ -2028,92 +2026,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    // ── IAM Role ──────────────────────────────────────────────────────────────
-
-    private void provisionIamRole(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                  String accountId, String stackName) {
-        String existingRoleName = r.getPhysicalId();
-        String roleName = resolveOptional(props, "RoleName", engine);
-        if (roleName == null || roleName.isBlank()) {
-            roleName = existingRoleName != null && !existingRoleName.isBlank()
-                    ? existingRoleName
-                    : generatePhysicalName(stackName, r.getLogicalId(), 64, false);
-        }
-        final String resolvedRoleName = roleName;
-        if (existingRoleName != null && !existingRoleName.equals(resolvedRoleName)) {
-            throw new AwsException("ValidationError",
-                    "Updating RoleName requires resource replacement, which is not supported.", 400);
-        }
-        String assumeDoc = props != null && props.has("AssumeRolePolicyDocument")
-                ? props.get("AssumeRolePolicyDocument").toString()
-                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
-        String path = resolveOptional(props, "Path", engine);
-        if (path == null) {
-            path = "/";
-        }
-        String description = resolveOptional(props, "Description", engine);
-        List<String> managedPolicyArns = resolveStringList(props, "ManagedPolicyArns", engine);
-
-        IamRole role;
-        boolean createdRole = false;
-        try {
-            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, 3600, Map.of());
-            createdRole = true;
-            r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
-        } catch (AwsException e) {
-            boolean stackAlreadyOwnsRole = existingRoleName != null
-                    && existingRoleName.equals(resolvedRoleName);
-            if (!stackAlreadyOwnsRole || !"EntityAlreadyExists".equals(e.getErrorCode())) {
-                throw e;
-            }
-            // Same-stack update/retry: both the physical name and immutable role ID must match.
-            // A role deleted out of band and recreated under the same name belongs to its new owner.
-            role = iamService.getRole(resolvedRoleName);
-            String existingRoleId = r.getAttributes().get("RoleId");
-            if (existingRoleId == null || existingRoleId.isBlank()
-                    || !existingRoleId.equals(role.getRoleId())) {
-                r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
-                throw e;
-            }
-        }
-
-        r.setPhysicalId(resolvedRoleName);
-        r.getAttributes().put("Arn", role.getArn());
-        r.getAttributes().put("RoleId", role.getRoleId());
-
-        Set<String> originalPolicyArns = new HashSet<>(role.getAttachedPolicyArns());
-        LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
-        try {
-            for (String policyArn : managedPolicyArns) {
-                iamService.attachRolePolicy(resolvedRoleName, policyArn);
-                if (!originalPolicyArns.contains(policyArn)) {
-                    attachedByThisAttempt.add(policyArn);
-                }
-            }
-        } catch (RuntimeException failure) {
-            List<String> rollbackArns = new ArrayList<>(attachedByThisAttempt);
-            Collections.reverse(rollbackArns);
-            boolean cleanupSucceeded = true;
-            for (String policyArn : rollbackArns) {
-                String cleanupDescription = "detach policy " + policyArn + " from role " + resolvedRoleName;
-                if (!attemptIamCleanup(failure, cleanupDescription,
-                        () -> iamService.detachRolePolicy(resolvedRoleName, policyArn))) {
-                    cleanupSucceeded = false;
-                }
-            }
-            if (createdRole) {
-                if (!attemptIamCleanup(failure, "delete role " + resolvedRoleName,
-                        () -> iamService.deleteRole(resolvedRoleName))) {
-                    cleanupSucceeded = false;
-                }
-                if (cleanupSucceeded) {
-                    r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
-                }
-            }
-            throw failure;
-        }
-    }
-
     // ── IAM Policy ────────────────────────────────────────────────────────────
 
     /**
@@ -2215,7 +2127,7 @@ public class CloudFormationResourceProvisioner {
         resource.getAttributes().put("InlineUserTargets", String.join("\n", userTargets));
         resource.getAttributes().put("InlineGroupTargets", String.join("\n", groupTargets));
         if (!roleTargets.isEmpty() || !userTargets.isEmpty() || !groupTargets.isEmpty()) {
-            resource.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+            resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         }
     }
 
@@ -2262,7 +2174,7 @@ public class CloudFormationResourceProvisioner {
         List<String> pendingTargets = new ArrayList<>();
         for (String target : rollbackTargets) {
             String description = "delete inline policy " + currentPolicyName + " from " + target;
-            if (!attemptIamCleanup(failure, description, () -> detachInline(target, cleanup))) {
+            if (!CfnRollback.attemptIamCleanup(failure, description, () -> detachInline(target, cleanup))) {
                 pendingTargets.add(target);
             }
         }
@@ -2303,7 +2215,7 @@ public class CloudFormationResourceProvisioner {
         List<String> roleNames = resolveStringList(props, "Roles", engine);
 
         var policy = iamService.createPolicy(policyName, "/", null, document, Map.of());
-        r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+        r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         r.setPhysicalId(policy.getArn());
         // PolicyArn is the attribute CloudFormation documents for this type, and what a template
         // written against AWS asks for. Without it Fn::GetAtt does not resolve and the unresolved
@@ -2326,31 +2238,19 @@ public class CloudFormationResourceProvisioner {
             boolean cleanupSucceeded = true;
             for (String roleName : rollbackRoles) {
                 String cleanupDescription = "detach policy " + policy.getArn() + " from role " + roleName;
-                if (!attemptIamCleanup(failure, cleanupDescription,
+                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
                         () -> iamService.detachRolePolicy(roleName, policy.getArn()))) {
                     cleanupSucceeded = false;
                 }
             }
-            if (!attemptIamCleanup(failure, "delete policy " + policy.getArn(),
+            if (!CfnRollback.attemptIamCleanup(failure, "delete policy " + policy.getArn(),
                     () -> iamService.deletePolicy(policy.getArn()))) {
                 cleanupSucceeded = false;
             }
             if (cleanupSucceeded) {
-                r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
+                r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
             }
             throw failure;
-        }
-    }
-
-    private boolean attemptIamCleanup(RuntimeException primaryFailure, String description, Runnable cleanup) {
-        try {
-            cleanup.run();
-            return true;
-        } catch (RuntimeException cleanupFailure) {
-            primaryFailure.addSuppressed(cleanupFailure);
-            LOG.warnv("IAM rollback cleanup failed while attempting to {0}: {1}",
-                    description, cleanupFailure.getMessage());
-            return false;
         }
     }
 
@@ -4785,26 +4685,6 @@ public class CloudFormationResourceProvisioner {
         return (value != null && !value.isBlank()) ? value : defaultValue;
     }
 
-    private void deleteRoleSafe(String roleName) {
-        IamRole role;
-        try {
-            role = iamService.getRole(roleName);
-        } catch (AwsException e) {
-            if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("IAM role already gone, treating as deleted: {0}", roleName);
-            return;
-        }
-        for (String policyArn : new ArrayList<>(role.getAttachedPolicyArns())) {
-            iamService.detachRolePolicy(roleName, policyArn);
-        }
-        for (String policyName : new ArrayList<>(role.getInlinePolicies().keySet())) {
-            iamService.deleteRolePolicy(roleName, policyName);
-        }
-        iamService.deleteRole(roleName);
-    }
-
     private void deletePolicySafe(String policyArn) {
         try {
             iamService.deletePolicy(policyArn);
@@ -4872,7 +4752,7 @@ public class CloudFormationResourceProvisioner {
         } catch (RuntimeException failure) {
             Collections.reverse(detachedRoles);
             for (String roleName : detachedRoles) {
-                attemptIamCleanup(failure,
+                CfnRollback.attemptIamCleanup(failure,
                         "reattach legacy policy " + policyArn + " to role " + roleName,
                         () -> iamService.attachRolePolicy(roleName, policyArn));
             }
