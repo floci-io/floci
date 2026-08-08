@@ -42,6 +42,33 @@ class GlobalCorsFilterIntegrationTest {
     }
 
     @Test
+    void preflightS3ObjectReturnsCorsHeaders() {
+        given()
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "PUT")
+        .when()
+            .options("/my-bucket/some-key")
+        .then()
+            .statusCode(204)
+            .header("Access-Control-Allow-Origin", equalTo("http://localhost:3000"));
+    }
+
+    @Test
+    void preflightS3ObjectVirtualHostReturnsCorsHeaders() {
+        given()
+            .header("Host", "my-bucket.s3.localhost.floci.io:4566")
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "PUT")
+        .when()
+            .options("/some-key")
+        .then()
+            .statusCode(204)
+            .header("Access-Control-Allow-Origin", equalTo("http://localhost:3000"));
+    }
+
+
+
+    @Test
     void preflightRequestingPrivateNetworkAccessIsGranted() {
         given()
             .header("Origin", "http://localhost:3000")
@@ -97,6 +124,18 @@ class GlobalCorsFilterIntegrationTest {
             .header("Access-Control-Allow-Origin", nullValue());
     }
 
+    @Test
+    void preflightFromUnlistedOriginGetsNoGlobalCorsHeaders() {
+        given()
+            .header("Origin", "https://not-allowed.example.test")
+            .header("Access-Control-Request-Method", "PUT")
+        .when()
+            .options("/my-bucket/some-key")
+        .then()
+            .statusCode(403)
+            .header("Access-Control-Allow-Origin", nullValue());
+    }
+
     public static final class CorsProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
@@ -137,6 +176,46 @@ class GlobalCorsFilterIntegrationTest {
             public Map<String, String> getConfigOverrides() {
                 return Map.of("floci.security.extra-cors-allowed-origins", "http://localhost:3000");
             }
+        }
+    }
+
+    @QuarkusTest
+    @TestProfile(DisabledGlobalCorsFilterTest.DisabledCorsProfile.class)
+    static class DisabledGlobalCorsFilterTest {
+
+        @BeforeAll
+        static void configureRestAssured() {
+            RestAssuredJsonUtils.configureAwsContentTypes();
+        }
+
+        @Test
+        void preflightReturnsForbiddenWithoutCorsHeaders() {
+            given()
+                .header("Origin", "http://localhost:3000")
+                .header("Access-Control-Request-Method", "PUT")
+            .when()
+                .options("/my-bucket/some-key")
+            .then()
+                .statusCode(403)
+                .header("Access-Control-Allow-Origin", nullValue());
+        }
+
+        @Test
+        void actualRequestGetsNoCorsHeaders() {
+            given()
+                .header("Origin", "http://localhost:3000")
+                .header("X-Amz-Target", "DynamoDB_20120810.ListTables")
+                .contentType("application/x-amz-json-1.0")
+                .body("{}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", nullValue());
+        }
+
+        public static final class DisabledCorsProfile implements QuarkusTestProfile {
+            // No config overrides, testing default application.yml values
         }
     }
 }
