@@ -590,12 +590,19 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    // With spoofed endpoints and TLS both enabled, the injected endpoint switches to
+    // https on the same host and port: clients like the CDK toolkit pass a shared
+    // https.Agent into their SDK httpOptions and Node rejects http: URLs on an
+    // https.Agent. The TLS proxy serves both protocols on the public port, and the
+    // staged CA bundle makes Node (NODE_EXTRA_CA_CERTS) and the AWS CLI
+    // (AWS_CA_BUNDLE) trust the self-signed certificate.
     private String resolveEndpointUrl() {
+        String scheme = spoofedEndpointTrustEnabled() ? "https://" : "http://";
         if (containerDetector.isRunningInContainer()) {
             String suffix = config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX);
-            return "http://" + suffix + ":" + config.port();
+            return scheme + suffix + ":" + config.port();
         } else {
-            return "http://host.docker.internal:" + config.port();
+            return scheme + "host.docker.internal:" + config.port();
         }
     }
 

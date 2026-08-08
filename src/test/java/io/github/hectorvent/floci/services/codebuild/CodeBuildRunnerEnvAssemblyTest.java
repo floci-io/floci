@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -41,15 +42,27 @@ class CodeBuildRunnerEnvAssemblyTest {
     private static final String REGION = "us-east-1";
 
     private SsmService ssmService;
+    private EmulatorConfig config;
+    private EmulatorConfig.DnsConfig dnsConfig;
+    private EmulatorConfig.TlsConfig tlsConfig;
+    private ContainerDetector containerDetector;
     private CodeBuildRunner runner;
 
     @BeforeEach
     void setUp() {
         ssmService = mock(SsmService.class);
+        config = mock(EmulatorConfig.class);
+        dnsConfig = mock(EmulatorConfig.DnsConfig.class);
+        tlsConfig = mock(EmulatorConfig.TlsConfig.class);
+        containerDetector = mock(ContainerDetector.class);
+        when(config.dns()).thenReturn(dnsConfig);
+        when(config.tls()).thenReturn(tlsConfig);
+        when(config.port()).thenReturn(4566);
+        when(config.hostname()).thenReturn(Optional.empty());
         runner = new CodeBuildRunner(mock(DockerClient.class), mock(ContainerBuilder.class),
                 mock(ContainerLifecycleManager.class), mock(ContainerLogStreamer.class),
                 mock(S3Service.class), ssmService, mock(SecretsManagerService.class),
-                mock(EmulatorConfig.class), mock(ContainerDetector.class), mock(RegionResolver.class));
+                config, containerDetector, mock(RegionResolver.class));
     }
 
     private static ParsedBuildspec emptyBuildspec() {
@@ -128,6 +141,53 @@ class CodeBuildRunnerEnvAssemblyTest {
         assertTrue(env.contains("ACCELERATOR_STAGE=prepare"), env.toString());
         assertTrue(env.contains("UNTOUCHED=kept"), env.toString());
         assertTrue(env.stream().noneMatch("ACCELERATOR_STAGE=project-level"::equals), env.toString());
+    }
+
+    // ── endpoint injection scheme ─────────────────────────────────────────────
+
+    @Test
+    void endpointUrlStaysHttpByDefault() {
+        List<String> env = envList(build(), project(null));
+
+        assertTrue(env.contains("AWS_ENDPOINT_URL=http://host.docker.internal:4566"), env.toString());
+    }
+
+    // Clients like the CDK toolkit pass a shared https.Agent into their SDK
+    // httpOptions and Node rejects http: URLs on an https.Agent — the injected
+    // endpoint must be https when the spoofed endpoints are served with TLS.
+    @Test
+    void endpointUrlSwitchesToHttpsWhenSpoofingAndTlsBothEnabled() {
+        when(dnsConfig.spoofAwsEndpoints()).thenReturn(true);
+        when(tlsConfig.enabled()).thenReturn(true);
+
+        List<String> env = envList(build(), project(null));
+
+        assertTrue(env.contains("AWS_ENDPOINT_URL=https://host.docker.internal:4566"), env.toString());
+    }
+
+    @Test
+    void endpointUrlUsesHttpsWithDnsSuffixWhenRunningInContainer() {
+        when(dnsConfig.spoofAwsEndpoints()).thenReturn(true);
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+
+        List<String> env = envList(build(), project(null));
+
+        assertTrue(env.contains("AWS_ENDPOINT_URL=https://localhost.floci.io:4566"), env.toString());
+    }
+
+    @Test
+    void endpointUrlKeepsHttpWhenOnlyOneFlagIsEnabled() {
+        when(dnsConfig.spoofAwsEndpoints()).thenReturn(true);
+
+        assertTrue(envList(build(), project(null))
+                .contains("AWS_ENDPOINT_URL=http://host.docker.internal:4566"));
+
+        when(dnsConfig.spoofAwsEndpoints()).thenReturn(false);
+        when(tlsConfig.enabled()).thenReturn(true);
+
+        assertTrue(envList(build(), project(null))
+                .contains("AWS_ENDPOINT_URL=http://host.docker.internal:4566"));
     }
 
     @Test

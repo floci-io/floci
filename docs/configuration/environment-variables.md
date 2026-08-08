@@ -131,7 +131,8 @@ Combine it with `FLOCI_TLS_ENABLED=true` so hardcoded `https://` endpoints work 
 
 - the TLS proxy already serves HTTPS on port 443, where those clients connect;
 - the generated self-signed certificate additionally covers `*.amazonaws.com` and `*.<default-region>.amazonaws.com` (flipping the flag regenerates the certificate);
-- CodeBuild containers get Floci's certificate staged in and a combined CA bundle — Floci's certificate plus the files referenced by any pre-existing `NODE_EXTRA_CA_CERTS`/`AWS_CA_BUNDLE` — exported through those same variables before any buildspec phase runs, so images that ship their own egress CAs keep working.
+- CodeBuild containers get Floci's certificate staged in and a combined CA bundle — Floci's certificate plus the files referenced by any pre-existing `NODE_EXTRA_CA_CERTS`/`AWS_CA_BUNDLE` — exported through those same variables before any buildspec phase runs, so images that ship their own egress CAs keep working;
+- the `AWS_ENDPOINT_URL` injected into CodeBuild containers switches to `https://` (same host and port), because clients like the CDK toolkit pass a shared `https.Agent` into their SDK options and Node rejects `http:` URLs on an `https.Agent`.
 
 ---
 
