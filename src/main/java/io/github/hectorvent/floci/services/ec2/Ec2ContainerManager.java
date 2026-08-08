@@ -192,7 +192,7 @@ public class Ec2ContainerManager {
                 String containerIp = waitForContainerBridgeIp(containerId, instanceId);
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
-                    exposeReachablePrivateAddress(instance, containerIp);
+                    exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                 }
                 else {
@@ -311,7 +311,7 @@ public class Ec2ContainerManager {
                 String containerIp = waitForContainerBridgeIp(containerId, instanceId);
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
-                    exposeReachablePrivateAddress(instance, containerIp);
+                    exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                 }
             } catch (InterruptedException e) {
@@ -351,13 +351,27 @@ public class Ec2ContainerManager {
             metadataServer.unregisterContainer(previousContainerIp, instance);
         }
         instance.setContainerBridgeIp(containerIp);
-        exposeReachablePrivateAddress(instance, containerIp);
+        exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
         metadataServer.registerContainer(containerIp, instance.getInstanceId(), instance);
         return true;
     }
 
     static void exposeReachablePrivateAddress(Instance instance, String privateIp) {
+        exposeReachablePrivateAddress(instance, privateIp, false);
+    }
+
+    /**
+     * Overwrite the instance's reported private address with the container's
+     * reachable bridge IP — unless {@code awsFaithful} is true (#1983), in which
+     * case the CFN/subnet-allocated private IP set at launch is left untouched.
+     * The container bridge IP is tracked separately (setContainerBridgeIp) and
+     * used for routing/IMDS regardless of this flag.
+     */
+    static void exposeReachablePrivateAddress(Instance instance, String privateIp, boolean awsFaithful) {
         if (instance == null || privateIp == null || privateIp.isBlank()) {
+            return;
+        }
+        if (awsFaithful) {
             return;
         }
 
