@@ -917,6 +917,15 @@ public interface EmulatorConfig {
 
         @WithDefault("3600")
         int defaultPresignExpirySeconds();
+
+        /**
+         * When true, S3 bucket/object existence resolution spans every account's partition,
+         * modelling AWS's globally-unique bucket namespace (a bucket owned by one account is
+         * reachable cross-account). Listing (ListBuckets/ListObjects) stays owner-scoped.
+         * Default false preserves per-account bucket isolation.
+         */
+        @WithDefault("false")
+        boolean globalBucketNamespace();
     }
 
     interface DynamoDbServiceConfig {

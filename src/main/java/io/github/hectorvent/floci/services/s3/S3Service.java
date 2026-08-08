@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -33,8 +34,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -104,6 +107,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private final ObjectMapper objectMapper;
     private final boolean enforceAuth;
     private final IamService iamService;
+    private final boolean globalBucketNamespace;
 
     @Inject
     public S3Service(StorageFactory storageFactory, EmulatorConfig config,
@@ -127,7 +131,8 @@ public class S3Service implements Resettable, ResourceProvider {
                 eventBridgeService, s3UpdatedEvent,
                 regionResolver,
                 config.effectiveBaseUrl(), objectMapper,
-                config.services().s3().enforceAuth(), iamService
+                config.services().s3().enforceAuth(), iamService,
+                config.services().s3().globalBucketNamespace()
         );
     }
 
@@ -138,7 +143,15 @@ public class S3Service implements Resettable, ResourceProvider {
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory) {
         this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), false, null);
+                null, "http://localhost:4566", new ObjectMapper(), false, null, false);
+    }
+
+    /** Package-private constructor for testing the global-bucket-namespace resolution flag. */
+    S3Service(StorageBackend<String, Bucket> bucketStore,
+              StorageBackend<String, S3Object> objectStore,
+              Path dataRoot, boolean inMemory, boolean globalBucketNamespace) {
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null, null,
+                null, "http://localhost:4566", new ObjectMapper(), false, null, globalBucketNamespace);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -147,7 +160,7 @@ public class S3Service implements Resettable, ResourceProvider {
               LambdaService lambdaService,
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null);
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -156,7 +169,7 @@ public class S3Service implements Resettable, ResourceProvider {
               LambdaInvoker lambdaInvoker,
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null);
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
 
     private S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -168,7 +181,7 @@ public class S3Service implements Resettable, ResourceProvider {
                       EventBridgeService eventBridgeService,
                       Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
                       RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper,
-                      boolean enforceAuth, IamService iamService) {
+                      boolean enforceAuth, IamService iamService, boolean globalBucketNamespace) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
         this.dataRoot = dataRoot;
@@ -185,6 +198,7 @@ public class S3Service implements Resettable, ResourceProvider {
         this.objectMapper = objectMapper;
         this.enforceAuth = enforceAuth;
         this.iamService = iamService;
+        this.globalBucketNamespace = globalBucketNamespace;
         if (!inMemory) {
             try {
                 Files.createDirectories(dataRoot);
@@ -387,7 +401,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object storeObject(String bucketName, String key, byte[] data,
                                  String contentType, Map<String, String> metadata,
                                  S3Checksum checksum, List<Part> parts, PutObjectOptions options) {
-        Bucket bucket = bucketStore.get(bucketName)
+        Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
         synchronized (bucket) {
@@ -729,7 +743,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private boolean readableObjectExists(String bucketName, String key) {
         ensureBucketExists(bucketName);
-        return objectStore.get(objectKey(bucketName, key))
+        return resolveObject(objectKey(bucketName, key))
                 .filter(object -> !object.isDeleteMarker())
                 .isPresent();
     }
@@ -929,7 +943,7 @@ public class S3Service implements Resettable, ResourceProvider {
         ensureBucketExists(bucketName);
 
         String storeKey = versionId != null ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
-        S3Object object = objectStore.get(storeKey)
+        S3Object object = resolveObject(storeKey)
                 .orElseThrow(() -> versionId != null
                         ? new AwsException("NoSuchVersion", "The specified version does not exist.", 404)
                         : new AwsException("NoSuchKey", "The specified key does not exist.", 404));
@@ -1419,7 +1433,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String getBucketRegion(String bucketName) {
         ensureBucketExists(bucketName);
-        return bucketStore.get(bucketName).map(Bucket::getRegion).orElse(null);
+        return resolveBucket(bucketName).map(Bucket::getRegion).orElse(null);
     }
 
     // --- Batch Delete ---
@@ -2445,26 +2459,22 @@ public class S3Service implements Resettable, ResourceProvider {
      * {@code Destination/Bucket}) and stored verbatim; Floci performs no actual replication.
      */
     public void putBucketReplication(String bucketName, String replicationXml) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        String role = XmlParser.extractFirst(replicationXml, "Role", null);
-        String destinationBucket = XmlParser.extractFirst(replicationXml, "Bucket", null);
-        if (role == null || role.isBlank()
-                || destinationBucket == null || destinationBucket.isBlank()
-                || XmlParser.extractGroupsMulti(replicationXml, "Rule").isEmpty()) {
-            throw new AwsException("MalformedXML",
-                    "The XML you provided was not well-formed or did not validate against our published schema.",
-                    400);
-        }
-        bucket.setReplicationConfiguration(replicationXml);
-        bucketStore.put(bucketName, bucket);
+        mutateBucket(bucketName, bucket -> {
+            String role = XmlParser.extractFirst(replicationXml, "Role", null);
+            String destinationBucket = XmlParser.extractFirst(replicationXml, "Bucket", null);
+            if (role == null || role.isBlank()
+                    || destinationBucket == null || destinationBucket.isBlank()
+                    || XmlParser.extractGroupsMulti(replicationXml, "Rule").isEmpty()) {
+                throw new AwsException("MalformedXML",
+                        "The XML you provided was not well-formed or did not validate against our published schema.",
+                        400);
+            }
+            bucket.setReplicationConfiguration(replicationXml);
+        });
     }
 
     public void deleteBucketReplication(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        bucket.setReplicationConfiguration(null);
-        bucketStore.put(bucketName, bucket);
+        mutateBucket(bucketName, bucket -> bucket.setReplicationConfiguration(null));
     }
 
     /**
@@ -3201,10 +3211,70 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void ensureBucketExists(String bucketName) {
-        if (bucketStore.get(bucketName).isEmpty()) {
+        if (resolveBucket(bucketName).isEmpty()) {
             throw new AwsException("NoSuchBucket",
                     "The specified bucket does not exist.", 404);
         }
+    }
+
+    /**
+     * Resolves a bucket for existence/access. With {@code globalBucketNamespace} enabled, the
+     * lookup spans every account's partition (AWS bucket names are globally unique and reachable
+     * cross-account); otherwise it stays scoped to the calling account. Write-side ownership
+     * checks (CreateBucket, delete) intentionally do not use this — they remain account-scoped.
+     */
+    private Optional<Bucket> resolveBucket(String bucketName) {
+        if (globalBucketNamespace && bucketStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
+            return typed.findAnyAccount(bucketName);
+        }
+        return bucketStore.get(bucketName);
+    }
+
+    /**
+     * Resolves an existing bucket and applies a configuration mutation, persisting it back to the
+     * bucket's <em>owning</em> account partition. With {@code globalBucketNamespace} enabled the
+     * bucket is resolved cross-account (mirroring {@link #resolveBucket}) and written back to its
+     * owner via {@link AccountAwareStorageBackend#putForAccount} — so a cross-account custom-resource
+     * caller (e.g. LZA's {@code Custom::S3PutBucketReplication} Lambda, which calls back under the
+     * management-account context) cannot fork a phantom bucket into its own partition or silently
+     * drop the config on the real bucket. With the flag off this is exactly the original
+     * account-scoped get-mutate-put.
+     *
+     * <p>The {@code mutation} runs after existence is established and before the write-back, so it
+     * may perform bucket-dependent validation and throw (e.g. {@code MalformedXML}); a throw skips
+     * the write, matching the original methods' fail-before-persist behavior.
+     */
+    private void mutateBucket(String bucketName, java.util.function.Consumer<Bucket> mutation) {
+        if (globalBucketNamespace && bucketStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
+            AccountAwareStorageBackend.OwnedEntry<Bucket> owned = typed.findAnyAccountEntry(bucketName)
+                    .orElseThrow(() -> new AwsException("NoSuchBucket",
+                            "The specified bucket does not exist.", 404));
+            mutation.accept(owned.value());
+            typed.putForAccount(owned.account(), bucketName, owned.value());
+        } else {
+            Bucket bucket = bucketStore.get(bucketName)
+                    .orElseThrow(() -> new AwsException("NoSuchBucket",
+                            "The specified bucket does not exist.", 404));
+            mutation.accept(bucket);
+            bucketStore.put(bucketName, bucket);
+        }
+    }
+
+    /**
+     * Resolves an object for read access. Mirrors {@link #resolveBucket}: cross-account when
+     * {@code globalBucketNamespace} is enabled, otherwise account-scoped.
+     */
+    private Optional<S3Object> resolveObject(String storeKey) {
+        if (globalBucketNamespace && objectStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
+            return typed.findAnyAccount(storeKey);
+        }
+        return objectStore.get(storeKey);
     }
 
     private String objectKey(String bucketName, String key) {
@@ -3348,8 +3418,7 @@ public class S3Service implements Resettable, ResourceProvider {
         ReentrantLock lock = diskFileLock(filePath);
         lock.lock();
         try {
-            Files.createDirectories(filePath.getParent());
-            Files.write(filePath, data);
+            atomicWrite(filePath, data);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write versioned S3 object file", e);
         } finally {
@@ -3377,12 +3446,39 @@ public class S3Service implements Resettable, ResourceProvider {
         ReentrantLock lock = diskFileLock(filePath);
         lock.lock();
         try {
-            Files.createDirectories(filePath.getParent());
-            Files.write(filePath, data);
+            atomicWrite(filePath, data);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write S3 object file", e);
         } finally {
             lock.unlock();
+        }
+    }
+
+    /**
+     * Writes {@code data} to {@code filePath} such that a concurrent reader ({@link #readFile})
+     * always observes either the complete previous file or the complete new one — never a
+     * truncated view. {@code Files.write} truncates-then-writes in place, so a reader that opens
+     * the path mid-write reads a short or empty file; under LZA's Bootstrap fan-out that torn
+     * read surfaced as an empty {@code src-Config} secondary source. Writing to a unique sibling
+     * temp file and atomically renaming it over the target closes that window. The temp name is
+     * unique per call so concurrent writers to the same key never clobber each other's temp file;
+     * whichever rename lands last wins, and every rename is all-or-nothing.
+     */
+    private void atomicWrite(Path filePath, byte[] data) throws IOException {
+        Files.createDirectories(filePath.getParent());
+        Path tmp = filePath.resolveSibling(filePath.getFileName() + ".tmp-" + UUID.randomUUID());
+        try {
+            Files.write(tmp, data);
+            try {
+                Files.move(tmp, filePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Rare filesystems (some network mounts) reject ATOMIC_MOVE; fall back to a plain
+                // replace. This narrows but does not fully close the window — acceptable only
+                // because the default overlay/ext filesystems used here support atomic rename.
+                Files.move(tmp, filePath, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(tmp);
         }
     }
 
