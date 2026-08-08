@@ -15,6 +15,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -168,7 +170,7 @@ public class KinesisJsonHandler {
         desc.put("StreamStatus", stream.getStreamStatus());
         desc.put("HasMoreShards", false);
         desc.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
-        desc.put("StreamCreationTimestamp", stream.getStreamCreationTimestamp().toEpochMilli() / 1000.0);
+        desc.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
         desc.put("EncryptionType", stream.getEncryptionType());
         if (stream.getKeyId() != null) {
             desc.put("KeyId", stream.getKeyId());
@@ -209,7 +211,7 @@ public class KinesisJsonHandler {
         summary.put("StreamARN", stream.getStreamArn());
         summary.put("StreamStatus", stream.getStreamStatus());
         summary.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
-        summary.put("StreamCreationTimestamp", stream.getStreamCreationTimestamp().toEpochMilli() / 1000.0);
+        summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
         summary.put("OpenShardCount", (int) stream.getShards().stream().filter(s -> !s.isClosed()).count());
         summary.put("EncryptionType", stream.getEncryptionType());
         if (stream.getKeyId() != null) {
@@ -229,6 +231,10 @@ public class KinesisJsonHandler {
 
     private void addStreamModeDetailsNode(ObjectNode parent, KinesisStream stream) {
         parent.putObject("StreamModeDetails").put("StreamMode", stream.getStreamMode());
+    }
+
+    private BigDecimal epochSeconds(Instant timestamp) {
+        return BigDecimal.valueOf(timestamp.toEpochMilli(), 3);
     }
 
     private Response handleRegisterStreamConsumer(JsonNode request, String region) {
