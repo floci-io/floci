@@ -154,12 +154,21 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Url", response.path("webhook").path("url").asText(""));
     }
 
-    /** Recursively lowercases the first letter of every object key. */
+    /**
+     * Recursively lowercases the first letter of every object key — except inside
+     * {@code Configuration} maps, whose keys are opaque provider-defined strings
+     * ({@code Owner}, {@code Repo}, {@code ProjectName}, ...) that the action executors
+     * match verbatim.
+     */
     private JsonNode lowerKeys(JsonNode node) {
         if (node instanceof ObjectNode objectNode) {
             ObjectNode result = mapper.createObjectNode();
             objectNode.fields().forEachRemaining(entry -> {
                 String key = entry.getKey();
+                if ("Configuration".equals(key)) {
+                    result.set("configuration", entry.getValue().deepCopy());
+                    return;
+                }
                 String lowered = key.isEmpty()
                         ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
                 result.set(lowered, lowerKeys(entry.getValue()));

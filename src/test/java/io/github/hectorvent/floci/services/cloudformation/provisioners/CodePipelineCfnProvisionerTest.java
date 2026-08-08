@@ -54,6 +54,8 @@ class CodePipelineCfnProvisionerTest {
         action.put("Name", "HumanGate");
         action.putObject("ActionTypeId")
                 .put("Category", "Approval").put("Owner", "AWS").put("Provider", "Manual").put("Version", "1");
+        action.putObject("Configuration")
+                .put("ProjectName", "installer-build").put("Owner", "awslabs");
         return props;
     }
 
@@ -72,8 +74,12 @@ class CodePipelineCfnProvisionerTest {
         assertEquals("the-pipeline", declaration.path("name").asText());
         assertEquals("arn:aws:iam::000000000000:role/cp", declaration.path("roleArn").asText());
         assertEquals("S3", declaration.path("artifactStore").path("type").asText());
-        assertEquals("Approval", declaration.path("stages").get(0).path("actions").get(0)
-                .path("actionTypeId").path("category").asText());
+        JsonNode action = declaration.path("stages").get(0).path("actions").get(0);
+        assertEquals("Approval", action.path("actionTypeId").path("category").asText());
+        // Configuration keys are provider-defined strings the executors match verbatim —
+        // they must survive the PascalCase→camelCase transform untouched.
+        assertEquals("installer-build", action.path("configuration").path("ProjectName").asText());
+        assertEquals("awslabs", action.path("configuration").path("Owner").asText());
 
         assertEquals("the-pipeline", r.getPhysicalId());
         assertEquals("1", r.getAttributes().get("Version"));
