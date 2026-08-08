@@ -194,9 +194,10 @@ public class CodeBuildRunner implements ContainerTeardown {
             String logGroup = "/aws/codebuild/" + project.getName();
             String logStream = logStreamer.generateLogStreamName(buildId.replace(":", "/"));
 
-            String image = build.getEnvironment() != null && build.getEnvironment().getImage() != null
-                    ? build.getEnvironment().getImage()
-                    : project.getEnvironment().getImage();
+            String image = resolveCuratedImage(
+                    build.getEnvironment() != null && build.getEnvironment().getImage() != null
+                            ? build.getEnvironment().getImage()
+                            : project.getEnvironment().getImage());
 
             boolean privileged = (project.getEnvironment() != null
                     && Boolean.TRUE.equals(project.getEnvironment().getPrivilegedMode()))
@@ -488,6 +489,25 @@ public class CodeBuildRunner implements ContainerTeardown {
         } else {
             return "http://host.docker.internal:" + config.port();
         }
+    }
+
+    /**
+     * Curated {@code aws/codebuild/*} names are not directly pullable: the Amazon Linux
+     * family has public.ecr.aws mirrors, while the Ubuntu {@code standard} family is not
+     * published to any public registry and runs the configured substitute image instead.
+     */
+    String resolveCuratedImage(String image) {
+        if (image == null || !image.startsWith("aws/codebuild/")) {
+            return image;
+        }
+        String name = image.substring("aws/codebuild/".length());
+        if (name.startsWith("amazonlinux")) {
+            return "public.ecr.aws/codebuild/" + name;
+        }
+        String substitute = config.services().codebuild().curatedImageSubstitute();
+        LOG.infov("Curated image {0} is not publicly distributed; running {1} instead",
+                image, substitute);
+        return substitute;
     }
 
     // Copies files from the local workspace into the container's working directory.

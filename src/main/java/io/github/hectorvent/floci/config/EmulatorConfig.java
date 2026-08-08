@@ -901,6 +901,14 @@ public interface EmulatorConfig {
         boolean enabled();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Substitute for curated {@code aws/codebuild/*} image names that AWS does not
+         * publish to a public registry (the Ubuntu {@code standard} family). The Amazon
+         * Linux curated images map directly to their public.ecr.aws mirrors instead.
+         */
+        @WithDefault("public.ecr.aws/codebuild/amazonlinux-x86_64-standard:5.0")
+        String curatedImageSubstitute();
     }
 
     interface BatchServiceConfig {
