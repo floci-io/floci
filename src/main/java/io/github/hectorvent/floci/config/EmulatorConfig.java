@@ -913,12 +913,25 @@ public interface EmulatorConfig {
 
         /**
          * Maximum number of builds allowed to stage a workspace on disk at once. Real
-         * CodeBuild enforces an account-level concurrent-build limit; on a constrained
-         * host a low cap keeps a fan-out stage (e.g. bootstrapping many targets at once)
-         * from exhausting disk. Unset means unbounded — every build runs as soon as it
-         * starts, matching a well-resourced host.
+         * CodeBuild enforces an account-level concurrent-build limit; here every build
+         * stages its whole source workspace on the single emulator container's filesystem,
+         * so a fan-out stage (e.g. LZA bootstrapping ~15 targets at once) can exhaust the
+         * shared disk. Unset falls back to a bounded default
+         * ({@code CodeBuildRunner.DEFAULT_MAX_CONCURRENT_BUILDS}); set a positive value to
+         * override it, or a non-positive value to run unbounded on a well-resourced host.
          */
         Optional<Integer> maxConcurrentBuilds();
+
+        /**
+         * Maximum number of builds allowed to stream their source tar into their container at
+         * once. Each build stages a multi-gigabyte tar over the single shared docker socket;
+         * when a fan-out stage launches its first wave simultaneously the daemon drops
+         * connections mid-write ({@code Broken pipe}) and those builds fail. Serialising the
+         * heavy streaming avoids that collision. Unset falls back to a bounded default
+         * ({@code CodeBuildRunner.DEFAULT_MAX_CONCURRENT_SOURCE_COPIES}); set a positive value
+         * to override it, or a non-positive value to stream unbounded on a well-resourced host.
+         */
+        Optional<Integer> maxConcurrentSourceCopies();
     }
 
     interface BatchServiceConfig {

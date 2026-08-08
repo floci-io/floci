@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.DockerRetry;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -43,7 +44,6 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -151,6 +151,12 @@ public class CodeBuildRunner implements ContainerTeardown {
     // only read when a build actually runs.
     private Semaphore buildSlots;
     private boolean buildSlotsResolved;
+
+    // Serialises the heavy source-tar streaming into containers so a fan-out stage's first
+    // wave cannot collide on the shared docker socket. Same lazy-resolve-once discipline as
+    // buildSlots; null when unbounded.
+    private Semaphore sourceCopySlots;
+    private boolean sourceCopySlotsResolved;
 
     @Inject
     public CodeBuildRunner(DockerClient dockerClient,
@@ -295,17 +301,109 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    // Every floci CodeBuild build stages its whole source workspace (plus a transient tar of
+    // it) on the single emulator container's filesystem. Real CodeBuild isolates each build on
+    // its own host, so an unbounded fan-out is safe there but here it means N full workspaces
+    // contend for one disk — an LZA Bootstrap stage fans out ~15 disk-heavy builds at once and
+    // exhausts it. So when no explicit cap is configured we bound to this default instead of
+    // running unbounded; a non-positive configured value opts back into unbounded.
+    static final int DEFAULT_MAX_CONCURRENT_BUILDS = 4;
+
     synchronized Semaphore buildSlots() {
         if (!buildSlotsResolved) {
-            buildSlots = config == null
-                    ? null
-                    : config.services().codebuild().maxConcurrentBuilds()
-                            .filter(max -> max > 0)
-                            .map(Semaphore::new)
-                            .orElse(null);
+            if (config == null) {
+                buildSlots = null;
+            } else {
+                int cap = config.services().codebuild().maxConcurrentBuilds()
+                        .orElse(DEFAULT_MAX_CONCURRENT_BUILDS);
+                buildSlots = cap > 0 ? new Semaphore(cap) : null;
+            }
             buildSlotsResolved = true;
         }
         return buildSlots;
+    }
+
+    // The socket-heavy staging steps of a build — creating its container and streaming its
+    // multi-gigabyte source tar in — all travel over the single shared docker socket. When a
+    // fan-out stage launches its first wave (up to maxConcurrentBuilds) at once, an in-flight
+    // tar stream saturates the socket and the daemon drops another build's concurrent create
+    // mid-write (Broken pipe), failing exactly that first wave. Serialising create-and-copy
+    // through one gate by default removes the collision (a lightweight create never overlaps a
+    // heavy copy); a non-positive configured value opts back into unbounded staging on a
+    // well-resourced host. Phase execs and log streaming are not gated — they coexisted fine.
+    static final int DEFAULT_MAX_CONCURRENT_SOURCE_COPIES = 1;
+
+    // A copy that still hits a transient docker I/O error (e.g. a momentary socket reset) is
+    // retried a few times before the build is failed. Idempotent: the copy re-stages the same
+    // tar into the same path, so a retry cannot corrupt state.
+    private static final int SOURCE_COPY_MAX_ATTEMPTS = 6;
+    private static final long SOURCE_COPY_RETRY_BACKOFF_MS = 500L;
+
+    synchronized Semaphore sourceCopySlots() {
+        if (!sourceCopySlotsResolved) {
+            if (config == null) {
+                sourceCopySlots = null;
+            } else {
+                int cap = config.services().codebuild().maxConcurrentSourceCopies()
+                        .orElse(DEFAULT_MAX_CONCURRENT_SOURCE_COPIES);
+                sourceCopySlots = cap > 0 ? new Semaphore(cap) : null;
+            }
+            sourceCopySlotsResolved = true;
+        }
+        return sourceCopySlots;
+    }
+
+    /** A docker call that may throw a checked exception; used by {@link #retryTransientDockerIo}. */
+    @FunctionalInterface
+    interface DockerIoOp {
+        void run() throws Exception;
+    }
+
+    /** A socket-heavy staging step (create container, copy source) that returns a value. */
+    @FunctionalInterface
+    interface StagingOp<T> {
+        T run() throws Exception;
+    }
+
+    /**
+     * Runs {@code op} holding a source-staging permit, so the socket-heavy staging steps of the
+     * build fleet — container create and source copy — never overlap on the shared docker socket
+     * and cannot starve one another into a {@code Broken pipe}. When staging is configured
+     * unbounded ({@link #sourceCopySlots} is null) the op runs without gating. The permit is
+     * always released, even if {@code op} throws.
+     */
+    <T> T underStagingSlot(StagingOp<T> op) throws Exception {
+        Semaphore slots = sourceCopySlots();
+        if (slots != null) {
+            slots.acquire();
+        }
+        try {
+            return op.run();
+        } finally {
+            if (slots != null) {
+                slots.release();
+            }
+        }
+    }
+
+    /**
+     * True when {@code t} (or any cause in its chain) is a transient docker I/O failure — an
+     * {@link IOException} such as {@code Broken pipe} or {@code Connection reset}, which
+     * docker-java surfaces wrapped in a {@link RuntimeException}. Such failures are worth
+     * retrying; anything else (a 4xx from the daemon, a bad request) is not.
+     */
+    static boolean isTransientDockerIo(Throwable t) {
+        return DockerRetry.isTransientIo(t);
+    }
+
+    /**
+     * Runs {@code op}, retrying up to {@code maxAttempts} times on a transient docker I/O error
+     * ({@link #isTransientDockerIo}) with a fixed backoff between attempts. A non-transient
+     * failure is rethrown immediately without retrying. The final failure is rethrown so the
+     * caller can fail the build with a clear cause. Delegates to the shared {@link DockerRetry}.
+     */
+    static void retryTransientDockerIo(int maxAttempts, long backoffMillis, DockerIoOp op) throws Exception {
+        DockerRetry.run(maxAttempts, backoffMillis, op::run);
     }
 
     private void runBuildBody(String region, Build build, Project project,
@@ -314,7 +412,6 @@ public class CodeBuildRunner implements ContainerTeardown {
         Path workspace = null;
         Path secondaryRoot = null;
         String containerId = null;
-        Closeable logHandle = null;
 
         try {
             // SUBMITTED
@@ -415,11 +512,21 @@ public class CodeBuildRunner implements ContainerTeardown {
                             "codebuild", buildId, regionResolver.getAccountId(), region))
                     .build();
 
-            ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
+            // Gate container-create through the same staging slot as source-copy: a lightweight
+            // create must never overlap another build's multi-gigabyte tar stream on the shared
+            // docker socket, or the daemon drops it mid-write (Broken pipe).
+            ContainerLifecycleManager.ContainerInfo info =
+                    underStagingSlot(() -> lifecycleManager.createAndStart(spec));
             containerId = info.containerId();
             runningContainers.put(buildId, containerId);
 
-            logHandle = logStreamer.attach(containerId, logGroup, logStream, region, "codebuild:" + buildId);
+            // Ensure the CloudWatch log group/stream exists, but do NOT open a persistent PID1
+            // log-follow connection: the CodeBuild container's entrypoint is `tail -f /dev/null`,
+            // so PID1 emits nothing — every build line is forwarded from the phase `docker exec`
+            // sessions instead (see runPhaseSession). Holding one idle follow connection per
+            // concurrent build only starved container-create on the shared docker socket into a
+            // Broken pipe during a fan-out stage's first wave.
+            logStreamer.ensureLogGroupAndStream(logGroup, logStream, region);
 
             String containerSrcDir = "/codebuild/output/src/src";
             int timeoutMinutes = build.getTimeoutInMinutes() != null ? build.getTimeoutInMinutes() : 60;
@@ -465,7 +572,7 @@ public class CodeBuildRunner implements ContainerTeardown {
             // come from sentinel lines the generated script emits.
             if (stopFlag.get()) { finishStopped(build); return; }
             PhaseResult phasesResult = runPhaseSession(containerId, containerSrcDir, envList,
-                    buildspec, build, bashAvailable, timeoutMinutes, stopFlag);
+                    buildspec, build, bashAvailable, timeoutMinutes, stopFlag, logGroup, logStream, region);
             if (phasesResult.stopped()) { finishStopped(build); return; }
             if (phasesResult.failed()) {
                 buildFailed = true;
@@ -529,9 +636,11 @@ public class CodeBuildRunner implements ContainerTeardown {
         } finally {
             stopFlags.remove(buildId);
             if (containerId != null && runningContainers.remove(buildId, containerId)) {
-                lifecycleManager.stopAndRemove(containerId, logHandle);
-            } else if (logHandle != null) {
-                try { logHandle.close(); } catch (Exception ignored) {}
+                if (System.getenv("FLOCI_DEBUG_KEEP_CONTAINER") != null) {
+                    LOG.warnv("FLOCI_DEBUG_KEEP_CONTAINER set; leaving build container {0} alive for inspection", containerId);
+                } else {
+                    lifecycleManager.stopAndRemove(containerId, null);
+                }
             }
             if (workspace != null) {
                 deleteDirectory(workspace);
@@ -801,22 +910,37 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
             if (!hasFiles) return;
 
-            Path tarFile = Files.createTempFile("floci-codebuild-src-", ".tar");
-            try {
-                try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
-                    createTarFromDir(sourceDir, out);
+            // Serialise the heavy tar streaming against the fleet's other staging steps so a
+            // fan-out stage's first wave of builds cannot collide on the shared docker socket
+            // and break each other's pipes.
+            underStagingSlot(() -> {
+                Path tarFile = Files.createTempFile("floci-codebuild-src-", ".tar");
+                try {
+                    try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+                        createTarFromDir(sourceDir, out);
+                    }
+                    // Re-open the staged tar on each attempt so a transient Broken pipe can be retried.
+                    retryTransientDockerIo(SOURCE_COPY_MAX_ATTEMPTS, SOURCE_COPY_RETRY_BACKOFF_MS, () -> {
+                        try (InputStream in = new BufferedInputStream(Files.newInputStream(tarFile))) {
+                            dockerClient.copyArchiveToContainerCmd(containerId)
+                                    .withRemotePath(remotePath)
+                                    .withTarInputStream(in)
+                                    .exec();
+                        }
+                    });
+                } finally {
+                    Files.deleteIfExists(tarFile);
                 }
-                try (InputStream in = new BufferedInputStream(Files.newInputStream(tarFile))) {
-                    dockerClient.copyArchiveToContainerCmd(containerId)
-                            .withRemotePath(remotePath)
-                            .withTarInputStream(in)
-                            .exec();
-                }
-            } finally {
-                Files.deleteIfExists(tarFile);
-            }
+                return null;
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while staging source into container " + containerId, e);
         } catch (Exception e) {
-            LOG.warnv("Could not copy source to container {0}: {1}", containerId, e.getMessage());
+            // A silently-skipped source copy leaves an empty working directory, which surfaces
+            // downstream as a misleading exit 127. Fail the build here with the real cause.
+            throw new RuntimeException("Could not stage source into container " + containerId
+                    + " at " + remotePath + ": " + e.getMessage(), e);
         }
     }
 
@@ -1068,12 +1192,13 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     private PhaseResult runPhaseSession(String containerId, String workDir, List<String> env,
                                         ParsedBuildspec buildspec, Build build, boolean bashAvailable,
-                                        int timeoutMinutes, AtomicBoolean stopFlag) {
+                                        int timeoutMinutes, AtomicBoolean stopFlag,
+                                        String logGroup, String logStream, String region) {
         String script = phaseSessionScript(buildspec.installCommands(), buildspec.preBuildCommands(),
                 buildspec.buildCommands(), buildspec.postBuildCommands(), bashAvailable,
                 spoofedEndpointTrustEnabled() ? CONTAINER_CA_CERT_PATH : null);
         String[] cmd = {bashAvailable ? "bash" : "sh", "-c", script};
-        PhaseSession session = new PhaseSession(build);
+        PhaseSession session = new PhaseSession(build, logGroup, logStream, region);
 
         try {
             String execId = dockerClient.execCreateCmd(containerId)
@@ -1400,13 +1525,22 @@ public class CodeBuildRunner implements ContainerTeardown {
         return "text/plain";
     }
 
+    // Package-private factory so the log-forwarding behaviour of a phase session can be
+    // driven directly from a unit test without spinning up a container.
+    PhaseSession newPhaseSession(Build build, String logGroup, String logStream, String region) {
+        return new PhaseSession(build, logGroup, logStream, region);
+    }
+
     // Parses the streamed session output line by line: sentinel lines drive phase
     // begin/complete/skip bookkeeping on the Build, everything else is buffered as
     // the running phase's log tail for the FAILED context message. finish() settles
     // phases the shell never reported on (premature exit, timeout, exec error).
-    private class PhaseSession {
+    class PhaseSession {
 
         private final Build build;
+        private final String logGroup;
+        private final String logStream;
+        private final String region;
         private final ByteArrayOutputStream pendingLine = new ByteArrayOutputStream();
         private final StringBuilder phaseOutput = new StringBuilder();
         private final Set<String> endedPhases = new HashSet<>();
@@ -1414,8 +1548,11 @@ public class CodeBuildRunner implements ContainerTeardown {
         private boolean anyPhaseFailed;
         private boolean finished;
 
-        PhaseSession(Build build) {
+        PhaseSession(Build build, String logGroup, String logStream, String region) {
             this.build = build;
+            this.logGroup = logGroup;
+            this.logStream = logStream;
+            this.region = region;
         }
 
         synchronized void accept(byte[] payload) {
@@ -1447,10 +1584,25 @@ public class CodeBuildRunner implements ContainerTeardown {
                 }
                 return;
             }
+            // Forward real build output (never the phase sentinels) to CloudWatch Logs so
+            // the build's log stream is populated. The PID-1 log tap in attach() sees none
+            // of this: the build runs in a docker exec, a separate stream. Without this the
+            // stream is empty and failed builds cannot be diagnosed after the fact.
+            forwardToCloudWatch(line);
             phaseOutput.append(line).append('\n');
-            if (phaseOutput.length() > 8192) {
-                phaseOutput.delete(0, phaseOutput.length() - 4096);
+            // Keep a generous tail so a failing phase's diagnostics (which can include a
+            // multi-line stack trace printed before a short trailer) survive for the
+            // failure log below; the CodePipeline/CodeBuild message still uses only 512.
+            if (phaseOutput.length() > 65536) {
+                phaseOutput.delete(0, phaseOutput.length() - 32768);
             }
+        }
+
+        private void forwardToCloudWatch(String line) {
+            if (logStreamer == null || logGroup == null || logStream == null) {
+                return;
+            }
+            logStreamer.streamToCloudWatchLogs(logGroup, logStream, region, line);
         }
 
         private void endPhase(String phase, String result) {
@@ -1472,6 +1624,16 @@ public class CodeBuildRunner implements ContainerTeardown {
             if (exitCode == 0) {
                 completePhase(build, phase, "SUCCEEDED");
             } else {
+                // The phase context/action message keeps only a 512-char tail, which can
+                // clip the real cause when a tool prints its error before a short trailer
+                // (e.g. LZA logs the CDK error, then a large options JSON). Emit the
+                // buffered tail to floci's own log so failed builds stay diagnosable even
+                // when the CloudWatch build-log stream is empty.
+                String recent = phaseOutput.toString().stripTrailing();
+                if (!recent.isBlank()) {
+                    LOG.errorv("CodeBuild phase {0} failed (exit {1}) for build {2}; recent output:\n{3}",
+                            phase, exitCode, build.getId(), recent);
+                }
                 completePhaseWithError(build, phase, "FAILED", failureMessage(exitCode));
                 anyPhaseFailed = true;
             }

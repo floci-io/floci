@@ -18,9 +18,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * The optional maxConcurrentBuilds cap gates the build body with a shared semaphore:
- * unset leaves builds unbounded, a set value bounds how many bodies run at once so a
- * fan-out stage cannot stage more than the cap of workspaces on disk simultaneously.
+ * The maxConcurrentBuilds cap gates the build body with a shared semaphore. Because every
+ * floci CodeBuild build stages its whole source workspace on the single emulator container's
+ * filesystem, an unset cap falls back to a bounded default so a fan-out stage (LZA bootstraps
+ * ~15 targets at once) cannot exhaust the shared disk. A set positive value bounds to that
+ * value; a non-positive value opts back into unbounded for a well-resourced host.
  */
 class CodeBuildConcurrencyCapTest {
 
@@ -32,8 +34,10 @@ class CodeBuildConcurrencyCapTest {
     }
 
     @Test
-    void unboundedWhenUnset() {
-        assertNull(runner(null).buildSlots());
+    void defaultsToBoundedCapWhenUnset() {
+        Semaphore slots = runner(null).buildSlots();
+        assertNotNull(slots);
+        assertEquals(CodeBuildRunner.DEFAULT_MAX_CONCURRENT_BUILDS, slots.availablePermits());
     }
 
     @Test
@@ -85,7 +89,8 @@ class CodeBuildConcurrencyCapTest {
     }
 
     @Test
-    void unboundedAllowsBuildBodiesToOverlap() throws Exception {
+    void defaultCapAllowsBuildBodiesToOverlap() throws Exception {
+        // The unset-default cap (> 1) still lets independent bodies run concurrently.
         assertBodiesOverlap(runner(null));
     }
 
