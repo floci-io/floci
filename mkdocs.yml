@@ -81,6 +81,7 @@ nav:
     - S3: services/s3.md
     - DynamoDB: services/dynamodb.md
     - Lambda: services/lambda.md
+    - Lambda MicroVMs: services/lambda-microvms.md
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - KMS: services/kms.md
