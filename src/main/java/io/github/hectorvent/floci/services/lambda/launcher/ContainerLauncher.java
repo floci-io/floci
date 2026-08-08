@@ -136,14 +136,24 @@ public class ContainerLauncher {
 
         // For Zip functions, verify code exists before allocating any resources.
         // Hot-reload functions use a bind-mount; the Docker daemon validates the path at start.
-        if (!fn.isHotReload()) {
-            if (fn.getCodeLocalPath() != null) {
-                Path codePath = Path.of(fn.getCodeLocalPath());
-                if (!Files.exists(codePath)) {
-                    throw new RuntimeException("Code directory not found for function '"
-                            + fn.getFunctionName() + "': " + fn.getCodeLocalPath()
-                            + " (function may have been deleted or updated)");
-                }
+        // Image functions carry an imageUri rather than a local path.
+        if (!fn.isHotReload() && !"Image".equals(fn.getPackageType())) {
+            if (fn.getCodeLocalPath() == null) {
+                // A null path used to skip validation entirely, which made the one state that
+                // always means "no code" the one state never checked: the container started
+                // empty, the runtime logged an ImportModuleError nobody saw, and the caller
+                // waited out the whole function timeout. Failing here surfaces a dropped code
+                // field at its cause instead of as a timeout somewhere else (#1987).
+                throw new RuntimeException("No code location for function '"
+                        + fn.getFunctionName() + "'"
+                        + ("$LATEST".equals(fn.getVersion()) ? "" : " version " + fn.getVersion())
+                        + " (function has no deployed code)");
+            }
+            Path codePath = Path.of(fn.getCodeLocalPath());
+            if (!Files.exists(codePath)) {
+                throw new RuntimeException("Code directory not found for function '"
+                        + fn.getFunctionName() + "': " + fn.getCodeLocalPath()
+                        + " (function may have been deleted or updated)");
             }
         }
 

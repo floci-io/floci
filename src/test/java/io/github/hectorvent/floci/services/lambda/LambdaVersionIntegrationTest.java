@@ -6,6 +6,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
+import java.util.Base64;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -124,5 +129,101 @@ class LambdaVersionIntegrationTest {
             .get(BASE_PATH + "/functions/" + FUNCTION_NAME + "/versions")
         .then()
             .statusCode(404);
+    }
+
+    @Test
+    @Order(6)
+    void invokeLatest_baselineRunsTheCode() throws Exception {
+        // Baseline for the case below. Every other test in this file uses a function with no code
+        // at all, so none of them can invoke; this pins that the zip, runtime and harness are
+        // sound, which is what makes a failure in the next test attributable to versioning.
+        // Deliberately a SEPARATE function: invoking $LATEST on the function under test would
+        // leave a warm container that the version invoke then reuses.
+        String fnName = "version-invoke-baseline";
+        createInvocableFunction(fnName);
+
+        try {
+            given()
+                .contentType("application/json")
+                .body("{}")
+            .when()
+                .post(BASE_PATH + "/functions/" + fnName + "/invocations")
+            .then()
+                .statusCode(200)
+                .header("X-Amz-Function-Error", nullValue())
+                .body("ok", equalTo(true));
+        } finally {
+            given().delete(BASE_PATH + "/functions/" + fnName);
+        }
+    }
+
+    @Test
+    @Order(7)
+    void invokePublishedVersion_runsTheVersionsCode() throws Exception {
+        // A published version is only useful if it can be invoked, and nothing in this file
+        // exercised that. publishVersion copies 14 fields onto the snapshot but no code location
+        // (codeLocalPath, s3Bucket/s3Key, imageUri are all dropped), and ContainerLauncher.launch
+        // only validates the code path when it is non-null — so a null one skips validation, the
+        // container starts with nothing to run, and the invoke times out rather than throwing.
+        String fnName = "version-invoke-cold";
+        createInvocableFunction(fnName);
+
+        try {
+            given()
+                .contentType("application/json")
+                .body("{\"Description\": \"invocable\"}")
+            .when()
+                .post(BASE_PATH + "/functions/" + fnName + "/versions")
+            .then()
+                .statusCode(201)
+                .body("Version", equalTo("1"));
+
+            // The version invoke must be a COLD start to mean anything. $LATEST is never invoked
+            // on this function: the warm pool is keyed by function name alone (#1988), so a warm
+            // container from a $LATEST invoke gets handed to a version-qualified one and serves
+            // $LATEST's code — which makes this assertion pass while the version path is broken.
+            given()
+                .contentType("application/json")
+                .body("{}")
+            .when()
+                .post(BASE_PATH + "/functions/" + fnName + ":1/invocations")
+            .then()
+                .statusCode(200)
+                // Body first: the header assertion below fails fast and would otherwise mask what
+                // the version actually returned.
+                .body("ok", equalTo(true))
+                .header("X-Amz-Function-Error", nullValue());
+        } finally {
+            given().delete(BASE_PATH + "/functions/" + fnName);
+        }
+    }
+
+    private void createInvocableFunction(String fnName) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write("exports.handler = async () => ({ ok: true });".getBytes());
+            zos.closeEntry();
+        }
+        String base64Zip = Base64.getEncoder().encodeToString(baos.toByteArray());
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Timeout": 5,
+                    "Code": {
+                        "ZipFile": "%s"
+                    }
+                }
+                """.formatted(fnName, base64Zip))
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201);
     }
 }
