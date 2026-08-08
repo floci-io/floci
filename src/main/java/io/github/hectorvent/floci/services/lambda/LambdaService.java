@@ -957,6 +957,21 @@ public class LambdaService {
         return functionStore.listVersions(region, fn.getFunctionName());
     }
 
+    /**
+     * Deletes a single published version of a function (DeleteFunction with a numeric qualifier),
+     * leaving {@code $LATEST} and every other version untouched. Deleting an already-gone version
+     * is a no-op; a missing function is a 404.
+     */
+    public void deleteVersion(String region, String functionName, String version) {
+        if (version == null || version.isBlank() || "$LATEST".equals(version)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Version must be a published version number, got: " + version, 400);
+        }
+        LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
+        functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        LOG.infov("Deleted version {0} of function {1}", version, fn.getFunctionName());
+    }
+
     // ──────────────────────────── Aliases ────────────────────────────
 
     public LambdaAlias createAlias(String region, String functionName, String aliasName,
@@ -1448,6 +1463,22 @@ public class LambdaService {
         policy.put("Id", "default");
         policy.put("Statement", fn.getPolicies());
         return Map.of("policy", policy, "revisionId", fn.getRevisionId());
+    }
+
+    /**
+     * Puts a previously captured policy statement back. Used to compensate when a replacement fails
+     * after the original was removed: it takes the stored statement shape rather than an
+     * AddPermission request, so what goes back is exactly what came out.
+     */
+    public void restorePermissionStatement(String region, String functionName, Map<String, Object> statement) {
+        LambdaFunction fn = getFunction(region, functionName);
+        String statementId = (String) statement.get("Sid");
+        if (statementId != null) {
+            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")));
+        }
+        fn.getPolicies().add(statement);
+        functionStore.save(region, fn);
+        LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
     }
 
     public void removePermission(String region, String functionName, String statementId) {
