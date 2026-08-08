@@ -1463,7 +1463,8 @@ public class S3Service implements Resettable {
                 sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5());
     }
 
-    public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers) {
+    public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
+                                            String checksumType, S3Checksum expectedChecksum) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)) {
             throw new AwsException("NoSuchUpload",
@@ -1494,6 +1495,12 @@ public class S3Service implements Resettable {
 
             byte[] allData = combined.toByteArray();
 
+            boolean fullObjectChecksumRequested = "FULL_OBJECT".equalsIgnoreCase(checksumType)
+                    && expectedChecksum != null && expectedChecksum.hasAnyValue();
+            if (fullObjectChecksumRequested) {
+                validateFullObjectChecksum(allData, expectedChecksum);
+            }
+
             // Composite ETag: MD5 of concatenated part MD5s, suffixed with part count
             String compositeETag = "\"" + bytesToHex(md.digest()) + "-" + partNumbers.size() + "\"";
 
@@ -1501,6 +1508,9 @@ public class S3Service implements Resettable {
                     .map(num -> copyPart(upload.getParts().get(num)))
                     .toList();
             S3Checksum checksum = buildChecksum(allData, completedParts, true, upload.getChecksumAlgorithm());
+            if (fullObjectChecksumRequested) {
+                checksum.setChecksumType("FULL_OBJECT");
+            }
             S3Object object = storeObject(bucket, key, allData, upload.getContentType(), upload.getMetadata(),
                     checksum, completedParts,
                     new PutObjectOptions()
@@ -2396,6 +2406,25 @@ public class S3Service implements Resettable {
             throw new AwsException("InvalidRequest", "The checksum algorithm you specified is a valid AWS checksum algorithm, but is not currently supported by Floci (supported: CRC32, CRC32C, CRC64NVME, SHA1, SHA256).", 400);
         }
         throw new AwsException("InvalidArgument", "The checksum algorithm you specified is not supported.", 400);
+    }
+
+    private static void validateFullObjectChecksum(byte[] data, S3Checksum expected) {
+        if (expected.getChecksumSHA1() != null || expected.getChecksumSHA256() != null) {
+            throw new AwsException("InvalidRequest",
+                    "The FULL_OBJECT checksum type is not supported with the SHA1 or SHA256 checksum algorithm. "
+                            + "Full object checksums are only supported with the CRC32, CRC32C, and CRC64NVME checksum algorithms.",
+                    400);
+        }
+        if (expected.getChecksumCRC32() != null && !expected.getChecksumCRC32().equals(S3Checksum.crc32Base64(data))) {
+            throw new AwsException("BadDigest", "The CRC32 checksum you specified did not match the payload.", 400);
+        }
+        if (expected.getChecksumCRC32C() != null && !expected.getChecksumCRC32C().equals(S3Checksum.crc32cBase64(data))) {
+            throw new AwsException("BadDigest", "The CRC32C checksum you specified did not match the payload.", 400);
+        }
+        if (expected.getChecksumCRC64NVME() != null
+                && !expected.getChecksumCRC64NVME().equals(S3Checksum.crc64NvmeBase64(data))) {
+            throw new AwsException("BadDigest", "The CRC64NVME checksum you specified did not match the payload.", 400);
+        }
     }
 
     private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload) {
