@@ -28,6 +28,8 @@ public class KinesisService {
             "IteratorAgeMilliseconds", "ALL");
     private static final Set<String> VALID_STREAM_MODES = Set.of("PROVISIONED", "ON_DEMAND");
     private static final String DEFAULT_STREAM_MODE = "PROVISIONED";
+    private static final int DEFAULT_INSPECTION_RECORD_LIMIT = 100;
+    private static final int MAX_INSPECTION_RECORD_LIMIT = 1000;
 
     private final StorageBackend<String, KinesisStream> store;
     private final StorageBackend<String, KinesisConsumer> consumerStore;
@@ -109,6 +111,13 @@ public class KinesisService {
         return store.scan(key -> key.startsWith(prefix)).stream()
                 .map(KinesisStream::getStreamName)
                 .sorted()
+                .toList();
+    }
+
+    public List<KinesisStream> listStreamDetails(String region) {
+        String prefix = region + "::";
+        return store.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(KinesisStream::getStreamName))
                 .toList();
     }
 
@@ -497,6 +506,61 @@ public class KinesisService {
         response.put("NextShardIterator", nextIterator);
         response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
         return response;
+    }
+
+    public record PeekedRecord(String shardId, KinesisRecord record) {}
+
+    /**
+     * Returns up to {@code limit} of the most-recent records across all (or one) shard.
+     * Records are returned in ascending arrival-timestamp order (oldest first).
+     *
+     * <p>With no pagination cursor, {@value MAX_INSPECTION_RECORD_LIMIT} is a hard ceiling
+     * on the total number of records reachable in a single call regardless of the {@code limit}
+     * parameter.
+     */
+    public List<PeekedRecord> peekRecords(String streamName, String shardId, Integer limit, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        int resolvedLimit = resolveInspectionRecordLimit(limit);
+        if (resolvedLimit == 0) {
+            return List.of();
+        }
+
+        if (shardId != null && !shardId.isBlank()) {
+            boolean exists = stream.getShards().stream().anyMatch(shard -> shard.getShardId().equals(shardId));
+            if (!exists) {
+                throw new AwsException("ResourceNotFoundException", "Shard " + shardId + " not found", 400);
+            }
+        }
+
+        Comparator<PeekedRecord> oldestFirst = Comparator.comparing(
+                peeked -> peeked.record().getApproximateArrivalTimestamp(),
+                Comparator.nullsFirst(Comparator.naturalOrder()));
+        PriorityQueue<PeekedRecord> newest = new PriorityQueue<>(oldestFirst);
+        stream.getShards().stream()
+                .filter(shard -> shardId == null || shardId.isBlank() || shard.getShardId().equals(shardId))
+                .forEach(shard -> shard.getRecords().forEach(record -> {
+                    newest.add(new PeekedRecord(shard.getShardId(), record));
+                    if (newest.size() > resolvedLimit) {
+                        newest.poll();
+                    }
+                }));
+
+        return newest.stream()
+                .sorted(Comparator.comparing(peeked -> peeked.record().getApproximateArrivalTimestamp(),
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    /**
+     * Resolves the caller-supplied limit to a value in {@code [0, MAX_INSPECTION_RECORD_LIMIT]}.
+     * Both ends are clamped silently, consistent with the behaviour of
+     * {@link #getRecords} and {@link #getRecordsForAccount}.
+     */
+    private int resolveInspectionRecordLimit(Integer limit) {
+        if (limit == null) {
+            return DEFAULT_INSPECTION_RECORD_LIMIT;
+        }
+        return Math.max(0, Math.min(limit, MAX_INSPECTION_RECORD_LIMIT));
     }
 
     /**
