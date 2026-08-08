@@ -44,6 +44,8 @@ class CodeBuildPhaseSessionScriptTest {
         // drop them so only the values a test sets explicitly reach the script.
         pb.environment().remove("NODE_EXTRA_CA_CERTS");
         pb.environment().remove("AWS_CA_BUNDLE");
+        // buildEnvList injects this into the container environment before the session starts.
+        pb.environment().put("CODEBUILD_BUILD_SUCCEEDING", "1");
         pb.environment().putAll(extraEnv);
         Process process = pb.start();
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
@@ -207,6 +209,60 @@ class CodeBuildPhaseSessionScriptTest {
         assertFalse(run.output().contains("marker-pre-build"), run.output());
         assertFalse(run.output().lines().anyMatch(l -> l.equals("marker-build")), run.output());
         assertTrue(run.output().contains("marker-post-build"), run.output());
+    }
+
+    @Test
+    void postBuildSeesBuildSucceedingOneWhenAllPhasesPass() throws Exception {
+        ShellRun run = runBash(
+                List.of(),
+                List.of(),
+                List.of("echo build-work"),
+                List.of("test \"$CODEBUILD_BUILD_SUCCEEDING\" -eq 1",
+                        "if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then echo guarded-work; fi"));
+
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ POST_BUILD 0"), run.output());
+        assertTrue(run.output().contains("guarded-work"), run.output());
+    }
+
+    @Test
+    void postBuildSeesBuildSucceedingZeroAfterBuildFailure() throws Exception {
+        ShellRun run = runBash(
+                List.of(),
+                List.of(),
+                List.of("false"),
+                List.of("if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then echo guarded-work; fi",
+                        "test \"$CODEBUILD_BUILD_SUCCEEDING\" -eq 0",
+                        "echo saw-failure"));
+
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ BUILD 1"), run.output());
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ POST_BUILD 0"), run.output());
+        assertFalse(run.output().contains("guarded-work"), run.output());
+        assertTrue(run.output().contains("saw-failure"), run.output());
+    }
+
+    @Test
+    void postBuildSeesBuildSucceedingOneWhenAllPhasesPassInShFallback() throws Exception {
+        ShellRun run = runSh(
+                List.of(),
+                List.of(),
+                List.of("echo build-work"),
+                List.of("test \"$CODEBUILD_BUILD_SUCCEEDING\" -eq 1", "echo guarded-work"));
+
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ POST_BUILD 0"), run.output());
+        assertTrue(run.output().contains("guarded-work"), run.output());
+    }
+
+    @Test
+    void postBuildSeesBuildSucceedingZeroAfterBuildFailureInShFallback() throws Exception {
+        ShellRun run = runSh(
+                List.of(),
+                List.of(),
+                List.of("false"),
+                List.of("test \"$CODEBUILD_BUILD_SUCCEEDING\" -eq 0", "echo saw-failure"));
+
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ BUILD 1"), run.output());
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ POST_BUILD 0"), run.output());
+        assertTrue(run.output().contains("saw-failure"), run.output());
     }
 
     // ── transparent AWS endpoints — combined CA bundle prelude ────────────────

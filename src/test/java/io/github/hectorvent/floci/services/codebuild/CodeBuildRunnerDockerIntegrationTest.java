@@ -75,6 +75,7 @@ class CodeBuildRunnerDockerIntegrationTest {
                   post_build:
                     commands:
                       - test "$(pwd)" = "/codebuild/output/src/src/subdir"
+                      - if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then true; else exit 1; fi
                 """);
 
         Map<String, Object> build = awaitBuild(buildId);
@@ -107,6 +108,7 @@ class CodeBuildRunnerDockerIntegrationTest {
                   post_build:
                     commands:
                       - test "$PIPELINE_STAGE" = "deploy"
+                      - test "$CODEBUILD_BUILD_SUCCEEDING" -eq 0
                       - sleep 2
                 """);
 
@@ -147,6 +149,7 @@ class CodeBuildRunnerDockerIntegrationTest {
                   post_build:
                     commands:
                       - test "$INSTALL_MARKER" = "set"
+                      - test "$CODEBUILD_BUILD_SUCCEEDING" -eq 0
                       - sleep 2
                 """);
 
@@ -203,6 +206,7 @@ class CodeBuildRunnerDockerIntegrationTest {
                     commands:
                       - test "$ENABLE_EXTERNAL_PIPELINE_ACCOUNT" = "no"
                       - test "$(pwd)" = "/codebuild/output/src/src/subdir"
+                      - test "$CODEBUILD_BUILD_SUCCEEDING" -eq 1
                 """);
 
         Map<String, Object> build = awaitBuild(buildId);

@@ -514,6 +514,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         env.put("CODEBUILD_BUILD_NUMBER", String.valueOf(build.getBuildNumber()));
         env.put("CODEBUILD_BUILD_IMAGE", build.getEnvironment() != null && build.getEnvironment().getImage() != null
                 ? build.getEnvironment().getImage() : project.getEnvironment().getImage());
+        env.put("CODEBUILD_BUILD_SUCCEEDING", "1");
         env.put("CODEBUILD_INITIATOR", "user");
         env.put("CODEBUILD_SRC_DIR", "/codebuild/output/src/src");
         if (build.getSecondarySources() != null) {
@@ -901,7 +902,18 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
         script.append("echo \"").append(PHASE_END_SENTINEL).append(' ').append(phase)
                 .append(" $___floci_rc\"\n");
-        script.append("[ \"$___floci_rc\" -eq 0 ] || ___floci_failed=1\n");
+        // Real CodeBuild flips CODEBUILD_BUILD_SUCCEEDING to 0 for every phase after
+        // the first failure. The append outlives later snapshots because each failed
+        // phase re-appends after the last entry's state rewrite, and successful
+        // entries snapshot the restored 0 back out themselves.
+        script.append("if [ \"$___floci_rc\" -ne 0 ]; then\n");
+        script.append("___floci_failed=1\n");
+        if (isolatedEntries) {
+            script.append("echo 'declare -x CODEBUILD_BUILD_SUCCEEDING=\"0\"' >> \"$___FLOCI_DIR/state\"\n");
+        } else {
+            script.append("export CODEBUILD_BUILD_SUCCEEDING=0\n");
+        }
+        script.append("fi\n");
         if (skipAfterFailure) {
             script.append("else\n");
             script.append("echo \"").append(PHASE_END_SENTINEL).append(' ').append(phase)
