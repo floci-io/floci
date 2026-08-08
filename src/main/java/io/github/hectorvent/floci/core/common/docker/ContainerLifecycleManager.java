@@ -42,6 +42,15 @@ public class ContainerLifecycleManager {
 
     private static final Logger LOG = Logger.getLogger(ContainerLifecycleManager.class);
 
+    /**
+     * Container-create runs over the shared docker socket, which drops connections mid-call
+     * ({@code Broken pipe}) when many builds hit the daemon at once — e.g. an LZA Bootstrap
+     * stage fanning out ~15 CodeBuild actions. A create fails before source staging, so the
+     * copy-path retry never sees it; {@link DockerRetry} recovers it here at the create call.
+     */
+    private static final int CREATE_MAX_ATTEMPTS = 6;
+    private static final long CREATE_RETRY_BACKOFF_MS = 500L;
+
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
@@ -129,7 +138,8 @@ public class ContainerLifecycleManager {
         }
         createCmd.withLabels(mergedLabels(spec.labels()));
 
-        CreateContainerResponse response = createCmd.exec();
+        CreateContainerResponse response = DockerRetry.call(
+                CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, createCmd::exec);
         String containerId = response.getId();
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
