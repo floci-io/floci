@@ -445,8 +445,11 @@ public class IamService implements SessionAccountLookup {
         }
         String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"" + awsServiceName + "\"},\"Action\":\"sts:AssumeRole\"}]}";
-        return createRole(roleName, SERVICE_LINKED_ROLE_PATH + awsServiceName + "/",
+        IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + awsServiceName + "/",
                 trustPolicy, description, 0, Map.of());
+        role.setServiceLinkedRole(true);
+        roles.put(roleName, role);
+        return role;
     }
 
     /**
@@ -458,21 +461,17 @@ public class IamService implements SessionAccountLookup {
             throw new AwsException("NoSuchEntity", "The request must include RoleName.", 404);
         }
         IamRole role = getRole(roleName);
-        String path = role.getPath();
-        // Nothing stops a caller creating an ordinary role directly under the service-role prefix,
-        // so the principal segment has to be present, not merely the prefix.
-        String servicePrincipal = path.startsWith(SERVICE_LINKED_ROLE_PATH)
-                        && path.length() > SERVICE_LINKED_ROLE_PATH.length()
-                ? path.substring(SERVICE_LINKED_ROLE_PATH.length(), path.length() - 1)
-                : "";
-        // Same published-error-list test as the create side: this action documents only
-        // NoSuchEntity, LimitExceeded and ServiceFailure, so InvalidInput would be off-contract.
-        if (servicePrincipal.isEmpty()) {
+        // The path cannot classify a role — CreateRole will put an ordinary one under the
+        // service-role prefix — so only roles minted here are deletable through this action. The
+        // error is NoSuchEntity because that is what this action's published list carries.
+        if (!role.isServiceLinkedRole()) {
             throw new AwsException("NoSuchEntity",
                     "There is no service-linked role with name " + roleName + ".", 404);
         }
+        String path = role.getPath();
         deleteRole(roleName);
 
+        String servicePrincipal = path.substring(SERVICE_LINKED_ROLE_PATH.length(), path.length() - 1);
         String deletionTaskId = "task" + SERVICE_LINKED_ROLE_PATH + servicePrincipal + "/"
                 + roleName + "/" + UUID.randomUUID();
         serviceLinkedRoleDeletions.put(deletionTaskId, roleName);

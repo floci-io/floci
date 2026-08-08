@@ -323,6 +323,45 @@ class IamServiceLinkedRoleIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
     }
 
+    /**
+     * CreateRole accepts the service-role prefix, so path is not evidence of how a role was made.
+     * An ordinary role sitting at a well-formed service-linked path must survive this action.
+     */
+    @Test
+    @Order(17)
+    void anOrdinaryRoleAtAServiceLinkedPathIsNotDeletable() {
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "ImpostorAtTheServicePath")
+            .formParam("Path", "/aws-service-role/es.amazonaws.com/")
+            .formParam("AssumeRolePolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteServiceLinkedRole")
+            .formParam("RoleName", "ImpostorAtTheServicePath")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+
+        // ...and it is still there.
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "ImpostorAtTheServicePath")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     @Test
     @Order(10)
     void deletingAnOrdinaryRoleThroughThisActionIsRejected() {
