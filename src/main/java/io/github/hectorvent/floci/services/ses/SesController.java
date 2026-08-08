@@ -87,9 +87,27 @@ public class SesController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = objectMapper.readTree(body);
-            String emailIdentity = request.path("EmailIdentity").asText(null);
+            JsonNode emailIdentityNode = request.path("EmailIdentity");
+            if (!emailIdentityNode.isMissingNode() && !emailIdentityNode.isNull()
+                    && !emailIdentityNode.isTextual()) {
+                // A non-string EmailIdentity is rejected rather than coerced (asText would turn 123
+                // into "123"), the same as ConfigurationSetName below.
+                throw new AwsException("SerializationException", null, 400);
+            }
+            String emailIdentity = emailIdentityNode.asText(null);
             if (emailIdentity == null || emailIdentity.isBlank()) {
                 throw new AwsException("BadRequestException", "EmailIdentity is required.", 400);
+            }
+            // ConfigurationSetName must be a String; AWS rejects a non-string, so reject it here too
+            // rather than coercing via asText (which would turn 123 into "123"). Floci surfaces this
+            // as a 400 SerializationException, rendered as a JSON error body by AwsExceptionMapper.
+            JsonNode configSetNode = request.path("ConfigurationSetName");
+            String configurationSetName = null;
+            if (!configSetNode.isMissingNode() && !configSetNode.isNull()) {
+                if (!configSetNode.isTextual()) {
+                    throw new AwsException("SerializationException", null, 400);
+                }
+                configurationSetName = configSetNode.textValue();
             }
 
             if (sesService.getIdentityVerificationAttributes(emailIdentity, region) != null) {
@@ -97,11 +115,30 @@ public class SesController {
                         "Email identity " + emailIdentity + " already exist.", 400);
             }
 
+            // Parse Tags up front. parseTagsArray is pure (it only reads the node), so validating the
+            // shape before creating the identity keeps the call atomic — a malformed Tags value fails
+            // without leaving a half-created identity behind, matching AWS and the ConfigurationSetName
+            // pre-check below.
+            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
+
+            // Verified against AWS: a non-existent ConfigurationSetName fails the whole call
+            // (NotFoundException) without creating the identity, so validate it before creating.
+            // Only the empty string means "no default configuration set" (consistent with the
+            // PutEmailIdentityConfigurationSetAttributes path); a whitespace-only name flows through
+            // name validation and is rejected as invalid input, rather than being silently ignored.
+            boolean hasConfigSet = configurationSetName != null && !configurationSetName.isEmpty();
+            if (hasConfigSet) {
+                sesService.getConfigurationSet(configurationSetName, region);
+            }
+
             Identity identity = emailIdentity.contains("@")
                     ? sesService.verifyEmailIdentity(emailIdentity, region)
                     : sesService.verifyDomainIdentity(emailIdentity, region);
 
-            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
+            if (hasConfigSet) {
+                sesService.setEmailIdentityConfigurationSet(emailIdentity, configurationSetName, region);
+            }
+
             if (parsedTags != null) {
                 sesService.setIdentityTags(emailIdentity, region, parsedTags);
             }
