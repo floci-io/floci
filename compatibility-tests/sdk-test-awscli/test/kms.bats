@@ -325,3 +325,93 @@ teardown() {
     aws_cmd kms schedule-key-deletion --key-id "$key_a" --pending-window-in-days 7 >/dev/null 2>&1 || true
     aws_cmd kms schedule-key-deletion --key-id "$key_b" --pending-window-in-days 7 >/dev/null 2>&1 || true
 }
+
+@test "KMS: decrypt with disabled key returns DisabledException" {
+    out=$(aws_cmd kms create-key --description "bats-disabled-decrypt")
+    KEY_ID=$(json_get "$out" '.KeyMetadata.KeyId')
+
+    plaintext_file=$(mktemp)
+    ciphertext_file=$(mktemp)
+    echo -n "secret data" > "$plaintext_file"
+
+    run aws_cmd kms encrypt \
+        --key-id "$KEY_ID" \
+        --plaintext "fileb://$plaintext_file" \
+        --output text \
+        --query CiphertextBlob
+    assert_success
+    echo "$output" | base64 -d > "$ciphertext_file"
+
+    run aws_cmd kms disable-key --key-id "$KEY_ID"
+    assert_success
+
+    run aws_cmd kms decrypt \
+        --ciphertext-blob "fileb://$ciphertext_file" \
+        --key-id "$KEY_ID"
+    assert_failure
+    [[ "$output" == *"DisabledException"* ]]
+
+    rm -f "$plaintext_file" "$ciphertext_file"
+}
+
+@test "KMS: encrypt with disabled key returns DisabledException" {
+    out=$(aws_cmd kms create-key --description "bats-disabled-encrypt")
+    KEY_ID=$(json_get "$out" '.KeyMetadata.KeyId')
+
+    run aws_cmd kms disable-key --key-id "$KEY_ID"
+    assert_success
+
+    plaintext_file=$(mktemp)
+    echo -n "secret data" > "$plaintext_file"
+
+    run aws_cmd kms encrypt --key-id "$KEY_ID" --plaintext "fileb://$plaintext_file"
+    assert_failure
+    [[ "$output" == *"DisabledException"* ]]
+
+    rm -f "$plaintext_file"
+}
+
+@test "KMS: decrypt with pending deletion key returns KmsInvalidStateException" {
+    out=$(aws_cmd kms create-key --description "bats-pending-decrypt")
+    KEY_ID=$(json_get "$out" '.KeyMetadata.KeyId')
+
+    plaintext_file=$(mktemp)
+    ciphertext_file=$(mktemp)
+    echo -n "secret data" > "$plaintext_file"
+
+    run aws_cmd kms encrypt \
+        --key-id "$KEY_ID" \
+        --plaintext "fileb://$plaintext_file" \
+        --output text \
+        --query CiphertextBlob
+    assert_success
+    echo "$output" | base64 -d > "$ciphertext_file"
+
+    run aws_cmd kms schedule-key-deletion --key-id "$KEY_ID" --pending-window-in-days 7
+    assert_success
+
+    run aws_cmd kms decrypt \
+        --ciphertext-blob "fileb://$ciphertext_file" \
+        --key-id "$KEY_ID"
+    assert_failure
+    [[ "$output" == *"KMSInvalidStateException"* ]]
+
+    rm -f "$plaintext_file" "$ciphertext_file"
+}
+
+@test "KMS: encrypt with pending deletion key returns KmsInvalidStateException" {
+    out=$(aws_cmd kms create-key --description "bats-pending-encrypt")
+    KEY_ID=$(json_get "$out" '.KeyMetadata.KeyId')
+
+    run aws_cmd kms schedule-key-deletion --key-id "$KEY_ID" --pending-window-in-days 7
+    assert_success
+
+    plaintext_file=$(mktemp)
+    echo -n "secret data" > "$plaintext_file"
+
+    run aws_cmd kms encrypt --key-id "$KEY_ID" --plaintext "fileb://$plaintext_file"
+    assert_failure
+    [[ "$output" == *"KMSInvalidStateException"* ]]
+
+    rm -f "$plaintext_file"
+}

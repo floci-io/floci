@@ -649,6 +649,7 @@ public class KmsService {
 
     public byte[] encrypt(String keyId, byte[] plaintext, Map<String, String> encryptionContext, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
+        validateKeyIsUsableForCryptoOperations(kmsKey);
 
         byte[] nonceBytes = new byte[NONCE_BYTES];
         SECURE_RANDOM.nextBytes(nonceBytes);
@@ -707,17 +708,22 @@ public class KmsService {
                         400
                 );
             }
+            validateKeyIsUsableForCryptoOperations(requestKey);
 
             return new DecryptResult(plaintext, requestKey.getArn());
         }
 
-        String keyArn;
+        KmsKey key;
         try {
-            keyArn = resolveKey(parsed.keyId, region).getArn();
+            key = resolveKey(parsed.keyId, region);
         } catch (AwsException e) {
-            keyArn = null;
+            key = null;
         }
-        return new DecryptResult(plaintext, keyArn);
+        if (key == null) {
+            return new DecryptResult(plaintext, null);
+        }
+        validateKeyIsUsableForCryptoOperations(key);
+        return new DecryptResult(plaintext, key.getArn());
     }
 
     public record DecryptResult(byte[] plaintext, String keyArn) {}
@@ -1110,4 +1116,22 @@ public class KmsService {
         return keyStore.get(region + "::" + id)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
     }
+
+    private static void validateKeyIsUsableForCryptoOperations(KmsKey key) {
+        if ("PendingDeletion".equals(key.getKeyState())) {
+            throw new AwsException(
+                    "KMSInvalidStateException",
+                    "KMS key " + key.getKeyId() + " is pending deletion.",
+                    400
+            );
+        }
+        if (!key.isEnabled()) {
+            throw new AwsException(
+                    "DisabledException",
+                    "The request was rejected because the specified KMS key is not enabled.",
+                    400
+            );
+        }
+    }
+
 }

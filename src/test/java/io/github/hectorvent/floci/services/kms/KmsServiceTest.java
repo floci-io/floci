@@ -632,6 +632,30 @@ class KmsServiceTest {
                 kmsService.decrypt("not-valid-ciphertext".getBytes(StandardCharsets.UTF_8), REGION));
     }
 
+    @Test
+    void encryptWithDisabledKeyThrowsDisabledException() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.disableKey(key.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.encrypt(key.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION));
+
+        assertEquals("DisabledException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void encryptWithPendingDeletionKeyThrowsKmsInvalidStateException() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.encrypt(key.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION));
+
+        assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
     @Nested
     class DecryptAndReEncryptTests {
 
@@ -701,6 +725,68 @@ class KmsServiceTest {
 
             assertArrayEquals(plaintext, result.plaintext());
             assertEquals(key.getArn(), result.keyArn());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithDisabledKeyThrowsDisabledException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.disableKey(key.getKeyId(), REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId())
+            );
+
+            assertEquals("DisabledException", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithPendingDeletionKeyThrowsKmsInvalidStateException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId())
+            );
+
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        @Test
+        void decryptAndResolveKeySelfDescribingWithDisabledKeyThrowsDisabledException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.disableKey(key.getKeyId(), REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null)
+            );
+
+            assertEquals("DisabledException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptAndResolveKeySelfDescribingWithPendingDeletionKeyThrowsKmsInvalidStateException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null)
+            );
+
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
         }
 
         @Test
