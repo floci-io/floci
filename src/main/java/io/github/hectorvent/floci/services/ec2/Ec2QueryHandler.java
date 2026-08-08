@@ -28,6 +28,15 @@ public class Ec2QueryHandler {
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
 
+    /** ReplaceRoute targets AWS accepts that a stored {@code Route} cannot represent here. */
+    private static final List<String> UNSUPPORTED_ROUTE_TARGETS = List.of(
+            "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId", "InstanceId",
+            "LocalGatewayId", "NetworkInterfaceId", "OdbNetworkArn",
+            "TransitGatewayId", "VpcEndpointId", "VpcPeeringConnectionId");
+
+    /** The gateway id a route table's built-in route carries (see Ec2Service#createRouteTable). */
+    private static final String LOCAL_GATEWAY_ID = "local";
+
     private final Ec2Service service;
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
@@ -123,6 +132,7 @@ public class Ec2QueryHandler {
                 case "AssociateRouteTable" -> handleAssociateRouteTable(params, region);
                 case "DisassociateRouteTable" -> handleDisassociateRouteTable(params, region);
                 case "CreateRoute" -> handleCreateRoute(params, region);
+                case "ReplaceRoute" -> handleReplaceRoute(params, region);
                 case "DeleteRoute" -> handleDeleteRoute(params, region);
                 // Network ACLs
                 case "CreateNetworkAcl" -> handleCreateNetworkAcl(params, region);
@@ -1497,6 +1507,33 @@ public class Ec2QueryHandler {
         String natGwId = p.getFirst("NatGatewayId");
         service.createRoute(region, rtId, dest, gwId, natGwId);
         return booleanResponse("CreateRoute");
+    }
+
+    private Response handleReplaceRoute(MultivaluedMap<String, String> p, String region) {
+        // A route holds only a gateway or a NAT gateway here. Every other AWS target keeps the
+        // UnsupportedOperation it returned before this action existed, rather than being accepted
+        // and quietly clearing the route it was meant to repoint.
+        for (String target : UNSUPPORTED_ROUTE_TARGETS) {
+            if (p.getFirst(target) != null) {
+                throw new AwsException("UnsupportedOperation",
+                        "ReplaceRoute with " + target + " is not supported.", 400);
+            }
+        }
+        String rtId = p.getFirst("RouteTableId");
+        String dest = p.getFirst("DestinationCidrBlock");
+        String gwId = p.getFirst("GatewayId");
+        String natGwId = p.getFirst("NatGatewayId");
+        // Resetting a route to the local target is expressible: `local` is the gateway id the
+        // route table's built-in route already carries, so it needs no new field on Route.
+        if (Boolean.parseBoolean(p.getFirst("LocalTarget"))) {
+            if (gwId != null || natGwId != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "ReplaceRoute takes exactly one target.", 400);
+            }
+            gwId = LOCAL_GATEWAY_ID;
+        }
+        service.replaceRoute(region, rtId, dest, gwId, natGwId);
+        return booleanResponse("ReplaceRoute");
     }
 
     private Response handleDeleteRoute(MultivaluedMap<String, String> p, String region) {

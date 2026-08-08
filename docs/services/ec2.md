@@ -254,6 +254,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
 | CreateRoute | Adds a route to a route table. |
+| ReplaceRoute | Replaces the target of an existing route. |
 | DeleteRoute | Removes a route from a route table. |
 
 ### Network ACLs
