@@ -785,6 +785,61 @@ class RdsQueryHandlerTest {
         assertTrue(((String) response.getEntity()).contains("DBSubnetGroupNotFoundFault"));
     }
 
+    @Test
+    void describeDbInstances_returnsAuroraPostgresqlCorrectly() {
+        DbInstance instance = makeInstance("aurora-pg");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.AURORA_POSTGRESQL);
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Engine>aurora-postgresql</Engine>"), "Expected aurora-postgresql in response");
+    }
+
+    @Test
+    void describeDbClusters_returnsAuroraMysqlCorrectly() {
+        DbCluster cluster = makeCluster("aurora-mysql-cluster");
+        cluster.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.AURORA_MYSQL);
+        when(service.listDbClusters(null)).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Engine>aurora-mysql</Engine>"), "Expected aurora-mysql in response");
+    }
+
+    @Test
+    void describeDbInstances_defaultParameterGroupNameUsesHyphenForAuroraEngine() {
+        DbInstance instance = makeInstance("aurora-pg");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.AURORA_POSTGRESQL);
+        instance.setEngineVersion("16.3");
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupName>default.aurora-postgresql16</DBParameterGroupName>"),
+                "Expected hyphenated aurora-postgresql in default parameter group name, got: " + body);
+        assertFalse(body.contains("aurora_postgresql"), "Parameter group name must not contain underscores");
+    }
+
+    @Test
+    void describeDbInstances_defaultEngineVersionFallsBackCorrectlyForAuroraEngine() {
+        DbInstance instance = makeInstance("aurora-pg");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.AURORA_POSTGRESQL);
+        instance.setEngineVersion(null);
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupName>default.aurora-postgresql16</DBParameterGroupName>"),
+                "Expected default engine version major \"16\" (from 16.3), not the \"1.0\" fallback; got: " + body);
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private static MultivaluedMap<String, String> params() {
