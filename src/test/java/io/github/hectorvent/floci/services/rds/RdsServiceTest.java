@@ -71,6 +71,7 @@ class RdsServiceTest {
     private Ec2Service ec2Service;
     private RegionResolver regionResolver;
     private EmulatorConfig config;
+    private EmulatorConfig.RdsServiceConfig rdsConfig;
 
     @BeforeEach
     void setUp() {
@@ -80,7 +81,7 @@ class RdsServiceTest {
         regionResolver = new RegionResolver("us-east-1", "123456789012");
         config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.RdsServiceConfig rdsConfig = mock(EmulatorConfig.RdsServiceConfig.class);
+        rdsConfig = mock(EmulatorConfig.RdsServiceConfig.class);
 
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.rds()).thenReturn(rdsConfig);
@@ -160,6 +161,17 @@ class RdsServiceTest {
 
         verify(containerManager).start(eq("mydb"), any(), eq(DatabaseEngine.POSTGRES),
                 eq("postgres:18.1-alpine"), eq("admin"), eq("password"), eq("dbname"));
+    }
+
+    @Test
+    void configuredPostgresImageIsNotRewrittenForRequestedEngineVersion() {
+        when(rdsConfig.defaultPostgresImage()).thenReturn("postgres:16.14-alpine3.23");
+
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        verify(containerManager).start(eq("cluster1"), any(), eq(DatabaseEngine.POSTGRES),
+                eq("postgres:16.14-alpine3.23"), eq("admin"), eq("password"), eq("dbname"));
     }
 
     @Test

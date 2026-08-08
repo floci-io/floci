@@ -164,6 +164,7 @@ floci:
       mock: false                             # true = clusters/instances created without Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # Built-in defaults adapt to EngineVersion; custom images are used verbatim.
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"

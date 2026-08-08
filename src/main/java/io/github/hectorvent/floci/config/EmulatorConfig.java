@@ -859,6 +859,10 @@ public interface EmulatorConfig {
     }
 
     interface RdsServiceConfig {
+        String DEFAULT_POSTGRES_IMAGE = "postgres:16-alpine";
+        String DEFAULT_MYSQL_IMAGE = "mysql:8.0";
+        String DEFAULT_MARIADB_IMAGE = "mariadb:11";
+
         @WithDefault("true")
         boolean enabled();
 
@@ -874,13 +878,13 @@ public interface EmulatorConfig {
         @WithDefault("7099")
         int proxyMaxPort();
 
-        @WithDefault("postgres:16-alpine")
+        @WithDefault(DEFAULT_POSTGRES_IMAGE)
         String defaultPostgresImage();
 
-        @WithDefault("mysql:8.0")
+        @WithDefault(DEFAULT_MYSQL_IMAGE)
         String defaultMysqlImage();
 
-        @WithDefault("mariadb:11")
+        @WithDefault(DEFAULT_MARIADB_IMAGE)
         String defaultMariadbImage();
 
         /** Docker network to attach DB containers to. Empty = default bridge. */

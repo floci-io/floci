@@ -1066,12 +1066,22 @@ public class RdsService implements Resettable {
     }
 
     private String imageForEngine(DatabaseEngine engine, String engineVersion) {
-        String defaultImage = switch (engine) {
+        String configuredImage = switch (engine) {
             case POSTGRES -> config.services().rds().defaultPostgresImage();
             case MYSQL -> config.services().rds().defaultMysqlImage();
             case MARIADB -> config.services().rds().defaultMariadbImage();
         };
-        return imageForRequestedVersion(defaultImage, engineVersion);
+        return configuredImage.equals(builtInDefaultImage(engine))
+                ? imageForRequestedVersion(configuredImage, engineVersion)
+                : configuredImage;
+    }
+
+    private static String builtInDefaultImage(DatabaseEngine engine) {
+        return switch (engine) {
+            case POSTGRES -> EmulatorConfig.RdsServiceConfig.DEFAULT_POSTGRES_IMAGE;
+            case MYSQL -> EmulatorConfig.RdsServiceConfig.DEFAULT_MYSQL_IMAGE;
+            case MARIADB -> EmulatorConfig.RdsServiceConfig.DEFAULT_MARIADB_IMAGE;
+        };
     }
 
     private void validateInstanceParameterGroup(String paramGroupName, String engineParam, String engineVersion) {
