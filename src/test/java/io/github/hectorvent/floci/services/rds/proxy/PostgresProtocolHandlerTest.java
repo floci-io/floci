@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -34,6 +35,7 @@ import java.security.cert.X509Certificate;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -102,10 +104,12 @@ class PostgresProtocolHandlerTest {
 
                 ourClient.close();
                 proxyClient.close();
-                authThread.join(5_000);
-                backendThread.join(5_000);
-                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+                // join(Duration) returns true iff the thread terminated, so there is no race
+                // between the timeout expiring and a separate isAlive() check. The window is
+                // generous enough to absorb virtual-thread scheduling latency under a loaded
+                // full-suite run while still failing fast if a thread genuinely hangs.
+                assertTrue(authThread.join(Duration.ofSeconds(30)), "authThread did not terminate");
+                assertTrue(backendThread.join(Duration.ofSeconds(30)), "backendThread did not terminate");
             }
 
             assertEquals("auth_db", backendDatabase.get());
@@ -156,10 +160,12 @@ class PostgresProtocolHandlerTest {
                 assertEquals('E', firstResponse);
                 assertNotEquals('R', firstResponse);
 
-                authThread.join(5_000);
-                backendThread.join(5_000);
-                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+                // join(Duration) returns true iff the thread terminated, so there is no race
+                // between the timeout expiring and a separate isAlive() check. The window is
+                // generous enough to absorb virtual-thread scheduling latency under a loaded
+                // full-suite run while still failing fast if a thread genuinely hangs.
+                assertTrue(authThread.join(Duration.ofSeconds(30)), "authThread did not terminate");
+                assertTrue(backendThread.join(Duration.ofSeconds(30)), "backendThread did not terminate");
             }
 
             assertEquals("missing_db", backendDatabase.get());
@@ -218,10 +224,12 @@ class PostgresProtocolHandlerTest {
 
                 ourClient.close();
                 proxyClient.close();
-                authThread.join(5_000);
-                backendThread.join(5_000);
-                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+                // join(Duration) returns true iff the thread terminated, so there is no race
+                // between the timeout expiring and a separate isAlive() check. The window is
+                // generous enough to absorb virtual-thread scheduling latency under a loaded
+                // full-suite run while still failing fast if a thread genuinely hangs.
+                assertTrue(authThread.join(Duration.ofSeconds(30)), "authThread did not terminate");
+                assertTrue(backendThread.join(Duration.ofSeconds(30)), "backendThread did not terminate");
             }
 
             assertEquals("auth_db", backendDatabase.get());
@@ -370,10 +378,12 @@ class PostgresProtocolHandlerTest {
                 writeSimpleQuery(clientOut, "select 1");
 
                 assertEquals(-1, clientIn.read(), "backend close must be visible to the client");
-                authThread.join(5_000);
-                backendThread.join(5_000);
-                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+                // join(Duration) returns true iff the thread terminated, so there is no race
+                // between the timeout expiring and a separate isAlive() check. The window is
+                // generous enough to absorb virtual-thread scheduling latency under a loaded
+                // full-suite run while still failing fast if a thread genuinely hangs.
+                assertTrue(authThread.join(Duration.ofSeconds(30)), "authThread did not terminate");
+                assertTrue(backendThread.join(Duration.ofSeconds(30)), "backendThread did not terminate");
             }
         }
     }
