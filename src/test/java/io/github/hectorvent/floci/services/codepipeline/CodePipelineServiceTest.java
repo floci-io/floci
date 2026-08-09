@@ -19,6 +19,10 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -533,6 +537,90 @@ class CodePipelineServiceTest {
         assertTrue(execution.getArtifactRevisions().stream().anyMatch(r ->
                 "github.com/awslabs/landing-zone-accelerator-on-aws@release/v1.16.0"
                         .equals(r.get("revisionSummary"))));
+    }
+
+    @Test
+    void gitHubSourceRepackagingPreservesUnixModes() throws Exception {
+        byte[] codeloadArchive;
+        try (var baos = new java.io.ByteArrayOutputStream()) {
+            try (var zos = new ZipArchiveOutputStream(baos)) {
+                zos.putArchiveEntry(new ZipArchiveEntry("repo-main/"));
+                zos.closeArchiveEntry();
+                ZipArchiveEntry script = new ZipArchiveEntry("repo-main/lib/bash/bootstrap.sh");
+                script.setUnixMode(0755);
+                zos.putArchiveEntry(script);
+                zos.write("#!/bin/bash\n".getBytes());
+                zos.closeArchiveEntry();
+                zos.putArchiveEntry(new ZipArchiveEntry("repo-main/README.md"));
+                zos.write("hello".getBytes());
+                zos.closeArchiveEntry();
+            }
+            codeloadArchive = baos.toByteArray();
+        }
+        Build build = new Build();
+        build.setId("proj:1");
+        build.setBuildComplete(true);
+        build.setBuildStatus("SUCCEEDED");
+        when(codeBuildService.startBuild(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any())).thenReturn(build);
+        CodePipelineService gitHubService = new CodePipelineService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
+                executionStore,
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
+                mapper, codeBuildService, mock(CodeDeployService.class),
+                lambdaService, s3Service,
+                new CodePipelineEventPublisher(eventBridgeService, snsService, mapper)) {
+            @Override
+            byte[] fetchGitHubArchive(java.net.URI uri) {
+                return codeloadArchive;
+            }
+        };
+
+        ObjectNode source = mapper.createObjectNode();
+        source.put("name", "Fetch");
+        ObjectNode sourceAction = source.putArray("actions").addObject();
+        sourceAction.put("name", "GitHubSource");
+        sourceAction.putObject("actionTypeId")
+                .put("category", "Source").put("owner", "ThirdParty")
+                .put("provider", "GitHub").put("version", "1");
+        sourceAction.putObject("configuration")
+                .put("Owner", "awslabs").put("Repo", "landing-zone-accelerator-on-aws")
+                .put("Branch", "main");
+        sourceAction.putArray("outputArtifacts").addObject().put("name", "Source");
+        sourceAction.put("runOrder", 1);
+
+        ObjectNode buildStage = mapper.createObjectNode();
+        buildStage.put("name", "Build");
+        ObjectNode buildAction = buildStage.putArray("actions").addObject();
+        buildAction.put("name", "BuildApp");
+        buildAction.putObject("actionTypeId")
+                .put("category", "Build").put("owner", "AWS").put("provider", "CodeBuild").put("version", "1");
+        buildAction.putObject("configuration").put("ProjectName", "proj");
+        buildAction.putArray("inputArtifacts").addObject().put("name", "Source");
+        buildAction.put("runOrder", 1);
+
+        ObjectNode declaration = mapper.createObjectNode();
+        declaration.put("name", "github-modes");
+        declaration.put("roleArn", "arn:aws:iam::000000000000:role/cp");
+        declaration.putObject("artifactStore").put("type", "S3").put("location", "bucket");
+        declaration.putArray("stages").add(source).add(buildStage);
+        gitHubService.handle("CreatePipeline",
+                mapper.createObjectNode().set("pipeline", declaration), REGION, ACCOUNT);
+
+        String executionId = gitHubService.handle("StartPipelineExecution",
+                mapper.createObjectNode().put("name", "github-modes"), REGION, ACCOUNT)
+                .path("pipelineExecutionId").asText();
+        awaitStatus(executionId, "Succeeded");
+
+        ArgumentCaptor<byte[]> dataCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bucket"),
+                eq("codepipeline/" + executionId + "/Source.zip"), dataCaptor.capture(),
+                eq("application/zip"), eq(Map.of()));
+        try (var artifact = ZipFile.builder()
+                .setSeekableByteChannel(new SeekableInMemoryByteChannel(dataCaptor.getValue())).get()) {
+            assertEquals(0755, artifact.getEntry("lib/bash/bootstrap.sh").getUnixMode());
+            assertEquals(0, artifact.getEntry("README.md").getUnixMode());
+        }
     }
 
     @Test

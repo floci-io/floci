@@ -28,6 +28,10 @@ import jakarta.annotation.PreDestroy;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
@@ -1356,10 +1360,12 @@ public class CodePipelineService {
     private static byte[] stripTopLevelDirectory(byte[] zip) {
         try {
             var baos = new java.io.ByteArrayOutputStream();
-            try (var zis = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(zip));
-                 var zos = new java.util.zip.ZipOutputStream(baos)) {
-                java.util.zip.ZipEntry entry;
-                while ((entry = zis.getNextEntry()) != null) {
+            try (var zipFile = ZipFile.builder()
+                    .setSeekableByteChannel(new SeekableInMemoryByteChannel(zip)).get();
+                 var zos = new ZipArchiveOutputStream(baos)) {
+                var entries = zipFile.getEntriesInPhysicalOrder();
+                while (entries.hasMoreElements()) {
+                    ZipArchiveEntry entry = entries.nextElement();
                     int slash = entry.getName().indexOf('/');
                     if (slash < 0 || slash == entry.getName().length() - 1) {
                         continue;
@@ -1368,9 +1374,15 @@ public class CodePipelineService {
                     if (entry.isDirectory()) {
                         continue;
                     }
-                    zos.putNextEntry(new java.util.zip.ZipEntry(stripped));
-                    zis.transferTo(zos);
-                    zos.closeEntry();
+                    ZipArchiveEntry copy = new ZipArchiveEntry(stripped);
+                    if (entry.getUnixMode() != 0) {
+                        copy.setUnixMode(entry.getUnixMode());
+                    }
+                    zos.putArchiveEntry(copy);
+                    try (var in = zipFile.getInputStream(entry)) {
+                        in.transferTo(zos);
+                    }
+                    zos.closeArchiveEntry();
                 }
             }
             return baos.toByteArray();
