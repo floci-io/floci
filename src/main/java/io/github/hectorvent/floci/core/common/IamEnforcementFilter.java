@@ -53,6 +53,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private static final Pattern SERVICE_PATTERN =
             Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
 
+    /**
+     * Implicit identity policy for the account-root principal: full access, bounded only by SCPs.
+     * The account root is not a registered IAM identity, so it has no stored identity policy.
+     */
+    private static final String ROOT_ALLOW_ALL =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
+
     private final EmulatorConfig config;
     private final AccountResolver accountResolver;
     private final IamService iamService;
@@ -126,26 +133,34 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
         }
 
-        CallerContext caller = iamService.resolveCallerContext(akid);
-        if (caller == null) {
-            return; // unknown access key → bypass (backward-compat)
-        }
-
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
         String accountId = requestContext.getAccountId() == null
                 ? accountResolver.resolve(auth)
                 : requestContext.getAccountId();
-        String resource = arnBuilder.build(credentialScope, ctx, region, accountId);
 
         // Service control policies from the caller's organization, when the Organizations
         // service is present and SCP enforcement is enabled. Resolved lazily via Instance
         // to avoid a hard IAM → Organizations dependency.
-        if (scpProvider.isResolvable()) {
-            List<List<String>> scpLevels = scpProvider.get().effectiveScpLevels(accountId);
-            if (scpLevels != null) {
-                caller = caller.withScpLevels(scpLevels);
+        List<List<String>> scpLevels = scpProvider.isResolvable()
+                ? scpProvider.get().effectiveScpLevels(accountId)
+                : null;
+
+        CallerContext caller = iamService.resolveCallerContext(akid);
+        if (caller == null) {
+            // A bare 12-digit account-id key is floci's account-root principal: not a registered
+            // IAM identity (resolveCallerContext → null), but in AWS the account root is still
+            // bounded by SCPs. Enforce them when the account actually has an SCP ceiling; otherwise
+            // preserve the historical unknown-key bypass.
+            if (scpLevels == null || !akid.equals(accountId)) {
+                return; // unknown access key or no SCP ceiling → bypass (backward-compat)
             }
+            caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
         }
+        if (scpLevels != null) {
+            caller = caller.withScpLevels(scpLevels);
+        }
+
+        String resource = arnBuilder.build(credentialScope, ctx, region, accountId);
 
         Map<String, String> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
         Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
