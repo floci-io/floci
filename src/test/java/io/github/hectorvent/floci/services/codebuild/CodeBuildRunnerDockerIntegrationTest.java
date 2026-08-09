@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.codebuild;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.BuildImageResultCallback;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -9,8 +10,11 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -164,6 +168,26 @@ class CodeBuildRunnerDockerIntegrationTest {
     }
 
     @Test
+    void imageEntrypointIsOverriddenSoItCannotKillTheBuild() throws Exception {
+        String image = buildSuicidalEntrypointImage();
+        String project = "entrypoint-" + Long.toString(System.nanoTime(), 36);
+        createProject(project, image);
+        String buildId = startBuild(project, """
+                version: 0.2
+                phases:
+                  build:
+                    commands:
+                      - sleep 3
+                      - echo survived-the-entrypoint
+                """);
+
+        Map<String, Object> build = awaitBuild(buildId);
+
+        assertEquals("SUCCEEDED", build.get("buildStatus"));
+        assertEquals("SUCCEEDED", phase(build, "BUILD").get("phaseStatus"));
+    }
+
+    @Test
     void shFallbackStillSharesShellStateWhenBashIsAbsent() {
         String project = "sh-fallback-" + Long.toString(System.nanoTime(), 36);
         createProject(project, SH_IMAGE);
@@ -276,6 +300,32 @@ class CodeBuildRunnerDockerIntegrationTest {
                 zos.closeArchiveEntry();
             }
             return baos.toByteArray();
+        }
+    }
+
+    /**
+     * Builds an image whose ENTRYPOINT kills the container shortly after start, the way
+     * the CodeBuild curated images' dockerd-entrypoint.sh exits non-zero when dockerd
+     * cannot start. The runner must override the ENTRYPOINT (as real CodeBuild does) or
+     * every build phase still running when it fires is killed with SIGKILL.
+     */
+    private String buildSuicidalEntrypointImage() throws Exception {
+        String tag = "floci-test-suicidal-entrypoint:latest";
+        Path context = Files.createTempDirectory("floci-entrypoint-test");
+        Path dockerfile = context.resolve("Dockerfile");
+        try {
+            Files.writeString(dockerfile, """
+                    FROM %s
+                    ENTRYPOINT ["sh", "-c", "sleep 1; exit 1"]
+                    """.formatted(SH_IMAGE));
+            dockerClient.buildImageCmd(dockerfile.toFile())
+                    .withTags(Set.of(tag))
+                    .exec(new BuildImageResultCallback())
+                    .awaitImageId();
+            return tag;
+        } finally {
+            Files.deleteIfExists(dockerfile);
+            Files.deleteIfExists(context);
         }
     }
 

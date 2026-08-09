@@ -263,8 +263,12 @@ public class CodeBuildRunner implements ContainerTeardown {
 
             // Keep the container alive so each phase can be run with docker exec.
             // No bind mount needed — source and artifacts are transferred with docker cp.
+            // The keep-alive must be the ENTRYPOINT, not the Cmd: real CodeBuild overrides
+            // a custom image's ENTRYPOINT, and the curated images' dockerd-entrypoint.sh
+            // exits non-zero when dockerd cannot start (e.g. nested in a rootless runtime),
+            // which would kill the container and every in-flight phase exec.
             ContainerSpec spec = containerBuilder.newContainer(image)
-                    .withCmd(List.of("sh", "-c", "tail -f /dev/null"))
+                    .withEntrypoint(List.of("sh", "-c", "tail -f /dev/null"))
                     .withEnv(envList)
                     .withDockerNetwork(config.services().codebuild().dockerNetwork())
                     .withEmbeddedDns()
