@@ -36,11 +36,11 @@ class IamServiceTest {
         return iamService(seedDeployerPrincipal, new InMemoryStorage<>());
     }
 
-    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys) {
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys) {
         return iamService(seedDeployerPrincipal, accessKeys, new InMemoryStorage<>());
     }
 
-    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys,
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys,
                                          StorageBackend<String, SessionCredential> sessions) {
         return new IamService(
                 new InMemoryStorage<>(),
@@ -500,12 +500,15 @@ class IamServiceTest {
     }
 
     @Test
-    void resolveAccountIdDoesNotScanSessionsForLongTermAccessKey() {
-        CountingAccountAwareSessionStorage sessions = new CountingAccountAwareSessionStorage();
-        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+    void resolveAccountIdUsesLongTermAccessKeyOwnerAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAIOSFODNN7EXAMPLE", "secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
 
-        assertTrue(service.resolveAccountId("AKIAIOSFODNN7EXAMPLE").isEmpty());
-        assertEquals(0, sessions.scanAllAccountsAsMapCalls);
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals("111122223333", service.resolveAccountId(accessKey.getAccessKeyId()).orElseThrow());
     }
 
     private static final class CountingAccountAwareSessionStorage

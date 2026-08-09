@@ -1631,15 +1631,21 @@ public class IamService implements SessionAccountLookup {
     }
 
     /**
-     * Resolves the account a temporary access key belongs to: the account encoded in the
-     * session's role (or federated-user) ARN when present, otherwise the caller account captured
-     * at mint time. Returns empty for unknown or expired sessions so callers fall back to the
-     * default account.
+     * Resolves the account an IAM or temporary access key belongs to. Long-term IAM access keys
+     * resolve from their owning account namespace. Temporary credentials resolve from the account
+     * encoded in the session's role (or federated-user) ARN when present, otherwise the caller
+     * account captured at mint time. Returns empty for unknown, inactive, or expired credentials.
      */
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
-            return Optional.empty();
+            if (accessKeyId == null || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
+                return Optional.empty();
+            }
+            return aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                    .filter(entry -> "Active".equals(entry.value().getStatus()))
+                    .map(AccountAwareStorageBackend.AccountEntry::accountId)
+                    .findFirst();
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
         if (sessionOpt.isEmpty()) {
