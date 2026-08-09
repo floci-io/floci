@@ -432,6 +432,71 @@ class CodePipelineServiceTest {
     }
 
     @Test
+    void gitHubSourceActionDownloadsAndRepackagesTheArchive() throws Exception {
+        byte[] codeloadArchive;
+        try (var baos = new java.io.ByteArrayOutputStream()) {
+            try (var zos = new java.util.zip.ZipOutputStream(baos)) {
+                zos.putNextEntry(new java.util.zip.ZipEntry("repo-main/"));
+                zos.closeEntry();
+                zos.putNextEntry(new java.util.zip.ZipEntry("repo-main/README.md"));
+                zos.write("hello".getBytes());
+                zos.closeEntry();
+                zos.putNextEntry(new java.util.zip.ZipEntry("repo-main/src/app.ts"));
+                zos.write("code".getBytes());
+                zos.closeEntry();
+            }
+            codeloadArchive = baos.toByteArray();
+        }
+        java.util.List<String> fetched = new java.util.ArrayList<>();
+        CodePipelineService gitHubService = new CodePipelineService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
+                executionStore,
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
+                mapper, mock(CodeBuildService.class), mock(CodeDeployService.class),
+                lambdaService, s3Service,
+                new CodePipelineEventPublisher(eventBridgeService, snsService, mapper)) {
+            @Override
+            byte[] fetchGitHubArchive(java.net.URI uri) {
+                fetched.add(uri.toString());
+                return codeloadArchive;
+            }
+        };
+
+        ObjectNode source = mapper.createObjectNode();
+        source.put("name", "Fetch");
+        ObjectNode action = source.putArray("actions").addObject();
+        action.put("name", "GitHubSource");
+        action.putObject("actionTypeId")
+                .put("category", "Source").put("owner", "ThirdParty")
+                .put("provider", "GitHub").put("version", "1");
+        action.putObject("configuration")
+                .put("Owner", "awslabs").put("Repo", "landing-zone-accelerator-on-aws")
+                .put("Branch", "release/v1.16.0");
+        action.putArray("outputArtifacts").addObject().put("name", "Source");
+        action.put("runOrder", 1);
+
+        ObjectNode declaration = mapper.createObjectNode();
+        declaration.put("name", "github-sourced");
+        declaration.put("roleArn", "arn:aws:iam::000000000000:role/cp");
+        declaration.putObject("artifactStore").put("type", "S3").put("location", "bucket");
+        declaration.putArray("stages").add(source).add(lambdaStage("Deploy"));
+        gitHubService.handle("CreatePipeline",
+                mapper.createObjectNode().set("pipeline", declaration), REGION, ACCOUNT);
+
+        String executionId = gitHubService.handle("StartPipelineExecution",
+                mapper.createObjectNode().put("name", "github-sourced"), REGION, ACCOUNT)
+                .path("pipelineExecutionId").asText();
+        CodePipelineExecution execution = awaitStatus(executionId, "Succeeded");
+
+        assertEquals(List.of("https://codeload.github.com/awslabs/landing-zone-accelerator-on-aws"
+                + "/zip/refs/heads/release/v1.16.0"), fetched);
+        assertEquals("release/v1.16.0", execution.getActionExecutions().get(0).getExternalExecutionId());
+        assertTrue(execution.getArtifactRevisions().stream().anyMatch(r ->
+                "github.com/awslabs/landing-zone-accelerator-on-aws@release/v1.16.0"
+                        .equals(r.get("revisionSummary"))));
+    }
+
+    @Test
     void listRuleTypesReturnsTheAwsRuleCatalog() {
         JsonNode result = service.handle("ListRuleTypes", mapper.createObjectNode(), REGION, ACCOUNT);
         List<String> providers = result.path("ruleTypes").findValuesAsText("provider");

@@ -28,6 +28,7 @@ The following providers execute against local Floci services:
 | Category | Provider | Behavior |
 |---|---|---|
 | Source | S3 | Reads the configured object and publishes the output artifact |
+| Source | GitHub (ThirdParty, v1) | Downloads the configured branch archive from github.com and publishes it with the repo contents at the artifact root |
 | Build/Test | CodeBuild | Starts and monitors the configured local CodeBuild project |
 | Deploy | S3 | Writes the input artifact to the configured bucket and key |
 | Deploy | CodeDeploy | Starts and monitors a local CodeDeploy deployment |

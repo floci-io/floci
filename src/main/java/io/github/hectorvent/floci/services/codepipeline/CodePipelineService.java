@@ -1242,6 +1242,10 @@ public class CodePipelineService {
             waitForApproval(execution, action, state);
             return;
         }
+        if ("Source".equals(category) && "GitHub".equals(provider)) {
+            executeGitHubSource(execution, action, state);
+            return;
+        }
         if (!"AWS".equals(owner)) {
             waitForCustomJob(pipeline, execution, action, state);
             return;
@@ -1286,6 +1290,94 @@ public class CodePipelineService {
         }
         s3Service.putObject(bucket, objectKey, data, "application/zip", Map.of());
         state.setExternalExecutionId("s3://" + bucket + "/" + objectKey);
+    }
+
+    /**
+     * The ThirdParty GitHub (version 1) source action: fetches the branch archive from
+     * github.com and publishes it as the output artifact with the repo contents at the
+     * artifact root, the layout the real action produces.
+     */
+    private void executeGitHubSource(CodePipelineExecution execution, JsonNode action,
+                                     ActionExecution state) {
+        JsonNode config = action.path("configuration");
+        String repoOwner = config.path("Owner").asText(null);
+        String repo = config.path("Repo").asText(null);
+        String branch = config.path("Branch").asText("main");
+        if (repoOwner == null || repo == null) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "GitHub source actions require Owner and Repo", 400);
+        }
+        byte[] archive = fetchGitHubArchive(java.net.URI.create(
+                "https://codeload.github.com/" + repoOwner + "/" + repo
+                        + "/zip/refs/heads/" + branch));
+        byte[] artifact = stripTopLevelDirectory(archive);
+        for (JsonNode output : action.path("outputArtifacts")) {
+            runtimeArtifacts.put(artifactKey(execution, output.path("name").asText()), artifact);
+        }
+        Map<String, Object> revision = new LinkedHashMap<>();
+        revision.put("name", state.getActionName());
+        revision.put("revisionId", branch);
+        revision.put("revisionChangeIdentifier", branch);
+        revision.put("revisionSummary", "github.com/" + repoOwner + "/" + repo + "@" + branch);
+        revision.put("revisionUrl", "https://github.com/" + repoOwner + "/" + repo + "/tree/" + branch);
+        revision.put("created", now());
+        execution.getArtifactRevisions().add(revision);
+        state.setExternalExecutionId(branch);
+        state.setExternalExecutionUrl("https://github.com/" + repoOwner + "/" + repo);
+    }
+
+    /** Overridable seam for tests; production goes to github.com with the JVM's proxy settings. */
+    byte[] fetchGitHubArchive(java.net.URI uri) {
+        try {
+            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                    .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                    .build();
+            java.net.http.HttpResponse<byte[]> response = client.send(
+                    java.net.http.HttpRequest.newBuilder(uri).GET().build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() != 200) {
+                throw new AwsException("ActionExecutionFailed",
+                        "GitHub source download returned HTTP " + response.statusCode()
+                                + " for " + uri, 400);
+            }
+            return response.body();
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ActionExecutionFailed",
+                    "GitHub source download failed: " + e.getMessage(), 400);
+        }
+    }
+
+    /**
+     * GitHub's codeload archives wrap the repo in a {@code <repo>-<branch>/} directory;
+     * the real source artifact has the repo contents at the root.
+     */
+    private static byte[] stripTopLevelDirectory(byte[] zip) {
+        try {
+            var baos = new java.io.ByteArrayOutputStream();
+            try (var zis = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(zip));
+                 var zos = new java.util.zip.ZipOutputStream(baos)) {
+                java.util.zip.ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    int slash = entry.getName().indexOf('/');
+                    if (slash < 0 || slash == entry.getName().length() - 1) {
+                        continue;
+                    }
+                    String stripped = entry.getName().substring(slash + 1);
+                    if (entry.isDirectory()) {
+                        continue;
+                    }
+                    zos.putNextEntry(new java.util.zip.ZipEntry(stripped));
+                    zis.transferTo(zos);
+                    zos.closeEntry();
+                }
+            }
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new AwsException("ActionExecutionFailed",
+                    "Could not repackage GitHub archive: " + e.getMessage(), 400);
+        }
     }
 
     private void executeCodeBuild(CodePipelineExecution execution, JsonNode action,
