@@ -157,6 +157,12 @@ All services that use `StorageFactory` participate in account isolation automati
 
 Background workers (Lambda event-source pollers, DynamoDB TTL sweeper, MSK readiness poller, OpenSearch readiness poller) iterate across all accounts internally and route writes back to the originating account. No cross-account data leaks through these async paths.
 
+**S3 exception — global bucket namespace.** S3 buckets are isolated per account by default like every
+other service, but real S3 bucket names are globally unique. Set
+`FLOCI_SERVICES_S3_GLOBAL_BUCKET_NAMESPACE=true` to make bucket/object resolution span every account's
+partition, so a bucket created in one account is visible cross-account — needed when a workload writes a
+bucket in one account and reads it from another (see [S3](../services/s3.md#global-bucket-namespace)).
+
 ## Signature Validation
 
 Floci does not currently perform general SigV4 validation for `Authorization` headers. Only the access key ID matters for account resolution, so the secret access key can be any non-empty string.
