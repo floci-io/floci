@@ -1634,6 +1634,31 @@ public class LambdaService implements ResourceProvider {
         return fn.getReservedConcurrentExecutions();
     }
 
+    /**
+     * Aggregates the caller's stored {@code $LATEST} functions in a region: code-size usage,
+     * function count, and the unreserved share of the configured concurrency limit.
+     */
+    public AccountSettings getAccountSettings(String region) {
+        List<LambdaFunction> functions = functionStore.list(region);
+        long totalCodeSize = 0;
+        long reserved = 0;
+        for (LambdaFunction fn : functions) {
+            totalCodeSize += fn.getCodeSizeBytes();
+            if (fn.getReservedConcurrentExecutions() != null) {
+                reserved += fn.getReservedConcurrentExecutions();
+            }
+        }
+        int concurrencyLimit = config != null
+                ? config.services().lambda().regionConcurrencyLimit()
+                : 1000;
+        long unreserved = Math.max(0, concurrencyLimit - reserved);
+        return new AccountSettings(totalCodeSize, functions.size(), concurrencyLimit, unreserved);
+    }
+
+    public record AccountSettings(long totalCodeSize, int functionCount,
+                                  int concurrentExecutions, long unreservedConcurrentExecutions) {
+    }
+
     public void deleteFunctionConcurrency(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName);
         String arn = fn.getFunctionArn();

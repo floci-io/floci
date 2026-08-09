@@ -43,6 +43,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `PutFunctionConcurrency` | Set reserved concurrent executions |
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
+| `GetAccountSettings` | Account limits plus usage derived from the caller's stored functions |
 
 ## Hot-Reloading via Reactive S3 Sync
 
@@ -183,7 +184,6 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 - Dead-letter, async invoke config, and event invoke config operations
 - `InvokeWithResponseStream`
 - Code signing management (only `GetFunctionCodeSigningConfig` is wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`)
-- Account and regional settings (`GetAccountSettings`)
 
 ## Configuration
 
