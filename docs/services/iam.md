@@ -269,6 +269,33 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
   aws s3 ls
 ```
 
+## Service-linked roles
+
+`CreateServiceLinkedRole` puts a role under `/aws-service-role/<principal>/` and marks it as
+service-linked. As on AWS, a role carrying that mark is protected: `AttachRolePolicy`,
+`DetachRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `PutRolePermissionsBoundary`,
+`DeleteRolePermissionsBoundary`, `UpdateRole`, `UpdateAssumeRolePolicy`, `AddRoleToInstanceProfile`,
+`RemoveRoleFromInstanceProfile` and `DeleteRole` all answer `UnmodifiableEntity` and name the
+linked service to go through instead. `TagRole` and `UntagRole` are allowed, as on AWS. Within the
+IAM API `DeleteServiceLinkedRole` is the only way to remove such a role — the emulator's own
+`/_floci/state/reset` still clears it along with everything else.
+
+Three deviations to be aware of:
+
+- **The role name is derived locally and will not match AWS for most services.** AWS lets each
+  linked service choose the name, and it is not computable from the service principal —
+  `lex.amazonaws.com` yields `AWSServiceRoleForLexBots` there, where Floci derives
+  `AWSServiceRoleForLex`. Read the name back from the create response rather than hardcoding
+  it, and do not rely on a name observed locally matching the one AWS mints.
+- **Deletion is synchronous.** `DeleteServiceLinkedRole` completes before it returns, so the
+  task id it hands back is already finished and `GetServiceLinkedRoleDeletionStatus` always
+  reports `SUCCEEDED`. The `IN_PROGRESS`, `NOT_STARTED` and `FAILED` states never occur, and no
+  failure `Reason` is ever returned — a poll loop works, but its failure branch is never taken.
+- **`CreateRole` accepts the `/aws-service-role/` path, which AWS reserves.** AWS rejects that
+  prefix on `CreateRole`; Floci allows it and treats the result as an ordinary role, since the
+  service-linked mark comes from the action that minted the role rather than from its path. Such
+  a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
+
 ## Configuration
 
 | Variable | Default | Description |

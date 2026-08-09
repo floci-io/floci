@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.startsWith;
@@ -385,5 +386,204 @@ class IamServiceLinkedRoleIntegrationTest {
         .then()
             .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+    }
+
+    private static void createServiceLinkedRole(String principal) {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", principal)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(18)
+    void attachingAManagedPolicyToAServiceLinkedRoleIsRejected() {
+        createServiceLinkedRole("attachprobe.amazonaws.com");
+
+        given()
+            .formParam("Action", "AttachRolePolicy")
+            .formParam("RoleName", "AWSServiceRoleForAttachprobe")
+            .formParam("PolicyArn", "arn:aws:iam::aws:policy/ReadOnlyAccess")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("UnmodifiableEntity"));
+    }
+
+    @Test
+    @Order(19)
+    void embeddingAnInlinePolicyInAServiceLinkedRoleIsRejected() {
+        createServiceLinkedRole("putprobe.amazonaws.com");
+
+        given()
+            .formParam("Action", "PutRolePolicy")
+            .formParam("RoleName", "AWSServiceRoleForPutprobe")
+            .formParam("PolicyName", "inline")
+            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("UnmodifiableEntity"));
+    }
+
+    @Test
+    @Order(20)
+    void deleteRoleOnAServiceLinkedRoleIsRejectedAndLeavesTheRoleInPlace() {
+        createServiceLinkedRole("delroleprobe.amazonaws.com");
+
+        given()
+            .formParam("Action", "DeleteRole")
+            .formParam("RoleName", "AWSServiceRoleForDelroleprobe")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("UnmodifiableEntity"));
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "AWSServiceRoleForDelroleprobe")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(21)
+    void deleteServiceLinkedRoleStillRemovesARoleThatDeleteRoleRefuses() {
+        createServiceLinkedRole("slrdelete.amazonaws.com");
+
+        given()
+            .formParam("Action", "DeleteServiceLinkedRole")
+            .formParam("RoleName", "AWSServiceRoleForSlrdelete")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "AWSServiceRoleForSlrdelete")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+    }
+
+    private static void refusedAsUnmodifiable(String action, String... formParams) {
+        var request = given().header("Authorization", AUTH_HEADER).formParam("Action", action);
+        for (int i = 0; i < formParams.length; i += 2) {
+            request = request.formParam(formParams[i], formParams[i + 1]);
+        }
+        request
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("UnmodifiableEntity"));
+    }
+
+    /** The mark has to hold across every action AWS protects, not just the delete path. */
+    @Test
+    @Order(24)
+    void theOtherRoleActionsAwsProtectsAreAlsoRefused() {
+        createServiceLinkedRole("protectprobe.amazonaws.com");
+        String roleName = "AWSServiceRoleForProtectprobe";
+        String readOnly = "arn:aws:iam::aws:policy/ReadOnlyAccess";
+
+        refusedAsUnmodifiable("UpdateRole", "RoleName", roleName, "Description", "hijacked");
+        refusedAsUnmodifiable("UpdateAssumeRolePolicy", "RoleName", roleName,
+                "PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[]}");
+        refusedAsUnmodifiable("DetachRolePolicy", "RoleName", roleName, "PolicyArn", readOnly);
+        refusedAsUnmodifiable("DeleteRolePolicy", "RoleName", roleName, "PolicyName", "inline");
+        refusedAsUnmodifiable("PutRolePermissionsBoundary", "RoleName", roleName,
+                "PermissionsBoundary", readOnly);
+        refusedAsUnmodifiable("DeleteRolePermissionsBoundary", "RoleName", roleName);
+
+        given()
+            .formParam("Action", "CreateInstanceProfile")
+            .formParam("InstanceProfileName", "protectprobe-profile")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        refusedAsUnmodifiable("AddRoleToInstanceProfile",
+                "InstanceProfileName", "protectprobe-profile", "RoleName", roleName);
+        refusedAsUnmodifiable("RemoveRoleFromInstanceProfile",
+                "InstanceProfileName", "protectprobe-profile", "RoleName", roleName);
+
+        // The trust policy is the one an attacker would rewrite, so pin that it survived intact.
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", roleName)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.AssumeRolePolicyDocument",
+                    containsString("protectprobe.amazonaws.com"));
+    }
+
+    /** AWS leaves tagging open on a service-linked role; the guard must not overreach. */
+    @Test
+    @Order(25)
+    void taggingAServiceLinkedRoleIsStillAllowed() {
+        createServiceLinkedRole("tagprobe.amazonaws.com");
+
+        given()
+            .formParam("Action", "TagRole")
+            .formParam("RoleName", "AWSServiceRoleForTagprobe")
+            .formParam("Tags.member.1.Key", "team")
+            .formParam("Tags.member.1.Value", "platform")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(22)
+    void aCustomSuffixOutsideTheAllowedCharactersIsRejected() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "suffixprobe.amazonaws.com")
+            .formParam("CustomSuffix", "a/b")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+    }
+
+    @Test
+    @Order(23)
+    void aPrincipalDerivingARoleNamePastTheLengthLimitIsRejected() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "a".repeat(114) + ".amazonaws.com")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
     }
 }

@@ -60,6 +60,9 @@ public class IamService implements SessionAccountLookup {
     private static final String AMAZONAWS_DOMAIN = ".amazonaws.com";
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
+    /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
+    private static final Pattern CUSTOM_SUFFIX_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
+    private static final int ROLE_NAME_MAX_LENGTH = 64;
 
     private final StorageBackend<String, IamUser> users;
     private final StorageBackend<String, IamGroup> groups;
@@ -409,8 +412,31 @@ public class IamService implements SessionAccountLookup {
         return roles.get(roleName);
     }
 
+    /**
+     * AWS publishes UnmodifiableEntity on twelve role actions, and its message names the linked
+     * service the caller has to go through instead. This guards the eleven of them the emulator
+     * implements; UpdateRoleDescription is the twelfth and has no handler here. TagRole and
+     * UntagRole are deliberately not guarded — AWS does not publish the error on either, and
+     * TagRole's reference says the role "can be a regular role or a service-linked role".
+     * Within the IAM API, {@link #deleteServiceLinkedRole} is the only way to remove such a role.
+     */
+    private static void requireNotServiceLinked(IamRole role, String roleName) {
+        if (role.isServiceLinkedRole()) {
+            throw new AwsException("UnmodifiableEntity",
+                    "Role " + roleName + " is a service-linked role for " + linkedServicePrincipal(role)
+                            + "; request the change through that service.", 400);
+        }
+    }
+
+    /** The linked service, recovered from the {@code /aws-service-role/<principal>/} path. */
+    private static String linkedServicePrincipal(IamRole role) {
+        String path = role.getPath();
+        return path.substring(SERVICE_LINKED_ROLE_PATH.length(), path.length() - 1);
+    }
+
     public void deleteRole(String roleName) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
             throw new AwsException("DeleteConflict",
                     "Cannot delete entity, must detach all policies first.", 409);
@@ -435,8 +461,21 @@ public class IamService implements SessionAccountLookup {
             throw new AwsException("InvalidInput",
                     "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400);
         }
+        if (customSuffix != null && !customSuffix.isEmpty()
+                && !CUSTOM_SUFFIX_PATTERN.matcher(customSuffix).matches()) {
+            throw new AwsException("InvalidInput",
+                    "CustomSuffix must be 1-64 characters matching [\\w+=,.@-].", 400);
+        }
         String roleName = SERVICE_LINKED_ROLE_NAME_PREFIX + derivedServiceName(awsServiceName)
                 + (customSuffix == null || customSuffix.isEmpty() ? "" : "_" + customSuffix);
+        // AWSServiceName allows 128 characters, but AWS caps RoleName at 64 — on every action that
+        // takes one, and on the Role this action returns — so a longer principal would derive a
+        // name AWS could not represent.
+        if (roleName.length() > ROLE_NAME_MAX_LENGTH) {
+            throw new AwsException("InvalidInput",
+                    "The derived role name " + roleName + " exceeds the "
+                            + ROLE_NAME_MAX_LENGTH + "-character role name limit.", 400);
+        }
         // createRole would answer EntityAlreadyExists, which this action does not document; the
         // duplicate-suffix case is an InvalidInput as far as its published error list is concerned.
         if (roles.get(roleName).isPresent()) {
@@ -468,10 +507,12 @@ public class IamService implements SessionAccountLookup {
             throw new AwsException("NoSuchEntity",
                     "There is no service-linked role with name " + roleName + ".", 404);
         }
-        String path = role.getPath();
-        deleteRole(roleName);
+        String servicePrincipal = linkedServicePrincipal(role);
+        // Not deleteRole: that action refuses a service-linked role outright, and its
+        // detach-first conflict is not in this action's published error list either.
+        roles.delete(roleName);
+        LOG.infov("Deleted service-linked IAM role: {0}", roleName);
 
-        String servicePrincipal = path.substring(SERVICE_LINKED_ROLE_PATH.length(), path.length() - 1);
         String deletionTaskId = "task" + SERVICE_LINKED_ROLE_PATH + servicePrincipal + "/"
                 + roleName + "/" + UUID.randomUUID();
         serviceLinkedRoleDeletions.put(deletionTaskId, roleName);
@@ -518,6 +559,7 @@ public class IamService implements SessionAccountLookup {
 
     public void updateRole(String roleName, String description, int maxSessionDuration) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         if (description != null) role.setDescription(description);
         if (maxSessionDuration > 0) role.setMaxSessionDuration(maxSessionDuration);
         roles.put(roleName, role);
@@ -525,6 +567,7 @@ public class IamService implements SessionAccountLookup {
 
     public void updateAssumeRolePolicy(String roleName, String policyDocument) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         role.setAssumeRolePolicyDocument(policyDocument);
         roles.put(roleName, role);
     }
@@ -839,6 +882,7 @@ public class IamService implements SessionAccountLookup {
 
     public void attachRolePolicy(String roleName, String policyArn) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         IamPolicy policy = getPolicy(policyArn);
         if (!role.getAttachedPolicyArns().contains(policyArn)) {
             role.getAttachedPolicyArns().add(policyArn);
@@ -850,6 +894,7 @@ public class IamService implements SessionAccountLookup {
 
     public void detachRolePolicy(String roleName, String policyArn) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         if (!role.getAttachedPolicyArns().remove(policyArn)) {
             throw new AwsException("NoSuchEntity",
                     "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
@@ -940,6 +985,7 @@ public class IamService implements SessionAccountLookup {
 
     public void putRolePolicy(String roleName, String policyName, String policyDocument) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         role.getInlinePolicies().put(policyName, policyDocument);
         roles.put(roleName, role);
     }
@@ -956,6 +1002,7 @@ public class IamService implements SessionAccountLookup {
 
     public void deleteRolePolicy(String roleName, String policyName) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         if (role.getInlinePolicies().remove(policyName) == null) {
             throw new AwsException("NoSuchEntity",
                     "Policy " + policyName + " not found for role " + roleName + ".", 404);
@@ -1064,7 +1111,7 @@ public class IamService implements SessionAccountLookup {
 
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        getRole(roleName); // validates existence
+        requireNotServiceLinked(getRole(roleName), roleName);
         List<String> roleNames = profile.getRoleNames();
         synchronized (roleNames) {
             if (!roleNames.contains(roleName)) {
@@ -1080,6 +1127,8 @@ public class IamService implements SessionAccountLookup {
 
     public void removeRoleFromInstanceProfile(String instanceProfileName, String roleName) {
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
+        // Tolerates an already-deleted role, so guard only what is still there.
+        roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
         profile.getRoleNames().remove(roleName);
         instanceProfiles.put(instanceProfileName, profile);
     }
@@ -1369,8 +1418,9 @@ public class IamService implements SessionAccountLookup {
     }
 
     public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn) {
-        getPolicy(permissionsBoundaryArn); // validate policy exists
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
+        getPolicy(permissionsBoundaryArn); // validate policy exists
         role.setPermissionsBoundaryArn(permissionsBoundaryArn);
         roles.put(roleName, role);
         LOG.infov("Set permissions boundary for role {0}: {1}", roleName, permissionsBoundaryArn);
@@ -1378,6 +1428,7 @@ public class IamService implements SessionAccountLookup {
 
     public void deleteRolePermissionsBoundary(String roleName) {
         IamRole role = getRole(roleName);
+        requireNotServiceLinked(role, roleName);
         if (role.getPermissionsBoundaryArn() == null) {
             throw new AwsException("NoSuchEntity",
                     "Role " + roleName + " does not have a permissions boundary.", 404);
