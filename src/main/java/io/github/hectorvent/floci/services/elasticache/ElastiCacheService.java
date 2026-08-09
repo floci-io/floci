@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
@@ -18,18 +20,22 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 /**
  * Core ElastiCache business logic — replication groups and users.
  * Creates Valkey containers and auth proxies on group creation.
  */
 @ApplicationScoped
-public class ElastiCacheService {
+public class ElastiCacheService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheService.class);
 
@@ -38,16 +44,19 @@ public class ElastiCacheService {
     private final ElastiCacheContainerManager containerManager;
     private final ElastiCacheProxyManager proxyManager;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
     public ElastiCacheService(ElastiCacheContainerManager containerManager,
                               ElastiCacheProxyManager proxyManager,
                               StorageFactory storageFactory,
-                              EmulatorConfig config) {
+                              EmulatorConfig config,
+                              RegionResolver regionResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.groups = storageFactory.create("elasticache", "elasticache-groups.json",
                 new TypeReference<Map<String, ReplicationGroup>>() {});
         this.users = storageFactory.create("elasticache", "elasticache-users.json",
@@ -55,7 +64,7 @@ public class ElastiCacheService {
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
-                                                   AuthMode authMode, String authToken) {
+                                                   AuthMode authMode, String authToken, String region) {
         if (groups.get(groupId).isPresent()) {
             throw new AwsException("ReplicationGroupAlreadyExistsFault",
                     "Replication group " + groupId + " already exists.", 400);
@@ -80,6 +89,8 @@ public class ElastiCacheService {
             group.setContainerHost(handle.getHost());
             group.setContainerPort(handle.getPort());
             group.setAuthToken(authToken);
+            group.setArn(regionResolver.buildArn("elasticache", region, "replicationgroup:" + groupId));
+            group.setRegion(region);
 
             proxyManager.startProxy(groupId, authMode, proxyPort,
                     handle.getHost(), handle.getPort(),
@@ -271,5 +282,25 @@ public class ElastiCacheService {
 
     private void releaseProxyPort(int port) {
         usedPorts.remove(port);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (group.getArn() == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(group.getArn());
+            resources.add(new ExplorerResource(
+                    group.getArn(), "elasticache:cluster", "elasticache",
+                    parsed.region(), parsed.accountId(),
+                    group.getCreatedAt() != null ? group.getCreatedAt() : Instant.now(),
+                    Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("elasticache:cluster", "elasticache", true));
     }
 }

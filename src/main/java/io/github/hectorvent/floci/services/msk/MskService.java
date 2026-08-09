@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -17,14 +20,17 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
-public class MskService {
+public class MskService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(MskService.class);
     private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
@@ -143,5 +149,26 @@ public class MskService {
         } else {
             storage.put(cluster.getClusterArn(), cluster);
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (MskCluster cluster : storage.scan(k -> true)) {
+            String arn = cluster.getClusterArn();
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "kafka:cluster", "kafka",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreationTime() != null ? cluster.getCreationTime() : Instant.now(),
+                    cluster.getTags() != null ? cluster.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("kafka:cluster", "kafka", true));
     }
 }
