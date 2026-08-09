@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
+import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,6 +58,7 @@ class CodePipelineServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private AccountAwareStorageBackend<CodePipelineExecution> executionStore;
+    private CodeBuildService codeBuildService;
     private LambdaService lambdaService;
     private S3Service s3Service;
     private EventBridgeService eventBridgeService;
@@ -65,6 +68,7 @@ class CodePipelineServiceTest {
     @BeforeEach
     void setUp() {
         executionStore = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
+        codeBuildService = mock(CodeBuildService.class);
         lambdaService = mock(LambdaService.class);
         s3Service = mock(S3Service.class);
         eventBridgeService = mock(EventBridgeService.class);
@@ -82,7 +86,7 @@ class CodePipelineServiceTest {
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
                 executionStore,
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
-                mapper, mock(CodeBuildService.class), mock(CodeDeployService.class),
+                mapper, codeBuildService, mock(CodeDeployService.class),
                 lambdaService, s3Service,
                 new CodePipelineEventPublisher(eventBridgeService, snsService, mapper));
     }
@@ -186,6 +190,41 @@ class CodePipelineServiceTest {
         CodePipelineExecution execution = awaitTerminal(startExecution("basic"));
         assertEquals("Succeeded", execution.getStatus());
         assertEquals(2, execution.getActionExecutions().size());
+    }
+
+    @Test
+    void codeBuildActionUploadsInputArtifactAndPassesSourceOverride() {
+        Build build = new Build();
+        build.setId("proj:1");
+        build.setBuildComplete(true);
+        build.setBuildStatus("SUCCEEDED");
+        when(codeBuildService.startBuild(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any())).thenReturn(build);
+
+        ObjectNode buildStage = mapper.createObjectNode();
+        buildStage.put("name", "Build");
+        ObjectNode action = buildStage.putArray("actions").addObject();
+        action.put("name", "BuildApp");
+        action.putObject("actionTypeId")
+                .put("category", "Build").put("owner", "AWS").put("provider", "CodeBuild").put("version", "1");
+        action.putObject("configuration").put("ProjectName", "proj");
+        action.putArray("inputArtifacts").addObject().put("name", "SourceOut");
+        action.put("runOrder", 1);
+        createPipeline("building", sourceStage(), buildStage);
+
+        String executionId = startExecution("building");
+        awaitStatus(executionId, "Succeeded");
+
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<byte[]> dataCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bucket"), keyCaptor.capture(), dataCaptor.capture(),
+                eq("application/zip"), eq(Map.of()));
+        assertEquals("codepipeline/" + executionId + "/SourceOut.zip", keyCaptor.getValue());
+        assertArrayEquals("artifact".getBytes(), dataCaptor.getValue());
+        verify(codeBuildService).startBuild(eq(REGION), eq(ACCOUNT), eq("proj"),
+                isNull(), isNull(), isNull(), isNull(), eq("S3"),
+                eq("bucket/codepipeline/" + executionId + "/SourceOut.zip"),
+                isNull(), isNull(), isNull());
     }
 
     @Test

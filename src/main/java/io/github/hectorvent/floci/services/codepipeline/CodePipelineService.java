@@ -1252,7 +1252,7 @@ public class CodePipelineService {
         }
         switch (provider) {
             case "S3" -> executeS3(execution, action, state);
-            case "CodeBuild" -> executeCodeBuild(execution, action, state);
+            case "CodeBuild" -> executeCodeBuild(pipeline, execution, action, state);
             case "CodeDeploy" -> executeCodeDeploy(execution, action, state);
             case "Lambda" -> executeLambda(execution, action, state);
             case "CodePipeline" -> executeNestedPipeline(execution, action, state);
@@ -1380,11 +1380,30 @@ public class CodePipelineService {
         }
     }
 
-    private void executeCodeBuild(CodePipelineExecution execution, JsonNode action,
-                                  ActionExecution state) throws InterruptedException {
+    private void executeCodeBuild(CodePipelinePipeline pipeline, CodePipelineExecution execution,
+                                  JsonNode action, ActionExecution state) throws InterruptedException {
         String projectName = action.path("configuration").path("ProjectName").asText(null);
+        String sourceTypeOverride = null;
+        String sourceLocationOverride = null;
+        String inputName = action.path("inputArtifacts").path(0).path("name").asText(null);
+        byte[] data = inputName != null ? runtimeArtifacts.get(artifactKey(execution, inputName)) : null;
+        if (data != null) {
+            String bucket = pipeline.getDeclaration().path("artifactStore").path("location").asText(null);
+            if (bucket == null || bucket.isBlank()) {
+                bucket = "codepipeline-artifacts";
+            }
+            String key = "codepipeline/" + execution.getPipelineExecutionId() + "/" + inputName + ".zip";
+            try {
+                s3Service.createBucket(bucket, execution.getRegion());
+            } catch (AwsException e) {
+                LOG.debugf("Artifact bucket %s already exists: %s", bucket, e.getMessage());
+            }
+            s3Service.putObject(bucket, key, data, "application/zip", Map.of());
+            sourceTypeOverride = "S3";
+            sourceLocationOverride = bucket + "/" + key;
+        }
         Build build = codeBuildService.startBuild(execution.getRegion(), execution.getAccountId(), projectName,
-                null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, sourceTypeOverride, sourceLocationOverride, null, null, null, null);
         state.setExternalExecutionId(build.getId());
         while (!Boolean.TRUE.equals(build.getBuildComplete())) {
             if (execution.isStopRequested()) {
