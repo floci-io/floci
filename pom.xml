@@ -187,6 +187,12 @@
             <artifactId>dec</artifactId>
             <version>0.1.2</version>
         </dependency>
+        <!-- Archive handling that preserves unix file modes (CodeBuild/CodePipeline artifacts,
+             docker tar streams) -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-compress</artifactId>
+        </dependency>
 
         <!-- BouncyCastle for X.509 certificate generation and PEM handling (ACM service) -->
         <dependency>

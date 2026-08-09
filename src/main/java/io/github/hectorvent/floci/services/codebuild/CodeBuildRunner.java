@@ -32,6 +32,9 @@ import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
@@ -42,18 +45,20 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 @ApplicationScoped
@@ -799,10 +804,12 @@ public class CodeBuildRunner implements ContainerTeardown {
         return bos.toByteArray();
     }
 
-    private void extractZip(byte[] data, Path dest) throws IOException {
-        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(data))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
+    void extractZip(byte[] data, Path dest) throws IOException {
+        try (ZipFile zipFile = ZipFile.builder()
+                .setSeekableByteChannel(new SeekableInMemoryByteChannel(data)).get()) {
+            var entries = zipFile.getEntriesInPhysicalOrder();
+            while (entries.hasMoreElements()) {
+                ZipArchiveEntry entry = entries.nextElement();
                 Path target = dest.resolve(entry.getName()).normalize();
                 if (!target.startsWith(dest)) {
                     continue; // zip slip protection
@@ -811,11 +818,31 @@ public class CodeBuildRunner implements ContainerTeardown {
                     Files.createDirectories(target);
                 } else {
                     Files.createDirectories(target.getParent());
-                    Files.write(target, zis.readAllBytes());
+                    try (InputStream in = zipFile.getInputStream(entry)) {
+                        Files.write(target, in.readAllBytes());
+                    }
+                    if (entry.getUnixMode() != 0) {
+                        try {
+                            Files.setPosixFilePermissions(target, posixPermissions(entry.getUnixMode()));
+                        } catch (UnsupportedOperationException e) {
+                            LOG.debugv("Filesystem does not support POSIX permissions for {0}: {1}",
+                                    target, e.getMessage());
+                        }
+                    }
                 }
-                zis.closeEntry();
             }
         }
+    }
+
+    private static Set<PosixFilePermission> posixPermissions(int mode) {
+        PosixFilePermission[] bits = PosixFilePermission.values();
+        Set<PosixFilePermission> permissions = EnumSet.noneOf(PosixFilePermission.class);
+        for (int i = 0; i < bits.length; i++) {
+            if ((mode & (0400 >> i)) != 0) {
+                permissions.add(bits[i]);
+            }
+        }
+        return permissions;
     }
 
     private void beginPhase(Build build, String phaseType) {
