@@ -47,6 +47,31 @@ as `Approved` or `Rejected`, limits `result.summary` to 512 characters, returns
 `InvalidApprovalTokenException` for unknown tokens, and returns
 `ApprovalAlreadyCompletedException` if the same approval token is reused after completion.
 
+## V2 stage conditions, retry, and rollback
+
+V2 stage condition blocks (`beforeEntry`, `onSuccess`, `onFailure`) are evaluated during
+execution. Two rule providers evaluate for real: **LambdaInvoke** (invokes the configured
+local Lambda function; the rule passes when the invocation succeeds) and **VariableCheck**
+(compares a `#{variables.name}` reference with `EQ`, `NE`, `CONTAINS`, or `MATCHES`).
+`Commands` and `DeployWindow` rules are accepted but pass permissively. Every rule run is
+recorded and returned by `ListRuleExecutions`; `ListRuleTypes` returns the AWS rule catalog.
+
+A failed `beforeEntry`/`onSuccess` condition applies its declared `result` — `FAIL` stops
+the execution, `SKIP` (entry only) skips the stage. `OverrideStageCondition` marks the
+condition overridden and, when the execution failed on exactly that condition, resumes it
+from the overridden stage.
+
+`RetryStageExecution` retries the failed stage **in place** on the same execution ID:
+`FAILED_ACTIONS` re-runs only the stage's non-succeeded actions, `ALL_ACTIONS` re-runs the
+whole stage, then the pipeline continues to the remaining stages.
+
+`RollbackStage` starts a new execution with `executionType: ROLLBACK` and
+`rollbackMetadata.rollbackTargetPipelineExecutionId` pointing at the target execution. The
+emulator has no per-execution artifact archive, so source-only stages re-run first to seed
+input artifacts, then only the rolled-back stage executes — intermediate build/deploy
+stages are skipped. A stage declaring `onFailure: {result: ROLLBACK}` rolls back
+automatically to the most recent successful execution when it fails.
+
 ## Configuration
 
 | Variable | Default | Description |
