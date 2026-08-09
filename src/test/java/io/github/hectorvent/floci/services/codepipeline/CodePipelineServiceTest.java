@@ -693,6 +693,96 @@ class CodePipelineServiceTest {
     }
 
     @Test
+    void gitHubSourceRepackagingPreservesSymlinks() throws Exception {
+        byte[] codeloadArchive;
+        try (var baos = new java.io.ByteArrayOutputStream()) {
+            try (var zos = new ZipArchiveOutputStream(baos)) {
+                zos.putArchiveEntry(new ZipArchiveEntry("repo-main/"));
+                zos.closeArchiveEntry();
+                ZipArchiveEntry realBin = new ZipArchiveEntry("repo-main/node_modules/ts-node/dist/bin.js");
+                realBin.setUnixMode(0755);
+                zos.putArchiveEntry(realBin);
+                zos.write("#!/usr/bin/env node\n".getBytes());
+                zos.closeArchiveEntry();
+                ZipArchiveEntry link = new ZipArchiveEntry("repo-main/node_modules/.bin/ts-node");
+                link.setUnixMode(0120777);
+                zos.putArchiveEntry(link);
+                zos.write("../ts-node/dist/bin.js".getBytes());
+                zos.closeArchiveEntry();
+            }
+            codeloadArchive = baos.toByteArray();
+        }
+        Build build = new Build();
+        build.setId("proj:1");
+        build.setBuildComplete(true);
+        build.setBuildStatus("SUCCEEDED");
+        when(codeBuildService.startBuild(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(build);
+        CodePipelineService gitHubService = new CodePipelineService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
+                executionStore,
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
+                mapper, codeBuildService, mock(CodeDeployService.class),
+                lambdaService, s3Service,
+                new CodePipelineEventPublisher(eventBridgeService, snsService, mapper)) {
+            @Override
+            byte[] fetchGitHubArchive(java.net.URI uri) {
+                return codeloadArchive;
+            }
+        };
+
+        ObjectNode source = mapper.createObjectNode();
+        source.put("name", "Fetch");
+        ObjectNode sourceAction = source.putArray("actions").addObject();
+        sourceAction.put("name", "GitHubSource");
+        sourceAction.putObject("actionTypeId")
+                .put("category", "Source").put("owner", "ThirdParty")
+                .put("provider", "GitHub").put("version", "1");
+        sourceAction.putObject("configuration")
+                .put("Owner", "awslabs").put("Repo", "landing-zone-accelerator-on-aws")
+                .put("Branch", "main");
+        sourceAction.putArray("outputArtifacts").addObject().put("name", "Source");
+        sourceAction.put("runOrder", 1);
+
+        ObjectNode buildStage = mapper.createObjectNode();
+        buildStage.put("name", "Build");
+        ObjectNode buildAction = buildStage.putArray("actions").addObject();
+        buildAction.put("name", "BuildApp");
+        buildAction.putObject("actionTypeId")
+                .put("category", "Build").put("owner", "AWS").put("provider", "CodeBuild").put("version", "1");
+        buildAction.putObject("configuration").put("ProjectName", "proj");
+        buildAction.putArray("inputArtifacts").addObject().put("name", "Source");
+        buildAction.put("runOrder", 1);
+
+        ObjectNode declaration = mapper.createObjectNode();
+        declaration.put("name", "github-symlinks");
+        declaration.put("roleArn", "arn:aws:iam::000000000000:role/cp");
+        declaration.putObject("artifactStore").put("type", "S3").put("location", "bucket");
+        declaration.putArray("stages").add(source).add(buildStage);
+        gitHubService.handle("CreatePipeline",
+                mapper.createObjectNode().set("pipeline", declaration), REGION, ACCOUNT);
+
+        String executionId = gitHubService.handle("StartPipelineExecution",
+                mapper.createObjectNode().put("name", "github-symlinks"), REGION, ACCOUNT)
+                .path("pipelineExecutionId").asText();
+        awaitStatus(executionId, "Succeeded");
+
+        ArgumentCaptor<byte[]> dataCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bucket"),
+                eq("codepipeline/" + executionId + "/Source.zip"), dataCaptor.capture(),
+                eq("application/zip"), eq(Map.of()));
+        try (var artifact = ZipFile.builder()
+                .setSeekableByteChannel(new SeekableInMemoryByteChannel(dataCaptor.getValue())).get()) {
+            ZipArchiveEntry link = artifact.getEntry("node_modules/.bin/ts-node");
+            assertEquals(0xA000, link.getUnixMode() & 0xF000, "Symlink S_IFLNK bits must survive repackaging");
+            try (var in = artifact.getInputStream(link)) {
+                assertEquals("../ts-node/dist/bin.js", new String(in.readAllBytes()));
+            }
+            assertEquals(0755, artifact.getEntry("node_modules/ts-node/dist/bin.js").getUnixMode());
+        }
+    }
+
+    @Test
     void listRuleTypesReturnsTheAwsRuleCatalog() {
         JsonNode result = service.handle("ListRuleTypes", mapper.createObjectNode(), REGION, ACCOUNT);
         List<String> providers = result.path("ruleTypes").findValuesAsText("provider");

@@ -1377,6 +1377,10 @@ public class CodePipelineService {
                     if (entry.isDirectory()) {
                         continue;
                     }
+                    // Symlink entries (unix mode S_IFLNK, content = link target) are not
+                    // directories, so they flow through this copy path: preserving the
+                    // unix mode and the content keeps them symlinks for CodeBuild, which
+                    // recreates them via extractZip. node_modules/.bin/* rely on this.
                     ZipArchiveEntry copy = new ZipArchiveEntry(stripped);
                     if (entry.getUnixMode() != 0) {
                         copy.setUnixMode(entry.getUnixMode());
