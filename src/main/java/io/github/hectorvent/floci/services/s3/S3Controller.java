@@ -333,6 +333,10 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "metrics")) {
                 return handlePutBucketMetricsConfiguration(bucket, uriInfo, body);
             }
+            if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.putBucketReplication(bucket, new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
 
             String locationConstraint = null;
             if (body != null && body.length > 0) {
@@ -543,6 +547,10 @@ public class S3Controller {
                         ? s3Service.getBucketMetricsConfiguration(bucket, id)
                         : s3Service.listBucketMetricsConfigurations(bucket);
                 return Response.ok(xml).type("application/xml").build();
+            }
+            if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetReplicationConfiguration", authorization);
+                return Response.ok(s3Service.getBucketReplication(bucket)).build();
             }
 
             // --- S3 static-website index resolution (site root) ---

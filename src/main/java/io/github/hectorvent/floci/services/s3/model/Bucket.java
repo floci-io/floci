@@ -25,6 +25,7 @@ public class Bucket {
     private String transitionDefaultMinimumObjectSize; // x-amz-transition-default-minimum-object-size header value
     private String acl; // XML representation or JSON stub
     private String encryptionConfiguration; // XML string
+    private String replicationConfiguration; // XML string
     private String publicAccessBlockConfiguration; // XML string
     private String ownershipControlsConfiguration; // XML string
     private String replicationConfiguration; // XML string; null until first PUT
@@ -98,6 +99,9 @@ public class Bucket {
 
     public String getEncryptionConfiguration() { return encryptionConfiguration; }
     public void setEncryptionConfiguration(String encryptionConfiguration) { this.encryptionConfiguration = encryptionConfiguration; }
+
+    public String getReplicationConfiguration() { return replicationConfiguration; }
+    public void setReplicationConfiguration(String replicationConfiguration) { this.replicationConfiguration = replicationConfiguration; }
 
     public String getPublicAccessBlockConfiguration() { return publicAccessBlockConfiguration; }
     public void setPublicAccessBlockConfiguration(String publicAccessBlockConfiguration) {

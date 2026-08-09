@@ -2429,6 +2429,44 @@ public class S3Service implements Resettable, ResourceProvider {
         bucketStore.put(bucketName, bucket);
     }
 
+    public String getBucketReplication(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        if (bucket.getReplicationConfiguration() == null) {
+            throw new AwsException("ReplicationConfigurationNotFoundError",
+                    "The replication configuration was not found", 404);
+        }
+        return bucket.getReplicationConfiguration();
+    }
+
+    /**
+     * Stores the bucket replication configuration for round-trip fidelity. The document is
+     * validated minimally (a {@code Role} and at least one {@code Rule} with a
+     * {@code Destination/Bucket}) and stored verbatim; Floci performs no actual replication.
+     */
+    public void putBucketReplication(String bucketName, String replicationXml) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        String role = XmlParser.extractFirst(replicationXml, "Role", null);
+        String destinationBucket = XmlParser.extractFirst(replicationXml, "Bucket", null);
+        if (role == null || role.isBlank()
+                || destinationBucket == null || destinationBucket.isBlank()
+                || XmlParser.extractGroupsMulti(replicationXml, "Rule").isEmpty()) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        bucket.setReplicationConfiguration(replicationXml);
+        bucketStore.put(bucketName, bucket);
+    }
+
+    public void deleteBucketReplication(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        bucket.setReplicationConfiguration(null);
+        bucketStore.put(bucketName, bucket);
+    }
+
     /**
      * Stores the bucket Request Payment configuration. AWS only allows the values
      * {@code BucketOwner} and {@code Requester}; we accept either and reject anything
