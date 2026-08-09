@@ -1617,7 +1617,13 @@ public class Ec2Service implements ContainerTeardown {
         if (keyPairId != null && !keyPairId.isEmpty()) {
             keyPairs.delete(key(region, keyPairId));
         } else {
-            keyPairs.scan(k -> true).removeIf(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
+            // scan() returns a detached copy, so the key pair has to be resolved to its
+            // store key and deleted through the backend — mutating the scan result does
+            // not touch the store.
+            keyPairs.scan(k -> true).stream()
+                    .filter(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName))
+                    .map(KeyPair::getKeyPairId)
+                    .forEach(id -> keyPairs.delete(key(region, id)));
         }
     }
 
