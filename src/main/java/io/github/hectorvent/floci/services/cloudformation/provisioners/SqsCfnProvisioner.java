@@ -80,9 +80,13 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
                 attrs.put("FifoThroughputLimit", ctx.engine().resolve(props.get("FifoThroughputLimit")));
             }
             if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
-                // A JSON object in the template (deadLetterTargetArn is usually an Fn::GetAtt);
+                // Usually a JSON object in the template (deadLetterTargetArn is an Fn::GetAtt);
                 // resolveNode resolves intrinsics in place and SqsService expects the JSON string.
-                attrs.put("RedrivePolicy", ctx.engine().resolveNode(props.path("RedrivePolicy")).toString());
+                // CDK commonly emits RedrivePolicy as an already-serialized string via Fn::Join,
+                // which resolveNode collapses to a TextNode — unwrap it instead of calling
+                // toString(), which would JSON-re-encode (quote/escape) the string a second time.
+                JsonNode redrivePolicy = ctx.engine().resolveNode(props.path("RedrivePolicy"));
+                attrs.put("RedrivePolicy", redrivePolicy.isTextual() ? redrivePolicy.asText() : redrivePolicy.toString());
             }
         }
         Queue queue = sqsService.createQueue(queueName, attrs, ctx.region());
