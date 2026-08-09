@@ -104,7 +104,7 @@ class CodeBuildServicePersistenceTest {
                 null, null, null, null, null, null, null);
 
         Build startResponse = service.startBuild(REGION, ACCOUNT, "p1", null,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null);
         assertEquals("IN_PROGRESS", startResponse.getBuildStatus());
         assertEquals(false, startResponse.getBuildComplete());
         assertEquals("SUBMITTED", startResponse.getCurrentPhase());

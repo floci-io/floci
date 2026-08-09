@@ -406,6 +406,8 @@ public class CodeBuildService {
                             ProjectEnvironment environmentOverride,
                             ProjectArtifacts artifactsOverride,
                             String sourceVersion,
+                            String sourceTypeOverride,
+                            String sourceLocationOverride,
                             Integer timeoutOverride,
                             String imageOverride,
                             String computeTypeOverride) {
@@ -432,7 +434,18 @@ public class CodeBuildService {
         build.setProjectName(projectName);
         build.setInitiator("user");
         build.setStartTime(Instant.now().toEpochMilli() / 1000.0);
-        build.setSource(project.getSource());
+        ProjectSource projectSource = project.getSource();
+        if (sourceTypeOverride != null || sourceLocationOverride != null) {
+            ProjectSource merged = new ProjectSource();
+            merged.setType(sourceTypeOverride != null ? sourceTypeOverride
+                    : (projectSource != null ? projectSource.getType() : null));
+            merged.setLocation(sourceLocationOverride != null ? sourceLocationOverride
+                    : (projectSource != null ? projectSource.getLocation() : null));
+            merged.setBuildspec(projectSource != null ? projectSource.getBuildspec() : null);
+            build.setSource(merged);
+        } else {
+            build.setSource(projectSource);
+        }
         build.setArtifacts(artifactsOverride != null ? artifactsOverride : project.getArtifacts());
         build.setTimeoutInMinutes(timeoutOverride != null ? timeoutOverride : project.getTimeoutInMinutes());
         build.setQueuedTimeoutInMinutes(project.getQueuedTimeoutInMinutes());
@@ -510,9 +523,12 @@ public class CodeBuildService {
     public Build retryBuild(String region, String account, String buildId) {
         Build original = getBuild(region, buildId);
         String buildspecOverride = buildspecOverridesFor(region).get(original.getId());
+        ProjectSource originalSource = original.getSource();
         return startBuild(region, account, original.getProjectName(),
                 buildspecOverride, original.getEnvironment(), original.getArtifacts(),
-                null, original.getTimeoutInMinutes(), null, null);
+                null, originalSource != null ? originalSource.getType() : null,
+                originalSource != null ? originalSource.getLocation() : null,
+                original.getTimeoutInMinutes(), null, null);
     }
 
     private Build copyBuild(Build source) {

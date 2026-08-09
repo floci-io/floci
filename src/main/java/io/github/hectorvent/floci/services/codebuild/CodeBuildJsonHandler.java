@@ -199,12 +199,15 @@ public class CodeBuildJsonHandler {
         ProjectArtifacts artifactsOverride = req.has("artifactsOverride")
                 ? mapper.treeToValue(req.get("artifactsOverride"), ProjectArtifacts.class) : null;
         String sourceVersion = req.has("sourceVersion") ? req.path("sourceVersion").asText(null) : null;
+        String sourceTypeOverride = req.has("sourceTypeOverride") ? req.path("sourceTypeOverride").asText(null) : null;
+        String sourceLocationOverride = req.has("sourceLocationOverride") ? req.path("sourceLocationOverride").asText(null) : null;
         Integer timeout = req.has("timeoutInMinutes") ? req.path("timeoutInMinutes").asInt() : null;
         String imageOverride = req.has("imageOverride") ? req.path("imageOverride").asText(null) : null;
         String computeTypeOverride = req.has("computeTypeOverride") ? req.path("computeTypeOverride").asText(null) : null;
 
         Build build = service.startBuild(region, account, projectName, buildspecOverride,
-                envOverride, artifactsOverride, sourceVersion, timeout, imageOverride, computeTypeOverride);
+                envOverride, artifactsOverride, sourceVersion, sourceTypeOverride,
+                sourceLocationOverride, timeout, imageOverride, computeTypeOverride);
         return Response.ok(Map.of("build", build)).build();
     }
 

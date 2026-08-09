@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuild
 import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codebuild.model.BuildPhase;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
+import io.github.hectorvent.floci.services.codebuild.model.ProjectSource;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -386,10 +387,11 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     private String resolveAndAcquireSource(String region, Build build, Project project,
                                            String buildspecOverride, Path workspace) throws IOException {
-        String sourceType = project.getSource() != null ? project.getSource().getType() : "NO_SOURCE";
+        ProjectSource effectiveSource = build.getSource() != null ? build.getSource() : project.getSource();
+        String sourceType = effectiveSource != null ? effectiveSource.getType() : "NO_SOURCE";
 
-        if ("S3".equals(sourceType) && project.getSource().getLocation() != null) {
-            String location = project.getSource().getLocation();
+        if ("S3".equals(sourceType) && effectiveSource.getLocation() != null) {
+            String location = effectiveSource.getLocation();
             int slash = location.indexOf('/');
             if (slash > 0) {
                 String bucket = location.substring(0, slash);
