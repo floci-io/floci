@@ -97,6 +97,8 @@ public class SesQueryHandler {
                         handleUpdateCustomVerificationEmailTemplate(params, region);
                 case "DeleteCustomVerificationEmailTemplate" ->
                         handleDeleteCustomVerificationEmailTemplate(params, region);
+                case "SendCustomVerificationEmail" ->
+                        handleSendCustomVerificationEmail(params, region);
                 case "CreateConfigurationSet" -> handleCreateConfigurationSet(params, region);
                 case "DescribeConfigurationSet" -> handleDescribeConfigurationSet(params, region);
                 case "ListConfigurationSets" -> handleListConfigurationSets(region);
@@ -609,6 +611,21 @@ public class SesQueryHandler {
         sesService.deleteCustomVerificationEmailTemplate(requireParam(params, "TemplateName"), region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "DeleteCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleSendCustomVerificationEmail(MultivaluedMap<String, String> params, String region) {
+        if (!sesService.isAccountSendingEnabled(region)) {
+            throw new AwsException("AccountSendingPausedException",
+                    "Account sending is disabled.", 400);
+        }
+        // getParam (not requireParam) so the service is the single validation authority and returns
+        // the AWS-faithful "Email address not specified." / "Invalid email address<...>." shapes.
+        String messageId = sesService.sendCustomVerificationEmail(
+                getParam(params, "EmailAddress"), getParam(params, "TemplateName"),
+                getParam(params, "ConfigurationSetName"), region);
+        String result = new XmlBuilder().elem("MessageId", messageId).build();
+        return Response.ok(AwsQueryResponse.envelope(
+                "SendCustomVerificationEmail", AwsNamespaces.SES, result)).build();
     }
 
     private CustomVerificationEmailTemplate readCvetParams(MultivaluedMap<String, String> params) {

@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class SesCustomVerificationEmailTemplateTest {
 
     private static final String FROM = "cvet-sdk-sender@floci-cvet.test";
+    private static final String RECIPIENT = "cvet-sdk-recipient@floci-cvet.test";
     private static final String NAME = "cvet-sdk-a";
 
     private static SesClient sesV1;
@@ -53,10 +54,12 @@ class SesCustomVerificationEmailTemplateTest {
                     // Best-effort cleanup: the template may already be gone.
                 }
             }
-            try {
-                sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(FROM).build());
-            } catch (Exception ignored) {
-                // Best-effort cleanup.
+            for (String id : new String[] {FROM, RECIPIENT}) {
+                try {
+                    sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(id).build());
+                } catch (Exception ignored) {
+                    // Best-effort cleanup.
+                }
             }
             sesV2.close();
         }
@@ -117,5 +120,21 @@ class SesCustomVerificationEmailTemplateTest {
 
         assertThat(sesV2.getCustomVerificationEmailTemplate(b -> b.templateName("cvet-sdk-shared"))
                 .templateSubject()).isEqualTo("Shared");
+    }
+
+    @Test
+    @Order(4)
+    void v2_sendCustomVerificationEmail() {
+        String messageId = sesV2.sendCustomVerificationEmail(b -> b
+                .emailAddress(RECIPIENT).templateName(NAME)).messageId();
+        assertThat(messageId).isNotBlank();
+
+        // The recipient is registered as a pending-verification identity by the send.
+        assertThat(sesV2.getEmailIdentity(b -> b.emailIdentity(RECIPIENT)).verifiedForSendingStatus())
+                .isFalse();
+
+        assertThatThrownBy(() -> sesV2.sendCustomVerificationEmail(b -> b
+                .emailAddress(RECIPIENT).templateName("nope-sdk")))
+                .isInstanceOf(NotFoundException.class);
     }
 }

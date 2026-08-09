@@ -398,7 +398,7 @@ public class AwsQueryController {
             "TestRenderTemplate",
             "CreateCustomVerificationEmailTemplate", "GetCustomVerificationEmailTemplate",
             "ListCustomVerificationEmailTemplates", "UpdateCustomVerificationEmailTemplate",
-            "DeleteCustomVerificationEmailTemplate",
+            "DeleteCustomVerificationEmailTemplate", "SendCustomVerificationEmail",
             "CreateConfigurationSet", "DescribeConfigurationSet",
             "ListConfigurationSets", "DeleteConfigurationSet",
             "CreateConfigurationSetEventDestination",

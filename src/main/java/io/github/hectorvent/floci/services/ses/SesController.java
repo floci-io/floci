@@ -702,6 +702,38 @@ public class SesController {
         }
     }
 
+    @POST
+    @Path("/outbound-custom-verification-emails")
+    public Response sendCustomVerificationEmail(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        String templateName = null;
+        try {
+            if (!sesService.isAccountSendingEnabled(region)) {
+                throw new AwsException("SendingPausedException",
+                        "Account sending is disabled.", 400);
+            }
+            JsonNode request = objectMapper.readTree(body);
+            requireJsonObject(request);
+            templateName = request.path("TemplateName").asText(null);
+            String messageId = sesService.sendCustomVerificationEmail(
+                    request.path("EmailAddress").asText(null), templateName,
+                    request.path("ConfigurationSetName").asText(null), region);
+            ObjectNode result = objectMapper.createObjectNode();
+            result.put("MessageId", messageId);
+            return Response.ok(result).build();
+        } catch (AwsException e) {
+            // AWS returns a longer not-found message on v2 than the v1 send message ("Template <name>
+            // does not exist"); the service throws the v1-native form, so restate it in the v2 wording.
+            if ("CustomVerificationEmailTemplateDoesNotExist".equals(e.getErrorCode())) {
+                throw new AwsException("NotFoundException",
+                        "Custom verification email template <" + templateName + "> does not exist", 404);
+            }
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
     private CustomVerificationEmailTemplate parseCvet(JsonNode request) {
         requireJsonObject(request);
         CustomVerificationEmailTemplate t = new CustomVerificationEmailTemplate();

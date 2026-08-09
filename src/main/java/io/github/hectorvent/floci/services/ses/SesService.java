@@ -1146,6 +1146,104 @@ public class SesService {
         LOG.infov("Deleted custom verification email template {0} in region {1}", templateName, region);
     }
 
+    // AWS appends this exact disclaimer to the end of every custom verification email and it cannot
+    // be removed (SES docs Q10).
+    private static final String CUSTOM_VERIFICATION_DISCLAIMER =
+            "If you did not request to verify this email address, please disregard this message.";
+
+    public String sendCustomVerificationEmail(String emailAddress, String templateName,
+                                              String configurationSetName, String region) {
+        // AWS validates the recipient before the template exists check (probe-confirmed): a blank
+        // address is "Email address not specified."; anything that isn't a single valid address —
+        // no local-part/domain separator, more than one separator, whitespace, or longer than 320
+        // chars — is "Invalid email address<addr>." (both InvalidParameterValue / 400, remapped to
+        // BadRequestException on v2). The separator count ignores '@' inside a quoted local part,
+        // since AWS accepts an RFC-5321 quoted local part that contains '@' (e.g. "a@b"@example.com).
+        if (emailAddress == null || emailAddress.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "Email address not specified.", 400);
+        }
+        // A leading/trailing '@' means an empty local part (@example.com) or empty domain (local@),
+        // both of which AWS rejects (probe-confirmed). AWS does not require a dot in the domain
+        // (a@b is accepted), so no stricter domain shape is enforced.
+        boolean emptyBoundary = emailAddress.charAt(0) == '@'
+                || emailAddress.charAt(emailAddress.length() - 1) == '@';
+        if (emailAddress.length() > 320 || unquotedAtCount(emailAddress) != 1 || emptyBoundary
+                || emailAddress.chars().anyMatch(Character::isWhitespace)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid email address<" + emailAddress + ">.", 400);
+        }
+        if (templateName == null || templateName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TemplateName is required.", 400);
+        }
+        CustomVerificationEmailTemplate template = cvetStore.get(cvetKey(region, templateName))
+                .orElseThrow(() -> new AwsException("CustomVerificationEmailTemplateDoesNotExist",
+                        "Template <" + templateName + "> does not exist", 400));
+        if (!isVerifiedSender(template.getFromEmailAddress(), region)) {
+            throw new AwsException("FromEmailAddressNotVerified",
+                    "Email address is not verified. The following identities failed the check in region "
+                            + region.toUpperCase(Locale.ROOT) + ": " + template.getFromEmailAddress(), 400);
+        }
+        if (configurationSetName != null && !configurationSetName.isBlank()) {
+            getConfigurationSet(configurationSetName, region);
+        }
+
+        // AWS registers the recipient as a pending-verification identity as part of sending the
+        // verification email, so ListIdentities / GetIdentityVerificationAttributes surface it.
+        markPendingEmailIdentity(emailAddress, region);
+
+        // AWS sends the template content verbatim and appends a fixed, non-removable disclaimer (SES
+        // docs Q10). AWS also appends a unique verification link, which Floci does not reproduce
+        // because it has no verification-click flow. The template body carries no placeholder that
+        // AWS substitutes, so the content itself is passed through unchanged.
+        String body = template.getTemplateContent() == null ? "" : template.getTemplateContent();
+        String renderedHtml = body + "<p>" + CUSTOM_VERIFICATION_DISCLAIMER + "</p>";
+
+        String messageId = UUID.randomUUID().toString();
+        SentEmail email = new SentEmail(messageId, region, template.getFromEmailAddress(),
+                List.of(emailAddress), List.of(), List.of(), List.of(),
+                template.getTemplateSubject(), null, renderedHtml);
+        emailStore.put("email::" + region + "::" + messageId, email);
+        smtpRelay.relay(template.getFromEmailAddress(), List.of(emailAddress), List.of(), List.of(),
+                List.of(), template.getTemplateSubject(), null, renderedHtml, List.of());
+        LOG.infov("SES custom verification email sent: to={0}, template={1}, messageId={2}",
+                emailAddress, templateName, messageId);
+        return messageId;
+    }
+
+    // Counts '@' characters outside a quoted local part. A valid address has exactly one — the
+    // local-part/domain separator; '@' inside a quoted local part (honoring backslash escapes) is
+    // part of the local part and doesn't count, so AWS-accepted forms like "a@b"@example.com pass
+    // while a@@b.com and "a"@@example.com are rejected.
+    private static int unquotedAtCount(String address) {
+        int count = 0;
+        boolean inQuotes = false;
+        boolean escaped = false;
+        for (int i = 0; i < address.length(); i++) {
+            char c = address.charAt(i);
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                inQuotes = !inQuotes;
+            } else if (c == '@' && !inQuotes) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void markPendingEmailIdentity(String emailAddress, String region) {
+        String key = identityKey(region, emailAddress);
+        if (identityStore.get(key).isEmpty()) {
+            Identity identity = new Identity(emailAddress, "EmailAddress");
+            identity.setVerificationStatus("Pending");
+            identityStore.put(key, identity);
+            LOG.infov("SES custom verification email registered pending identity {0} in region {1}",
+                    emailAddress, region);
+        }
+    }
+
     private void validateCustomVerificationTemplate(CustomVerificationEmailTemplate t, String region) {
         requireCvetField(t.getTemplateName(), "TemplateName");
         requireCvetField(t.getFromEmailAddress(), "FromEmailAddress");

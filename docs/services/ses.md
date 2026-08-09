@@ -30,6 +30,7 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `ListCustomVerificationEmailTemplates`  | List custom verification email templates (no content)     |
 | `UpdateCustomVerificationEmailTemplate` | Replace a custom verification email template              |
 | `DeleteCustomVerificationEmailTemplate` | Delete a custom verification email template               |
+| `SendCustomVerificationEmail`           | Send a custom verification email and register the recipient as a pending identity |
 | `GetSendQuota`                      | Return local send quota counters                          |
 | `GetSendStatistics`                 | Return aggregate delivery stats for sent messages         |
 | `GetAccountSendingEnabled`          | Report whether sending is enabled                         |
@@ -173,7 +174,7 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 - `SetIdentityNotificationTopic` publishes to the configured topic on a Bounce/Complaint/Delivery event (triggered via the mailbox simulator addresses or the suppression list), independent of any configuration set. The payload uses the legacy format (`notificationType`, no `mail.tags`, headers only when `SetIdentityHeadersInNotificationsEnabled` is on).
 - Identity (sending authorization) policies are stored and returned as metadata: the policy document, the per-identity limit of 20, and the create/update/delete error shapes match AWS, but Floci does not evaluate policy authorization (Principal-account existence, Resource-ARN match) or gate sending on it.
 - Receipt rule sets are stored inertly: Floci has no inbound-mail endpoint, so a rule set never holds any receipt rules and routes no mail. `CreateReceiptRuleSet` / `DescribeReceiptRuleSet` (Rules always empty) / `ListReceiptRuleSets` / `DeleteReceiptRuleSet` (idempotent) and `SetActiveReceiptRuleSet` / `DescribeActiveReceiptRuleSet` round-trip so tools like Terraform (`aws_ses_receipt_rule_set`, `aws_ses_active_receipt_rule_set`) can declare a rule set during bootstrap. Individual receipt rules and receipt filters are not implemented.
-- Custom verification email templates are stored and returned; `Create`/`Update` require the `FromEmailAddress` to be a verified identity (or a verified domain) and reject an invalid redirection URL, matching AWS. `SendCustomVerificationEmail` is not yet implemented.
+- Custom verification email templates are stored and returned; `Create`/`Update` require the `FromEmailAddress` to be a verified identity (or a verified domain) and reject an invalid redirection URL, matching AWS. `SendCustomVerificationEmail` renders the template into the `/_aws/ses` inspection mailbox (and the SMTP relay, when configured) and registers the recipient as a pending-verification identity, matching AWS. The template body has no placeholder that AWS substitutes, so it is passed through verbatim with the same fixed disclaimer AWS always appends; the unique verification link AWS appends is not reproduced because Floci has no verification-click flow. The `SuccessRedirectionURL` / `FailureRedirectionURL` are stored and returned by Get/List but are the post-click redirect targets, so they are not used at send time.
 - For the REST JSON API see [SES v2](#v2) below.
 
 ## SES v2 (REST JSON) {#v2}
@@ -215,6 +216,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/custom-verification-email-templates/{templateName}` | `GetCustomVerificationEmailTemplate` |
 | `PUT` | `/v2/email/custom-verification-email-templates/{templateName}` | `UpdateCustomVerificationEmailTemplate` |
 | `DELETE` | `/v2/email/custom-verification-email-templates/{templateName}` | `DeleteCustomVerificationEmailTemplate` |
+| `POST` | `/v2/email/outbound-custom-verification-emails` | `SendCustomVerificationEmail` |
 | `POST` | `/v2/email/configuration-sets` | `CreateConfigurationSet` |
 | `GET` | `/v2/email/configuration-sets` | `ListConfigurationSets` |
 | `GET` | `/v2/email/configuration-sets/{name}` | `GetConfigurationSet` |
