@@ -33,6 +33,7 @@ import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.compress.archivers.tar.TarConstants;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
@@ -74,6 +75,12 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     private static final String PHASE_START_SENTINEL = "___FLOCI_PHASE_START___";
     private static final String PHASE_END_SENTINEL = "___FLOCI_PHASE_END___";
+
+    // Unix file-type mask and S_IFLNK marker: a zip stores a symlink with these bits
+    // in its unix mode and the link target as the entry's content. LZA's installer
+    // zips with `zip -y`, so all of node_modules/.bin/* arrive as symlink entries.
+    private static final int S_IFMT = 0xF000;
+    private static final int S_IFLNK = 0xA000;
     private static final List<String> SHELL_PHASES = List.of("INSTALL", "PRE_BUILD", "BUILD", "POST_BUILD");
     static final String CONTAINER_CA_CERT_PATH = "/tmp/floci-ca.pem";
 
@@ -793,7 +800,20 @@ public class CodeBuildRunner implements ContainerTeardown {
                 Path target = destDir.resolve(name).normalize();
                 if (!target.startsWith(destDir)) continue; // path traversal
 
-                if (entry.isDirectory()) {
+                if (entry.isSymbolicLink()) {
+                    String linkTarget = entry.getLinkName();
+                    Path resolved = target.getParent().resolve(linkTarget).normalize();
+                    if (!resolved.startsWith(destDir)) continue; // symlink escape
+                    Files.createDirectories(target.getParent());
+                    Files.deleteIfExists(target);
+                    try {
+                        Files.createSymbolicLink(target, Path.of(linkTarget));
+                    } catch (UnsupportedOperationException e) {
+                        LOG.debugv("Filesystem does not support symlinks; writing target of {0} as a regular file: {1}",
+                                name, e.getMessage());
+                        Files.write(target, linkTarget.getBytes(StandardCharsets.UTF_8));
+                    }
+                } else if (entry.isDirectory()) {
                     Files.createDirectories(target);
                 } else {
                     Files.createDirectories(target.getParent());
@@ -811,7 +831,15 @@ public class CodeBuildRunner implements ContainerTeardown {
             for (Path path : (Iterable<Path>) stream::iterator) {
                 if (path.equals(dir)) continue;
                 String entryName = dir.relativize(path).toString();
-                if (Files.isDirectory(path)) {
+                if (Files.isSymbolicLink(path)) {
+                    // Check symlinks before directories: isDirectory follows links and
+                    // would dereference a link to a directory. Files.walk itself does not
+                    // follow links, so it never recurses through one.
+                    TarArchiveEntry entry = new TarArchiveEntry(entryName, TarConstants.LF_SYMLINK);
+                    entry.setLinkName(Files.readSymbolicLink(path).toString());
+                    tar.putArchiveEntry(entry);
+                    tar.closeArchiveEntry();
+                } else if (Files.isDirectory(path)) {
                     TarArchiveEntry entry = new TarArchiveEntry(entryName + "/");
                     tar.putArchiveEntry(entry);
                     tar.closeArchiveEntry();
@@ -1169,6 +1197,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                 }
                 if (entry.isDirectory()) {
                     Files.createDirectories(target);
+                } else if ((entry.getUnixMode() & S_IFMT) == S_IFLNK) {
+                    extractSymlink(zipFile, entry, target, dest);
                 } else {
                     Files.createDirectories(target.getParent());
                     try (InputStream in = zipFile.getInputStream(entry)) {
@@ -1184,6 +1214,35 @@ public class CodeBuildRunner implements ContainerTeardown {
                     }
                 }
             }
+        }
+    }
+
+    // Recreates a symlink zip entry as a real symlink. The entry content is the link
+    // target. Relative intra-tree targets (e.g. node_modules/.bin/ts-node ->
+    // ../ts-node/dist/bin.js) are the common, legitimate case and must be created;
+    // only targets that resolve outside the extraction root are skipped. On a
+    // filesystem without symlink support, fall back to the previous behaviour of
+    // writing the target string as a regular file.
+    private void extractSymlink(ZipFile zipFile, ZipArchiveEntry entry, Path target, Path dest)
+            throws IOException {
+        String linkTarget;
+        try (InputStream in = zipFile.getInputStream(entry)) {
+            linkTarget = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        Path resolved = target.getParent().resolve(linkTarget).normalize();
+        if (!resolved.startsWith(dest)) {
+            LOG.debugv("Skipping symlink {0} whose target {1} escapes the source root",
+                    entry.getName(), linkTarget);
+            return;
+        }
+        Files.createDirectories(target.getParent());
+        Files.deleteIfExists(target);
+        try {
+            Files.createSymbolicLink(target, Path.of(linkTarget));
+        } catch (UnsupportedOperationException e) {
+            LOG.debugv("Filesystem does not support symlinks; writing target of {0} as a regular file: {1}",
+                    entry.getName(), e.getMessage());
+            Files.write(target, linkTarget.getBytes(StandardCharsets.UTF_8));
         }
     }
 
