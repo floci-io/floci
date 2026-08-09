@@ -1312,6 +1312,9 @@ public interface EmulatorConfig {
     interface OrganizationsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean scpEnforcementEnabled();
     }
 
     interface AthenaServiceConfig {

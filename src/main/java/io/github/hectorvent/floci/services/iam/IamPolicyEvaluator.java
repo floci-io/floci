@@ -89,6 +89,13 @@ public class IamPolicyEvaluator {
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
 
+        // 0. Service control policies gate everything: the action must be allowed at EVERY
+        //    organization level and explicitly denied at none, before identity policies are
+        //    even consulted. An empty level means FullAWSAccess semantics and is skipped.
+        if (!scpAllows(caller.scpLevels(), action, resource, ctx)) {
+            return Decision.DENY;
+        }
+
         // 1. Explicit deny in ANY policy → DENY immediately
         if (anyExplicitDeny(identityStmts, action, resource, ctx)
                 || anyExplicitDeny(resourceStmts, action, resource, ctx)
@@ -161,6 +168,30 @@ public class IamPolicyEvaluator {
             return SimulationDecision.IMPLICIT_DENY;
         }
         return SimulationDecision.ALLOWED;
+    }
+
+    /**
+     * SCP evaluation: at every organization level the action must be explicitly allowed
+     * and not explicitly denied. {@code null} levels mean SCPs don't apply; an empty
+     * level (defensive — the last SCP on a target can't be detached) is FullAWSAccess
+     * semantics and passes.
+     */
+    private boolean scpAllows(List<List<String>> scpLevels, String action, String resource,
+                              Map<String, String> ctx) {
+        if (scpLevels == null) {
+            return true;
+        }
+        for (List<String> level : scpLevels) {
+            List<PolicyStatement> levelStmts = parseAll(level);
+            if (levelStmts.isEmpty()) {
+                continue;
+            }
+            if (anyExplicitDeny(levelStmts, action, resource, ctx)
+                    || !anyExplicitAllow(levelStmts, action, resource, ctx)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------------

@@ -7,9 +7,11 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -18,6 +20,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -61,6 +64,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final CloudTrailService cloudTrailService;
     private final CurrentVertxRequest currentVertxRequest;
     private final ResolvedServiceCatalog catalog;
+    private final Instance<ScpProvider> scpProvider;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -73,7 +77,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 IamConditionContextResolver conditionContextResolver,
                                 CloudTrailService cloudTrailService,
                                 CurrentVertxRequest currentVertxRequest,
-                                ResolvedServiceCatalog catalog) {
+                                ResolvedServiceCatalog catalog,
+                                Instance<ScpProvider> scpProvider) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -85,6 +90,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.cloudTrailService = cloudTrailService;
         this.currentVertxRequest = currentVertxRequest;
         this.catalog = catalog;
+        this.scpProvider = scpProvider;
     }
 
     @Override
@@ -130,6 +136,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ? accountResolver.resolve(auth)
                 : requestContext.getAccountId();
         String resource = arnBuilder.build(credentialScope, ctx, region, accountId);
+
+        // Service control policies from the caller's organization, when the Organizations
+        // service is present and SCP enforcement is enabled. Resolved lazily via Instance
+        // to avoid a hard IAM → Organizations dependency.
+        if (scpProvider.isResolvable()) {
+            List<List<String>> scpLevels = scpProvider.get().effectiveScpLevels(accountId);
+            if (scpLevels != null) {
+                caller = caller.withScpLevels(scpLevels);
+            }
+        }
 
         Map<String, String> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
         Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);

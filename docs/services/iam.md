@@ -312,11 +312,35 @@ environment:
 
 Policy evaluation follows the standard AWS precedence:
 
-1. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
-2. An explicit **Allow** in an identity policy creates the base grant
-3. If a session policy is present, it must also explicitly allow the request
-4. If a permission boundary is present, it must also explicitly allow the request
-5. No matching effective allow → implicit deny (HTTP 403)
+1. If [SCP enforcement](#service-control-policies-scps) is active, the action must be allowed at **every** organization level (root, OUs on the path, account) and explicitly denied at none — otherwise the request is denied before identity policies are consulted
+2. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
+3. An explicit **Allow** in an identity policy creates the base grant
+4. If a session policy is present, it must also explicitly allow the request
+5. If a permission boundary is present, it must also explicitly allow the request
+6. No matching effective allow → implicit deny (HTTP 403)
+
+### Service control policies (SCPs)
+
+When the caller's account belongs to an [Organizations](organizations.md) organization,
+SCPs attached to the root, the OUs on the account's path, and the account itself can
+participate in evaluation. Two flags must both be on:
+
+```yaml
+floci:
+  services:
+    iam:
+      enforcement-enabled: true
+    organizations:
+      scp-enforcement-enabled: true
+```
+
+(env: `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` and
+`FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED`)
+
+SCP semantics match AWS: SCPs never grant permissions — they cap what identity policies
+may allow; the organization's **management account is exempt**; and an account outside
+any organization is unaffected. The enforcement bypass rules below still apply, so the
+`test` credential and unknown access keys are never SCP-denied.
 
 ### Bypass rules
 

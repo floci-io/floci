@@ -155,6 +155,8 @@ arn:aws:s3:::my-bucket                         # S3 ARNs are account-agnostic
 
 All services that use `StorageFactory` participate in account isolation automatically. This covers every service in Floci — SQS, SNS, S3, DynamoDB, Lambda, SSM, Secrets Manager, KMS, Kinesis, EventBridge, Cognito, RDS, ElastiCache, OpenSearch, MSK, and more.
 
+[AWS Organizations](../services/organizations.md) sits on top of this model: the organization's state lives in the management account's namespace, member accounts created with `CreateAccount` are immediately usable as 12-digit access key IDs, and — with IAM enforcement plus `FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED` — service control policies attached in the organization constrain what member-account identities may do.
+
 Background workers (Lambda event-source pollers, DynamoDB TTL sweeper, MSK readiness poller, OpenSearch readiness poller) iterate across all accounts internally and route writes back to the originating account. No cross-account data leaks through these async paths.
 
 ## Signature Validation

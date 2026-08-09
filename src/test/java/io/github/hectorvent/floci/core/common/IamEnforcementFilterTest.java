@@ -73,12 +73,16 @@ class IamEnforcementFilterTest {
     }
 
     private IamEnforcementFilter newFilter() {
+        @SuppressWarnings("unchecked")
+        jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.services.iam.ScpProvider> scpProvider =
+                mock(jakarta.enterprise.inject.Instance.class);
+        when(scpProvider.isResolvable()).thenReturn(false);
         return new IamEnforcementFilter(
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
                 mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
-                catalog);
+                catalog, scpProvider);
     }
 
     @Test
