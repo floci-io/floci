@@ -638,6 +638,8 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+        ServiceQuotasServiceConfig servicequotas();
+        RamServiceConfig ram();
     }
 
     interface IotServiceConfig {
@@ -677,6 +679,12 @@ public interface EmulatorConfig {
     }
 
     interface EmrServerlessServiceConfig {
+    interface ServiceQuotasServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RamServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

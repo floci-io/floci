@@ -155,6 +155,13 @@ floci:
       enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
       seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
 
+    servicequotas:
+      enabled: true
+
+    ram:
+      enabled: true
+
+
     elasticache:
       enabled: true
       proxy-base-port: 6379

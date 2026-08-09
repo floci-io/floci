@@ -1,0 +1,182 @@
+package io.github.hectorvent.floci.services.servicequotas;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.zip.CRC32;
+
+/**
+ * Service Quotas emulation backed by a generated in-memory catalog.
+ *
+ * <p>Every service code resolves to a quota list: a curated set with real AWS
+ * quota codes where tooling depends on them (CodeBuild's {@code L-2DC20C30}
+ * "Concurrently running builds", Lambda's {@code L-B99A9384} "Concurrent
+ * executions"), plus a deterministic generic set for any other service code.
+ * All values are deliberately generous so local pipelines that gate on quota
+ * headroom (for example Landing Zone Accelerator) never stall on a limit the
+ * emulator does not enforce. Applied and default quotas return the same data.
+ *
+ * @see <a href="https://docs.aws.amazon.com/servicequotas/2019-06-24/apireference/Welcome.html">Service Quotas API</a>
+ */
+@ApplicationScoped
+public class ServiceQuotasService {
+
+    private static final double GENERIC_QUOTA_VALUE = 5000.0;
+
+    private static final Map<String, String> SERVICE_NAMES = Map.ofEntries(
+            Map.entry("codebuild", "AWS CodeBuild"),
+            Map.entry("codepipeline", "AWS CodePipeline"),
+            Map.entry("lambda", "AWS Lambda"),
+            Map.entry("cloudformation", "AWS CloudFormation"),
+            Map.entry("organizations", "AWS Organizations"),
+            Map.entry("iam", "AWS Identity and Access Management (IAM)"),
+            Map.entry("kms", "AWS Key Management Service (AWS KMS)"),
+            Map.entry("s3", "Amazon Simple Storage Service (Amazon S3)"),
+            Map.entry("sns", "Amazon Simple Notification Service (Amazon SNS)"),
+            Map.entry("sqs", "Amazon Simple Queue Service (Amazon SQS)"),
+            Map.entry("ec2", "Amazon Elastic Compute Cloud (Amazon EC2)"),
+            Map.entry("dynamodb", "Amazon DynamoDB"),
+            Map.entry("logs", "Amazon CloudWatch Logs"),
+            Map.entry("events", "Amazon EventBridge (CloudWatch Events)"));
+
+    private static final Map<String, List<QuotaDefinition>> CURATED_QUOTAS = Map.of(
+            "codebuild", List.of(
+                    new QuotaDefinition("L-2DC20C30", "Concurrently running builds", GENERIC_QUOTA_VALUE)),
+            "lambda", List.of(
+                    new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE)));
+
+    private static final List<String> GENERIC_QUOTA_NAMES = List.of(
+            "Resources per Region",
+            "Rate of requests per second",
+            "Concurrent operations");
+
+    private final ObjectMapper objectMapper;
+
+    @Inject
+    public ServiceQuotasService(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
+
+    public ObjectNode listServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
+                                        Integer maxResults, String region, String accountId) {
+        requireServiceCode(serviceCode);
+        List<QuotaDefinition> quotas = quotasFor(serviceCode);
+        if (quotaCodeFilter != null && !quotaCodeFilter.isEmpty()) {
+            quotas = quotas.stream().filter(q -> q.quotaCode().equals(quotaCodeFilter)).toList();
+        }
+        Page page = paginate(quotas, nextToken, maxResults);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("Quotas");
+        for (QuotaDefinition quota : page.items()) {
+            array.add(quotaNode(serviceCode, quota, region, accountId));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return response;
+    }
+
+    public ObjectNode getServiceQuota(String serviceCode, String quotaCode, String region, String accountId) {
+        requireServiceCode(serviceCode);
+        if (quotaCode == null || quotaCode.isEmpty()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: QuotaCode must not be empty.", 400);
+        }
+        QuotaDefinition quota = quotasFor(serviceCode).stream()
+                .filter(q -> q.quotaCode().equals(quotaCode))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("NoSuchResourceException",
+                        "The request failed because the specified service quota does not exist.", 400));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Quota", quotaNode(serviceCode, quota, region, accountId));
+        return response;
+    }
+
+    List<QuotaDefinition> quotasFor(String serviceCode) {
+        List<QuotaDefinition> quotas = new ArrayList<>(CURATED_QUOTAS.getOrDefault(serviceCode, List.of()));
+        for (String name : GENERIC_QUOTA_NAMES) {
+            quotas.add(new QuotaDefinition(syntheticQuotaCode(serviceCode, name), name, GENERIC_QUOTA_VALUE));
+        }
+        return quotas;
+    }
+
+    /**
+     * Deterministic {@code L-XXXXXXXX} code for generated quotas so that a code
+     * observed in {@code ListServiceQuotas} always resolves in {@code GetServiceQuota}.
+     */
+    static String syntheticQuotaCode(String serviceCode, String quotaName) {
+        CRC32 crc = new CRC32();
+        crc.update((serviceCode + "/" + quotaName).getBytes(StandardCharsets.UTF_8));
+        return "L-%08X".formatted(crc.getValue());
+    }
+
+    private ObjectNode quotaNode(String serviceCode, QuotaDefinition quota, String region, String accountId) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("ServiceCode", serviceCode);
+        node.put("ServiceName", SERVICE_NAMES.getOrDefault(serviceCode, serviceCode));
+        node.put("QuotaArn", "arn:aws:servicequotas:" + region + ":" + accountId + ":"
+                + serviceCode + "/" + quota.quotaCode());
+        node.put("QuotaCode", quota.quotaCode());
+        node.put("QuotaName", quota.quotaName());
+        node.put("Value", quota.value());
+        node.put("Unit", "None");
+        node.put("Adjustable", true);
+        node.put("GlobalQuota", false);
+        node.put("QuotaAppliedAtLevel", "ACCOUNT");
+        return node;
+    }
+
+    private static void requireServiceCode(String serviceCode) {
+        if (serviceCode == null || serviceCode.isEmpty()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: ServiceCode must not be empty.", 400);
+        }
+    }
+
+    private static Page paginate(List<QuotaDefinition> items, String nextToken, Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: MaxResults must be between 1 and 100.", 400);
+        }
+        int start = decodeToken(nextToken);
+        if (start < 0 || start > items.size()) {
+            throw new AwsException("InvalidPaginationTokenException", "Invalid NextToken.", 400);
+        }
+        int end = (maxResults == null) ? items.size() : Math.min(items.size(), start + maxResults);
+        String next = (end < items.size()) ? encodeToken(end) : null;
+        return new Page(items.subList(start, end), next);
+    }
+
+    private static String encodeToken(int offset) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(Integer.toString(offset).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static int decodeToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return 0;
+        }
+        try {
+            byte[] decoded = Base64.getUrlDecoder().decode(token);
+            return Integer.parseInt(new String(decoded, StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException e) {
+            return -1;
+        }
+    }
+
+    record QuotaDefinition(String quotaCode, String quotaName, double value) {
+    }
+
+    private record Page(List<QuotaDefinition> items, String nextToken) {
+    }
+}

@@ -100,6 +100,10 @@ services:
     doc: docs/services/secrets-manager.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/secretsmanager/SecretsManagerJsonHandler.java, mode: switch }
+  - service: servicequotas
+    doc: docs/services/servicequotas.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/servicequotas/ServiceQuotasJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:
