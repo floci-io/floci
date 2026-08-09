@@ -20,6 +20,7 @@ import org.mockito.ArgumentCaptor;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -379,6 +380,100 @@ class IamEnforcementFilterTest {
         newFilterWithScp(scp).filter(denied);
         verify(denied).abortWith(captor.capture());
         assertEquals(403, captor.getValue().getStatus());
+    }
+
+    // aws:PrincipalArn is populated only for principals whose ARN is known — IAM users and
+    // assumed-role sessions (IamService.resolveCallerArn). A condition-scoped SCP keyed on the
+    // principal ARN must therefore fire for a real IAM identity. It stays inert for the bare
+    // account-root key, whose resolveCallerArn is empty (see the workload-guardrails test above).
+    private static final String DENY_IAM_USER_PRINCIPAL =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"*\","
+            + "\"Resource\":\"*\",\"Condition\":{\"StringLike\":"
+            + "{\"aws:PrincipalArn\":\"arn:aws:iam::*:user/*\"}}}]}";
+
+    @Test
+    void scpConditionOnPrincipalArnDeniesRealIamIdentity() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String account = "111122223333";
+        String akid = "AKIAALICEEXAMPLE";
+        String auth = "AWS4-HMAC-SHA256 Credential=" + akid
+                + "/20260629/us-east-1/organizations/aws4_request, SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId(account);
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn(akid);
+        when(accountResolver.resolve(auth)).thenReturn(account);
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.1"));
+        when(actionRegistry.resolve("organizations", containerRequest))
+                .thenReturn("organizations:DescribeOrganization");
+        // A real IAM user: full-access identity policy plus a known principal ARN.
+        when(iamService.resolveCallerContext(akid))
+                .thenReturn(CallerContext.of(List.of(FULL_AWS_ACCESS)));
+        when(iamService.resolveCallerArn(akid))
+                .thenReturn(Optional.of("arn:aws:iam::" + account + ":user/alice"));
+        when(arnBuilder.build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
+                .thenReturn("*");
+        when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
+                .thenReturn(null);
+
+        ScpProvider scp = mock(ScpProvider.class);
+        when(scp.effectiveScpLevels(account)).thenReturn(List.of(
+                List.of(FULL_AWS_ACCESS),
+                List.of(FULL_AWS_ACCESS, DENY_IAM_USER_PRINCIPAL)));
+
+        ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
+        newFilterWithScp(scp).filter(containerRequest);
+
+        // aws:PrincipalArn is now populated for the IAM user, so the principal-scoped Deny matches.
+        verify(containerRequest).abortWith(captor.capture());
+        assertEquals(403, captor.getValue().getStatus());
+    }
+
+    // Populating aws:PrincipalArn is bidirectional: it lets a principal-scoped Deny fire (above) AND
+    // lets a principal-scoped Allow match. An identity policy that grants access only when the caller
+    // is an IAM user must therefore ALLOW a real IAM user. Before aws:PrincipalArn was populated the
+    // key was absent, the StringLike failed, the sole Allow never matched, and the request was denied
+    // by default — so stubbing resolveCallerArn empty makes this test RED, proving it is load-bearing.
+    private static final String ALLOW_IF_IAM_USER_PRINCIPAL =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\","
+            + "\"Resource\":\"*\",\"Condition\":{\"StringLike\":"
+            + "{\"aws:PrincipalArn\":\"arn:aws:iam::*:user/*\"}}}]}";
+
+    @Test
+    void identityPolicyAllowGatedOnPrincipalArnMatchesRealIamIdentity() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String account = "111122223333";
+        String akid = "AKIABOBEXAMPLE";
+        String auth = "AWS4-HMAC-SHA256 Credential=" + akid
+                + "/20260629/us-east-1/organizations/aws4_request, SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId(account);
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn(akid);
+        when(accountResolver.resolve(auth)).thenReturn(account);
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("organizations", containerRequest))
+                .thenReturn("organizations:DescribeOrganization");
+        // A real IAM user whose ONLY grant is conditional on being an IAM-user principal.
+        when(iamService.resolveCallerContext(akid))
+                .thenReturn(CallerContext.of(List.of(ALLOW_IF_IAM_USER_PRINCIPAL)));
+        when(iamService.resolveCallerArn(akid))
+                .thenReturn(Optional.of("arn:aws:iam::" + account + ":user/bob"));
+        when(arnBuilder.build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
+                .thenReturn("*");
+        when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
+                .thenReturn(null);
+
+        // No SCP ceiling (effectiveScpLevels → null) so the identity-policy Allow is the deciding factor.
+        ScpProvider scp = mock(ScpProvider.class);
+        when(scp.effectiveScpLevels(account)).thenReturn(null);
+
+        newFilterWithScp(scp).filter(containerRequest);
+
+        // aws:PrincipalArn matches arn:aws:iam::*:user/* → the conditional Allow grants access.
+        verify(containerRequest, never()).abortWith(any());
+        verify(arnBuilder).build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
     }
 
     @Test

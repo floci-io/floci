@@ -20,8 +20,10 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -163,6 +165,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         String resource = arnBuilder.build(credentialScope, ctx, region, accountId);
 
         Map<String, String> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
+
+        // aws:PrincipalArn is populated only for principals whose ARN is known — IAM users and
+        // assumed-role sessions. resolveCallerArn returns empty for the bare account-id key
+        // (floci's account root), so a principal-scoped condition (e.g. a DenyRootUser guardrail
+        // keyed on aws:PrincipalArn) stays absent for the account root and does not fire against it.
+        Optional<String> principalArn = iamService.resolveCallerArn(akid);
+        if (principalArn.isPresent()) {
+            conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
+            conditionContext.put("aws:PrincipalArn", principalArn.get());
+        }
+
         Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
         if (decision == Decision.DENY) {
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
