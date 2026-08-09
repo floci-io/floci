@@ -146,6 +146,25 @@ class SqsCfnProvisionerTest {
     }
 
     @Test
+    void queuePassesThroughAlreadySerializedRedrivePolicyString() {
+        // Reported on #1939: CDK commonly emits RedrivePolicy via Fn::Join, which resolveNode
+        // collapses to an already-JSON-encoded TextNode. TextNode#toString() re-encodes it (quotes
+        // and escapes the string), double-serializing the policy so SqsService can't parse it.
+        when(sqs.createQueue(eq("orders.fifo"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("orders.fifo", "http://localhost:4566/000000000000/orders.fifo"));
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        String serializedRedrive =
+                "{\"maxReceiveCount\":5,\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:my-stack-Dlq.fifo\"}";
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders.fifo");
+        props.put("RedrivePolicy", serializedRedrive);
+
+        provisioner.provision(r, props, ctx());
+
+        Map<String, String> attrs = capturedCreateQueueAttributes("orders.fifo");
+        assertEquals(serializedRedrive, attrs.get("RedrivePolicy"));
+    }
+
+    @Test
     void fifoQueueWithoutNameGetsGeneratedFifoNameAndFifoAttribute() {
         // Like real CloudFormation, a FifoQueue: true resource without a QueueName must get a
         // generated physical name ending in .fifo — SqsService rejects FifoQueue=true otherwise.
