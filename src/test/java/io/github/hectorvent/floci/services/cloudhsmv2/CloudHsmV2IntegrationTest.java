@@ -40,7 +40,6 @@ class CloudHsmV2IntegrationTest {
                 {
                     "HsmType": "hsm1.medium",
                     "SubnetIds": ["subnet-abcdef01"]
-                    }
                 }
                 """)
         .when()
@@ -601,6 +600,37 @@ class CloudHsmV2IntegrationTest {
         .then()
             .statusCode(200)
             .extract().jsonPath().getString("Cluster.ClusterId");
+
+        String hwCert = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeClusters")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": {
+                        "clusterIds": ["%s"]
+                    }
+                }
+                """.formatted(tempClusterId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Clusters[0].Certificates.AwsHardwareCertificate");
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "InitializeCluster")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ClusterId": "%s",
+                    "SignedCert": %s,
+                    "TrustAnchor": %s
+                }
+                """.formatted(tempClusterId, jsonString(hwCert), jsonString(hwCert)))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
 
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "CreateHsm")

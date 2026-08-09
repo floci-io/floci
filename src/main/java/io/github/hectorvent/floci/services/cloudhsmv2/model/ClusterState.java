@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudhsmv2.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * CloudHSM v2 cluster lifecycle states.
  *
@@ -7,6 +9,7 @@ package io.github.hectorvent.floci.services.cloudhsmv2.model;
  * {@link #INITIALIZED} after {@code InitializeCluster} succeeds, and finally
  * reaches {@link #ACTIVE} once it is initialized <em>and</em> has at least one HSM.
  */
+@RegisterForReflection
 public enum ClusterState {
 
     CREATE_IN_PROGRESS,

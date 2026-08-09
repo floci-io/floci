@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudhsmv2.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * Certificate bundle for a CloudHSM v2 cluster.
  *
@@ -7,6 +9,7 @@ package io.github.hectorvent.floci.services.cloudhsmv2.model;
  * The CSR is generated at cluster creation; the remaining fields are populated during
  * initialization.
  */
+@RegisterForReflection
 public class Certificates {
 
     private String clusterCsr;

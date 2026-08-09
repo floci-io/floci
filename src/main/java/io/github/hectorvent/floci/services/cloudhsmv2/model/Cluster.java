@@ -6,12 +6,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * Domain model for a CloudHSM v2 cluster.
  *
  * <p>Follows the same mutable-POJO pattern used by other Floci service models
  * (e.g. MemoryDB {@code Cluster}, ACM {@code Certificate}).
  */
+@RegisterForReflection
 public class Cluster {
 
     private String clusterId;
