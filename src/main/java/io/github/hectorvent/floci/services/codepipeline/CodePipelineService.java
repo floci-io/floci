@@ -63,6 +63,7 @@ public class CodePipelineService {
     private final CodeDeployService codeDeployService;
     private final LambdaService lambdaService;
     private final S3Service s3Service;
+    private final CodePipelineEventPublisher eventPublisher;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Map<String, Object> pipelineLocks = new ConcurrentHashMap<>();
     private final Map<String, byte[]> runtimeArtifacts = new ConcurrentHashMap<>();
@@ -71,7 +72,8 @@ public class CodePipelineService {
     @SuppressWarnings("unchecked")
     public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
                                CodeBuildService codeBuildService, CodeDeployService codeDeployService,
-                               LambdaService lambdaService, S3Service s3Service) {
+                               LambdaService lambdaService, S3Service s3Service,
+                               CodePipelineEventPublisher eventPublisher) {
         this((AccountAwareStorageBackend<CodePipelinePipeline>) storageFactory.create(
                         "codepipeline", "codepipeline-pipelines.json",
                         new TypeReference<Map<String, CodePipelinePipeline>>() {}),
@@ -81,7 +83,7 @@ public class CodePipelineService {
                 (AccountAwareStorageBackend<CodePipelineStoredItem>) storageFactory.create(
                         "codepipeline", "codepipeline-items.json",
                         new TypeReference<Map<String, CodePipelineStoredItem>>() {}),
-                mapper, codeBuildService, codeDeployService, lambdaService, s3Service);
+                mapper, codeBuildService, codeDeployService, lambdaService, s3Service, eventPublisher);
     }
 
     CodePipelineService(AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore,
@@ -89,7 +91,8 @@ public class CodePipelineService {
                         AccountAwareStorageBackend<CodePipelineStoredItem> itemStore,
                         ObjectMapper mapper,
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
-                        LambdaService lambdaService, S3Service s3Service) {
+                        LambdaService lambdaService, S3Service s3Service,
+                        CodePipelineEventPublisher eventPublisher) {
         this.pipelineStore = pipelineStore;
         this.executionStore = executionStore;
         this.itemStore = itemStore;
@@ -98,6 +101,7 @@ public class CodePipelineService {
         this.codeDeployService = codeDeployService;
         this.lambdaService = lambdaService;
         this.s3Service = s3Service;
+        this.eventPublisher = eventPublisher;
     }
 
     public JsonNode handle(String action, JsonNode request, String region, String account) {
@@ -163,6 +167,7 @@ public class CodePipelineService {
                         execution.setAbandon(false);
                         execution.setActionExecutions(new ArrayList<>());
                         putExecution(execution);
+                        eventPublisher.pipelineStateChange(execution, "RESUMED");
                         executor.submit(() -> runExecution(pipeline, execution));
                     }, () -> {
                         execution.setStatus("Failed");
@@ -299,6 +304,7 @@ public class CodePipelineService {
         execution.setTrigger(trigger);
         putExecution(execution);
         applyExecutionMode(execution);
+        eventPublisher.pipelineStateChange(execution, "STARTED");
         executor.submit(() -> runExecution(pipeline, execution));
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
     }
@@ -324,6 +330,7 @@ public class CodePipelineService {
                     });
         }
         putExecution(execution);
+        eventPublisher.pipelineStateChange(execution, "STOPPING");
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
     }
 
@@ -934,6 +941,7 @@ public class CodePipelineService {
                     execution.setCurrentStage(stageName);
                     execution.setLastUpdateTime(now());
                     putExecution(execution);
+                    eventPublisher.stageStateChange(execution, stageName, "STARTED");
 
                     ConditionOutcome entry = evaluateConditions(execution, stage, "BEFORE_ENTRY");
                     if (entry == ConditionOutcome.SKIP_STAGE) {
@@ -941,23 +949,28 @@ public class CodePipelineService {
                     }
                     if (entry == ConditionOutcome.FAIL) {
                         failForCondition(execution, stageName, "BEFORE_ENTRY");
+                        eventPublisher.stageStateChange(execution, stageName, "FAILED");
                         return;
                     }
 
                     runStage(pipeline, execution, stage, stageName.equals(skipSucceededIn));
                     if ("Failed".equals(execution.getStatus())) {
+                        eventPublisher.stageStateChange(execution, stageName, "FAILED");
                         handleStageFailure(pipeline, execution, stage);
                         return;
                     }
                     if (finishIfStopped(execution)) {
+                        eventPublisher.stageStateChange(execution, stageName, "STOPPED");
                         return;
                     }
 
                     if (evaluateConditions(execution, stage, "ON_SUCCESS") == ConditionOutcome.FAIL) {
                         failForCondition(execution, stageName, "ON_SUCCESS");
+                        eventPublisher.stageStateChange(execution, stageName, "FAILED");
                         handleStageFailure(pipeline, execution, stage);
                         return;
                     }
+                    eventPublisher.stageStateChange(execution, stageName, "SUCCEEDED");
                 }
                 execution.setStatus("Succeeded");
                 execution.setStatusSummary("Pipeline execution succeeded.");
@@ -970,6 +983,12 @@ public class CodePipelineService {
                 execution.setLastUpdateTime(now());
                 putExecution(execution);
                 clearRuntimeArtifacts(execution);
+                switch (execution.getStatus()) {
+                    case "Succeeded" -> eventPublisher.pipelineStateChange(execution, "SUCCEEDED");
+                    case "Failed" -> eventPublisher.pipelineStateChange(execution, "FAILED");
+                    case "Stopped" -> eventPublisher.pipelineStateChange(execution, "STOPPED");
+                    default -> { }
+                }
             }
         };
         if ("QUEUED".equals(execution.getExecutionMode())) {
@@ -1185,6 +1204,7 @@ public class CodePipelineService {
             execution.getActionExecutions().add(state);
             putExecution(execution);
         }
+        eventPublisher.actionStateChange(execution, state, "STARTED");
         try {
             executeProvider(pipeline, execution, action, state);
             if ("InProgress".equals(state.getStatus())) {
@@ -1204,6 +1224,12 @@ public class CodePipelineService {
         } finally {
             state.setLastUpdateTime(now());
             putExecution(execution);
+            switch (state.getStatus()) {
+                case "Succeeded" -> eventPublisher.actionStateChange(execution, state, "SUCCEEDED");
+                case "Failed" -> eventPublisher.actionStateChange(execution, state, "FAILED");
+                case "Abandoned" -> eventPublisher.actionStateChange(execution, state, "ABANDONED");
+                default -> { }
+            }
         }
     }
 
@@ -1213,7 +1239,7 @@ public class CodePipelineService {
         String owner = state.getOwner();
         String provider = state.getProvider();
         if ("Approval".equals(category) && "Manual".equals(provider)) {
-            waitForApproval(execution, state);
+            waitForApproval(execution, action, state);
             return;
         }
         if (!"AWS".equals(owner)) {
@@ -1331,10 +1357,17 @@ public class CodePipelineService {
         state.setExternalExecutionId(result.path("pipelineExecutionId").asText());
     }
 
-    private void waitForApproval(CodePipelineExecution execution, ActionExecution state) throws InterruptedException {
+    private void waitForApproval(CodePipelineExecution execution, JsonNode action,
+                                 ActionExecution state) throws InterruptedException {
         state.setToken(UUID.randomUUID().toString());
         state.setSummary("Waiting for approval.");
         putExecution(execution);
+        String notificationArn = action.path("configuration").path("NotificationArn").asText(null);
+        if (notificationArn != null && !notificationArn.isBlank()) {
+            eventPublisher.approvalNeeded(execution, state, notificationArn,
+                    action.path("configuration").path("CustomData").asText(null),
+                    now() + TimeUnit.DAYS.toSeconds(7));
+        }
         while ("InProgress".equals(state.getStatus()) && !execution.isStopRequested()) {
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
         }

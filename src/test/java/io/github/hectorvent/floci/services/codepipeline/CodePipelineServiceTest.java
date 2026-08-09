@@ -11,7 +11,9 @@ import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineStoredItem;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -19,8 +21,11 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import org.mockito.ArgumentCaptor;
+
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,7 +35,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -47,6 +58,8 @@ class CodePipelineServiceTest {
     private AccountAwareStorageBackend<CodePipelineExecution> executionStore;
     private LambdaService lambdaService;
     private S3Service s3Service;
+    private EventBridgeService eventBridgeService;
+    private SnsService snsService;
     private CodePipelineService service;
 
     @BeforeEach
@@ -54,6 +67,8 @@ class CodePipelineServiceTest {
         executionStore = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
         lambdaService = mock(LambdaService.class);
         s3Service = mock(S3Service.class);
+        eventBridgeService = mock(EventBridgeService.class);
+        snsService = mock(SnsService.class);
 
         S3Object object = mock(S3Object.class);
         when(object.getData()).thenReturn("artifact".getBytes());
@@ -68,7 +83,8 @@ class CodePipelineServiceTest {
                 executionStore,
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
                 mapper, mock(CodeBuildService.class), mock(CodeDeployService.class),
-                lambdaService, s3Service);
+                lambdaService, s3Service,
+                new CodePipelineEventPublisher(eventBridgeService, snsService, mapper));
     }
 
     private void lambdaSucceeds() {
@@ -323,6 +339,96 @@ class CodePipelineServiceTest {
         }
         assertTrue(rollback != null, "expected an automatic ROLLBACK execution");
         assertEquals(goodId, rollback.getRollbackTargetPipelineExecutionId());
+    }
+
+    @Test
+    void executionEmitsEventBridgeStateChangeEvents() {
+        createPipeline("evented", sourceStage(), lambdaStage("Deploy"));
+        awaitStatus(startExecution("evented"), "Succeeded");
+
+        // The terminal pipeline event publishes just after the status flips, so poll for it.
+        List<Map<String, Object>> events = awaitPublishedEvents(
+                e -> String.valueOf(e.get("Detail")).contains("\"state\":\"SUCCEEDED\"")
+                        && "CodePipeline Pipeline Execution State Change".equals(e.get("DetailType")));
+
+        assertTrue(events.stream().allMatch(e -> "aws.codepipeline".equals(e.get("Source"))));
+        List<String> detailTypes = events.stream()
+                .map(e -> String.valueOf(e.get("DetailType"))).distinct().toList();
+        assertTrue(detailTypes.contains("CodePipeline Pipeline Execution State Change"));
+        assertTrue(detailTypes.contains("CodePipeline Stage Execution State Change"));
+        assertTrue(detailTypes.contains("CodePipeline Action Execution State Change"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> awaitPublishedEvents(
+            java.util.function.Predicate<Map<String, Object>> awaited) {
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(10);
+        List<Map<String, Object>> events = List.of();
+        while (System.currentTimeMillis() < deadline) {
+            ArgumentCaptor<List<Map<String, Object>>> entries = ArgumentCaptor.forClass(List.class);
+            verify(eventBridgeService, atLeast(0)).putEvents(entries.capture(), eq(REGION));
+            events = entries.getAllValues().stream().flatMap(List::stream).toList();
+            if (events.stream().anyMatch(awaited)) {
+                return events;
+            }
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        return fail("Awaited event was never published; saw " + events.size() + " events");
+    }
+
+    @Test
+    void approvalActionPublishesSnsNotification() {
+        ObjectNode approvalStage = mapper.createObjectNode();
+        approvalStage.put("name", "Gate");
+        ObjectNode action = approvalStage.putArray("actions").addObject();
+        action.put("name", "HumanGate");
+        action.putObject("actionTypeId")
+                .put("category", "Approval").put("owner", "AWS").put("provider", "Manual").put("version", "1");
+        action.putObject("configuration")
+                .put("NotificationArn", "arn:aws:sns:us-east-1:000000000000:approvals")
+                .put("CustomData", "please review");
+        createPipeline("approved", approvalStage, lambdaStage("Deploy"));
+
+        String executionId = startExecution("approved");
+        verify(snsService, timeout(5000)).publish(
+                eq("arn:aws:sns:us-east-1:000000000000:approvals"), isNull(),
+                contains("please review"),
+                contains("APPROVAL NEEDED"), eq(REGION));
+
+        CodePipelineExecution execution = awaitToken(executionId);
+        String token = execution.getActionExecutions().get(0).getToken();
+        service.handle("PutApprovalResult", mapper.createObjectNode()
+                        .put("pipelineName", "approved")
+                        .put("stageName", "Gate")
+                        .put("actionName", "HumanGate")
+                        .put("token", token)
+                        .<ObjectNode>set("result", mapper.createObjectNode()
+                                .put("status", "Approved").put("summary", "ok")),
+                REGION, ACCOUNT);
+        awaitStatus(executionId, "Succeeded");
+    }
+
+    private CodePipelineExecution awaitToken(String executionId) {
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(10);
+        while (System.currentTimeMillis() < deadline) {
+            CodePipelineExecution execution = executionStore.scanAllAccounts().stream()
+                    .filter(e -> executionId.equals(e.getPipelineExecutionId()))
+                    .findFirst().orElse(null);
+            if (execution != null && !execution.getActionExecutions().isEmpty()
+                    && execution.getActionExecutions().get(0).getToken() != null) {
+                return execution;
+            }
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        return fail("Approval token never appeared for " + executionId);
     }
 
     @Test
