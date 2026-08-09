@@ -365,3 +365,74 @@ resource "aws_kinesis_firehose_delivery_stream" "events" {
 output "firehose_stream_arn" {
   value = aws_kinesis_firehose_delivery_stream.events.arn
 }
+
+# -- Application Auto Scaling (scalable target + target-tracking policies) -----
+resource "aws_appautoscaling_target" "ecs_service" {
+  max_capacity       = 20
+  min_capacity       = 2
+  resource_id        = "service/floci-compat-cluster/floci-compat-service"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+resource "aws_appautoscaling_policy" "ecs_cpu" {
+  name               = "floci-compat-cpu-tracking"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs_service.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_service.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs_service.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value = 65
+  }
+}
+
+# resource_label round-trips only if every nested field is echoed back, so this
+# resource is the canary for target-tracking drift.
+resource "aws_appautoscaling_policy" "ecs_alb_requests" {
+  name               = "floci-compat-alb-request-count"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs_service.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_service.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs_service.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 1000
+    scale_in_cooldown  = 240
+    scale_out_cooldown = 60
+
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "app/floci-compat-alb/abc123/targetgroup/floci-compat-tg/def456"
+    }
+  }
+}
+
+output "appautoscaling_target_arn" {
+  value = aws_appautoscaling_target.ecs_service.arn
+}
+
+output "appautoscaling_alb_policy_arn" {
+  value = aws_appautoscaling_policy.ecs_alb_requests.arn
+}
+
+# ── SES Receipt Rule Set ───────────────────────────────────────────────────
+# floci stores it inertly (no inbound-mail routing); the management API just round-trips.
+resource "aws_ses_receipt_rule_set" "compat" {
+  rule_set_name = "floci-compat-rule-set"
+}
+
+resource "aws_ses_active_receipt_rule_set" "compat" {
+  rule_set_name = aws_ses_receipt_rule_set.compat.rule_set_name
+}
+
+output "ses_rule_set_name" {
+  value = aws_ses_receipt_rule_set.compat.rule_set_name
+}

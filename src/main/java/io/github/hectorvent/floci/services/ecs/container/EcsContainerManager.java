@@ -404,14 +404,16 @@ public class EcsContainerManager {
         // to the task region.
         String secretRegion = arnRegion(valueFrom, region);
         String value;
+        String jsonKey = null;
         try {
             if (valueFrom != null && valueFrom.startsWith("arn:aws:secretsmanager:")) {
-                // A plain secret ARN (or partial ARN) resolves to its full SecretString.
-                // The ECS `:json-key:version-stage:version-id` selector suffix is not yet
-                // supported: it is passed through unparsed, so a valueFrom carrying one fails
-                // to resolve and stops the task with ResourceInitializationError rather than
-                // silently returning the whole secret. See floci-io/floci#1624.
-                var secret = secretsManagerService.getSecretValue(valueFrom, null, null, secretRegion);
+                // The valueFrom may carry the ECS selector suffix
+                // (:json-key:version-stage:version-id); the parser strips it so the base ARN
+                // reaches SecretsManagerService intact, keeping its partial-ARN fallback working.
+                var selector = SecretsManagerSelector.parse(valueFrom);
+                jsonKey = selector.jsonKey();
+                var secret = secretsManagerService.getSecretValue(selector.secretId(),
+                        selector.versionId(), selector.versionStage(), secretRegion);
                 value = secret == null ? null : secret.getSecretString();
             } else {
                 String parameterName = ssmParameterName(valueFrom);
@@ -425,8 +427,16 @@ public class EcsContainerManager {
             // A Secrets Manager secret stored as SecretBinary (no SecretString) has no string
             // value to inject as an env var. Real AWS fails the task launch rather than starting
             // the container with a missing value, so surface the same ResourceInitializationError
-            // instead of emitting a literal "NAME=null".
+            // instead of emitting a literal "NAME=null". Checked before JSON extraction: the real
+            // agent nil-derefs on this input, so failing cleanly is a deliberate improvement.
             throw resourceInitializationError(valueFrom, "secret value is not a string", 400);
+        }
+        if (jsonKey != null) {
+            try {
+                value = SecretsManagerSelector.extractJsonKey(value, jsonKey);
+            } catch (AwsException e) {
+                throw resourceInitializationError(valueFrom, e.getMessage(), e.getHttpStatus());
+            }
         }
         return value;
     }

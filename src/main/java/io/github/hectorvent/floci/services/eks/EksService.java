@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
@@ -51,11 +52,12 @@ public class EksService implements TagHandler {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final EksClusterManager clusterManager;
+    private final Ec2Service ec2Service;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
-            RegionResolver regionResolver, EksClusterManager clusterManager) {
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -68,6 +70,7 @@ public class EksService implements TagHandler {
         this.config = config;
         this.regionResolver = regionResolver;
         this.clusterManager = clusterManager;
+        this.ec2Service = ec2Service;
     }
 
     @PostConstruct
@@ -97,7 +100,8 @@ public class EksService implements TagHandler {
                     "Cluster already exists: " + name, 409);
         }
 
-        String region = config.defaultRegion();
+        String region = regionResolver.getRegion();
+        String resolvedVpcId = validateSubnetsAndResolveVpcId(region, request.getResourcesVpcConfig());
         String accountId = regionResolver.getAccountId();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString();
 
@@ -108,7 +112,7 @@ public class EksService implements TagHandler {
         cluster.setCreatedAt(Instant.now());
         cluster.setVersion(request.getVersion() != null ? request.getVersion() : "1.29");
         cluster.setRoleArn(request.getRoleArn());
-        cluster.setResourcesVpcConfig(buildVpcConfigResponse(request.getResourcesVpcConfig()));
+        cluster.setResourcesVpcConfig(buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId));
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
@@ -380,12 +384,42 @@ public class EksService implements TagHandler {
         return resourceArn.substring(idx + 1);
     }
 
-    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request) {
+    /**
+     * Validates every requested subnet and returns the VPC they belong to.
+     *
+     * CreateCluster carries no vpcId — real EKS derives it from the subnets, and
+     * #1942 reported resourcesVpcConfig.vpcId coming back blank because the
+     * Subnet that requireSubnet already resolves was discarded here.
+     *
+     * @return the vpcId of the requested subnets, or null when none were given
+     */
+    private String validateSubnetsAndResolveVpcId(String region, ResourcesVpcConfig vpcConfig) {
+        if (vpcConfig == null || vpcConfig.getSubnetIds() == null) {
+            return null;
+        }
+        String vpcId = null;
+        for (String subnetId : vpcConfig.getSubnetIds()) {
+            try {
+                vpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
+            } catch (AwsException e) {
+                throw new AwsException("InvalidParameterException",
+                        "Subnet ID '" + subnetId + "' does not exist", 400);
+            }
+        }
+        return vpcId;
+    }
+
+    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId) {
         ResourcesVpcConfig response = new ResourcesVpcConfig();
         if (request != null) {
             response.setSubnetIds(request.getSubnetIds() != null ? request.getSubnetIds() : List.of());
             response.setSecurityGroupIds(request.getSecurityGroupIds() != null ? request.getSecurityGroupIds() : List.of());
-            response.setVpcId(request.getVpcId() != null ? request.getVpcId() : "");
+            // A caller-supplied vpcId still wins; otherwise fall back to the one
+            // the subnets resolved to, and only then to empty.
+            String vpcId = request.getVpcId() != null && !request.getVpcId().isBlank()
+                    ? request.getVpcId()
+                    : (resolvedVpcId != null ? resolvedVpcId : "");
+            response.setVpcId(vpcId);
             response.setEndpointPublicAccess(
                     request.getEndpointPublicAccess() != null ? request.getEndpointPublicAccess() : Boolean.TRUE);
             response.setEndpointPrivateAccess(

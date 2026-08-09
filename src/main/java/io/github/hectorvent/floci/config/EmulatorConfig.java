@@ -571,6 +571,7 @@ public interface EmulatorConfig {
         CodeDeployServiceConfig codedeploy();
         CodePipelineServiceConfig codepipeline();
         AutoScalingServiceConfig autoscaling();
+        ApplicationAutoScalingServiceConfig applicationautoscaling();
         ElasticBeanstalkServiceConfig elasticbeanstalk();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
@@ -690,6 +691,11 @@ public interface EmulatorConfig {
     }
 
     interface AutoScalingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ApplicationAutoScalingServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1182,6 +1188,58 @@ public interface EmulatorConfig {
     interface BedrockRuntimeServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Converse/InvokeModel backend: "stub" (default, hardcoded response, no
+         * external calls) or "proxy" (forwards Converse to an OpenAI-compatible
+         * /chat/completions endpoint; see {@link BedrockProxyConfig}).
+         */
+        @WithDefault("stub")
+        String backend();
+
+        BedrockProxyConfig proxy();
+    }
+
+    interface BedrockProxyConfig {
+        /**
+         * Base URL of the OpenAI-compatible backend (Ollama, OpenRouter, LiteLLM,
+         * vLLM), e.g. "http://localhost:11434/v1". Required when backend=proxy;
+         * requests are POSTed to "{url}/chat/completions".
+         */
+        Optional<String> url();
+
+        /** Sent as "Authorization: Bearer {apiKey}" when present. */
+        Optional<String> apiKey();
+
+        /**
+         * Fallback OpenAI-side model id used when no explicit mapping matches
+         * and passthrough is disabled.
+         */
+        Optional<String> defaultModel();
+
+        /**
+         * Comma-separated {@code bedrockModelId=openaiModelId} pairs, e.g.
+         * {@code "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"}.
+         * A delimited string rather than a native Map config property: Bedrock
+         * model ids contain '.' and ':', which collide with SmallRye's per-key
+         * env-var naming convention for maps.
+         */
+        Optional<String> modelMapping();
+
+        /**
+         * When true, and no explicit mapping matches, forward the raw Bedrock
+         * model id as-is instead of requiring a mapping or defaultModel.
+         */
+        @WithDefault("false")
+        boolean passthrough();
+
+        /**
+         * How long to wait for the backend to finish generating a response before
+         * failing the request with ModelTimeoutException. Larger models on
+         * CPU-backed backends (e.g. Ollama) may need more than the default.
+         */
+        @WithDefault("60")
+        int requestTimeoutSeconds();
     }
 
     interface TextractServiceConfig {

@@ -1164,7 +1164,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
-                        getChecksumAlgorithm(httpHeaders));
+                        getChecksumAlgorithm(httpHeaders),
+                        parseInlineTaggingHeader(httpHeaders.getHeaderString("x-amz-tagging")));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -1200,7 +1201,10 @@ public class S3Controller {
                 if (preconditionResponse != null) {
                     return preconditionResponse;
                 }
-                S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers);
+                String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
+                S3Checksum expectedChecksum = extractChecksumFromHeaders(httpHeaders);
+                S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
+                        checksumType, expectedChecksum);
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);

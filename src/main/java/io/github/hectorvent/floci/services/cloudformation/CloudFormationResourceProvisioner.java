@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
@@ -82,6 +83,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -117,8 +119,13 @@ public class CloudFormationResourceProvisioner {
     private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
     private static final String INLINE_CLEANUP_USER_TARGETS_ATTR = "__FlociInlineCleanupUserTargets";
     private static final String INLINE_CLEANUP_GROUP_TARGETS_ATTR = "__FlociInlineCleanupGroupTargets";
-    private static final String LAMBDA_NAME_MODE_EXPLICIT = "explicit";
-    private static final String LAMBDA_NAME_MODE_GENERATED = "generated";
+    private static final String NAME_MODE_EXPLICIT = "explicit";
+    private static final String NAME_MODE_GENERATED = "generated";
+    private static final String LOG_GROUP_NAME_MODE_ATTR = "FlociLogGroupNameMode";
+    private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
+    private static final String SECRET_TARGET_OWNER_ATTR = "__FlociSecretTargetOwner";
+    private static final List<String> SECRET_TARGET_CONNECTION_KEYS = List.of(
+            "engine", "host", "port", "dbname", "dbInstanceIdentifier", "dbClusterIdentifier");
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
@@ -165,6 +172,7 @@ public class CloudFormationResourceProvisioner {
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
     private final FirehoseService firehoseService;
+    private final DocDbService docDbService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
@@ -198,6 +206,7 @@ public class CloudFormationResourceProvisioner {
                                              CloudWatchMetricsService cloudWatchMetricsService,
                                              AutoScalingService autoScalingService,
                                              FirehoseService firehoseService,
+                                             DocDbService docDbService,
                                              CloudFormationResourceRegistry resourceRegistry) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
@@ -230,6 +239,7 @@ public class CloudFormationResourceProvisioner {
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
         this.firehoseService = firehoseService;
+        this.docDbService = docDbService;
         this.resourceRegistry = resourceRegistry;
     }
 
@@ -288,6 +298,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::KMS::Key" -> provisionKmsKey(resource, properties, engine, region, accountId);
                 case "AWS::KMS::Alias" -> provisionKmsAlias(resource, properties, engine, region);
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
+                case "AWS::SecretsManager::SecretTargetAttachment" ->
+                        provisionSecretTargetAttachment(resource, properties, engine, region, stackName);
                 case "AWS::CDK::Metadata" -> provisionCdkMetadata(resource);
                 case "AWS::S3::BucketPolicy" -> provisionS3BucketPolicy(resource, properties, engine);
                 case "AWS::ECR::Repository" -> provisionEcrRepository(resource, properties, engine, stackName, region);
@@ -303,6 +315,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ApiGateway::Deployment" -> provisionApiGatewayDeployment(resource, properties, engine, region);
                 case "AWS::ApiGateway::Stage" -> provisionApiGatewayStage(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Api" -> provisionApiGatewayV2Api(resource, properties, engine, region, accountId, stackName);
+                case "AWS::ApiGatewayV2::Authorizer" -> provisionApiGatewayV2Authorizer(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Route" -> provisionApiGatewayV2Route(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Integration" -> provisionApiGatewayV2Integration(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Stage" -> provisionApiGatewayV2Stage(resource, properties, engine, region);
@@ -400,6 +413,10 @@ public class CloudFormationResourceProvisioner {
             deleteCustomResource(resource, region);
             return;
         }
+        if ("AWS::SecretsManager::SecretTargetAttachment".equals(resourceType)) {
+            deleteSecretTargetAttachment(resource, region);
+            return;
+        }
         // Nodegroup deletion needs both the cluster name (from a Fn::GetAtt attribute) and the
         // nodegroup name (the physical id), which the type/physicalId delete path can't provide.
         if ("AWS::EKS::Nodegroup".equals(resourceType)) {
@@ -419,6 +436,21 @@ public class CloudFormationResourceProvisioner {
         if ("AWS::Events::Rule".equals(resourceType)) {
             deleteEventBridgeRuleSafe(resource.getPhysicalId(),
                     resource.getAttributes().get("EventBusName"), region);
+            return;
+        }
+        // Authorizer deletion needs the api id (a stored attribute, not the physical id, which is
+        // the authorizer id) — same shape as the Nodegroup case above. Without this, the generic
+        // type/physicalId delete path has no case for this type at all and silently no-ops,
+        // leaving the authorizer behind in AWS after the stack reports deleted.
+        if ("AWS::ApiGatewayV2::Authorizer".equals(resourceType)) {
+            String apiId = resource.getAttributes().get("ApiId");
+            if (apiId != null && !apiId.isBlank()) {
+                try {
+                    apiGatewayV2Service.deleteAuthorizer(region, apiId, resource.getPhysicalId());
+                } catch (Exception e) {
+                    LOG.debugv("Error deleting authorizer {0}: {1}", resource.getPhysicalId(), e.getMessage());
+                }
+            }
             return;
         }
         // AWS::IAM::Policy is an inline policy; detaching it needs the principals it was attached to,
@@ -468,6 +500,10 @@ public class CloudFormationResourceProvisioner {
             } // KMS keys can't be immediately deleted; skip
             case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
             case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
+            case "AWS::SecretsManager::SecretTargetAttachment" -> throw new AwsException(
+                    "ValidationError",
+                    "SecretTargetAttachment deletion requires the StackResource metadata that records its managed fields.",
+                    400);
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
@@ -672,8 +708,32 @@ public class CloudFormationResourceProvisioner {
 
     private void provisionLogGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                    String region, String accountId, String stackName) {
-        String name = resolveOptional(props, "LogGroupName", engine);
-        if (name == null || name.isBlank()) {
+        String explicitName = resolveOptional(props, "LogGroupName", engine);
+        boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
+        String previousNameMode = r.getAttributes().get(LOG_GROUP_NAME_MODE_ATTR);
+        if (previousNameMode == null && r.getPhysicalId() != null) {
+            // Stacks persisted before FlociLogGroupNameMode existed have no recorded mode, but an
+            // auto-generated name always has the deterministic <stackName>-<logicalId>-<12 hex chars>
+            // shape generatePhysicalName produces, so anything else must have been explicit.
+            previousNameMode = isGeneratedLogGroupName(r.getPhysicalId(), stackName, r.getLogicalId())
+                    ? NAME_MODE_GENERATED
+                    : NAME_MODE_EXPLICIT;
+        }
+        // Going from an explicit name to none is itself a replacement-worthy change on real AWS, not
+        // something to silently keep reconciling under the old explicit name (mirrors the same check
+        // for Lambda's FunctionName above).
+        boolean explicitNameRemoved = r.getPhysicalId() != null && !hasExplicitName
+                && NAME_MODE_EXPLICIT.equals(previousNameMode);
+
+        String name;
+        if (hasExplicitName) {
+            name = explicitName;
+        } else if (r.getPhysicalId() != null && !explicitNameRemoved) {
+            // No explicit name and the prior name was itself auto-generated: keep it across updates
+            // instead of generating a fresh random one each time, so the log group is reconciled in
+            // place rather than replaced on every no-op update.
+            name = r.getPhysicalId();
+        } else {
             name = generatePhysicalName(stackName, r.getLogicalId(), 512, false);
         }
         Integer retentionInDays = null;
@@ -694,11 +754,74 @@ public class CloudFormationResourceProvisioner {
                 }
             }
         }
-        logsService.createLogGroup(name, retentionInDays, tags, region);
+
+        // LogGroupName isn't updatable in place on real AWS (a change replaces the resource), so only
+        // reconcile in place when the name is unchanged and the group is still there; otherwise this is
+        // either a first create or a rename, both of which need a fresh createLogGroup call. On a rename,
+        // create the new group before deleting the old one: if the new name collides with something else
+        // and createLogGroup throws, the update rolls back without touching the old group, since rollback
+        // does not restore a resource this method already deleted.
+        String priorPhysicalId = r.getPhysicalId();
+        if (priorPhysicalId != null && priorPhysicalId.equals(name) && logsService.logGroupExists(name, region)) {
+            reconcileLogGroup(name, retentionInDays, tags, region);
+        } else {
+            logsService.createLogGroup(name, retentionInDays, tags, region);
+            if (priorPhysicalId != null && !priorPhysicalId.equals(name)
+                    && logsService.logGroupExists(priorPhysicalId, region)) {
+                logsService.deleteLogGroup(priorPhysicalId, region);
+            }
+        }
+
         // Ref returns the log group name; GetAtt Arn is arn:aws:logs:<region>:<account>:log-group:<name>:*
         r.setPhysicalId(name);
         r.getAttributes().put("Arn",
                 AwsArnUtils.Arn.of("logs", region, accountId, "log-group:" + name + ":*").toString());
+        r.getAttributes().put(LOG_GROUP_NAME_MODE_ATTR,
+                hasExplicitName ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
+    }
+
+    /**
+     * Whether {@code physicalId} matches the exact shape {@link #generatePhysicalName} produces for
+     * this stack/logical id: {@code <stackName>-<logicalId>-} followed by exactly 12 lowercase hex
+     * characters. Doesn't account for the (practically unreachable at a 512-character limit)
+     * truncation path in {@link #generatePhysicalName}, so a truncated legacy name is conservatively
+     * treated as explicit rather than misdetected as generated.
+     */
+    private boolean isGeneratedLogGroupName(String physicalId, String stackName, String logicalId) {
+        String prefix = stackName + "-" + logicalId + "-";
+        if (!physicalId.startsWith(prefix)) {
+            return false;
+        }
+        String suffix = physicalId.substring(prefix.length());
+        if (suffix.length() != 12) {
+            return false;
+        }
+        for (int i = 0; i < suffix.length(); i++) {
+            char c = suffix.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void reconcileLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
+        if (retentionInDays != null) {
+            logsService.putRetentionPolicy(name, retentionInDays, region);
+        } else {
+            logsService.deleteRetentionPolicy(name, region);
+        }
+        Map<String, String> existingTags = logsService.listTagsLogGroup(name, region);
+        List<String> tagsToRemove = existingTags.keySet().stream()
+                .filter(key -> !tags.containsKey(key))
+                .toList();
+        if (!tagsToRemove.isEmpty()) {
+            logsService.untagLogGroup(name, tagsToRemove, region);
+        }
+        if (!tags.isEmpty()) {
+            logsService.tagLogGroup(name, tags, region);
+        }
     }
 
     // ── Kinesis ─────────────────────────────────────────────────────────────────
@@ -1383,7 +1506,7 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("Arn", func.getFunctionArn());
         r.getAttributes().put(LAMBDA_CODE_IDENTITY_ATTR, desired.code().identity());
         r.getAttributes().put(LAMBDA_NAME_MODE_ATTR,
-                desired.explicitFunctionName() ? LAMBDA_NAME_MODE_EXPLICIT : LAMBDA_NAME_MODE_GENERATED);
+                desired.explicitFunctionName() ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
         r.getAttributes().put(LAMBDA_PACKAGE_TYPE_ATTR, desired.packageType());
     }
 
@@ -1401,7 +1524,7 @@ public class CloudFormationResourceProvisioner {
                 && !Objects.equals(oldPackageType, packageType);
         boolean explicitRemoved = r.getPhysicalId() != null
                 && !hasExplicitName
-                && LAMBDA_NAME_MODE_EXPLICIT.equals(previousNameMode);
+                && NAME_MODE_EXPLICIT.equals(previousNameMode);
 
         String functionName;
         if (hasExplicitName) {
@@ -2182,7 +2305,13 @@ public class CloudFormationResourceProvisioner {
         var policy = iamService.createPolicy(policyName, "/", null, document, Map.of());
         r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
         r.setPhysicalId(policy.getArn());
+        // PolicyArn is the attribute CloudFormation documents for this type, and what a template
+        // written against AWS asks for. Without it Fn::GetAtt does not resolve and the unresolved
+        // literal reaches whatever consumed it — a role's ManagedPolicyArns, typically, which then
+        // fails with "policy does not exist" and rolls the stack back. "Arn" stays for callers
+        // already using it.
         r.getAttributes().put("Arn", policy.getArn());
+        r.getAttributes().put("PolicyArn", policy.getArn());
         r.getAttributes().put("ManagedPolicyRoleTargets", String.join("\n", roleNames));
 
         LinkedHashSet<String> attachedRoleNames = new LinkedHashSet<>();
@@ -2299,6 +2428,352 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(secret.getArn());
         r.getAttributes().put("Arn", secret.getArn());
         r.getAttributes().put("Name", name);
+    }
+
+    /** Provisions an AWS-compatible Secrets Manager database target attachment. */
+    private void provisionSecretTargetAttachment(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine, String region,
+                                                 String stackName) {
+        String secretId = requireSecretTargetProperty(props, "SecretId", engine);
+        String targetId = requireSecretTargetProperty(props, "TargetId", engine);
+        String targetType = requireSecretTargetProperty(props, "TargetType", engine);
+        validateSecretTargetType(targetType);
+        SecretTargetConnection connection = resolveSecretTargetConnection(targetType, targetId);
+
+        String previousSecretId = r.getPhysicalId();
+        String previousManagedKeys = r.getAttributes().get(SECRET_TARGET_MANAGED_KEYS_ATTR);
+        String attachmentOwner = r.getAttributes().getOrDefault(
+                SECRET_TARGET_OWNER_ATTR, stackName + "/" + r.getLogicalId());
+        String secretArn = secretsManagerService.describeSecret(secretId, region).getArn();
+        String previousSecretArn = canonicalExistingSecretArn(previousSecretId, secretArn, region);
+        boolean replacingSecret = previousSecretArn != null && !previousSecretArn.equals(secretArn);
+        boolean claimCreated = false;
+        boolean wroteNewSecret = false;
+        boolean detachedPreviousSecret = false;
+        ObjectNode currentSecretJson = null;
+        SecretTargetMutation previousDetach = null;
+
+        try {
+            claimCreated = secretsManagerService.claimTargetAttachment(
+                    secretArn, attachmentOwner, region);
+
+            currentSecretJson = readSecretJsonObject(secretArn, region);
+            ObjectNode desiredSecretJson = currentSecretJson.deepCopy();
+            SECRET_TARGET_CONNECTION_KEYS.forEach(desiredSecretJson::remove);
+
+            List<String> managedKeys = new ArrayList<>();
+            addSecretTargetConnection(desiredSecretJson, managedKeys, connection);
+
+            if (replacingSecret) {
+                previousDetach = prepareSecretTargetDetach(previousSecretArn, previousManagedKeys, region);
+            }
+            if (!desiredSecretJson.equals(currentSecretJson)) {
+                secretsManagerService.putSecretValue(
+                        secretArn, desiredSecretJson.toString(), null, null, region, null);
+                wroteNewSecret = true;
+            }
+            if (previousDetach != null) {
+                putSecretTargetMutation(previousDetach, region);
+                detachedPreviousSecret = true;
+            }
+            if (replacingSecret) {
+                secretsManagerService.releaseTargetAttachment(
+                        previousSecretArn, attachmentOwner, region);
+            }
+
+            r.setPhysicalId(secretArn);
+            r.getAttributes().remove("Arn");
+            r.getAttributes().put("Id", secretArn);
+            r.getAttributes().put(SECRET_TARGET_OWNER_ATTR, attachmentOwner);
+            r.getAttributes().put(SECRET_TARGET_MANAGED_KEYS_ATTR, String.join(",", managedKeys));
+        } catch (RuntimeException failure) {
+            if (detachedPreviousSecret && previousDetach != null) {
+                ObjectNode previousValue = previousDetach.originalValue();
+                attemptSecretTargetCleanup(failure, "restore previous secret " + previousSecretArn,
+                        () -> secretsManagerService.putSecretValue(
+                                previousSecretArn, previousValue.toString(),
+                                null, null, region, null));
+            }
+            if (wroteNewSecret && currentSecretJson != null) {
+                ObjectNode originalValue = currentSecretJson;
+                attemptSecretTargetCleanup(failure, "restore new secret " + secretArn,
+                        () -> secretsManagerService.putSecretValue(
+                                secretArn, originalValue.toString(),
+                                null, null, region, null));
+            }
+            if (claimCreated) {
+                attemptSecretTargetCleanup(failure, "release target attachment claim for " + secretArn,
+                        () -> secretsManagerService.releaseTargetAttachment(
+                                secretArn, attachmentOwner, region));
+            }
+            throw failure;
+        }
+    }
+
+    private static void validateSecretTargetType(String targetType) {
+        if (!Set.of(
+                "AWS::RDS::DBInstance",
+                "AWS::RDS::DBCluster",
+                "AWS::DocDB::DBInstance",
+                "AWS::DocDB::DBCluster").contains(targetType)) {
+            throw new AwsException("ValidationError",
+                    "SecretTargetAttachment TargetType " + targetType
+                            + " is not supported by Floci; supported values are AWS::RDS::DBInstance,"
+                            + " AWS::RDS::DBCluster, AWS::DocDB::DBInstance,"
+                            + " and AWS::DocDB::DBCluster.", 400);
+        }
+    }
+
+    private String canonicalExistingSecretArn(String secretId, String newSecretArn, String region) {
+        if (secretId == null || secretId.isBlank() || secretId.equals(newSecretArn)) {
+            return secretId;
+        }
+        try {
+            return secretsManagerService.describeSecret(secretId, region).getArn();
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private String requireSecretTargetProperty(JsonNode props, String name,
+                                               CloudFormationTemplateEngine engine) {
+        String value = resolveOptional(props, name, engine);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "AWS::SecretsManager::SecretTargetAttachment requires " + name + ".", 400);
+        }
+        return value;
+    }
+
+    private ObjectNode readSecretJsonObject(String secretId, String region) {
+        return tryReadSecretJsonObject(secretId, region)
+                .orElseThrow(CloudFormationResourceProvisioner::invalidSecretTargetValue);
+    }
+
+    private Optional<ObjectNode> tryReadSecretJsonObject(String secretId, String region) {
+        String secretString = secretsManagerService
+                .getSecretValue(secretId, null, null, region)
+                .getSecretString();
+        if (secretString == null) {
+            return Optional.empty();
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(secretString);
+            if (parsed == null || !parsed.isObject()) {
+                return Optional.empty();
+            }
+            return Optional.of(((ObjectNode) parsed).deepCopy());
+        } catch (JsonProcessingException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static AwsException invalidSecretTargetValue() {
+        return new AwsException("ValidationError",
+                "SecretString for AWS::SecretsManager::SecretTargetAttachment must be a JSON object.", 400);
+    }
+
+    private SecretTargetConnection resolveSecretTargetConnection(String targetType, String targetId) {
+        return switch (targetType) {
+            case "AWS::RDS::DBInstance" -> dbInstanceConnection(targetId);
+            case "AWS::RDS::DBCluster" -> dbClusterConnection(targetId);
+            case "AWS::DocDB::DBInstance" -> docDbInstanceConnection(targetId);
+            case "AWS::DocDB::DBCluster" -> docDbClusterConnection(targetId);
+            default -> throw new IllegalStateException("Validated target type was not handled: " + targetType);
+        };
+    }
+
+    private SecretTargetConnection dbInstanceConnection(String targetId) {
+        var instance = rdsService.getDbInstance(targetId);
+        if (instance == null || instance.getEngine() == null || instance.getEndpoint() == null
+                || instance.getEndpoint().address() == null
+                || instance.getEndpoint().address().isBlank()
+                || instance.getEndpoint().port() <= 0
+                || instance.getDbInstanceIdentifier() == null
+                || instance.getDbInstanceIdentifier().isBlank()) {
+            throw incompleteSecretTarget(targetId);
+        }
+        return new SecretTargetConnection(
+                instance.getEngine().name().toLowerCase(Locale.ROOT),
+                instance.getEndpoint().address(),
+                instance.getEndpoint().port(),
+                instance.getDbName(),
+                "dbInstanceIdentifier",
+                instance.getDbInstanceIdentifier());
+    }
+
+    private SecretTargetConnection dbClusterConnection(String targetId) {
+        var cluster = rdsService.getDbCluster(targetId);
+        if (cluster == null || cluster.getEngine() == null || cluster.getEndpoint() == null
+                || cluster.getEndpoint().address() == null
+                || cluster.getEndpoint().address().isBlank()
+                || cluster.getEndpoint().port() <= 0
+                || cluster.getDbClusterIdentifier() == null
+                || cluster.getDbClusterIdentifier().isBlank()) {
+            throw incompleteSecretTarget(targetId);
+        }
+        return new SecretTargetConnection(
+                cluster.getEngine().name().toLowerCase(Locale.ROOT),
+                cluster.getEndpoint().address(),
+                cluster.getEndpoint().port(),
+                cluster.getDatabaseName(),
+                "dbClusterIdentifier",
+                cluster.getDbClusterIdentifier());
+    }
+
+    private SecretTargetConnection docDbInstanceConnection(String targetId) {
+        var instance = docDbService.getDbInstance(targetId);
+        if (instance == null || instance.getEndpoint() == null
+                || instance.getEndpoint().isBlank()
+                || instance.getPort() <= 0
+                || instance.getDbInstanceIdentifier() == null
+                || instance.getDbInstanceIdentifier().isBlank()) {
+            throw incompleteSecretTarget(targetId);
+        }
+        return new SecretTargetConnection(
+                "mongo",
+                instance.getEndpoint(),
+                instance.getPort(),
+                null,
+                "dbInstanceIdentifier",
+                instance.getDbInstanceIdentifier());
+    }
+
+    private SecretTargetConnection docDbClusterConnection(String targetId) {
+        var cluster = docDbService.getDbCluster(targetId);
+        if (cluster == null || cluster.getEndpoint() == null
+                || cluster.getEndpoint().isBlank()
+                || cluster.getPort() <= 0
+                || cluster.getDbClusterIdentifier() == null
+                || cluster.getDbClusterIdentifier().isBlank()) {
+            throw incompleteSecretTarget(targetId);
+        }
+        return new SecretTargetConnection(
+                "mongo",
+                cluster.getEndpoint(),
+                cluster.getPort(),
+                null,
+                "dbClusterIdentifier",
+                cluster.getDbClusterIdentifier());
+    }
+
+    private static void addSecretTargetConnection(ObjectNode secretJson, List<String> managedKeys,
+                                                  SecretTargetConnection connection) {
+        putSecretTargetField(secretJson, managedKeys, "engine", connection.engine());
+        putSecretTargetField(secretJson, managedKeys, "host", connection.host());
+        putSecretTargetField(secretJson, managedKeys, "port", connection.port());
+        putOptionalSecretTargetField(secretJson, managedKeys, "dbname", connection.dbname());
+        putSecretTargetField(secretJson, managedKeys,
+                connection.identifierKey(), connection.identifier());
+    }
+
+    private static AwsException incompleteSecretTarget(String targetId) {
+        return new AwsException("ValidationError",
+                "SecretTargetAttachment target " + targetId + " has incomplete connection information.", 400);
+    }
+
+    private record SecretTargetConnection(String engine, String host, int port, String dbname,
+                                          String identifierKey, String identifier) {
+    }
+
+    private record SecretTargetMutation(String secretId, ObjectNode originalValue, ObjectNode value) {
+    }
+
+    private static void putSecretTargetField(ObjectNode secretJson, List<String> managedKeys,
+                                             String name, String value) {
+        secretJson.put(name, value);
+        managedKeys.add(name);
+    }
+
+    private static void putSecretTargetField(ObjectNode secretJson, List<String> managedKeys,
+                                             String name, int value) {
+        secretJson.put(name, value);
+        managedKeys.add(name);
+    }
+
+    private static void putOptionalSecretTargetField(ObjectNode secretJson, List<String> managedKeys,
+                                                     String name, String value) {
+        if (value != null && !value.isBlank()) {
+            putSecretTargetField(secretJson, managedKeys, name, value);
+        }
+    }
+
+    private void deleteSecretTargetAttachment(StackResource resource, String region) {
+        String attachmentOwner = resource.getAttributes().get(SECRET_TARGET_OWNER_ATTR);
+        if (!secretsManagerService.canManageTargetAttachment(
+                resource.getPhysicalId(), attachmentOwner, region)) {
+            LOG.warnv("Skipping SecretTargetAttachment detach because secret {0}"
+                            + " is owned by a different attachment",
+                    resource.getPhysicalId());
+            return;
+        }
+        detachSecretTarget(resource.getPhysicalId(),
+                resource.getAttributes().get(SECRET_TARGET_MANAGED_KEYS_ATTR), region);
+        secretsManagerService.releaseTargetAttachment(
+                resource.getPhysicalId(), attachmentOwner, region);
+    }
+
+    private void detachSecretTarget(String secretId, String managedKeysAttribute, String region) {
+        SecretTargetMutation mutation = prepareSecretTargetDetach(secretId, managedKeysAttribute, region);
+        if (mutation != null) {
+            putSecretTargetMutation(mutation, region);
+        }
+    }
+
+    private SecretTargetMutation prepareSecretTargetDetach(String secretId,
+                                                           String managedKeysAttribute,
+                                                           String region) {
+        try {
+            Optional<ObjectNode> parsedSecret = tryReadSecretJsonObject(secretId, region);
+            if (parsedSecret.isEmpty()) {
+                LOG.debugv("SecretTargetAttachment current secret value is no longer a JSON object;"
+                        + " treating as already detached: {0}", secretId);
+                return null;
+            }
+            ObjectNode currentSecretJson = parsedSecret.get();
+            ObjectNode detachedSecretJson = currentSecretJson.deepCopy();
+            List<String> managedKeys = managedSecretTargetKeys(managedKeysAttribute);
+            managedKeys.forEach(detachedSecretJson::remove);
+            return detachedSecretJson.equals(currentSecretJson)
+                    ? null
+                    : new SecretTargetMutation(secretId, currentSecretJson, detachedSecretJson);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("SecretTargetAttachment secret already gone, treating as detached: {0}", secretId);
+            return null;
+        }
+    }
+
+    private void putSecretTargetMutation(SecretTargetMutation mutation, String region) {
+        secretsManagerService.putSecretValue(
+                mutation.secretId(), mutation.value().toString(), null, null, region, null);
+    }
+
+    private void attemptSecretTargetCleanup(RuntimeException primaryFailure,
+                                            String description,
+                                            Runnable cleanup) {
+        try {
+            cleanup.run();
+        } catch (RuntimeException cleanupFailure) {
+            primaryFailure.addSuppressed(cleanupFailure);
+            LOG.warnv("SecretTargetAttachment rollback cleanup failed while attempting to {0}: {1}",
+                    description, cleanupFailure.getMessage());
+        }
+    }
+
+    private static List<String> managedSecretTargetKeys(String attribute) {
+        if (attribute == null || attribute.isBlank()) {
+            return SECRET_TARGET_CONNECTION_KEYS;
+        }
+        List<String> keys = Arrays.stream(attribute.split(","))
+                .filter(SECRET_TARGET_CONNECTION_KEYS::contains)
+                .toList();
+        return keys.isEmpty() ? SECRET_TARGET_CONNECTION_KEYS : keys;
     }
 
     /**
@@ -3207,12 +3682,78 @@ public class CloudFormationResourceProvisioner {
         return out;
     }
 
+    /**
+     * Resolves {@code IdentitySource} accepting either the documented array form or a single
+     * scalar string — {@code ApiGatewayV2Service.createAuthorizer}/{@code updateAuthorizer}
+     * already accept both ({@code identitySourceRaw instanceof String}), so the CFN provisioner
+     * should not be stricter than the service it calls.
+     */
+    private List<String> resolveIdentitySource(JsonNode props, String source, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null) {
+            return List.of();
+        }
+        if (resolved.isTextual()) {
+            return List.of(resolved.asText());
+        }
+        if (!resolved.isArray()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        resolved.forEach(v -> values.add(v.asText()));
+        return values;
+    }
+
+    private void provisionApiGatewayV2Authorizer(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                                 String region) {
+        String apiId = resolveOptional(props, "ApiId", engine);
+        Map<String, Object> req = new HashMap<>();
+        req.put("name", resolveOptional(props, "Name", engine));
+        req.put("authorizerType", resolveOptional(props, "AuthorizerType", engine));
+        req.put("identitySource", resolveIdentitySource(props, "IdentitySource", engine));
+        req.put("authorizerUri", resolveOptional(props, "AuthorizerUri", engine));
+        req.put("authorizerPayloadFormatVersion", resolveOptional(props, "AuthorizerPayloadFormatVersion", engine));
+
+        String ttl = resolveOptional(props, "AuthorizerResultTtlInSeconds", engine);
+        if (ttl != null) {
+            req.put("authorizerResultTtlInSeconds", Integer.parseInt(ttl));
+        }
+        String simpleResponses = resolveOptional(props, "EnableSimpleResponses", engine);
+        if (simpleResponses != null) {
+            req.put("enableSimpleResponses", simpleResponses);
+        }
+
+        JsonNode jwtConfigNode = props != null ? props.get("JwtConfiguration") : null;
+        if (jwtConfigNode != null && !jwtConfigNode.isNull()) {
+            Map<String, Object> jwtConfig = new HashMap<>();
+            jwtConfig.put("audience", resolveStringListOrEmpty(jwtConfigNode, "Audience", engine));
+            jwtConfig.put("issuer", resolveOptional(jwtConfigNode, "Issuer", engine));
+            req.put("jwtConfiguration", jwtConfig);
+        }
+
+        Authorizer authorizer;
+        if (r.getPhysicalId() == null) {
+            authorizer = apiGatewayV2Service.createAuthorizer(region, apiId, req);
+        } else {
+            authorizer = apiGatewayV2Service.updateAuthorizer(region, apiId, r.getPhysicalId(), req);
+        }
+        r.setPhysicalId(authorizer.getAuthorizerId());
+        r.getAttributes().put("AuthorizerId", authorizer.getAuthorizerId());
+        // ApiId is needed by delete(StackResource, region) to scope deleteAuthorizer — the
+        // type/physicalId-only delete overload has no apiId to call it with.
+        r.getAttributes().put("ApiId", apiId);
+    }
+
     private void provisionApiGatewayV2Route(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                             String region) {
         String apiId = resolveOptional(props, "ApiId", engine);
         Map<String, Object> req = new HashMap<>();
         req.put("routeKey", resolveOptional(props, "RouteKey", engine));
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
+        req.put("authorizerId", resolveOptional(props, "AuthorizerId", engine));
         req.put("target", resolveOptional(props, "Target", engine));
 
         Route route;

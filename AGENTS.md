@@ -263,6 +263,40 @@ When adding functionality:
 
 ---
 
+## Adding a CloudFormation Resource Type
+
+**Do not add cases to `CloudFormationResourceProvisioner`.** That class is a legacy
+monolith being dismantled; new types go in per-service provisioners under
+`services/cloudformation/provisioners/`.
+
+1. Add the type to the existing `<Service>CfnProvisioner`, or create one:
+   `@ApplicationScoped`, injecting only the service it wraps. CDI discovery via
+   `CloudFormationResourceRegistry` handles registration — no manual wiring, but a
+   missing `@ApplicationScoped` silently means the type is never provisioned.
+2. `resourceTypes()` lists the `AWS::*` types; `provision(resource, props, ctx)`
+   does the work, switching on `resource.getResourceType()` when it serves several.
+3. Set **both** reference mechanisms — they are separate:
+   - `resource.setPhysicalId(...)` backs `Ref`
+   - `resource.getAttributes().put(...)` backs `Fn::GetAtt`, one entry per attribute
+   Omitting an attribute does not fail; `Fn::GetAtt` resolves to the literal
+   `"LogicalId.Attr"`. Source the attribute names from the type's registry schema in
+   `local/aws/cfn-resource-schemas/us-east-1/` (`readOnlyProperties`), and validate
+   `required` from the same file.
+4. **`provision` serves create *and* update.** On `UpdateStack` it is re-invoked with
+   the prior physical id and attributes already populated on the resource. Branch on
+   that instead of creating unconditionally.
+5. Override `delete(...)` when the type has a backing delete; tolerate already-deleted.
+6. Tests: focused unit test mocking one service (`SqsCfnProvisionerTest` is the
+   pattern) plus an integration test asserting the **exact `Fn::GetAtt` keys**. An
+   unmapped type is stubbed as `CREATE_COMPLETE` with a fake ARN, so asserting status
+   alone cannot detect a type that was never wired.
+7. Update the resource-type table in `docs/services/cloudformation.md`.
+
+References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
+(update-in-place and replacement).
+
+---
+
 ## Code Style
 
 - Use constructor injection
@@ -306,8 +340,11 @@ Do not add `Co-Authored-By` trailers for AI tools in commit messages. Keep attri
 ## Release Awareness
 
 - Changes merged into `main` do not automatically imply a stable release
-- Release branches define stable release lines
-- Tags trigger publishing workflows
+- Releases are cut from `main` via the "Release Cut" workflow (`workflow_dispatch`
+  on `.github/workflows/release-cut.yml`), which runs semantic-release: it bumps
+  `pom.xml`, writes `CHANGELOG.md`, commits, tags, and creates the GitHub Release
+- `release/x.y.x` branches are retired for now
+- Tags still trigger the publishing workflows (`release.yml`)
 
 Treat release workflows as critical infrastructure.
 
@@ -342,6 +379,10 @@ Treat release workflows as critical infrastructure.
 - Producing inconsistent URLs or ARNs
 - Testing only with raw HTTP
 - Introducing unnecessary new patterns
+- Adding a CloudFormation type to `CloudFormationResourceProvisioner` instead of a
+  per-service provisioner
+- Setting a CloudFormation resource's physical id but not its `Fn::GetAtt`
+  attributes (they are two separate mechanisms, and the miss is silent)
 
 ---
 

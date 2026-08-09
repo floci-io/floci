@@ -250,6 +250,8 @@ floci:
       enabled: true
     autoscaling:
       enabled: true
+    applicationautoscaling:
+      enabled: true
     elasticbeanstalk:
       enabled: true
     transfer:

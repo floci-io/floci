@@ -44,6 +44,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -510,15 +511,23 @@ public class ApiGatewayExecuteController {
                                      String httpMethod, String requestPath,
                                      String resourcePath, String resourceId, Stage stage, UriInfo uriInfo,
                                      String resolvedApiKey) {
+        // Recover the trailing slash the JAX-RS {proxy} binding strips, so the authorizer sees
+        // the same raw path the Lambda later receives from buildProxyEvent (AWS parity). Path
+        // matching and path-parameter extraction keep using the normalized requestPath.
+        String preservedPath = preserveTrailingSlash(requestPath, uriInfo.getRequestUri().getRawPath());
+
         ObjectNode node = objectMapper.createObjectNode();
         node.put("type", auth.getType());
+        // methodArn keeps the normalized path: it is matched against IAM-style policy resources,
+        // where a stray trailing slash would silently fail wildcards an authorizer already returns.
+        // No AWS behavior was found pinning it either way, so the conservative form wins.
         node.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, requestPath));
         if ("TOKEN".equals(auth.getType())) {
             String headerName = auth.getIdentitySource().replace("method.request.header.", "");
             node.put("authorizationToken", headers.getHeaderString(headerName));
         } else if ("REQUEST".equals(auth.getType())) {
             node.put("resource", resourcePath);
-            node.put("path", requestPath);
+            node.put("path", preservedPath);
             node.put("httpMethod", httpMethod);
             putSingleValueHeaders(node, headers);
             putMultiValueHeaders(node, headers);
@@ -545,7 +554,7 @@ public class ApiGatewayExecuteController {
             ctx.put("apiId", apiId);
             ctx.put("resourceId", resourceId != null ? resourceId : "");
             ctx.put("resourcePath", resourcePath);
-            ctx.put("path", requestPath);
+            ctx.put("path", preservedPath);
             ctx.put("httpMethod", httpMethod);
             ctx.put("stage", stageName);
             ctx.put("requestId", UUID.randomUUID().toString());
@@ -615,9 +624,15 @@ public class ApiGatewayExecuteController {
                                    byte[] body, String requestId,
                                    String principalId, Map<String, Object> authorizerContext,
                                    String resolvedApiKey) {
+        // The JAX-RS {proxy} binding strips a trailing slash, but a trailing slash is
+        // significant in the delivered path (routers treat /x and /x/ as distinct routes).
+        // Recover it from the raw request URI for the event path fields. Resource matching
+        // and path-parameter extraction continue to use the normalized `path`.
+        String requestPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+
         ObjectNode event = objectMapper.createObjectNode();
         event.put("resource", resourcePath);
-        event.put("path", path);
+        event.put("path", requestPath);
         event.put("httpMethod", httpMethod);
 
         putSingleValueHeaders(event, headers);
@@ -625,8 +640,12 @@ public class ApiGatewayExecuteController {
         putQueryStringParameters(event, uriInfo);
         putMultiValueQueryStringParameters(event, uriInfo);
 
+        // pathParameters come from the matcher, which ran on the normalized path, so the greedy
+        // {proxy+} value has no trailing slash on real AWS even when event.path keeps one.
         ObjectNode pathParams = event.putObject("pathParameters");
-        if (proxy != null && !proxy.isEmpty()) pathParams.put("proxy", proxy);
+        if (proxy != null && !proxy.isEmpty()) {
+            pathParams.put("proxy", proxy);
+        }
         extractPathParams(resourcePath, path).forEach(pathParams::put);
 
         // stageVariables: populate from the Stage object (null if no variables configured)
@@ -652,7 +671,7 @@ public class ApiGatewayExecuteController {
         ctx.put("domainPrefix", apiId);
         ctx.put("extendedRequestId", requestId);
         ctx.put("httpMethod", httpMethod);
-        ctx.put("path", path);
+        ctx.put("path", requestPath);
         ctx.put("protocol", "HTTP/1.1");
         ctx.put("requestId", requestId);
         ctx.put("requestTime", requestTime);
@@ -766,7 +785,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private Response buildProxyResponse(InvokeResult result) {
+    Response buildProxyResponse(InvokeResult result) {
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getFunctionError() != null ? 502 : result.getStatusCode()).build();
         }
@@ -793,9 +812,9 @@ public class ApiGatewayExecuteController {
                 String bodyStr = bodyNode.asText();
                 boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
                 byte[] bytes = isBase64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
-                String ct = MediaType.APPLICATION_JSON;
-                JsonNode ctNode = node.path("headers").path("Content-Type");
-                if (!ctNode.isMissingNode() && !ctNode.isNull()) ct = ctNode.asText();
+                String ct = findHeaderIgnoreCase(multiHeaders, "Content-Type")
+                        .or(() -> findHeaderIgnoreCase(respHeaders, "Content-Type"))
+                        .orElse(MediaType.APPLICATION_JSON);
                 builder.entity(bytes).type(ct);
             }
             return builder.build();
@@ -803,6 +822,29 @@ public class ApiGatewayExecuteController {
             LOG.warnv("Failed to parse Lambda response: {0}", e.getMessage());
             return Response.status(502).entity(result.getPayload()).type(MediaType.APPLICATION_JSON).build();
         }
+    }
+
+    /**
+     * HTTP header names are case-insensitive on the wire (RFC 7230 §3.2), and Lambda proxy
+     * integrations commonly return lowercased names (e.g. the AWS Lambda Web Adapter emits
+     * "content-type", not "Content-Type"). A plain JsonNode#path lookup is exact-case and
+     * silently misses those, so Content-Type detection needs to scan case-insensitively.
+     * Handles both the "headers" shape (single string value) and the "multiValueHeaders"
+     * shape (array value, first element wins).
+     */
+    private static Optional<String> findHeaderIgnoreCase(JsonNode headersNode, String name) {
+        if (headersNode == null || !headersNode.isObject()) {
+            return Optional.empty();
+        }
+        var it = headersNode.fields();
+        while (it.hasNext()) {
+            var e = it.next();
+            if (e.getKey().equalsIgnoreCase(name)) {
+                JsonNode value = e.getValue().isArray() ? e.getValue().get(0) : e.getValue();
+                return value == null || value.isNull() ? Optional.empty() : Optional.of(value.asText());
+            }
+        }
+        return Optional.empty();
     }
 
     // ──────────────────────────── AWS (non-proxy) ────────────────────────────
@@ -1212,7 +1254,7 @@ public class ApiGatewayExecuteController {
         }
 
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
-            Response authError = enforceJwtAuthorizer(region, apiId, route, headers);
+            Response authError = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
             if (authError != null) return authError;
         }
 
@@ -1441,7 +1483,8 @@ public class ApiGatewayExecuteController {
     /** Extracts parameter names from a route template; the pattern itself is constant. */
     private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
 
-    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers) {
+    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
+                                          UriInfo uriInfo) {
         Authorizer authorizer;
         try {
             authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
@@ -1451,7 +1494,7 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
-        String token = extractToken(authorizer, headers);
+        String token = extractToken(authorizer, headers, uriInfo);
         if (token == null) {
             return Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
@@ -1763,7 +1806,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private String extractToken(Authorizer authorizer, HttpHeaders headers) {
+    private String extractToken(Authorizer authorizer, HttpHeaders headers, UriInfo uriInfo) {
         List<String> sources = authorizer.getIdentitySource();
         if (sources == null || sources.isEmpty()) {
             // Default: Authorization header
@@ -1774,6 +1817,10 @@ public class ApiGatewayExecuteController {
             if (source.startsWith("$request.header.")) {
                 String headerName = source.substring("$request.header.".length());
                 String value = headers.getHeaderString(headerName);
+                if (value != null) return stripBearer(value);
+            } else if (source.startsWith("$request.querystring.")) {
+                String paramName = source.substring("$request.querystring.".length());
+                String value = uriInfo.getQueryParameters().getFirst(paramName);
                 if (value != null) return stripBearer(value);
             }
         }
@@ -1908,6 +1955,23 @@ public class ApiGatewayExecuteController {
     }
 
     // ──────────────────────────── Path matching ────────────────────────────
+
+    /**
+     * Re-appends a trailing slash that the JAX-RS {@code {proxy}} path-param binding strips.
+     * A trailing slash is significant in the proxy event path (many routers treat {@code /x}
+     * and {@code /x/} as distinct routes), so it is recovered from the raw request URI. The
+     * normalized path is still used for resource matching and path-parameter extraction, which
+     * mirrors AWS routing {@code /x/} to the {@code /x} resource while keeping the slash in the
+     * delivered event. Returns {@code normalizedPath} unchanged for the root path or when the
+     * raw request had no trailing slash.
+     */
+    static String preserveTrailingSlash(String normalizedPath, String rawRequestPath) {
+        if (!"/".equals(normalizedPath) && !normalizedPath.endsWith("/")
+                && rawRequestPath != null && rawRequestPath.endsWith("/")) {
+            return normalizedPath + "/";
+        }
+        return normalizedPath;
+    }
 
     /**
      * Finds all matching resources for {@code requestPath}, sorted by specificity.
