@@ -451,7 +451,18 @@ public class RuntimeApiServer {
     private void tryListen(CompletableFuture<Void> started, Router router, long deadline) {
         if (started.isDone()) return;
         httpServer = vertx.createHttpServer(new HttpServerOptions()
-                .setMaxFormAttributeSize(-1));
+                .setMaxFormAttributeSize(-1)
+                // Real AWS's Runtime/Extensions API is plain HTTP/1.1. Vert.x defaults to
+                // accepting an h2c upgrade, which the JDK HttpClient used in tests and by some
+                // language runtimes opts into unless told otherwise. That multiplexes every
+                // request from one client (e.g. an extension's register + its own /event/next
+                // long-poll) onto a single connection/stream-set, so stop()'s close of that
+                // connection can race a just-flushed response's HTTP/2 stream-completion
+                // bookkeeping instead of tearing down an already-idle connection — see #2180.
+                // Disabling h2c makes the client fall back to a plain HTTP/1.1 request
+                // automatically (no client-side change needed) and matches AWS's actual wire
+                // protocol.
+                .setHttp2ClearTextEnabled(false));
         httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
             if (result.succeeded()) {
                 LOG.infov("RuntimeApiServer started on port {0}", String.valueOf(port));
