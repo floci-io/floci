@@ -216,8 +216,6 @@ public class CloudHsmV2Service {
         if (subnetId == null || subnetId.isEmpty()) {
             // AZ not in the list, use first available subnet
             subnetId = subnetIds.get(0);
-        } else{
-            subnetId = "subnet-" + generateShortId();
         }
         hsm.setSubnetId(subnetId);
         hsm.setEniId("eni-" + generateShortId());
