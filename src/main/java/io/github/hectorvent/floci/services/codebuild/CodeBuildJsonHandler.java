@@ -194,36 +194,43 @@ public class CodeBuildJsonHandler {
     private Response startBuild(JsonNode req, String region, String account) throws Exception {
         String projectName = req.path("projectName").asText(null);
         String buildspecOverride = req.has("buildspecOverride") ? req.path("buildspecOverride").asText(null) : null;
-        ProjectEnvironment envOverride = req.has("environmentVariablesOverride")
+        ProjectEnvironment envOverride = req.has("privilegedModeOverride") || req.has("environmentTypeOverride")
                 ? buildEnvOverride(req) : null;
+        List<Map<String, String>> environmentVariablesOverride = parseEnvironmentVariablesOverride(req);
         ProjectArtifacts artifactsOverride = req.has("artifactsOverride")
                 ? mapper.treeToValue(req.get("artifactsOverride"), ProjectArtifacts.class) : null;
         String sourceVersion = req.has("sourceVersion") ? req.path("sourceVersion").asText(null) : null;
         String sourceTypeOverride = req.has("sourceTypeOverride") ? req.path("sourceTypeOverride").asText(null) : null;
         String sourceLocationOverride = req.has("sourceLocationOverride") ? req.path("sourceLocationOverride").asText(null) : null;
+        List<ProjectSource> secondarySourcesOverride = parseList(req, "secondarySourcesOverride", ProjectSource.class);
         Integer timeout = req.has("timeoutInMinutes") ? req.path("timeoutInMinutes").asInt() : null;
         String imageOverride = req.has("imageOverride") ? req.path("imageOverride").asText(null) : null;
         String computeTypeOverride = req.has("computeTypeOverride") ? req.path("computeTypeOverride").asText(null) : null;
 
         Build build = service.startBuild(region, account, projectName, buildspecOverride,
-                envOverride, artifactsOverride, sourceVersion, sourceTypeOverride,
-                sourceLocationOverride, timeout, imageOverride, computeTypeOverride);
+                envOverride, environmentVariablesOverride, artifactsOverride, sourceVersion,
+                sourceTypeOverride, sourceLocationOverride, secondarySourcesOverride,
+                timeout, imageOverride, computeTypeOverride);
         return Response.ok(Map.of("build", build)).build();
     }
 
-    private ProjectEnvironment buildEnvOverride(JsonNode req) throws Exception {
-        ProjectEnvironment env = new ProjectEnvironment();
-        if (req.has("environmentVariablesOverride")) {
-            List<Map<String, String>> vars = new ArrayList<>();
-            for (JsonNode v : req.get("environmentVariablesOverride")) {
-                Map<String, String> m = new HashMap<>();
-                m.put("name", v.path("name").asText());
-                m.put("value", v.path("value").asText());
-                m.put("type", v.path("type").asText("PLAINTEXT"));
-                vars.add(m);
-            }
-            env.setEnvironmentVariables(vars);
+    private List<Map<String, String>> parseEnvironmentVariablesOverride(JsonNode req) {
+        if (!req.has("environmentVariablesOverride") || req.get("environmentVariablesOverride").isNull()) {
+            return null;
         }
+        List<Map<String, String>> vars = new ArrayList<>();
+        for (JsonNode v : req.get("environmentVariablesOverride")) {
+            Map<String, String> m = new HashMap<>();
+            m.put("name", v.path("name").asText());
+            m.put("value", v.path("value").asText());
+            m.put("type", v.path("type").asText("PLAINTEXT"));
+            vars.add(m);
+        }
+        return vars;
+    }
+
+    private ProjectEnvironment buildEnvOverride(JsonNode req) {
+        ProjectEnvironment env = new ProjectEnvironment();
         if (req.has("imageOverride")) {
             env.setImage(req.path("imageOverride").asText(null));
         }

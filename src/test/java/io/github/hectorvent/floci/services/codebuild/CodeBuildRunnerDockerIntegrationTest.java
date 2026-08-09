@@ -187,6 +187,98 @@ class CodeBuildRunnerDockerIntegrationTest {
         assertEquals("SUCCEEDED", phase(build, "BUILD").get("phaseStatus"));
     }
 
+    @Test
+    void secondarySourcesAreStagedIntoTheirOwnDirectories() throws Exception {
+        String project = "secondary-src-" + Long.toString(System.nanoTime(), 36);
+        createProject(project, BASH_IMAGE);
+        String bucket = "secondary-src-" + Long.toString(System.nanoTime(), 36);
+        given().when().put("/" + bucket).then().statusCode(200);
+        given()
+            .contentType("application/octet-stream")
+            .body(secondarySourceZip())
+        .when()
+            .put("/" + bucket + "/Config.zip")
+        .then()
+            .statusCode(200);
+
+        String buildId = given()
+            .header("X-Amz-Target", "CodeBuild_20161006.StartBuild")
+            .contentType(CONTENT_TYPE)
+            .body("{\"projectName\": \"" + project + "\", \"buildspecOverride\": \""
+                    + jsonEscape("""
+                        version: 0.2
+                        phases:
+                          build:
+                            commands:
+                              - test "$CODEBUILD_SRC_DIR" = "/codebuild/output/src/src"
+                              - test "$CODEBUILD_SRC_DIR_Config" = "/codebuild/output/src-Config/src"
+                              - test "$(cat "$CODEBUILD_SRC_DIR_Config/config/settings.txt")" = "cfg"
+                              - test -x "$CODEBUILD_SRC_DIR_Config/scripts/run.sh"
+                              - "$CODEBUILD_SRC_DIR_Config/scripts/run.sh"
+                        """)
+                    + "\", \"secondarySourcesOverride\": [{\"type\": \"S3\", \"location\": \""
+                    + bucket + "/Config.zip\", \"sourceIdentifier\": \"Config\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("build.id");
+
+        Map<String, Object> build = awaitBuild(buildId);
+
+        assertEquals("SUCCEEDED", build.get("buildStatus"));
+    }
+
+    @Test
+    void missingParameterStoreEnvVarFailsProvisioning() {
+        String project = "param-missing-" + Long.toString(System.nanoTime(), 36);
+        createProject(project, BASH_IMAGE);
+        String buildId = given()
+            .header("X-Amz-Target", "CodeBuild_20161006.StartBuild")
+            .contentType(CONTENT_TYPE)
+            .body("{\"projectName\": \"" + project + "\", \"buildspecOverride\": \""
+                    + jsonEscape("""
+                        version: 0.2
+                        phases:
+                          build:
+                            commands:
+                              - echo never-reached
+                        """)
+                    + "\", \"environmentVariablesOverride\": [{\"name\": \"ACCELERATOR_PIPELINE_VERSION\", "
+                    + "\"value\": \"/floci/does-not-exist\", \"type\": \"PARAMETER_STORE\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("build.id");
+
+        Map<String, Object> build = awaitBuild(buildId);
+
+        assertEquals("FAILED", build.get("buildStatus"));
+        Map<String, Object> provisioning = phase(build, "PROVISIONING");
+        assertEquals("FAILED", provisioning.get("phaseStatus"));
+        Map<String, String> context = firstContext(provisioning);
+        assertTrue(context.get("message").contains("ACCELERATOR_PIPELINE_VERSION"), context.get("message"));
+        assertTrue(context.get("message").contains("/floci/does-not-exist"), context.get("message"));
+    }
+
+    private static byte[] secondarySourceZip() throws Exception {
+        try (var baos = new java.io.ByteArrayOutputStream()) {
+            try (var zos = new org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream(baos)) {
+                var settings = new org.apache.commons.compress.archivers.zip.ZipArchiveEntry("config/settings.txt");
+                zos.putArchiveEntry(settings);
+                zos.write("cfg".getBytes());
+                zos.closeArchiveEntry();
+                var script = new org.apache.commons.compress.archivers.zip.ZipArchiveEntry("scripts/run.sh");
+                script.setUnixMode(0755);
+                zos.putArchiveEntry(script);
+                zos.write("#!/bin/sh\nexit 0\n".getBytes());
+                zos.closeArchiveEntry();
+            }
+            return baos.toByteArray();
+        }
+    }
+
     private void createProject(String name, String image) {
         given()
             .header("X-Amz-Target", "CodeBuild_20161006.CreateProject")

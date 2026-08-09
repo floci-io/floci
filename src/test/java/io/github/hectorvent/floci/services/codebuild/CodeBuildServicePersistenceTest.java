@@ -104,7 +104,7 @@ class CodeBuildServicePersistenceTest {
                 null, null, null, null, null, null, null);
 
         Build startResponse = service.startBuild(REGION, ACCOUNT, "p1", null,
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null);
         assertEquals("IN_PROGRESS", startResponse.getBuildStatus());
         assertEquals(false, startResponse.getBuildComplete());
         assertEquals("SUBMITTED", startResponse.getCurrentPhase());
@@ -116,6 +116,36 @@ class CodeBuildServicePersistenceTest {
         assertEquals("SUBMITTED", retryResponse.getCurrentPhase());
         assertTrue(retryResponse.getBuildNumber() > startResponse.getBuildNumber());
         assertEquals("FAILED", service.getBuild(REGION, retryResponse.getId()).getBuildStatus());
+    }
+
+    @Test
+    void startBuildMergesEnvironmentVariableAndSecondarySourceOverrides() {
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory());
+        ProjectEnvironment environment = new ProjectEnvironment();
+        environment.setEnvironmentVariables(List.of(Map.of("name", "STAGE", "value", "project")));
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                environment, "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+
+        ProjectSource secondary = source("S3");
+        secondary.setLocation("bucket/codepipeline/exec-1/Config.zip");
+        secondary.setSourceIdentifier("Config");
+        Build response = service.startBuild(REGION, ACCOUNT, "p1", null,
+                null, List.of(Map.of("name", "STAGE", "value", "override", "type", "PLAINTEXT")),
+                null, null, null, null, List.of(secondary), null, null, null);
+
+        Build stored = service.getBuild(REGION, response.getId());
+        assertEquals(List.of(
+                Map.of("name", "STAGE", "value", "project"),
+                Map.of("name", "STAGE", "value", "override", "type", "PLAINTEXT")),
+                stored.getEnvironment().getEnvironmentVariables());
+        assertEquals(1, stored.getSecondarySources().size());
+        assertEquals("S3", stored.getSecondarySources().getFirst().getType());
+        assertEquals("bucket/codepipeline/exec-1/Config.zip",
+                stored.getSecondarySources().getFirst().getLocation());
+        assertEquals("Config", stored.getSecondarySources().getFirst().getSourceIdentifier());
+        assertEquals("Config", response.getSecondarySources().getFirst().getSourceIdentifier());
     }
 
     private static ProjectSource source(String type) {

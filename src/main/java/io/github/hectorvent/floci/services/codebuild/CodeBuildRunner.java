@@ -176,6 +176,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                           String buildspecOverride, AtomicBoolean stopFlag) {
         String buildId = build.getId();
         Path workspace = null;
+        Path secondaryRoot = null;
         String containerId = null;
         Closeable logHandle = null;
 
@@ -213,6 +214,12 @@ public class CodeBuildRunner implements ContainerTeardown {
                 return;
             }
 
+            Map<String, Path> secondarySources = Map.of();
+            if (build.getSecondarySources() != null && !build.getSecondarySources().isEmpty()) {
+                secondaryRoot = Files.createTempDirectory("floci-codebuild-secondary-");
+                secondarySources = acquireSecondarySources(build, secondaryRoot);
+            }
+
             ParsedBuildspec buildspec;
             try {
                 buildspec = BuildspecParser.parse(buildspecContent);
@@ -245,7 +252,14 @@ public class CodeBuildRunner implements ContainerTeardown {
             logsMap.put("cloudWatchLogsArn", AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(), "log-group:" + logGroup + ":log-stream:" + logStream).toString());
             build.setLogs(logsMap);
 
-            List<String> envList = buildEnvList(region, build, project, buildspec, logStream);
+            List<String> envList;
+            try {
+                envList = buildEnvList(region, build, project, buildspec, logStream);
+            } catch (AwsException e) {
+                completePhaseWithError(build, "PROVISIONING", "FAILED", e.getMessage());
+                finishFailed(build);
+                return;
+            }
 
             // Keep the container alive so each phase can be run with docker exec.
             // No bind mount needed — source and artifacts are transferred with docker cp.
@@ -276,8 +290,12 @@ public class CodeBuildRunner implements ContainerTeardown {
             // working directory with an explicit, awaited exec (run from "/", which always
             // exists) so the source copy, the phase execs that chdir into it, and the final
             // artifact copy can never race against container startup.
+            StringBuilder workDirs = new StringBuilder("mkdir -p " + containerSrcDir);
+            for (String identifier : secondarySources.keySet()) {
+                workDirs.append(' ').append(secondarySourceDir(identifier));
+            }
             PhaseResult workDirResult = runPhase(containerId, "/", envList,
-                    List.of("mkdir -p " + containerSrcDir), timeoutMinutes, stopFlag);
+                    List.of(workDirs.toString()), timeoutMinutes, stopFlag);
             if (workDirResult.stopped()) { finishStopped(build); return; }
             if (workDirResult.failed()) {
                 throw new IllegalStateException("Could not create build working directory "
@@ -286,6 +304,10 @@ public class CodeBuildRunner implements ContainerTeardown {
 
             // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
             copySourceToContainer(containerId, workspace, containerSrcDir);
+            for (Map.Entry<String, Path> secondary : secondarySources.entrySet()) {
+                copySourceToContainer(containerId, secondary.getValue(),
+                        secondarySourceDir(secondary.getKey()));
+            }
 
             PhaseResult bashProbe = runPhase(containerId, "/", envList,
                     List.of("command -v bash >/dev/null 2>&1"), timeoutMinutes, stopFlag);
@@ -370,6 +392,9 @@ public class CodeBuildRunner implements ContainerTeardown {
             if (workspace != null) {
                 deleteDirectory(workspace);
             }
+            if (secondaryRoot != null) {
+                deleteDirectory(secondaryRoot);
+            }
         }
     }
 
@@ -413,8 +438,43 @@ public class CodeBuildRunner implements ContainerTeardown {
         throw new AwsException("InvalidInputException", "No buildspec found in source or request", 400);
     }
 
-    private List<String> buildEnvList(String region, Build build, Project project,
-                                      ParsedBuildspec buildspec, String logStream) {
+    /** Downloads and extracts each S3 secondary source into its own local directory,
+     *  keyed by source identifier, mirroring the primary source's lenient S3 handling. */
+    private Map<String, Path> acquireSecondarySources(Build build, Path root) throws IOException {
+        Map<String, Path> dirs = new LinkedHashMap<>();
+        for (ProjectSource secondary : build.getSecondarySources()) {
+            String identifier = secondary.getSourceIdentifier();
+            if (identifier == null || identifier.isBlank()) {
+                continue;
+            }
+            Path dir = Files.createDirectories(root.resolve(identifier));
+            dirs.put(identifier, dir);
+            String location = secondary.getLocation();
+            int slash = location != null ? location.indexOf('/') : -1;
+            if (!"S3".equals(secondary.getType()) || slash <= 0) {
+                LOG.warnv("Secondary source {0} of build {1} has no usable S3 location: {2}",
+                        identifier, build.getId(), location);
+                continue;
+            }
+            try {
+                S3Object obj = s3Service.getObject(location.substring(0, slash), location.substring(slash + 1));
+                if (obj != null && obj.getData() != null) {
+                    extractZip(obj.getData(), dir);
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not acquire secondary source {0} from {1}: {2}",
+                        identifier, location, e.getMessage());
+            }
+        }
+        return dirs;
+    }
+
+    static String secondarySourceDir(String sourceIdentifier) {
+        return "/codebuild/output/src-" + sourceIdentifier + "/src";
+    }
+
+    List<String> buildEnvList(String region, Build build, Project project,
+                              ParsedBuildspec buildspec, String logStream) {
         Map<String, String> env = new LinkedHashMap<>();
 
         env.put("CODEBUILD_BUILD_ID", build.getId());
@@ -424,6 +484,14 @@ public class CodeBuildRunner implements ContainerTeardown {
                 ? build.getEnvironment().getImage() : project.getEnvironment().getImage());
         env.put("CODEBUILD_INITIATOR", "user");
         env.put("CODEBUILD_SRC_DIR", "/codebuild/output/src/src");
+        if (build.getSecondarySources() != null) {
+            for (ProjectSource secondary : build.getSecondarySources()) {
+                String identifier = secondary.getSourceIdentifier();
+                if (identifier != null && !identifier.isBlank()) {
+                    env.put("CODEBUILD_SRC_DIR_" + identifier, secondarySourceDir(identifier));
+                }
+            }
+        }
         env.put("CODEBUILD_LOG_PATH", logStream);
         env.put("AWS_DEFAULT_REGION", region);
         env.put("AWS_REGION", region);
@@ -451,25 +519,43 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
         }
 
-        if (project.getEnvironment() != null && project.getEnvironment().getEnvironmentVariables() != null) {
-            for (Map<String, String> v : project.getEnvironment().getEnvironmentVariables()) {
-                String name = v.get("name");
-                String value = v.get("value");
-                if (name != null) { env.put(name, value != null ? value : ""); }
-            }
+        if (project.getEnvironment() != null) {
+            applyEnvironmentVariables(env, project.getEnvironment().getEnvironmentVariables(), region);
         }
 
-        if (build.getEnvironment() != null && build.getEnvironment().getEnvironmentVariables() != null) {
-            for (Map<String, String> v : build.getEnvironment().getEnvironmentVariables()) {
-                String name = v.get("name");
-                String value = v.get("value");
-                if (name != null) { env.put(name, value != null ? value : ""); }
-            }
+        if (build.getEnvironment() != null) {
+            applyEnvironmentVariables(env, build.getEnvironment().getEnvironmentVariables(), region);
         }
 
         List<String> result = new ArrayList<>();
         env.forEach((k, v) -> result.add(k + "=" + (v != null ? v : "")));
         return result;
+    }
+
+    /** Entries typed PARAMETER_STORE carry an SSM parameter name as their value; an
+     *  unresolvable parameter fails the build like real CodeBuild's provisioning error. */
+    private void applyEnvironmentVariables(Map<String, String> env,
+                                           List<Map<String, String>> variables, String region) {
+        if (variables == null) {
+            return;
+        }
+        for (Map<String, String> v : variables) {
+            String name = v.get("name");
+            if (name == null) {
+                continue;
+            }
+            String value = v.get("value") != null ? v.get("value") : "";
+            if ("PARAMETER_STORE".equals(v.get("type"))) {
+                try {
+                    value = ssmService.getParameter(value, region).getValue();
+                } catch (Exception e) {
+                    throw new AwsException("InvalidInputException",
+                            "Could not resolve environment variable " + name
+                                    + " from SSM parameter " + value + ": " + e.getMessage(), 400);
+                }
+            }
+            env.put(name, value);
+        }
     }
 
     private String resolveEndpointUrl() {
