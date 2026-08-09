@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
+import io.github.hectorvent.floci.services.codebuild.model.ProjectSource;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
@@ -58,6 +59,8 @@ public class CodePipelineService {
     private static final String DEFAULT_EXECUTION_MODE = "SUPERSEDED";
     private static final String DEFAULT_PIPELINE_TYPE = "V1";
     private static final long POLL_INTERVAL_MS = 100L;
+    private static final java.util.regex.Pattern VARIABLE_REFERENCE =
+            java.util.regex.Pattern.compile("#\\{([^}]+)\\}");
 
     private final AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
     private final AccountAwareStorageBackend<CodePipelineExecution> executionStore;
@@ -1395,27 +1398,34 @@ public class CodePipelineService {
     private void executeCodeBuild(CodePipelinePipeline pipeline, CodePipelineExecution execution,
                                   JsonNode action, ActionExecution state) throws InterruptedException {
         String projectName = action.path("configuration").path("ProjectName").asText(null);
+        List<Map<String, String>> environmentVariablesOverride = parseActionEnvironmentVariables(
+                execution, action.path("configuration").path("EnvironmentVariables").asText(null));
         String sourceTypeOverride = null;
         String sourceLocationOverride = null;
-        String inputName = action.path("inputArtifacts").path(0).path("name").asText(null);
+        JsonNode inputArtifacts = action.path("inputArtifacts");
+        String inputName = inputArtifacts.path(0).path("name").asText(null);
         byte[] data = inputName != null ? runtimeArtifacts.get(artifactKey(execution, inputName)) : null;
         if (data != null) {
-            String bucket = pipeline.getDeclaration().path("artifactStore").path("location").asText(null);
-            if (bucket == null || bucket.isBlank()) {
-                bucket = "codepipeline-artifacts";
-            }
-            String key = "codepipeline/" + execution.getPipelineExecutionId() + "/" + inputName + ".zip";
-            try {
-                s3Service.createBucket(bucket, execution.getRegion());
-            } catch (AwsException e) {
-                LOG.debugf("Artifact bucket %s already exists: %s", bucket, e.getMessage());
-            }
-            s3Service.putObject(bucket, key, data, "application/zip", Map.of());
             sourceTypeOverride = "S3";
-            sourceLocationOverride = bucket + "/" + key;
+            sourceLocationOverride = uploadRuntimeArtifact(pipeline, execution, inputName, data);
+        }
+        List<ProjectSource> secondarySourcesOverride = new ArrayList<>();
+        for (int i = 1; i < inputArtifacts.size(); i++) {
+            String artifactName = inputArtifacts.path(i).path("name").asText(null);
+            byte[] bytes = artifactName != null
+                    ? runtimeArtifacts.get(artifactKey(execution, artifactName)) : null;
+            if (bytes == null) {
+                continue;
+            }
+            ProjectSource secondary = new ProjectSource();
+            secondary.setType("S3");
+            secondary.setLocation(uploadRuntimeArtifact(pipeline, execution, artifactName, bytes));
+            secondary.setSourceIdentifier(artifactName);
+            secondarySourcesOverride.add(secondary);
         }
         Build build = codeBuildService.startBuild(execution.getRegion(), execution.getAccountId(), projectName,
-                null, null, null, null, null, sourceTypeOverride, sourceLocationOverride, null, null, null, null);
+                null, null, environmentVariablesOverride, null, null, sourceTypeOverride, sourceLocationOverride,
+                secondarySourcesOverride.isEmpty() ? null : secondarySourcesOverride, null, null, null);
         state.setExternalExecutionId(build.getId());
         while (!Boolean.TRUE.equals(build.getBuildComplete())) {
             if (execution.isStopRequested()) {
@@ -1429,6 +1439,71 @@ public class CodePipelineService {
             throw new AwsException("ActionExecutionFailed",
                     "CodeBuild build " + build.getId() + " finished with " + build.getBuildStatus(), 400);
         }
+    }
+
+    private String uploadRuntimeArtifact(CodePipelinePipeline pipeline, CodePipelineExecution execution,
+                                         String artifactName, byte[] data) {
+        String bucket = pipeline.getDeclaration().path("artifactStore").path("location").asText(null);
+        if (bucket == null || bucket.isBlank()) {
+            bucket = "codepipeline-artifacts";
+        }
+        String key = "codepipeline/" + execution.getPipelineExecutionId() + "/" + artifactName + ".zip";
+        try {
+            s3Service.createBucket(bucket, execution.getRegion());
+        } catch (AwsException e) {
+            LOG.debugf("Artifact bucket %s already exists: %s", bucket, e.getMessage());
+        }
+        s3Service.putObject(bucket, key, data, "application/zip", Map.of());
+        return bucket + "/" + key;
+    }
+
+    /**
+     * The action's {@code EnvironmentVariables} configuration is a JSON-encoded array of
+     * {@code {name, value, type}} entries (type defaults to PLAINTEXT). Values may reference
+     * pipeline variables with {@code #{...}}; unresolvable references stay literal.
+     */
+    private List<Map<String, String>> parseActionEnvironmentVariables(CodePipelineExecution execution,
+                                                                     String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        JsonNode parsed;
+        try {
+            parsed = mapper.readTree(json);
+        } catch (Exception e) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "EnvironmentVariables must be a JSON array: " + e.getMessage(), 400);
+        }
+        if (!parsed.isArray()) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "EnvironmentVariables must be a JSON array", 400);
+        }
+        List<Map<String, String>> variables = new ArrayList<>();
+        for (JsonNode variable : parsed) {
+            Map<String, String> entry = new LinkedHashMap<>();
+            entry.put("name", variable.path("name").asText());
+            entry.put("value", resolveActionConfigurationValue(execution, variable.path("value").asText("")));
+            entry.put("type", variable.path("type").asText("PLAINTEXT"));
+            variables.add(entry);
+        }
+        return variables.isEmpty() ? null : variables;
+    }
+
+    private String resolveActionConfigurationValue(CodePipelineExecution execution, String value) {
+        if (value == null || !value.contains("#{")) {
+            return value;
+        }
+        java.util.regex.Matcher matcher = VARIABLE_REFERENCE.matcher(value);
+        StringBuilder resolved = new StringBuilder();
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            String replacement = "codepipeline.PipelineExecutionId".equals(name)
+                    ? execution.getPipelineExecutionId()
+                    : resolveVariableReference(execution, matcher.group());
+            matcher.appendReplacement(resolved, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(resolved);
+        return resolved.toString();
     }
 
     private void executeCodeDeploy(CodePipelineExecution execution, JsonNode action,

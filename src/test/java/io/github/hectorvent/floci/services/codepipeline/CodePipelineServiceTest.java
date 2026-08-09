@@ -2,12 +2,14 @@ package io.github.hectorvent.floci.services.codepipeline;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
+import io.github.hectorvent.floci.services.codebuild.model.ProjectSource;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline;
@@ -47,6 +49,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -203,7 +206,7 @@ class CodePipelineServiceTest {
         build.setBuildComplete(true);
         build.setBuildStatus("SUCCEEDED");
         when(codeBuildService.startBuild(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any())).thenReturn(build);
+                any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(build);
 
         ObjectNode buildStage = mapper.createObjectNode();
         buildStage.put("name", "Build");
@@ -226,9 +229,75 @@ class CodePipelineServiceTest {
         assertEquals("codepipeline/" + executionId + "/SourceOut.zip", keyCaptor.getValue());
         assertArrayEquals("artifact".getBytes(), dataCaptor.getValue());
         verify(codeBuildService).startBuild(eq(REGION), eq(ACCOUNT), eq("proj"),
-                isNull(), isNull(), isNull(), isNull(), eq("S3"),
+                isNull(), isNull(), isNull(), isNull(), isNull(), eq("S3"),
                 eq("bucket/codepipeline/" + executionId + "/SourceOut.zip"),
-                isNull(), isNull(), isNull());
+                isNull(), isNull(), isNull(), isNull());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void codeBuildActionPassesEnvironmentVariablesAndSecondarySources() {
+        Build build = new Build();
+        build.setId("proj:1");
+        build.setBuildComplete(true);
+        build.setBuildStatus("SUCCEEDED");
+        when(codeBuildService.startBuild(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(build);
+
+        ObjectNode source = sourceStage();
+        ((ArrayNode) source.path("actions").path(0).path("outputArtifacts"))
+                .addObject().put("name", "Config");
+
+        ObjectNode buildStage = mapper.createObjectNode();
+        buildStage.put("name", "Build");
+        ObjectNode action = buildStage.putArray("actions").addObject();
+        action.put("name", "BuildApp");
+        action.putObject("actionTypeId")
+                .put("category", "Build").put("owner", "AWS").put("provider", "CodeBuild").put("version", "1");
+        action.putObject("configuration")
+                .put("ProjectName", "proj")
+                .put("EnvironmentVariables",
+                        "[{\"name\":\"ACCELERATOR_STAGE\",\"value\":\"prepare\"},"
+                                + "{\"name\":\"CODEPIPELINE_EXECUTION_ID\","
+                                + "\"value\":\"#{codepipeline.PipelineExecutionId}\",\"type\":\"PLAINTEXT\"},"
+                                + "{\"name\":\"ACCELERATOR_PIPELINE_VERSION\","
+                                + "\"value\":\"/accelerator/version\",\"type\":\"PARAMETER_STORE\"}]");
+        ArrayNode inputArtifacts = action.putArray("inputArtifacts");
+        inputArtifacts.addObject().put("name", "SourceOut");
+        inputArtifacts.addObject().put("name", "Config");
+        action.put("runOrder", 1);
+        createPipeline("multi-input", source, buildStage);
+
+        String executionId = startExecution("multi-input");
+        awaitStatus(executionId, "Succeeded");
+
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(s3Service, times(2)).putObject(eq("bucket"), keyCaptor.capture(),
+                any(byte[].class), eq("application/zip"), eq(Map.of()));
+        assertEquals(List.of(
+                "codepipeline/" + executionId + "/SourceOut.zip",
+                "codepipeline/" + executionId + "/Config.zip"), keyCaptor.getAllValues());
+
+        ArgumentCaptor<List<Map<String, String>>> envCaptor =
+                ArgumentCaptor.forClass((Class) List.class);
+        ArgumentCaptor<List<ProjectSource>> secondaryCaptor =
+                ArgumentCaptor.forClass((Class) List.class);
+        verify(codeBuildService).startBuild(eq(REGION), eq(ACCOUNT), eq("proj"),
+                isNull(), isNull(), envCaptor.capture(), isNull(), isNull(), eq("S3"),
+                eq("bucket/codepipeline/" + executionId + "/SourceOut.zip"),
+                secondaryCaptor.capture(), isNull(), isNull(), isNull());
+
+        assertEquals(List.of(
+                Map.of("name", "ACCELERATOR_STAGE", "value", "prepare", "type", "PLAINTEXT"),
+                Map.of("name", "CODEPIPELINE_EXECUTION_ID", "value", executionId, "type", "PLAINTEXT"),
+                Map.of("name", "ACCELERATOR_PIPELINE_VERSION", "value", "/accelerator/version",
+                        "type", "PARAMETER_STORE")), envCaptor.getValue());
+
+        assertEquals(1, secondaryCaptor.getValue().size());
+        var secondary = secondaryCaptor.getValue().get(0);
+        assertEquals("S3", secondary.getType());
+        assertEquals("bucket/codepipeline/" + executionId + "/Config.zip", secondary.getLocation());
+        assertEquals("Config", secondary.getSourceIdentifier());
     }
 
     @Test
@@ -562,7 +631,7 @@ class CodePipelineServiceTest {
         build.setBuildComplete(true);
         build.setBuildStatus("SUCCEEDED");
         when(codeBuildService.startBuild(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any())).thenReturn(build);
+                any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(build);
         CodePipelineService gitHubService = new CodePipelineService(
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
                 executionStore,
