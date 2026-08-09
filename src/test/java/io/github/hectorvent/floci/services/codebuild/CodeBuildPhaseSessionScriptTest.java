@@ -2,10 +2,14 @@ package io.github.hectorvent.floci.services.codebuild;
 
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -21,12 +25,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class CodeBuildPhaseSessionScriptTest {
 
+    @TempDir
+    Path tempDir;
+
     private record ShellRun(int exitCode, String output, List<String> sentinels) {}
 
     private ShellRun run(String shell, boolean bashMode, List<String> install, List<String> preBuild,
                          List<String> build, List<String> postBuild) throws Exception {
-        String script = CodeBuildRunner.phaseSessionScript(install, preBuild, build, postBuild, bashMode);
-        Process process = new ProcessBuilder(shell, "-c", script).redirectErrorStream(true).start();
+        return run(shell, bashMode, null, Map.of(), install, preBuild, build, postBuild);
+    }
+
+    private ShellRun run(String shell, boolean bashMode, String caCertPath, Map<String, String> extraEnv,
+                         List<String> install, List<String> preBuild,
+                         List<String> build, List<String> postBuild) throws Exception {
+        String script = CodeBuildRunner.phaseSessionScript(install, preBuild, build, postBuild, bashMode, caCertPath);
+        ProcessBuilder pb = new ProcessBuilder(shell, "-c", script).redirectErrorStream(true);
+        // The build host may itself export CA bundle variables (e.g. a corporate proxy);
+        // drop them so only the values a test sets explicitly reach the script.
+        pb.environment().remove("NODE_EXTRA_CA_CERTS");
+        pb.environment().remove("AWS_CA_BUNDLE");
+        pb.environment().putAll(extraEnv);
+        Process process = pb.start();
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         int exitCode = process.waitFor();
         List<String> sentinels = output.lines()
@@ -188,5 +207,88 @@ class CodeBuildPhaseSessionScriptTest {
         assertFalse(run.output().contains("marker-pre-build"), run.output());
         assertFalse(run.output().lines().anyMatch(l -> l.equals("marker-build")), run.output());
         assertTrue(run.output().contains("marker-post-build"), run.output());
+    }
+
+    // ── transparent AWS endpoints — combined CA bundle prelude ────────────────
+
+    @Test
+    void caBundleIsBuiltAndExportedBeforeAnyPhase() throws Exception {
+        Assumptions.assumeTrue(new File("/bin/sh").canExecute(), "A POSIX shell is required for script tests");
+        Path caCert = tempDir.resolve("floci-ca.pem");
+        Files.writeString(caCert, "FLOCI-CA\n");
+
+        ShellRun run = run("sh", false, caCert.toString(), Map.of(),
+                List.of("echo \"install-bundle=$NODE_EXTRA_CA_CERTS\""),
+                List.of("echo \"pre-bundle=$AWS_CA_BUNDLE\""),
+                List.of(),
+                List.of());
+
+        Path bundle = tempDir.resolve("floci-ca.pem.bundle");
+        assertTrue(run.output().contains("install-bundle=" + bundle), run.output());
+        assertTrue(run.output().contains("pre-bundle=" + bundle), run.output());
+        assertEquals("FLOCI-CA\n", Files.readString(bundle));
+    }
+
+    @Test
+    void caBundlePreservesPreExistingNodeExtraCaCertsAndAwsCaBundle() throws Exception {
+        Assumptions.assumeTrue(new File("/bin/sh").canExecute(), "A POSIX shell is required for script tests");
+        Path caCert = tempDir.resolve("floci-ca.pem");
+        Files.writeString(caCert, "FLOCI-CA\n");
+        Path nodeCa = tempDir.resolve("node-extra.pem");
+        Files.writeString(nodeCa, "NODE-USER-CA\n");
+        Path awsCa = tempDir.resolve("aws-bundle.pem");
+        Files.writeString(awsCa, "AWS-USER-CA\n");
+
+        ShellRun run = run("sh", false, caCert.toString(),
+                Map.of("NODE_EXTRA_CA_CERTS", nodeCa.toString(), "AWS_CA_BUNDLE", awsCa.toString()),
+                List.of("cat \"$NODE_EXTRA_CA_CERTS\"", "test \"$NODE_EXTRA_CA_CERTS\" = \"$AWS_CA_BUNDLE\""),
+                List.of(),
+                List.of(),
+                List.of());
+
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ INSTALL 0"), run.output());
+        String bundleContent = Files.readString(tempDir.resolve("floci-ca.pem.bundle"));
+        assertTrue(bundleContent.contains("FLOCI-CA"), bundleContent);
+        assertTrue(bundleContent.contains("NODE-USER-CA"), bundleContent);
+        assertTrue(bundleContent.contains("AWS-USER-CA"), bundleContent);
+        assertTrue(bundleContent.indexOf("FLOCI-CA") < bundleContent.indexOf("NODE-USER-CA"),
+                "Floci's certificate must seed the bundle: " + bundleContent);
+    }
+
+    @Test
+    void caBundleExportsPersistAcrossEntriesAndPhasesInBashMode() throws Exception {
+        Assumptions.assumeTrue(new File("/bin/bash").canExecute() || new File("/usr/bin/bash").canExecute(),
+                "bash is required for driver script tests");
+        Path caCert = tempDir.resolve("floci-ca.pem");
+        Files.writeString(caCert, "FLOCI-CA\n");
+        String bundle = caCert + ".bundle";
+
+        ShellRun run = run("bash", true, caCert.toString(), Map.of(),
+                List.of("test \"$NODE_EXTRA_CA_CERTS\" = \"" + bundle + "\""),
+                List.of("test \"$AWS_CA_BUNDLE\" = \"" + bundle + "\""),
+                List.of("grep -q FLOCI-CA \"$NODE_EXTRA_CA_CERTS\""),
+                List.of("test \"$NODE_EXTRA_CA_CERTS\" = \"" + bundle + "\""));
+
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ INSTALL 0"), run.output());
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ PRE_BUILD 0"), run.output());
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ BUILD 0"), run.output());
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ POST_BUILD 0"), run.output());
+    }
+
+    @Test
+    void missingStagedCertificateLeavesCaEnvironmentUntouched() throws Exception {
+        Assumptions.assumeTrue(new File("/bin/sh").canExecute(), "A POSIX shell is required for script tests");
+        Path nodeCa = tempDir.resolve("node-extra.pem");
+        Files.writeString(nodeCa, "NODE-USER-CA\n");
+
+        ShellRun run = run("sh", false, tempDir.resolve("absent.pem").toString(),
+                Map.of("NODE_EXTRA_CA_CERTS", nodeCa.toString()),
+                List.of("test \"$NODE_EXTRA_CA_CERTS\" = \"" + nodeCa + "\"", "test -z \"${AWS_CA_BUNDLE:-}\""),
+                List.of(),
+                List.of(),
+                List.of());
+
+        assertTrue(run.sentinels().contains("___FLOCI_PHASE_END___ INSTALL 0"), run.output());
+        assertFalse(Files.exists(tempDir.resolve("absent.pem.bundle")));
     }
 }

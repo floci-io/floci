@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -70,6 +71,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private static final String PHASE_START_SENTINEL = "___FLOCI_PHASE_START___";
     private static final String PHASE_END_SENTINEL = "___FLOCI_PHASE_END___";
     private static final List<String> SHELL_PHASES = List.of("INSTALL", "PRE_BUILD", "BUILD", "POST_BUILD");
+    static final String CONTAINER_CA_CERT_PATH = "/tmp/floci-ca.pem";
 
     // Wrapper for the bash driver: each command entry runs in its own child shell
     // that first restores the variable and cwd snapshot of the previous entry, sources
@@ -94,6 +96,28 @@ public class CodeBuildRunner implements ContainerTeardown {
             exit "$___floci_entry_rc"
             ___FLOCI_WRAPPER_EOF___
             """;
+
+    // Trust prelude for transparent AWS endpoints: seeds a combined CA bundle with
+    // Floci's staged certificate, appends the files referenced by any pre-existing
+    // NODE_EXTRA_CA_CERTS / AWS_CA_BUNDLE (images that ship their own egress CAs
+    // keep working — combined, never replaced), then exports both variables at the
+    // bundle for the whole session. POSIX sh compatible so the bash driver and the
+    // sh fallback share it; a no-op when the certificate was not staged.
+    static String caBundlePrelude(String caCertPath) {
+        return """
+                if [ -r "%1$s" ]; then
+                ___FLOCI_CA_BUNDLE="%1$s.bundle"
+                cat "%1$s" > "$___FLOCI_CA_BUNDLE"
+                for ___floci_extra_ca in "${NODE_EXTRA_CA_CERTS:-}" "${AWS_CA_BUNDLE:-}"; do
+                if [ -n "$___floci_extra_ca" ] && [ -r "$___floci_extra_ca" ]; then
+                cat "$___floci_extra_ca" >> "$___FLOCI_CA_BUNDLE"
+                fi
+                done
+                export NODE_EXTRA_CA_CERTS="$___FLOCI_CA_BUNDLE"
+                export AWS_CA_BUNDLE="$___FLOCI_CA_BUNDLE"
+                fi
+                """.formatted(caCertPath);
+    }
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -311,6 +335,10 @@ public class CodeBuildRunner implements ContainerTeardown {
             for (Map.Entry<String, Path> secondary : secondarySources.entrySet()) {
                 copySourceToContainer(containerId, secondary.getValue(),
                         secondarySourceDir(secondary.getKey()));
+            }
+
+            if (spoofedEndpointTrustEnabled()) {
+                stageCaCertificate(containerId);
             }
 
             PhaseResult bashProbe = runPhase(containerId, "/", envList,
@@ -600,6 +628,45 @@ public class CodeBuildRunner implements ContainerTeardown {
                 : "public.ecr.aws/codebuild/amazonlinux-x86_64-standard:6.0";
     }
 
+    private boolean spoofedEndpointTrustEnabled() {
+        return config.dns().spoofAwsEndpoints() && config.tls().enabled();
+    }
+
+    // Stages Floci's TLS certificate PEM into the container so the phase-session
+    // prelude can build a combined CA bundle before any buildspec phase runs —
+    // builds then trust the spoofed https://*.amazonaws.com endpoints Floci serves.
+    private void stageCaCertificate(String containerId) {
+        Path certPath = config.tls().certPath()
+                .filter(p -> !p.isBlank())
+                .map(Path::of)
+                .orElseGet(() -> TlsConfigSource.selfSignedCertPath(config.storage().persistentPath()));
+        try {
+            if (!Files.isReadable(certPath)) {
+                LOG.warnv("Floci TLS certificate {0} is not readable; build containers will not trust spoofed AWS endpoints",
+                        certPath);
+                return;
+            }
+            byte[] pem = Files.readAllBytes(certPath);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = newTarStream(bos)) {
+                TarArchiveEntry entry = new TarArchiveEntry(
+                        CONTAINER_CA_CERT_PATH.substring(CONTAINER_CA_CERT_PATH.lastIndexOf('/') + 1));
+                entry.setSize(pem.length);
+                entry.setMode(0644);
+                tar.putArchiveEntry(entry);
+                tar.write(pem);
+                tar.closeArchiveEntry();
+            }
+            dockerClient.copyArchiveToContainerCmd(containerId)
+                    .withRemotePath("/tmp")
+                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
+                    .exec();
+        } catch (Exception e) {
+            LOG.warnv("Could not stage Floci CA certificate into container {0}: {1}",
+                    containerId, e.getMessage());
+        }
+    }
+
     // Copies files from the local workspace into the container's working directory.
     // Skips silently when the workspace is empty (e.g. NO_SOURCE builds).
     private void copySourceToContainer(String containerId, Path sourceDir, String remotePath) {
@@ -785,8 +852,11 @@ public class CodeBuildRunner implements ContainerTeardown {
     // previous Java-side decisions. Sentinel lines report each phase's outcome.
     static String phaseSessionScript(List<String> installCommands, List<String> preBuildCommands,
                                      List<String> buildCommands, List<String> postBuildCommands,
-                                     boolean bashAvailable) {
+                                     boolean bashAvailable, String caCertPath) {
         StringBuilder script = new StringBuilder();
+        if (caCertPath != null && !caCertPath.isBlank()) {
+            script.append(caBundlePrelude(caCertPath));
+        }
         if (bashAvailable) {
             script.append(BASH_DRIVER_PRELUDE);
         }
@@ -837,7 +907,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                                         ParsedBuildspec buildspec, Build build, boolean bashAvailable,
                                         int timeoutMinutes, AtomicBoolean stopFlag) {
         String script = phaseSessionScript(buildspec.installCommands(), buildspec.preBuildCommands(),
-                buildspec.buildCommands(), buildspec.postBuildCommands(), bashAvailable);
+                buildspec.buildCommands(), buildspec.postBuildCommands(), bashAvailable,
+                spoofedEndpointTrustEnabled() ? CONTAINER_CA_CERT_PATH : null);
         String[] cmd = {bashAvailable ? "bash" : "sh", "-c", script};
         PhaseSession session = new PhaseSession(build);
 
