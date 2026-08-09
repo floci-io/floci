@@ -401,7 +401,7 @@ public class ApiGatewayExecuteController {
         try {
             InvokeResult result = lambdaService.invoke(region, functionName, eventJson.getBytes(),
                     InvocationType.RequestResponse);
-            return buildProxyResponse(result);
+            return buildProxyResponse(result, false);
         } catch (AwsException e) {
             if (e.getHttpStatus() == 404) {
                 return Response.status(404)
@@ -839,7 +839,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    Response buildProxyResponse(InvokeResult result) {
+    Response buildProxyResponse(InvokeResult result, boolean httpApiV2) {
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getFunctionError() != null ? 502 : result.getStatusCode()).build();
         }
@@ -859,6 +859,12 @@ public class ApiGatewayExecuteController {
                 multiHeaders.fields().forEachRemaining(e -> {
                     if (e.getValue().isArray()) e.getValue().forEach(v -> builder.header(e.getKey(), v.asText()));
                 });
+            }
+            if (httpApiV2) {
+                JsonNode cookies = node.get("cookies");
+                if (cookies != null && cookies.isArray()) {
+                    cookies.forEach(cookie -> builder.header(HttpHeaders.SET_COOKIE, cookie.asText()));
+                }
             }
 
             JsonNode bodyNode = node.get("body");
@@ -1419,7 +1425,7 @@ public class ApiGatewayExecuteController {
         try {
             InvokeResult result = lambdaService.invoke(region, functionName,
                     eventJson.getBytes(), InvocationType.RequestResponse);
-            return buildProxyResponse(result);
+            return buildProxyResponse(result, true);
         } catch (AwsException e) {
             if (e.getHttpStatus() == 404) {
                 return Response.status(404)
