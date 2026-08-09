@@ -2418,6 +2418,41 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
+    public void replaceRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
+        if (destinationCidrBlock == null || destinationCidrBlock.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must include DestinationCidrBlock; routes are matched on their IPv4 destination.", 400);
+        }
+        // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
+        // emulator cannot model (transit gateway, network interface, peering connection, ...) from
+        // silently clearing the route and reporting success.
+        boolean hasGateway = gatewayId != null && !gatewayId.isBlank();
+        boolean hasNatGateway = natGatewayId != null && !natGatewayId.isBlank();
+        if (hasGateway == hasNatGateway) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ReplaceRoute takes exactly one target, and only GatewayId or NatGatewayId is supported.", 400);
+        }
+
+        ensureDefaultResources(region);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<Route> next = new ArrayList<>(current.getRoutes());
+            Route existing = next.stream()
+                    .filter(r -> destinationCidrBlock.equals(r.getDestinationCidrBlock()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("InvalidRoute.NotFound",
+                            "The route identified by " + destinationCidrBlock + " does not exist", 400));
+
+            // The target the request does not name is cleared rather than carried over from the
+            // route being replaced.
+            Route replacement = new Route(destinationCidrBlock, hasGateway ? gatewayId : null, existing.getOrigin());
+            replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
+            next.set(next.indexOf(existing), replacement);
+            current.setRoutes(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
+    }
+
     public void deleteRoute(String region, String routeTableId, String destinationCidrBlock) {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {

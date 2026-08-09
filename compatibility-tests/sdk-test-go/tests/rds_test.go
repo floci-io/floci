@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
+	"github.com/aws/aws-sdk-go-v2/service/rds/types"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,7 +107,9 @@ func TestRDSInstance(t *testing.T) {
 		assert.Equal(t, 1, result)
 	})
 
-	// Fix #567: deleting an instance must remove it from the describe list.
+	// Fix #567: deleting an instance must remove it from the describe list. Real AWS
+	// faults DBInstanceNotFound when describing a deleted instance by identifier —
+	// this is what lets the DBInstanceDeleted waiter complete.
 	t.Run("DeleteDBInstance", func(t *testing.T) {
 		_, err := svc.DeleteDBInstance(ctx, &rds.DeleteDBInstanceInput{
 			DBInstanceIdentifier: aws.String(instanceId),
@@ -114,11 +117,12 @@ func TestRDSInstance(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		out, err := svc.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
+		_, err = svc.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
 			DBInstanceIdentifier: aws.String(instanceId),
 		})
-		require.NoError(t, err)
-		assert.Empty(t, out.DBInstances, "deleted instance must not appear in describe")
+		var notFound *types.DBInstanceNotFoundFault
+		require.ErrorAs(t, err, &notFound,
+			"describe of a deleted instance must fault DBInstanceNotFound")
 	})
 }
 
@@ -167,7 +171,9 @@ func TestRDSCluster(t *testing.T) {
 			"DBCluster.DBSubnetGroup must be a non-nil string (shape: String in AWS service model)")
 	})
 
-	// Fix #567: deleting a cluster must remove it from the describe list.
+	// Fix #567: deleting a cluster must remove it from the describe list. Real AWS
+	// faults DBClusterNotFoundFault when describing a deleted cluster by identifier —
+	// this is what lets the DBClusterDeleted waiter complete.
 	t.Run("DeleteDBCluster", func(t *testing.T) {
 		_, err := svc.DeleteDBCluster(ctx, &rds.DeleteDBClusterInput{
 			DBClusterIdentifier: aws.String(clusterId),
@@ -175,11 +181,12 @@ func TestRDSCluster(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		out, err := svc.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{
+		_, err = svc.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{
 			DBClusterIdentifier: aws.String(clusterId),
 		})
-		require.NoError(t, err)
-		assert.Empty(t, out.DBClusters, "deleted cluster must not appear in describe")
+		var notFound *types.DBClusterNotFoundFault
+		require.ErrorAs(t, err, &notFound,
+			"describe of a deleted cluster must fault DBClusterNotFoundFault")
 	})
 }
 

@@ -21,6 +21,8 @@ public class EcsServiceModel {
     private int pendingCount;
     private String status;
     private Instant createdAt;
+    /** When the current deployment began: service creation, or the last task-definition change. */
+    private Instant lastDeploymentAt;
     private String namespace;
     private String deploymentController;
     private Map<String, String> tags = new HashMap<>();
@@ -56,6 +58,8 @@ public class EcsServiceModel {
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    public Instant getLastDeploymentAt() { return lastDeploymentAt; }
+    public void setLastDeploymentAt(Instant lastDeploymentAt) { this.lastDeploymentAt = lastDeploymentAt; }
 
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }

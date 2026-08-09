@@ -156,7 +156,7 @@ public class AwsQueryController {
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",
             "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
-            "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
+            "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "ReplaceRoute", "DeleteRoute",
             "CreateNetworkAcl", "DescribeNetworkAcls", "DeleteNetworkAcl",
             "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
             "ReplaceNetworkAclAssociation",
@@ -395,6 +395,9 @@ public class AwsQueryController {
             "CreateTemplate", "UpdateTemplate", "GetTemplate", "DeleteTemplate",
             "ListTemplates", "SendTemplatedEmail", "SendBulkTemplatedEmail",
             "TestRenderTemplate",
+            "CreateCustomVerificationEmailTemplate", "GetCustomVerificationEmailTemplate",
+            "ListCustomVerificationEmailTemplates", "UpdateCustomVerificationEmailTemplate",
+            "DeleteCustomVerificationEmailTemplate",
             "CreateConfigurationSet", "DescribeConfigurationSet",
             "ListConfigurationSets", "DeleteConfigurationSet",
             "CreateConfigurationSetEventDestination",
@@ -405,7 +408,9 @@ public class AwsQueryController {
             "UpdateConfigurationSetTrackingOptions",
             "DeleteConfigurationSetTrackingOptions",
             "UpdateConfigurationSetReputationMetricsEnabled",
-            "PutConfigurationSetDeliveryOptions"
+            "PutConfigurationSetDeliveryOptions",
+            "CreateReceiptRuleSet", "DescribeReceiptRuleSet", "ListReceiptRuleSets",
+            "DeleteReceiptRuleSet", "SetActiveReceiptRuleSet", "DescribeActiveReceiptRuleSet"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(

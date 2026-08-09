@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsT
 import io.github.hectorvent.floci.services.bcmdataexports.BcmDataExportsJsonHandler;
 import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailJsonHandler;
+import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAutoScalingJsonHandler;
 import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
@@ -242,6 +243,7 @@ public class AwsJson11Controller {
                 case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
                 case "config" -> configServiceJsonHandler.handle(action, request, region);
                 case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
+                case "application-autoscaling" -> applicationAutoScalingJsonHandler.handle(action, request, region);
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);

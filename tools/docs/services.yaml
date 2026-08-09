@@ -14,6 +14,10 @@ services:
     doc: docs/services/acm.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/acm/AcmJsonHandler.java, mode: switch }
+  - service: applicationautoscaling
+    doc: docs/services/applicationautoscaling.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/applicationautoscaling/ApplicationAutoScalingJsonHandler.java, mode: switch }
   - service: athena
     doc: docs/services/athena.md
     sources:
