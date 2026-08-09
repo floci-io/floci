@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +46,7 @@ class CloudFormationServiceRollbackTest {
         service = new CloudFormationService(
                 provisioner,
                 mock(S3Service.class),
+                mock(SsmService.class),
                 new ObjectMapper(),
                 config,
                 mock(RegionResolver.class),
