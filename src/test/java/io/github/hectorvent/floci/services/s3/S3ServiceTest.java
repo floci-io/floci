@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.services.s3.model.WebsiteConfiguration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -618,5 +619,138 @@ class S3ServiceTest {
         // Retrieve using the same literal key (S3 keys are opaque strings)
         S3Object got = s3Service.getObject("test-bucket", "docs/../file.txt");
         assertArrayEquals(data, got.getData());
+    }
+
+    // =========================================================================
+    // Website request resolution
+    //
+    // The HTTP rendering of these outcomes is covered end-to-end by
+    // S3WebsiteIntegrationTest; these pin the policy itself, with no HTTP layer.
+    // =========================================================================
+
+    private static final S3Service.RequestAuthorization UNSIGNED =
+            new S3Service.RequestAuthorization(false, null);
+
+    private void websiteBucket(String index, String errorDoc) {
+        s3Service.createBucket("site", "us-east-1");
+        s3Service.putBucketWebsite("site", new WebsiteConfiguration(index, errorDoc));
+    }
+
+    @Test
+    void resolveWebsiteRequestServesIndexForDirectoryRequest() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "docs", true, UNSIGNED);
+
+        var serve = assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution);
+        assertEquals("docs/index.html", serve.key());
+    }
+
+    @Test
+    void resolveWebsiteRequestServesRootIndexWhenKeyIsEmpty() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "index.html", "root".getBytes(), "text/html", null);
+
+        // The site root is a directory request even though the caller saw no trailing slash.
+        var resolution = s3Service.resolveWebsiteRequest("site", "", false, UNSIGNED);
+
+        assertEquals("index.html",
+                assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution).key());
+    }
+
+    @Test
+    void resolveWebsiteRequestRedirectsFolderWithoutTrailingSlash() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
+
+        // No trailing slash, no object at "docs", but an index lives beneath it.
+        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+
+        assertInstanceOf(S3Service.WebsiteResolution.RedirectToDirectory.class, resolution);
+    }
+
+    @Test
+    void resolveWebsiteRequestPrefersExactObjectOverFolderRedirect() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "docs", "exact".getBytes(), "text/plain", null);
+        s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
+
+        // An exact object hit is served by the normal object path, not redirected.
+        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+
+        assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
+    }
+
+    @Test
+    void resolveWebsiteRequestFallsBackToErrorDocumentWhenIndexMissing() {
+        websiteBucket("index.html", "error.html");
+        s3Service.putObject("site", "error.html", "oops".getBytes(), "text/html", null);
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+
+        var err = assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class, resolution);
+        assertEquals(404, err.status());
+        assertArrayEquals("oops".getBytes(), err.object().getData());
+    }
+
+    @Test
+    void resolveWebsiteRequestFallsBackToDefaultErrorWhenNoErrorDocumentConfigured() {
+        websiteBucket("index.html", null);
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+
+        assertEquals(404,
+                assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
+    }
+
+    @Test
+    void resolveWebsiteRequestFallsBackToDefaultErrorWhenErrorDocumentItselfMissing() {
+        // Configured but never uploaded: S3 serves its built-in page rather than 500-ing.
+        websiteBucket("index.html", "error.html");
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+
+        assertEquals(404,
+                assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
+    }
+
+    @Test
+    void resolveWebsiteRequestIsNotAWebsiteWithoutConfiguration() {
+        s3Service.createBucket("plain", "us-east-1");
+
+        var resolution = s3Service.resolveWebsiteRequest("plain", "any", true, UNSIGNED);
+
+        assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
+    }
+
+    @Test
+    void resolveWebsiteRequestPropagatesRealBucketErrors() {
+        // A missing bucket must surface as NoSuchBucket, not be masked as "not a website".
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.resolveWebsiteRequest("no-such-bucket", "any", true, UNSIGNED));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+    }
+
+    @Test
+    void resolveWebsiteErrorReturnsNotAWebsiteWithoutConfiguration() {
+        s3Service.createBucket("plain", "us-east-1");
+
+        assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class,
+                s3Service.resolveWebsiteError("plain", UNSIGNED, 404));
+    }
+
+    @Test
+    void resolveWebsiteErrorMapsForbiddenToItsOwnStatus() {
+        websiteBucket("index.html", "error.html");
+        s3Service.putObject("site", "error.html", "denied".getBytes(), "text/html", null);
+
+        // 403 keeps its status; everything else collapses to 404, matching S3.
+        assertEquals(403,
+                assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class,
+                        s3Service.resolveWebsiteError("site", UNSIGNED, 403)).status());
+        assertEquals(404,
+                assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class,
+                        s3Service.resolveWebsiteError("site", UNSIGNED, 500)).status());
     }
 }

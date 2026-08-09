@@ -1221,6 +1221,133 @@ public class S3Service implements Resettable {
         LOG.infov("Deleted website configuration for bucket: {0}", bucketName);
     }
 
+    /**
+     * What a website-endpoint request resolves to. The service decides <em>what</em> to serve;
+     * the controller decides how to render it as HTTP. Keeping the decision here means the policy
+     * is unit-testable without standing up the HTTP layer.
+     */
+    public sealed interface WebsiteResolution {
+
+        /** Serve {@code object} (already read and authorized) as the response body. */
+        record ServeObject(String key, S3Object object) implements WebsiteResolution {}
+
+        /**
+         * The request names a "folder" that only exists as a prefix with an index document
+         * beneath it: redirect to the slash-terminated form so the page's relative asset URLs
+         * resolve against the right base. The target is built by the caller, which is the only
+         * layer that knows the raw request path.
+         */
+        record RedirectToDirectory() implements WebsiteResolution {}
+
+        /** Serve the bucket's custom error document with {@code status}. */
+        record ErrorDocument(S3Object object, int status) implements WebsiteResolution {}
+
+        /** No usable custom error document: render S3's built-in error page with {@code status}. */
+        record DefaultError(int status) implements WebsiteResolution {}
+
+        /** Not a website request — fall through to the normal object path. */
+        record NotAWebsite() implements WebsiteResolution {}
+    }
+
+    /**
+     * Resolve a request against a bucket's website configuration.
+     * <p>
+     * {@code directoryRequest} is the caller's answer to "did the client ask for a directory?" —
+     * the routing layer strips the trailing slash from the object key, so only the caller can see
+     * the slash that distinguishes {@code /docs/} (serve {@code docs/index.html}) from
+     * {@code /docs} (redirect to {@code /docs/}). The site root is always a directory request.
+     * <p>
+     * Returns {@link WebsiteResolution.NotAWebsite} when the request should be served by the
+     * normal object path — an exact object hit, or a bucket with no website configuration. The
+     * index read is authorized (a no-op unless S3 auth enforcement is enabled), matching the
+     * object-serving path.
+     */
+    public WebsiteResolution resolveWebsiteRequest(String bucket, String key, boolean directoryRequest,
+                                                   RequestAuthorization authorization) {
+        WebsiteConfiguration cfg;
+        try {
+            cfg = getBucketWebsite(bucket);
+        } catch (AwsException e) {
+            // Only "no website configuration" means fall through to normal handling; a real error
+            // (e.g. NoSuchBucket) must propagate rather than be masked as "not a website".
+            if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return new WebsiteResolution.NotAWebsite();
+        }
+        String index = cfg.getIndexDocument();
+        if (index == null) {
+            return new WebsiteResolution.NotAWebsite();
+        }
+        boolean directory = key.isEmpty() || directoryRequest;
+        String prefix = key.endsWith("/") ? key.substring(0, key.length() - 1) : key;
+
+        if (directory) {
+            String indexKey = prefix.isEmpty() ? index : prefix + "/" + index;
+            try {
+                authorizeGetObject(bucket, indexKey, null, authorization);
+                return new WebsiteResolution.ServeObject(indexKey, headObject(bucket, indexKey, null));
+            } catch (AwsException e) {
+                if (!isWebsiteErrorDocumentTrigger(e)) {
+                    throw e;
+                }
+                return resolveErrorDocument(bucket, cfg, authorization, e.getHttpStatus());
+            }
+        }
+        // Not slash-terminated: an exact object is served by the normal path; a prefix that exists
+        // only as a "folder" (an index document lives beneath it) redirects to the slash-terminated
+        // form, matching real S3.
+        if (!objectExists(bucket, prefix) && objectExists(bucket, prefix + "/" + index)) {
+            return new WebsiteResolution.RedirectToDirectory();
+        }
+        return new WebsiteResolution.NotAWebsite();
+    }
+
+    /**
+     * Resolve the error response for a website request that already failed, so a website endpoint
+     * answers with the bucket's error document rather than S3's REST XML.
+     * <p>
+     * Returns {@link WebsiteResolution.NotAWebsite} when the bucket has no website configuration.
+     * Any other failure propagates, so the caller renders the real error instead of hiding it
+     * behind an error document.
+     */
+    public WebsiteResolution resolveWebsiteError(String bucket, RequestAuthorization authorization, int status) {
+        try {
+            return resolveErrorDocument(bucket, getBucketWebsite(bucket), authorization, status);
+        } catch (AwsException e) {
+            if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return new WebsiteResolution.NotAWebsite();
+        }
+    }
+
+    private WebsiteResolution resolveErrorDocument(String bucket, WebsiteConfiguration cfg,
+                                                   RequestAuthorization authorization, int status) {
+        int responseStatus = status == 403 ? 403 : 404;
+        if (cfg.getErrorDocument() == null) {
+            return new WebsiteResolution.DefaultError(responseStatus);
+        }
+        try {
+            authorizeGetObject(bucket, cfg.getErrorDocument(), null, authorization);
+            return new WebsiteResolution.ErrorDocument(getObject(bucket, cfg.getErrorDocument()), responseStatus);
+        } catch (AwsException e) {
+            if (!isWebsiteErrorDocumentTrigger(e)) {
+                throw e;
+            }
+            return new WebsiteResolution.DefaultError(responseStatus);
+        }
+    }
+
+    /**
+     * Whether a failure should be answered with the bucket's website error document rather than
+     * S3's REST XML error. Callers use this to decide whether the website error path is worth
+     * attempting at all.
+     */
+    public static boolean isWebsiteErrorDocumentTrigger(AwsException e) {
+        return "NoSuchKey".equals(e.getErrorCode()) || "AccessDenied".equals(e.getErrorCode());
+    }
+
     public void deleteBucketTagging(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
