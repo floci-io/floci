@@ -1,0 +1,225 @@
+package io.github.hectorvent.floci.services.controltower;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.controltower.model.EnabledBaseline;
+import io.github.hectorvent.floci.services.controltower.model.LandingZone;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ControlTowerServiceTest {
+
+    private static final String ACCOUNT = "000000000101";
+    private static final String REGION = "us-east-1";
+    private static final String SEEDED_ARN =
+            "arn:aws:controltower:us-east-1:000000000101:landingzone/FLOCISEEDEDLZ1";
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ControlTowerService service =
+            new ControlTowerService(new InMemoryStorage<>(), new InMemoryStorage<>());
+
+    @Test
+    void listLandingZonesAlwaysReturnsExactlyOneSeededLandingZone() {
+        List<LandingZone> first = service.listLandingZones(ACCOUNT, REGION);
+        assertEquals(1, first.size());
+        assertEquals(SEEDED_ARN, first.get(0).getArn());
+
+        List<LandingZone> second = service.listLandingZones(ACCOUNT, REGION);
+        assertEquals(1, second.size());
+        assertEquals(SEEDED_ARN, second.get(0).getArn());
+    }
+
+    @Test
+    void seededLandingZoneCarriesPinnedVersionAndInSyncDrift() {
+        LandingZone seeded = service.getOrSeedLandingZone(ACCOUNT, REGION);
+        assertEquals("4.0", seeded.getVersion());
+        assertEquals("4.0", seeded.getLatestAvailableVersion());
+        assertEquals("ACTIVE", seeded.getStatus());
+        assertEquals("IN_SYNC", seeded.getDriftStatus());
+        assertNull(seeded.getRemediationTypes());
+    }
+
+    @Test
+    void seededManifestContainsEveryKeyLzaDereferences() {
+        JsonNode manifest = service.getOrSeedLandingZone(ACCOUNT, REGION).getManifest();
+        assertTrue(manifest.path("securityRoles").path("enabled").asBoolean(false));
+        assertTrue(manifest.path("accessManagement").path("enabled").asBoolean(false));
+        assertEquals(REGION, manifest.path("governedRegions").get(0).asText());
+        assertTrue(manifest.has("centralizedLogging"));
+        assertTrue(manifest.has("config"));
+        assertEquals("Security", manifest.path("organizationStructure").path("security").path("name").asText());
+    }
+
+    @Test
+    void updateLandingZoneStoresManifestVersionAndRemediationTypesAndReturnsOperationId() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {
+                  "version": "4.0",
+                  "landingZoneIdentifier": "%s",
+                  "remediationTypes": ["INHERITANCE_DRIFT"],
+                  "manifest": {
+                    "governedRegions": ["us-east-1"],
+                    "centralizedLogging": {"configurations": {"loggingBucket": {"retentionDays": 90}}},
+                    "securityRoles": {"enabled": true, "accountId": "000000000101"},
+                    "accessManagement": {"enabled": true}
+                  }
+                }
+                """.formatted(SEEDED_ARN));
+
+        String opId = service.updateLandingZone(ACCOUNT, REGION, request);
+        assertNotNull(opId);
+        assertFalse(opId.isBlank());
+
+        LandingZone updated = service.getOrSeedLandingZone(ACCOUNT, REGION);
+        assertEquals("4.0", updated.getVersion());
+        assertEquals("4.0", updated.getLatestAvailableVersion());
+        assertEquals(90, updated.getManifest().path("centralizedLogging")
+                .path("configurations").path("loggingBucket").path("retentionDays").asInt());
+        assertEquals(List.of("INHERITANCE_DRIFT"), updated.getRemediationTypes());
+    }
+
+    @Test
+    void updateLandingZoneWithoutRemediationTypesClearsThem() throws Exception {
+        JsonNode withRemediation = objectMapper.readTree("""
+                {"version":"4.0","landingZoneIdentifier":"%s","remediationTypes":["INHERITANCE_DRIFT"],
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """.formatted(SEEDED_ARN));
+        service.updateLandingZone(ACCOUNT, REGION, withRemediation);
+
+        JsonNode withoutRemediation = objectMapper.readTree("""
+                {"version":"4.0","landingZoneIdentifier":"%s",
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """.formatted(SEEDED_ARN));
+        service.updateLandingZone(ACCOUNT, REGION, withoutRemediation);
+
+        assertNull(service.getOrSeedLandingZone(ACCOUNT, REGION).getRemediationTypes());
+    }
+
+    @Test
+    void getOperationTypeReportsUpdateForIssuedAndUnknownIds() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"version":"4.0","landingZoneIdentifier":"%s",
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """.formatted(SEEDED_ARN));
+        String opId = service.updateLandingZone(ACCOUNT, REGION, request);
+
+        assertEquals("UPDATE", service.getOperationType(opId));
+        assertNotNull(service.getOperationType("never-issued"));
+    }
+
+    @Test
+    void listBaselinesContainsControlTowerAndIdentityCenterBaselinesWithRegionStampedArns() {
+        List<ObjectNode> baselines = service.listBaselines(REGION);
+        List<String> names = baselines.stream().map(b -> b.get("name").asText()).toList();
+        assertTrue(names.contains("AWSControlTowerBaseline"));
+        assertTrue(names.contains("IdentityCenterBaseline"));
+
+        for (ObjectNode baseline : baselines) {
+            assertTrue(baseline.get("arn").asText().startsWith("arn:aws:controltower:us-east-1::baseline/"));
+        }
+    }
+
+    @Test
+    void identityCenterBaselineAutoEnabledWhenManifestAccessManagementEnabled() {
+        // Fresh service — seed manifest has accessManagement.enabled=true.
+        String identityCenterArn = service.listBaselines(REGION).stream()
+                .filter(b -> "IdentityCenterBaseline".equals(b.get("name").asText()))
+                .findFirst().orElseThrow().get("arn").asText();
+
+        List<EnabledBaseline> enabled = service.listEnabledBaselines(ACCOUNT, REGION);
+        List<EnabledBaseline> icEntries = enabled.stream()
+                .filter(e -> identityCenterArn.equals(e.getBaselineIdentifier()))
+                .toList();
+
+        assertEquals(1, icEntries.size());
+        EnabledBaseline entry = icEntries.get(0);
+        assertNotNull(entry.getArn());
+        assertNotNull(entry.getTargetIdentifier());
+        assertNotNull(entry.getBaselineVersion());
+        assertNotNull(entry.getStatus());
+    }
+
+    @Test
+    void identityCenterBaselineAbsentWhenAccessManagementDisabled() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"version":"4.0","landingZoneIdentifier":"%s",
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":false}}}
+                """.formatted(SEEDED_ARN));
+        service.updateLandingZone(ACCOUNT, REGION, request);
+
+        List<EnabledBaseline> enabled = service.listEnabledBaselines(ACCOUNT, REGION);
+        boolean hasIdentityCenter = enabled.stream()
+                .anyMatch(e -> e.getBaselineIdentifier() != null
+                        && e.getBaselineIdentifier().contains("LN25R72TTG6IGPTQ"));
+        assertFalse(hasIdentityCenter);
+    }
+
+    @Test
+    void enableBaselineStoresEnabledBaselineByTargetAndEchoesVersion() throws Exception {
+        String ctBaselineArn = service.listBaselines(REGION).stream()
+                .filter(b -> "AWSControlTowerBaseline".equals(b.get("name").asText()))
+                .findFirst().orElseThrow().get("arn").asText();
+        String ouArn = "arn:aws:organizations::000000000101:ou/o-floci0001/ou-abcd-11111111";
+
+        JsonNode request = objectMapper.readTree("""
+                {"baselineIdentifier":"%s","baselineVersion":"5.0","targetIdentifier":"%s",
+                 "parameters":[{"key":"IdentityCenterEnabledBaselineArn","value":"placeholder"}]}
+                """.formatted(ctBaselineArn, ouArn));
+
+        ControlTowerService.EnableBaselineResult result = service.enableBaseline(ACCOUNT, REGION, request);
+        assertNotNull(result.operationIdentifier());
+        assertFalse(result.operationIdentifier().isBlank());
+        assertNotNull(result.arn());
+
+        List<EnabledBaseline> enabled = service.listEnabledBaselines(ACCOUNT, REGION);
+        EnabledBaseline stored = enabled.stream()
+                .filter(e -> ouArn.equals(e.getTargetIdentifier()))
+                .findFirst().orElseThrow();
+        assertEquals("5.0", stored.getBaselineVersion());
+        assertEquals("SUCCEEDED", stored.getStatus());
+
+        assertEquals("BASELINE_ENABLED", service.getBaselineOperationType(result.operationIdentifier()));
+    }
+
+    @Test
+    void enableBaselineTwiceForSameTargetReplacesNotDuplicates() throws Exception {
+        String ctBaselineArn = service.listBaselines(REGION).stream()
+                .filter(b -> "AWSControlTowerBaseline".equals(b.get("name").asText()))
+                .findFirst().orElseThrow().get("arn").asText();
+        String ouArn = "arn:aws:organizations::000000000101:ou/o-floci0001/ou-abcd-22222222";
+
+        JsonNode request = objectMapper.readTree("""
+                {"baselineIdentifier":"%s","baselineVersion":"5.0","targetIdentifier":"%s"}
+                """.formatted(ctBaselineArn, ouArn));
+        service.enableBaseline(ACCOUNT, REGION, request);
+        service.enableBaseline(ACCOUNT, REGION, request);
+
+        long matching = service.listEnabledBaselines(ACCOUNT, REGION).stream()
+                .filter(e -> ouArn.equals(e.getTargetIdentifier()))
+                .count();
+        assertEquals(1, matching);
+    }
+
+    @Test
+    void enableBaselineWithoutRequiredFieldsThrowsValidationException() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"baselineIdentifier":"arn:aws:controltower:us-east-1::baseline/17BSJV3IGJ2QSGA2","baselineVersion":"5.0"}
+                """);
+
+        AwsException error = assertThrows(
+                AwsException.class, () -> service.enableBaseline(ACCOUNT, REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+}
