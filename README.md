@@ -362,7 +362,7 @@ docker run -d --name floci \
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` |
-| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` |
+| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | *(unset — images resolve per requested `EngineVersion`)* |
 | `FLOCI_SERVICES_KINESIS_ANALYTICS_DEFAULT_IMAGE` | _(unset; chosen per RuntimeEnvironment)_ |
 | `FLOCI_SERVICES_NEPTUNE_DEFAULT_IMAGE` | `tinkerpop/gremlin-server:3.7.3` |
 | `FLOCI_SERVICES_NEPTUNE_DEFAULT_NEO4J_IMAGE` | `neo4j:5-community` |

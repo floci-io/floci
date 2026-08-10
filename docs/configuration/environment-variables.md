@@ -360,7 +360,7 @@ These services spawn Docker containers. They require access to the Docker socket
 |---|---|---|
 | `FLOCI_SERVICES_OPENSEARCH_ENABLED` | `true` | Enable the OpenSearch service |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK` | `false` | When `true`, domains are created instantly without a real container (API only) |
-| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` | Docker image for OpenSearch domains |
+| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | *(unset)* | Optional fixed Docker image for every OpenSearch domain; when unset, images resolve per requested `EngineVersion` |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | First port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Last port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Keep OpenSearch containers running when Floci stops |
