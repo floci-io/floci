@@ -1951,9 +1951,12 @@ public class ApiGatewayExecuteController {
         try {
             MediaType mediaType = MediaType.valueOf(contentType);
             String type = (mediaType.getType() + "/" + mediaType.getSubtype()).toLowerCase(Locale.ROOT);
-            String charset = mediaType.getParameters().get("charset");
-            return V2_TEXT_CONTENT_TYPES.contains(type)
-                    && (charset == null || StandardCharsets.UTF_8.name().equalsIgnoreCase(charset));
+            if (mediaType.getParameters().isEmpty()) {
+                return V2_TEXT_CONTENT_TYPES.contains(type);
+            }
+            return (MediaType.TEXT_PLAIN.equals(type) || MediaType.APPLICATION_JSON.equals(type))
+                    && mediaType.getParameters().size() == 1
+                    && StandardCharsets.UTF_8.name().equalsIgnoreCase(mediaType.getParameters().get("charset"));
         } catch (IllegalArgumentException e) {
             return false;
         }
