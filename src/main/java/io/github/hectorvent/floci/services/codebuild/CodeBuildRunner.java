@@ -354,6 +354,17 @@ public class CodeBuildRunner implements ContainerTeardown {
     static final int SOURCE_COPY_MAX_ATTEMPTS = 6;
     static final long SOURCE_COPY_RETRY_BACKOFF_MS = 500L;
 
+    /**
+     * Retry budget for exec BOOKKEEPING calls (exec-create, exec-inspect). The transport-level
+     * retry ({@code RetryingDockerHttpClient}) excludes every {@code /exec} path because
+     * exec-START must never be replayed, so these replay-safe calls retry for themselves:
+     * a replayed exec-create leaves at most an orphaned, never-started exec instance, and
+     * exec-inspect is a read. Without this, a broken pipe on the exit-code inspect after a
+     * fully successful build fails the build with every phase marked SUCCEEDED.
+     */
+    static final int EXEC_SETUP_MAX_ATTEMPTS = 6;
+    static final long EXEC_SETUP_RETRY_BACKOFF_MS = 500L;
+
     synchronized Semaphore sourceCopySlots() {
         if (!sourceCopySlotsResolved) {
             if (config == null) {
@@ -1119,14 +1130,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         String[] cmd = {"sh", "-e", "-c", script};
 
         try {
-            String execId = dockerClient.execCreateCmd(containerId)
-                    .withCmd(cmd)
-                    .withWorkingDir(workDir)
-                    .withEnv(env)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec()
-                    .getId();
+            String execId = createPhaseExec(containerId, workDir, env, cmd);
 
             CountDownLatch latch = new CountDownLatch(1);
             ByteArrayOutputStream outputCapture = new ByteArrayOutputStream();
@@ -1153,7 +1157,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                 return PhaseResult.ofStopped();
             }
 
-            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
+            Long exitCode = fetchExecExitCode(execId);
             if (exitCode != null && exitCode != 0) {
                 String output = outputCapture.toString(StandardCharsets.UTF_8);
                 String msg = "Exit code " + exitCode;
@@ -1172,6 +1176,8 @@ public class CodeBuildRunner implements ContainerTeardown {
             if (stopFlag.get()) {
                 return PhaseResult.ofStopped();
             }
+            LOG.errorv(e, "Exec session infrastructure failed (not the build commands): {0}",
+                    e.getMessage());
             return PhaseResult.ofFailure(e.getMessage());
         }
     }
@@ -1249,6 +1255,34 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    /** Exec-create with a transient-I/O retry; see {@link #EXEC_SETUP_MAX_ATTEMPTS}. */
+    String createPhaseExec(String containerId, String workDir, List<String> env, String[] cmd) {
+        return createPhaseExec(containerId, workDir, env, cmd,
+                EXEC_SETUP_MAX_ATTEMPTS, EXEC_SETUP_RETRY_BACKOFF_MS);
+    }
+
+    String createPhaseExec(String containerId, String workDir, List<String> env, String[] cmd,
+                           int maxAttempts, long backoffMillis) {
+        return DockerRetry.call(maxAttempts, backoffMillis, () -> dockerClient.execCreateCmd(containerId)
+                .withCmd(cmd)
+                .withWorkingDir(workDir)
+                .withEnv(env)
+                .withAttachStdout(true)
+                .withAttachStderr(true)
+                .exec()
+                .getId());
+    }
+
+    /** Exec-inspect (exit-code read) with a transient-I/O retry; see {@link #EXEC_SETUP_MAX_ATTEMPTS}. */
+    Long fetchExecExitCode(String execId) {
+        return fetchExecExitCode(execId, EXEC_SETUP_MAX_ATTEMPTS, EXEC_SETUP_RETRY_BACKOFF_MS);
+    }
+
+    Long fetchExecExitCode(String execId, int maxAttempts, long backoffMillis) {
+        return DockerRetry.call(maxAttempts, backoffMillis,
+                () -> dockerClient.inspectExecCmd(execId).exec().getExitCodeLong());
+    }
+
     private PhaseResult runPhaseSession(String containerId, String workDir, List<String> env,
                                         ParsedBuildspec buildspec, Build build, boolean bashAvailable,
                                         int timeoutMinutes, AtomicBoolean stopFlag,
@@ -1260,14 +1294,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         PhaseSession session = new PhaseSession(build, logGroup, logStream, region);
 
         try {
-            String execId = dockerClient.execCreateCmd(containerId)
-                    .withCmd(cmd)
-                    .withWorkingDir(workDir)
-                    .withEnv(env)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec()
-                    .getId();
+            String execId = createPhaseExec(containerId, workDir, env, cmd);
 
             CountDownLatch latch = new CountDownLatch(1);
 
@@ -1295,7 +1322,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                 return PhaseResult.ofFailure(message);
             }
 
-            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
+            Long exitCode = fetchExecExitCode(execId);
             boolean anyPhaseFailed = session.finish(exitCode, null);
             return anyPhaseFailed ? PhaseResult.ofFailure(null) : PhaseResult.ofSuccess();
 
@@ -1306,6 +1333,8 @@ public class CodeBuildRunner implements ContainerTeardown {
             if (stopFlag.get()) {
                 return PhaseResult.ofStopped();
             }
+            LOG.errorv(e, "Phase session infrastructure failed for build {0} (all shell phases may"
+                    + " already have SUCCEEDED): {1}", session.build.getId(), e.getMessage());
             session.finish(null, e.getMessage());
             return PhaseResult.ofFailure(e.getMessage());
         }
