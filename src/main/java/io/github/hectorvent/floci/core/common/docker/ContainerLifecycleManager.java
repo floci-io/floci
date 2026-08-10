@@ -10,6 +10,7 @@ import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
@@ -47,6 +48,10 @@ public class ContainerLifecycleManager {
      * ({@code Broken pipe}) when many builds hit the daemon at once — e.g. an LZA Bootstrap
      * stage fanning out ~15 CodeBuild actions. A create fails before source staging, so the
      * copy-path retry never sees it; {@link DockerRetry} recovers it here at the create call.
+     *
+     * <p>Container-start travels the same socket and is just as exposed — a blip between create
+     * and start failed an LZA Prepare stage outright at a peak of only six live containers, so
+     * this is not a load threshold anyone can stay under. Start reuses the create budget.
      */
     private static final int CREATE_MAX_ATTEMPTS = 6;
     private static final long CREATE_RETRY_BACKOFF_MS = 500L;
@@ -153,7 +158,7 @@ public class ContainerLifecycleManager {
      * @return information about the running container including resolved endpoints
      */
     public ContainerInfo startCreated(String containerId, ContainerSpec spec) {
-        dockerClient.startContainerCmd(containerId).exec();
+        startWithRetry(containerId);
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
@@ -171,6 +176,28 @@ public class ContainerLifecycleManager {
 
         Map<Integer, EndpointInfo> endpoints = resolveEndpoints(containerId, spec);
         return new ContainerInfo(containerId, endpoints);
+    }
+
+    /**
+     * Starts {@code containerId}, retrying a transient docker I/O error the same way
+     * {@link #create} does — the two calls share one socket and one failure mode.
+     *
+     * <p>A retried start is only safe because docker answers {@code start} on an already-running
+     * container with HTTP 304 rather than an error state. That is precisely what the retry meets
+     * when the daemon honoured a start whose response was lost to the broken pipe, so the
+     * resulting {@link NotModifiedException} reports the outcome we wanted and is swallowed.
+     * Letting it escape would turn a recovered blip into a hard launch failure — the exact bug
+     * the retry exists to remove.
+     */
+    private void startWithRetry(String containerId) {
+        DockerRetry.run(CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, () -> {
+            try {
+                dockerClient.startContainerCmd(containerId).exec();
+            } catch (NotModifiedException alreadyRunning) {
+                LOG.debugv("Container {0} was already running (304) — treating start as done",
+                        containerId);
+            }
+        });
     }
 
     /**
@@ -490,7 +517,7 @@ public class ContainerLifecycleManager {
         boolean running = Boolean.TRUE.equals(inspect.getState().getRunning());
 
         if (!running) {
-            dockerClient.startContainerCmd(containerId).exec();
+            startWithRetry(containerId);
             LOG.infov("Started adopted container {0}", containerId);
             inspect = dockerClient.inspectContainerCmd(containerId).exec();
         }
