@@ -29,7 +29,7 @@ class S3VirtualHostFilterTest {
      * hardcoding a copy of {@code EmbeddedDnsServer.BUILTIN_SUFFIXES}.
      */
     private static final Set<String> DEFAULT_SUFFIXES =
-            S3VirtualHostFilter.buildServiceHostSuffixes(Optional.empty());
+            S3VirtualHostFilter.buildServiceHostSuffixes(Optional.empty(), Optional.empty());
 
     // --- extractBucket with baseHostname ---
 
@@ -195,6 +195,41 @@ class S3VirtualHostFilterTest {
                 "my-bucket.s3.localhost.example.internal", "localhost", DEFAULT_SUFFIXES));
     }
 
+    // --- The configured hostname is a DNS suffix too, and routes the same forms ---
+
+    @Test
+    void routesVirtualHostedBucketsForConfiguredHostname() {
+        String hostname = "aws.mycorp.test";
+        Set<String> withHostname =
+                S3VirtualHostFilter.buildServiceHostSuffixes(Optional.of(hostname), Optional.empty());
+
+        // EmbeddedDnsServer makes *.<hostname> resolvable, so the derived set must carry it too,
+        // lowercased like the rest of the set because matching is case-insensitive
+        assertTrue(withHostname.contains(hostname));
+        assertTrue(S3VirtualHostFilter.buildServiceHostSuffixes(Optional.of("AWS.MyCorp.Test"), Optional.empty())
+                .contains(hostname));
+
+        // bucket.s3.<hostname> resolves via wildcard DNS, so it must route as a bucket rather
+        // than fall through to path-style with "s3" read as the bucket name
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.s3." + hostname, hostname, withHostname));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.s3." + hostname + ":4566", hostname, withHostname));
+
+        // The forms already covered by baseHostname matching keep working
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket." + hostname, hostname, withHostname));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.s3.us-east-1." + hostname, hostname, withHostname));
+
+        // The bare s3.<hostname> service host stays bucketless
+        assertNull(S3VirtualHostFilter.extractBucket("s3." + hostname, hostname, withHostname));
+
+        // Without the hostname configured, bucket.s3.<hostname> does not route (no accidental match)
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "my-bucket.s3." + hostname, "localhost", DEFAULT_SUFFIXES));
+    }
+
     // --- Hostname extraction from URL ---
 
     @ParameterizedTest
@@ -241,7 +276,7 @@ class S3VirtualHostFilterTest {
         // be recovered from the URI authority instead of falling through to path-style.
         URI uri = URI.create("https://my-bucket.s3.us-east-1.localhost:4566/key.txt");
         String host = S3VirtualHostFilter.resolveHost(null, uri);
-        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(host, "localhost"));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
     }
 
     // --- HTTP/2 website request: the path rewrite must preserve the s3-website authority (#1954) ---

@@ -28,9 +28,9 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      * Hostname suffixes for which a bare {@code s3.<suffix>} Host header is Floci's own
      * S3 service endpoint (bucketless) rather than a bucket literally named {@code s3}.
      * Derived from the same source of truth the embedded DNS server uses: the always-on
-     * builtins ({@code localhost.floci.io}, {@code localhost.localstack.cloud}) plus any
-     * configured {@code floci.dns.extra-suffixes}, alongside plain {@code localhost}.
-     * Stored lowercase for case-insensitive matching.
+     * builtins ({@code localhost.floci.io}, {@code localhost.localstack.cloud}) plus the
+     * configured {@code floci.hostname} and any {@code floci.dns.extra-suffixes},
+     * alongside plain {@code localhost}. Stored lowercase for case-insensitive matching.
      */
     private final Set<String> serviceHostSuffixes;
 
@@ -40,24 +40,27 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 .orElseGet(() -> containerDetector.isRunningInContainer()
                         ? EmbeddedDnsServer.DEFAULT_SUFFIX
                         : extractHostnameFromUrl(config.baseUrl()));
-        this.serviceHostSuffixes = buildServiceHostSuffixes(config.dns().extraSuffixes());
+        this.serviceHostSuffixes = buildServiceHostSuffixes(config.hostname(), config.dns().extraSuffixes());
     }
 
     S3VirtualHostFilter() {
         this.baseHostname = "localhost";
-        this.serviceHostSuffixes = buildServiceHostSuffixes(Optional.empty());
+        this.serviceHostSuffixes = buildServiceHostSuffixes(Optional.empty(), Optional.empty());
     }
 
     /**
      * Builds the service-host suffix set from the DNS source of truth rather than
      * re-hardcoding it: {@code {"localhost"}} plus the {@link EmbeddedDnsServer} builtins
-     * plus any configured extra suffixes. Package-private so tests reuse the same
-     * derivation instead of duplicating the builtin list.
+     * plus the configured hostname and any extra suffixes. The three configured inputs
+     * mirror what {@code EmbeddedDnsServer} makes resolvable, so a host that reaches Floci
+     * by wildcard DNS is routed by the same rules it resolved under. Package-private so
+     * tests reuse the same derivation instead of duplicating the builtin list.
      */
-    static Set<String> buildServiceHostSuffixes(Optional<List<String>> extraSuffixes) {
+    static Set<String> buildServiceHostSuffixes(Optional<String> hostname, Optional<List<String>> extraSuffixes) {
         Set<String> suffixes = new HashSet<>();
         suffixes.add("localhost");
         EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(s -> suffixes.add(s.toLowerCase()));
+        hostname.ifPresent(h -> suffixes.add(h.toLowerCase()));
         extraSuffixes.ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase())));
         return Set.copyOf(suffixes);
     }
@@ -197,7 +200,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
     /**
      * Matches the virtual-hosted bucket forms for a configured DNS suffix {@code S}
-     * (a builtin or a {@code floci.dns.extra-suffix}): {@code bucket.S},
+     * (a builtin, {@code floci.hostname}, or a {@code floci.dns.extra-suffix}): {@code bucket.S},
      * {@code bucket.s3.S}, and the region-qualified {@code bucket.s3.<region>.S}.
      * Plain {@code localhost} is skipped here — it keeps its dedicated
      * {@link #matchesEndpointHost} handling via {@link #isAwsS3Domain}.
