@@ -120,4 +120,4 @@ aws events put-targets \
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
 - Onward delivery from that bus follows each target type: SQS resolves cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
-- Bus-to-bus forwarding stops after 5 hops, and the sixth is dropped with only a `WARN` rather than reported to the caller — a Floci limit with no AWS equivalent, present to break cycles.
+- An event is forwarded between buses only once, matching AWS: a bus that received an event from another bus does not forward it on to a third. The second hop is dropped with only a `WARN` rather than reported to the caller.

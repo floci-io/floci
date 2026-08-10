@@ -29,7 +29,8 @@ public class EventBridgeInvoker {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeInvoker.class);
 
-    private static final int MAX_BUS_TO_BUS_DEPTH = 5;
+    // AWS can't route an event from a sender bus on to a third bus; the second hop is dropped.
+    private static final int MAX_BUS_TO_BUS_DEPTH = 1;
     private static final ThreadLocal<Integer> BUS_TO_BUS_DEPTH = ThreadLocal.withInitial(() -> 0);
 
     private final LambdaService lambdaService;
@@ -133,7 +134,7 @@ public class EventBridgeInvoker {
                     LOG.warnv("EventBridge event-bus target missing EventBridge service: {0}", arn);
                     return;
                 }
-                // Fixed ceiling breaks bus-to-bus cycles; relies on putEvents delivering targets synchronously.
+                // Relies on putEvents delivering targets synchronously.
                 int depth = BUS_TO_BUS_DEPTH.get();
                 if (depth >= MAX_BUS_TO_BUS_DEPTH) {
                     LOG.warnv("EventBridge bus-to-bus depth {0} exceeded at target {1}; dropping", depth, arn);
