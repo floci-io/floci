@@ -91,6 +91,52 @@ class FlociUiManagerTest {
     }
 
     @Test
+    void tlsEnabledDerivesHttpForAnIpLiteralHost() {
+        // The self-signed certificate carries no IP SAN for the container address the resolver
+        // returns, so https:// to it can only ever fail altname verification. Port 4566 does
+        // HTTP/HTTPS protocol detection, so http:// reaches the same listener with TLS left on.
+        withUiConfig();
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.hostname()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4566);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(true);
+        when(dockerHostResolver.resolve()).thenReturn("10.88.3.252");
+
+        assertEquals("http://10.88.3.252:4566", newManager().resolveFlociEndpoint());
+    }
+
+    @Test
+    void tlsEnabledKeepsHttpsForANamedHostTheCertificateCovers() {
+        // host.docker.internal is a DNS SAN on the self-signed certificate. Nothing to work
+        // around, so the downgrade must not reach it.
+        withUiConfig();
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(config.port()).thenReturn(4566);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(true);
+        when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
+
+        assertEquals("https://host.docker.internal:4566", newManager().resolveFlociEndpoint());
+    }
+
+    @Test
+    void tlsEnabledKeepsHttpsForAnIpLiteralWhenVerificationIsSkipped() {
+        // An operator who opted into skipping verification has said they want TLS on this hop;
+        // the altname gap no longer blocks it, so honour the explicit choice.
+        withUiConfig();
+        when(ui.insecureSkipTlsVerify()).thenReturn(true);
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.hostname()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4566);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(true);
+        when(dockerHostResolver.resolve()).thenReturn("10.88.3.252");
+
+        assertEquals("https://10.88.3.252:4566", newManager().resolveFlociEndpoint());
+    }
+
+    @Test
     void probeUsesSidecarContainerIpWhenContainerized() {
         // In a container the published host port is not reachable via localhost; the
         // probe must target the sidecar's container IP on the shared Docker network.
