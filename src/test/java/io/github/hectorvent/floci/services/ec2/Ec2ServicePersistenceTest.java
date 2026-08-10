@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +53,25 @@ class Ec2ServicePersistenceTest {
     private static final String REGION = "us-east-1";
 
     @Test
+    void emptyNetworkDiscoverySurvivesRestart(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        assertTrue(first.describeVpcPeeringConnectionIds(REGION, List.of(), Map.of()).isEmpty());
+        assertTrue(first.describeTransitGatewayVpcAttachmentIds(REGION, List.of(), Map.of()).isEmpty());
+        assertTrue(first.describeVpnGatewayIds(REGION, List.of(), Map.of()).isEmpty());
+        assertTrue(first.describeEgressOnlyInternetGatewayIds(REGION, List.of(), Map.of()).isEmpty());
+
+        Ec2Service restarted = newService(dir);
+        assertTrue(restarted.describeVpcPeeringConnectionIds(
+                REGION, List.of(), Map.of("status-code", List.of("active"))).isEmpty());
+        assertTrue(restarted.describeTransitGatewayVpcAttachmentIds(
+                REGION, List.of(), Map.of("state", List.of("available"))).isEmpty());
+        assertTrue(restarted.describeVpnGatewayIds(
+                REGION, List.of(), Map.of("attachment.vpc-id", List.of("vpc-0123456789abcdef0"))).isEmpty());
+        assertTrue(restarted.describeEgressOnlyInternetGatewayIds(
+                REGION, List.of(), Map.of("tag:Owner", List.of("TeamA"))).isEmpty());
+    }
+
+    @Test
     void vpcAndSubnetSurviveRestart(@TempDir Path dir) {
         Ec2Service first = newService(dir);
         Vpc vpc = first.createVpc(REGION, "10.0.0.0/16", false);
@@ -68,6 +88,34 @@ class Ec2ServicePersistenceTest {
         assertEquals(1, subnets.size(), "Subnet must survive restart");
         assertEquals(vpc.getVpcId(), subnets.get(0).getVpcId());
         assertEquals("10.0.1.0/24", subnets.get(0).getCidrBlock());
+    }
+
+    @Test
+    void deletedVpcDefaultResourcesRemainAbsentAfterRestart(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        Vpc vpc = first.createVpc(REGION, "10.77.0.0/16", false);
+        SecurityGroup defaultGroup = first.describeSecurityGroups(REGION, List.of(), List.of(), Map.of()).stream()
+                .filter(group -> vpc.getVpcId().equals(group.getVpcId()) && "default".equals(group.getGroupName()))
+                .findFirst().orElseThrow();
+        String mainRouteTableId = first.describeRouteTables(REGION, List.of(), Map.of()).stream()
+                .filter(table -> vpc.getVpcId().equals(table.getVpcId()))
+                .filter(table -> table.getAssociations().stream().anyMatch(association -> association.isMain()))
+                .findFirst().orElseThrow().getRouteTableId();
+        String defaultNetworkAclId = first.describeNetworkAcls(REGION, List.of(), Map.of()).stream()
+                .filter(acl -> vpc.getVpcId().equals(acl.getVpcId()) && acl.isDefault())
+                .findFirst().orElseThrow().getNetworkAclId();
+
+        first.deleteVpc(REGION, vpc.getVpcId());
+        Ec2Service restarted = newService(dir);
+
+        assertTrue(restarted.describeVpcs(REGION, List.of(), Map.of()).stream()
+                .noneMatch(candidate -> vpc.getVpcId().equals(candidate.getVpcId())));
+        assertTrue(restarted.describeSecurityGroups(
+                REGION, List.of(defaultGroup.getGroupId()), List.of(), Map.of()).isEmpty());
+        assertTrue(restarted.describeSecurityGroupRules(
+                REGION, List.of(defaultGroup.getGroupId()), List.of()).isEmpty());
+        assertTrue(restarted.describeRouteTables(REGION, List.of(mainRouteTableId), Map.of()).isEmpty());
+        assertTrue(restarted.describeNetworkAcls(REGION, List.of(defaultNetworkAclId), Map.of()).isEmpty());
     }
 
     @Test
