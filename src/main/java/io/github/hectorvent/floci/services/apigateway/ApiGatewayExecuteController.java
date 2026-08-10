@@ -43,8 +43,10 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -66,6 +68,15 @@ public class ApiGatewayExecuteController {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteController.class);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final Set<String> V2_TEXT_CONTENT_TYPES = Set.of(
+            MediaType.TEXT_PLAIN,
+            MediaType.TEXT_HTML,
+            "text/csv",
+            MediaType.TEXT_XML,
+            MediaType.APPLICATION_JSON,
+            MediaType.APPLICATION_XML,
+            "application/javascript",
+            "application/graphql");
 
     private final ApiGatewayService apiGatewayService;
     private final ApiGatewayV2Service apiGatewayV2Service;
@@ -1915,8 +1926,11 @@ public class ApiGatewayExecuteController {
                 ? headers.getHeaderString("User-Agent") : "");
 
         if (body != null && body.length > 0) {
-            event.put("body", new String(body));
-            event.put("isBase64Encoded", false);
+            boolean isText = isV2TextContentType(headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
+            event.put("body", isText
+                    ? new String(body, StandardCharsets.UTF_8)
+                    : Base64.getEncoder().encodeToString(body));
+            event.put("isBase64Encoded", !isText);
         } else {
             event.putNull("body");
             event.put("isBase64Encoded", false);
@@ -1926,6 +1940,25 @@ public class ApiGatewayExecuteController {
             return objectMapper.writeValueAsString(event);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize v2 proxy event", e);
+        }
+    }
+
+    private static boolean isV2TextContentType(String contentType) {
+        if (contentType == null || contentType.isBlank()) {
+            return false;
+        }
+
+        try {
+            MediaType mediaType = MediaType.valueOf(contentType);
+            String type = (mediaType.getType() + "/" + mediaType.getSubtype()).toLowerCase(Locale.ROOT);
+            if (mediaType.getParameters().isEmpty()) {
+                return V2_TEXT_CONTENT_TYPES.contains(type);
+            }
+            return (MediaType.TEXT_PLAIN.equals(type) || MediaType.APPLICATION_JSON.equals(type))
+                    && mediaType.getParameters().size() == 1
+                    && StandardCharsets.UTF_8.name().equalsIgnoreCase(mediaType.getParameters().get("charset"));
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
