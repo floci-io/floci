@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.iam.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -16,6 +18,8 @@ import java.util.Set;
  * A {@link LinkedHashSet} keeps enablement order stable and de-duplicates, so repeated
  * enable calls are idempotent.
  */
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class OrganizationRootFeatures {
 
     private Set<String> enabledFeatures = new LinkedHashSet<>();
