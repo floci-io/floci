@@ -187,8 +187,14 @@ public class CloudFormationResourceProvisioner {
      * How long to wait when the ServiceToken is a CDK Provider-framework {@code framework.onEvent}
      * Lambda: it does not PUT itself but returns after starting the waiter state machine, so the
      * ResponseURL callback arrives asynchronously once {@code framework.isComplete} reports done (or
-     * {@code framework.onTimeout} reports failure). Bounded, so a resource that never completes fails
-     * cleanly instead of hanging. Non-final so tests can shorten it to exercise the timeout bound.
+     * {@code framework.onTimeout} reports failure).
+     *
+     * <p>This is an <em>idle</em> budget, not a total one: every waiter poll resets it (see {@link
+     * CustomResourceResponseStore#touch}). Total time here is a property of the work rather than of
+     * the emulator — {@code Custom::CreateOrganizationAccounts} creates one account per poll, so 15
+     * accounts take five times as long as three — and a total budget would need re-tuning for every
+     * config set while guillotining Lambdas that were succeeding. Measuring idleness still fails a
+     * genuinely hung resource cleanly instead of hanging. Non-final so tests can shorten it.
      */
     private Duration asyncCustomResourceTimeout = Duration.ofMinutes(3);
     /**
@@ -6405,6 +6411,8 @@ public class CloudFormationResourceProvisioner {
                                                  ObjectNode resourceProperties, ObjectNode oldResourceProperties,
                                                  String region, String accountId, String stackName) {
         String token = customResourceResponseStore.register();
+        // Declared out here so the timeout message below can name the budget that was exceeded.
+        Duration responseTimeout = CR_RESPONSE_TIMEOUT;
         try {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
@@ -6428,7 +6436,7 @@ public class CloudFormationResourceProvisioner {
             // cadence until it PUTs). So the callback lands asynchronously and needs a longer wait than
             // the synchronous single-Lambda pattern. onEvent-only providers and plain handlers PUT
             // during the invoke, so their await returns immediately regardless of this budget.
-            Duration responseTimeout = isProviderFrameworkOnEvent(serviceToken, region)
+            responseTimeout = isProviderFrameworkOnEvent(serviceToken, region)
                     ? asyncCustomResourceTimeout : CR_RESPONSE_TIMEOUT;
 
             byte[] payload = objectMapper.writeValueAsBytes(event);
@@ -6447,7 +6455,8 @@ public class CloudFormationResourceProvisioner {
         } catch (TimeoutException e) {
             throw new AwsException("CustomResourceTimeout",
                     "Timed out waiting for custom resource " + logicalId
-                            + " to PUT its response to ResponseURL", 504);
+                            + " to PUT its response to ResponseURL: no waiter activity for "
+                            + responseTimeout, 504);
         } catch (Exception e) {
             throw new AwsException("CustomResourceFailed",
                     "Failed to invoke custom resource " + logicalId + ": " + e.getMessage(), 500);
