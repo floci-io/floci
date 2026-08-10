@@ -7,8 +7,8 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.security.SecureRandom;
 import java.util.Optional;
-import java.util.concurrent.ThreadLocalRandom;
 
 /** Mints and revokes the IAM sessions used by Lambda execution environments. */
 @ApplicationScoped
@@ -17,6 +17,12 @@ public class LambdaExecutionRoleCredentials {
     private static final String UPPER_ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String SECRET_CHARACTERS =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    /**
+     * These values are what {@code IamEnforcementFilter} authorizes a caller against, so they are
+     * minted from a CSPRNG rather than a predictable generator.
+     */
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private final IamService iamService;
 
@@ -88,7 +94,7 @@ public class LambdaExecutionRoleCredentials {
     private static String random(String characters, int length) {
         StringBuilder value = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            value.append(characters.charAt(ThreadLocalRandom.current().nextInt(characters.length())));
+            value.append(characters.charAt(SECURE_RANDOM.nextInt(characters.length())));
         }
         return value.toString();
     }

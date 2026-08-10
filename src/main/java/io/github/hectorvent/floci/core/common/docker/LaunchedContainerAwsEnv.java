@@ -3,11 +3,13 @@ package io.github.hectorvent.floci.core.common.docker;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Builds the baseline AWS SDK environment for a container Floci launches, so the workload
@@ -22,6 +24,11 @@ import java.util.Optional;
  */
 @ApplicationScoped
 public class LaunchedContainerAwsEnv {
+
+    private static final Logger LOG = Logger.getLogger(LaunchedContainerAwsEnv.class);
+
+    /** Host-credential passthrough is a property of the process, so it is worth saying once. */
+    private static final AtomicBoolean hostCredentialsWarned = new AtomicBoolean();
 
     private final ContainerReachableEndpoint reachableEndpoint;
 
@@ -68,6 +75,16 @@ public class LaunchedContainerAwsEnv {
             String ak = System.getenv("AWS_ACCESS_KEY_ID");
             String sk = System.getenv("AWS_SECRET_ACCESS_KEY");
             String st = System.getenv("AWS_SESSION_TOKEN");
+            if ((ak != null || sk != null || st != null) && hostCredentialsWarned.compareAndSet(false, true)) {
+                // The container runs workload code, so surface that it is being handed the
+                // credentials Floci itself was started with (an exported key pair, aws-vault, a
+                // CI runner) rather than placeholders. Mount ~/.aws via aws-config-path, or give
+                // the workload a role Floci knows, to keep host credentials out of it.
+                // Once per process: ephemeral containers relaunch per invocation, and a warning
+                // repeated on every launch is one people learn to scroll past.
+                LOG.warnf("Forwarding Floci's own AWS credentials from the environment "
+                        + "(AWS_ACCESS_KEY_ID=%s...) into launched containers", abbreviate(ak));
+            }
             env.add("AWS_ACCESS_KEY_ID=" + (ak != null ? ak : "test"));
             env.add("AWS_SECRET_ACCESS_KEY=" + (sk != null ? sk : "test"));
             env.add("AWS_SESSION_TOKEN=" + (st != null ? st : "test"));
@@ -77,5 +94,13 @@ public class LaunchedContainerAwsEnv {
         env.add("FLOCI_ENDPOINT=" + flociEndpoint);
         env.add("AWS_ENDPOINT_URL=" + flociEndpoint);
         return env;
+    }
+
+    /** Enough of an access key to identify which credentials leaked, without logging the key. */
+    private static String abbreviate(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return "<unset>";
+        }
+        return accessKeyId.length() <= 4 ? accessKeyId : accessKeyId.substring(0, 4);
     }
 }

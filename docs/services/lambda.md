@@ -365,6 +365,14 @@ When unset (default), Floci injects execution-role credentials for a known role.
 
     A known execution role takes precedence over `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` values in the function environment. Use `aws-config-path` when the function must use mounted credentials instead of its emulated execution role.
 
+    Passthrough is on whenever those three variables are set in Floci's own environment, so a
+    Floci started from a shell that exports real AWS credentials (`aws-vault exec`, a sourced
+    credentials file, a CI runner) hands them to any function whose role it does not know. An
+    `AWS_PROFILE` or an `aws sso login` alone does not do this: those populate config and cache
+    files, not the environment. Floci logs a `WARN` carrying the forwarded access-key prefix the
+    first time it happens. Give the function a role Floci knows, or set `aws-config-path`, to keep
+    host credentials out of the container.
+
 ### Private registry authentication
 
 Container image functions (`"PackageType": "Image"`) that pull from private registries need Docker credentials. See [Docker Configuration → Private Registry Authentication](../configuration/docker.md#private-registry-authentication) for the full guide.
