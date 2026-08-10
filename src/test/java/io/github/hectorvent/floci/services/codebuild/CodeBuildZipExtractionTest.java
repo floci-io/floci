@@ -46,7 +46,7 @@ class CodeBuildZipExtractionTest {
             }
             zip = baos.toByteArray();
         }
-        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null, null);
         runner.extractZip(zip, tempDir);
 
         Path script = tempDir.resolve("lib/bash/bootstrap.sh");
@@ -73,7 +73,7 @@ class CodeBuildZipExtractionTest {
             }
             zip = baos.toByteArray();
         }
-        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null, null);
         Path sourceDir = Files.createDirectories(tempDir.resolve("source"));
         runner.extractZip(zip, sourceDir);
 
@@ -120,7 +120,7 @@ class CodeBuildZipExtractionTest {
             }
             zip = baos.toByteArray();
         }
-        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null, null);
         runner.extractZip(zip, tempDir);
 
         Path link = tempDir.resolve("node_modules/.bin/ts-node");
@@ -149,7 +149,7 @@ class CodeBuildZipExtractionTest {
             }
             zip = baos.toByteArray();
         }
-        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null, null);
         runner.extractZip(zip, tempDir);
 
         Path evil = tempDir.resolve("evil-link");
@@ -167,7 +167,7 @@ class CodeBuildZipExtractionTest {
 
         Path tarFile = tempDir.resolve("source.tar");
         try (var out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
-            new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null)
+            new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null, null)
                     .createTarFromDir(sourceDir, out);
         }
 

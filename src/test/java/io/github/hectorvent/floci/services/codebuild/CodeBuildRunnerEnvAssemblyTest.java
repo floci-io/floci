@@ -59,7 +59,7 @@ class CodeBuildRunnerEnvAssemblyTest {
         when(config.tls()).thenReturn(tlsConfig);
         when(config.port()).thenReturn(4566);
         when(config.hostname()).thenReturn(Optional.empty());
-        runner = new CodeBuildRunner(mock(DockerClient.class), mock(ContainerBuilder.class),
+        runner = new CodeBuildRunner(mock(DockerClient.class), mock(DockerClient.class), mock(ContainerBuilder.class),
                 mock(ContainerLifecycleManager.class), mock(ContainerLogStreamer.class),
                 mock(S3Service.class), ssmService, mock(SecretsManagerService.class),
                 config, containerDetector, mock(RegionResolver.class));

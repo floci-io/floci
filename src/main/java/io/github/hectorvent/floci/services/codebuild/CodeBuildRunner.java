@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerRetry;
+import io.github.hectorvent.floci.core.common.docker.StreamingDocker;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -139,6 +140,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     private final DockerClient dockerClient;
+    private final DockerClient streamingDockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
@@ -167,6 +169,7 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     @Inject
     public CodeBuildRunner(DockerClient dockerClient,
+                           @StreamingDocker DockerClient streamingDockerClient,
                            ContainerBuilder containerBuilder,
                            ContainerLifecycleManager lifecycleManager,
                            ContainerLogStreamer logStreamer,
@@ -177,6 +180,11 @@ public class CodeBuildRunner implements ContainerTeardown {
                            ContainerDetector containerDetector,
                            RegionResolver regionResolver) {
         this.dockerClient = dockerClient;
+        // execStartCmd output streams and the copyArchiveFromContainerCmd tar read below are
+        // held open for a whole CodeBuild phase; everything else on this class (create/start/
+        // stop/copyArchiveTo/execCreate/inspectExec) stays on the short-lived control-plane
+        // client. See DockerClientProducer / StreamingDocker for why these must not share a pool.
+        this.streamingDockerClient = streamingDockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -998,7 +1006,8 @@ public class CodeBuildRunner implements ContainerTeardown {
     // component as a top-level directory in the tar; we strip it on extraction.
     private void copyArtifactsFromContainer(String containerId, String containerPath, Path destDir)
             throws IOException {
-        try (InputStream tarStream = dockerClient.copyArchiveFromContainerCmd(containerId, containerPath).exec();
+        // Held open for the entire tar read below, not a quick control-plane round-trip.
+        try (InputStream tarStream = streamingDockerClient.copyArchiveFromContainerCmd(containerId, containerPath).exec();
              TarArchiveInputStream tar = new TarArchiveInputStream(tarStream)) {
 
             String stripPrefix = null;
@@ -1122,7 +1131,8 @@ public class CodeBuildRunner implements ContainerTeardown {
             CountDownLatch latch = new CountDownLatch(1);
             ByteArrayOutputStream outputCapture = new ByteArrayOutputStream();
 
-            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+            // Held open for the entire exec phase (can run for minutes), not a quick call.
+            streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getPayload() != null) {
@@ -1261,7 +1271,8 @@ public class CodeBuildRunner implements ContainerTeardown {
 
             CountDownLatch latch = new CountDownLatch(1);
 
-            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+            // Held open for the entire exec phase (can run for minutes), not a quick call.
+            streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getPayload() != null) {

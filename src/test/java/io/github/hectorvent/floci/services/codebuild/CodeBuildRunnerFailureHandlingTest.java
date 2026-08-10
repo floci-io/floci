@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CodeBuildRunnerFailureHandlingTest {
 
     private CodeBuildRunner runner() {
-        return new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null);
+        return new CodeBuildRunner(null, null, null, null, null, null, null, null, null, null, null);
     }
 
     @Test

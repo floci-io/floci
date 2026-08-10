@@ -13,7 +13,7 @@ import org.jboss.logging.Logger;
 import java.time.Duration;
 
 /**
- * CDI producer for the DockerClient singleton bean.
+ * CDI producer for the DockerClient beans.
  */
 @ApplicationScoped
 public class DockerClientProducer {
@@ -103,12 +103,43 @@ public class DockerClientProducer {
         return System.getProperty("os.name", "").toLowerCase().contains("win");
     }
 
+    /**
+     * Control-plane DockerClient: create/start/stop/remove/copyArchive and every other
+     * short-lived call in Floci. Kept on its own connection pool, separate from the
+     * {@link StreamingDocker} bean, so long-lived log-follow and exec-output streams can
+     * never occupy every lease in this pool and starve these short calls until
+     * httpclient5's connection-request timeout fires.
+     */
     @Produces
     @ApplicationScoped
     public DockerClient dockerClient() {
+        return buildDockerClient(buildClientConfig(), config.docker().maxConnections(), "control-plane");
+    }
+
+    /**
+     * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}) and
+     * {@code execStartCmd} output streams held open for a whole CodeBuild phase. Each such
+     * stream occupies a connection pool slot for its entire lifetime — sharing the
+     * control-plane pool meant a fan-out of many concurrent streams exhausted it and blocked
+     * control-plane calls. Sized larger by default than the control-plane pool because
+     * {@code WarmPool}'s cap is per-function, so total live streams across distinct
+     * functions is unbounded.
+     */
+    @Produces
+    @StreamingDocker
+    @ApplicationScoped
+    public DockerClient streamingDockerClient() {
+        return buildDockerClient(buildClientConfig(), config.docker().streamingMaxConnections(), "streaming");
+    }
+
+    /**
+     * Builds the {@link DefaultDockerClientConfig} shared by both DockerClient beans (host
+     * resolution, optional Docker config path). The two beans differ only in connection
+     * pool size, never in how they reach the daemon.
+     */
+    private DefaultDockerClientConfig buildClientConfig() {
         String dockerHost = resolveEffectiveDockerHost(
                 config.docker().dockerHost(), System.getenv("DOCKER_HOST"), isWindows());
-        LOG.infov("Creating DockerClient for host: {0}", dockerHost);
 
         // createDefaultConfigBuilder() reads DOCKER_HOST directly from System.getenv() and passes
         // it to withDockerHost(), which calls URI.create() immediately. If DOCKER_HOST is set
@@ -121,11 +152,16 @@ public class DockerClientProducer {
             LOG.infov("Using Docker config path: {0}", path);
             builder.withDockerConfig(path);
         });
-        DefaultDockerClientConfig clientConfig = builder.build();
+        return builder.build();
+    }
+
+    private DockerClient buildDockerClient(DefaultDockerClientConfig clientConfig, int maxConnections, String role) {
+        LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
+                role, maxConnections, clientConfig.getDockerHost());
 
         ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
-                .maxConnections(100)
+                .maxConnections(maxConnections)
                 .connectionTimeout(Duration.ofSeconds(30))
                 .responseTimeout(Duration.ofMinutes(5))
                 .build();

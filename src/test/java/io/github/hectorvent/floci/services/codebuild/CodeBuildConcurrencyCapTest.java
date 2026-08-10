@@ -30,7 +30,7 @@ class CodeBuildConcurrencyCapTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().codebuild().maxConcurrentBuilds())
                 .thenReturn(Optional.ofNullable(maxConcurrentBuilds));
-        return new CodeBuildRunner(null, null, null, null, null, null, null, config, null, null);
+        return new CodeBuildRunner(null, null, null, null, null, null, null, null, config, null, null);
     }
 
     @Test

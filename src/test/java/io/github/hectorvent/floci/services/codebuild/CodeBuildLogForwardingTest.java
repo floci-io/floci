@@ -42,7 +42,7 @@ class CodeBuildLogForwardingTest {
     }
 
     private CodeBuildRunner runnerWith(ContainerLogStreamer streamer) {
-        return new CodeBuildRunner(null, null, null, streamer, null, null, null, null, null, null);
+        return new CodeBuildRunner(null, null, null, null, streamer, null, null, null, null, null, null);
     }
 
     @Test

@@ -35,7 +35,7 @@ class CodeBuildCaStagingTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.tls().certPath()).thenReturn(Optional.of(certFile.toString()));
         when(config.storage().persistentPath()).thenReturn(persistent.toString());
-        return new CodeBuildRunner(docker, null, null, null, null, null, null, config, null, null);
+        return new CodeBuildRunner(docker, null, null, null, null, null, null, null, config, null, null);
     }
 
     private DockerClient dockerWhoseCopyExec(AtomicInteger execCalls,

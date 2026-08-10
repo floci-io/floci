@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -62,6 +63,14 @@ public final class DockerRetry {
      */
     public static boolean isTransientIo(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
+            // ConnectionRequestTimeoutException extends IOException (via InterruptedIOException),
+            // but it means the httpclient5 pool has no free connection lease after waiting the
+            // full request timeout — the pool is exhausted, not a socket blip. Retrying just
+            // re-enters another full wait and adds more pressure to an already-starved pool, so
+            // it must be excluded from the general "any IOException is transient" rule below.
+            if (c instanceof ConnectionRequestTimeoutException) {
+                return false;
+            }
             if (c instanceof IOException) {
                 return true;
             }

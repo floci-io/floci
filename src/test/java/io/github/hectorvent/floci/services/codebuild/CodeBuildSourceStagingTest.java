@@ -33,7 +33,7 @@ class CodeBuildSourceStagingTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().codebuild().maxConcurrentSourceCopies())
                 .thenReturn(Optional.ofNullable(maxConcurrentSourceCopies));
-        return new CodeBuildRunner(null, null, null, null, null, null, null, config, null, null);
+        return new CodeBuildRunner(null, null, null, null, null, null, null, null, config, null, null);
     }
 
     // ---- source-copy serialisation slots ----

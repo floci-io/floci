@@ -20,7 +20,7 @@ class CuratedImageResolutionTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().codebuild().curatedImageSubstitute())
                 .thenReturn(java.util.Optional.ofNullable(substitute));
-        return new CodeBuildRunner(null, null, null, null, null, null, null, config, null, null);
+        return new CodeBuildRunner(null, null, null, null, null, null, null, null, config, null, null);
     }
 
     private CodeBuildRunner runner() {

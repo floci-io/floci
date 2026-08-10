@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -37,6 +38,16 @@ class DockerRetryTest {
     @Test
     void plainRuntimeExceptionIsNotTransient() {
         assertFalse(DockerRetry.isTransientIo(new RuntimeException("400 Bad Request")));
+    }
+
+    // ConnectionRequestTimeoutException extends InterruptedIOException extends IOException, so the
+    // old "any IOException in the cause chain is transient" rule wrongly retried it. It means the
+    // httpclient5 pool has no free connection/lease after waiting the full request timeout — the
+    // pool is exhausted, not the socket blipping. Retrying just re-enters another full wait and
+    // adds more pressure to an already-starved pool, so this must NOT be classified as transient.
+    @Test
+    void connectionRequestTimeoutIsNotTransient() {
+        assertFalse(DockerRetry.isTransientIo(new ConnectionRequestTimeoutException("Timeout waiting for connection from pool")));
     }
 
     @Test
