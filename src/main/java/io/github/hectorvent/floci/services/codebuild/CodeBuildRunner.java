@@ -871,9 +871,12 @@ public class CodeBuildRunner implements ContainerTeardown {
                 .orElseGet(() -> TlsConfigSource.selfSignedCertPath(config.storage().persistentPath()));
         try {
             if (!Files.isReadable(certPath)) {
-                LOG.warnv("Floci TLS certificate {0} is not readable; build containers will not trust spoofed AWS endpoints",
-                        certPath);
-                return;
+                // Reached only under spoofedEndpointTrustEnabled(), so the CA is required. Warning and
+                // proceeding CA-less lets the build start, then every spoofed HTTPS AWS call dies with a
+                // cryptic DEPTH_ZERO_SELF_SIGNED_CERT far from here. Fail now with the real cause, exactly
+                // as the copy-failure catch block below does.
+                throw new IllegalStateException("Floci TLS certificate " + certPath
+                        + " is not readable; cannot stage it so build containers trust spoofed AWS endpoints");
             }
             byte[] pem = Files.readAllBytes(certPath);
             ByteArrayOutputStream bos = new ByteArrayOutputStream();

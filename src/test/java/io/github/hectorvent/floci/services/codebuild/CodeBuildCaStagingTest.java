@@ -77,4 +77,20 @@ class CodeBuildCaStagingTest {
         assertEquals(CodeBuildRunner.SOURCE_COPY_MAX_ATTEMPTS, execCalls.get(),
                 "staging must exhaust the shared source-copy retry budget before giving up");
     }
+
+    @Test
+    void stagingThrowsWhenCertFileIsUnreadable(@TempDir Path dir) {
+        // stageCaCertificate is only ever reached under spoofedEndpointTrustEnabled(), so the CA is
+        // required — an unreadable/missing cert is a hard failure, not a warn-and-continue. Proceeding
+        // CA-less lets the build start, then every spoofed HTTPS AWS call dies three seconds later with
+        // DEPTH_ZERO_SELF_SIGNED_CERT far from the cause. Fail loud here, matching the catch block below.
+        Path missing = dir.resolve("floci-selfsigned.crt"); // never written -> not readable
+        AtomicInteger execCalls = new AtomicInteger();
+        DockerClient docker = dockerWhoseCopyExec(execCalls, attempt -> null);
+        assertThrows(RuntimeException.class,
+                () -> runner(docker, missing, dir).stageCaCertificate("container-noca"),
+                "an unreadable CA cert must fail the build loudly, never warn-and-proceed CA-less");
+        assertEquals(0, execCalls.get(),
+                "an unreadable cert must fail before any copy is attempted, not after a partial stage");
+    }
 }
