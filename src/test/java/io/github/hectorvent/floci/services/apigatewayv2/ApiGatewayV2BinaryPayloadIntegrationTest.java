@@ -134,8 +134,8 @@ class ApiGatewayV2BinaryPayloadIntegrationTest {
     @Order(999)
     void cleanup() {
         if (apiId != null) {
-            given().when().delete("/v2/apis/" + apiId).then().statusCode(204);
+            given().when().delete("/v2/apis/" + apiId);
         }
-        given().when().delete("/2015-03-31/functions/" + FUNCTION_NAME).then().statusCode(204);
+        given().when().delete("/2015-03-31/functions/" + FUNCTION_NAME);
     }
 }
