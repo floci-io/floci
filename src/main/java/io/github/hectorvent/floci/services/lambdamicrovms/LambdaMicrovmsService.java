@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -87,6 +88,7 @@ public class LambdaMicrovmsService {
 
     // ---------------------------------------------------------------- images
 
+    @RegisterForReflection
     public static final class MicrovmImage {
         public String name;
         public String imageArn;
@@ -103,6 +105,7 @@ public class LambdaMicrovmsService {
         public final List<MicrovmImageVersion> versions = new ArrayList<>();
     }
 
+    @RegisterForReflection
     public static final class MicrovmImageVersion {
         public String imageVersion;
         public String state;
@@ -111,6 +114,7 @@ public class LambdaMicrovmsService {
         public final List<MicrovmBuild> builds = new ArrayList<>();
     }
 
+    @RegisterForReflection
     public static final class MicrovmBuild {
         public String buildId;
         public String buildState;
@@ -305,6 +309,7 @@ public class LambdaMicrovmsService {
 
     // ------------------------------------------------------------------- vms
 
+    @RegisterForReflection
     public static final class Microvm {
         public String microvmId;
         public String state;
@@ -374,6 +379,7 @@ public class LambdaMicrovmsService {
 
     // ------------------------------------------------------------ connectors
 
+    @RegisterForReflection
     public static final class NetworkConnector {
         public String id;
         public String name;
