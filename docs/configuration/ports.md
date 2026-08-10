@@ -22,7 +22,7 @@ There are two distinct patterns Floci uses to expose container ports:
 
 ### Proxy-in-Floci (ElastiCache, MemoryDB, RDS, Neptune, MWAA)
 
-Floci runs a **TCP proxy process inside its own container**. The proxy listens on the host port and forwards traffic to the backend container.
+Floci runs a **proxy process inside its own container**. The proxy listens on the host port and forwards traffic to the backend container.
 
 ```
 host:6379  →  [docker-compose ports mapping]  →  Floci container:6379  →  Redis container:6379
