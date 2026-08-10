@@ -1629,10 +1629,25 @@ public interface EmulatorConfig {
 
         Optional<String> dockerHostOverride();
 
-        @WithDefault("9200")
+        /**
+         * Runtime API port pool. One port is held for the lifetime of each running Lambda
+         * container, so this range is a hard ceiling on concurrent Lambda executions.
+         *
+         * <p>The former 9200-9299 default was exactly 100 ports, which cannot run a
+         * multi-account landing zone — LZA's LoggingStack fans out ~8 custom-resource Lambdas
+         * per account, so a 14-account org needs ~112 at once. Exhaustion did not read as a
+         * capacity limit either: the custom resource reported FAILED and CloudFormation rolled
+         * the stack back, so it surfaced as an unrelated CFN error (issue #2206).
+         *
+         * <p>12000-12499 rather than a widened 9200 range: 9200 is OpenSearch, 9092 Kafka,
+         * 9644 the Redpanda admin port and 9400-9499 the ECS proxy pool. Those are
+         * sibling-container-internal so they would not truly collide, but a pool this wide
+         * stops being obvious about what it covers. 12000-12499 touches nothing.
+         */
+        @WithDefault("12000")
         int runtimeApiBasePort();
 
-        @WithDefault("9299")
+        @WithDefault("12499")
         int runtimeApiMaxPort();
 
         @WithDefault("./data/lambda-code")

@@ -197,7 +197,7 @@ sudo ufw allow in on docker0 comment 'floci: containers reach host'
 If you want to scope it tighter to just the Lambda Runtime API and the ECR registry port ranges:
 
 ```bash
-sudo ufw allow in on docker0 to any port 9200:9299 proto tcp comment 'floci lambda runtime api'
+sudo ufw allow in on docker0 to any port 12000:12499 proto tcp comment 'floci lambda runtime api'
 sudo ufw allow in on docker0 to any port 5000:5099 proto tcp comment 'floci ecr registry'
 ```
 
