@@ -1237,6 +1237,10 @@ public class S3Controller {
     private Response handleDeleteObjects(String bucket, byte[] body) {
         String xml = new String(body, StandardCharsets.UTF_8);
         List<String> keys = XmlParser.extractAll(xml, "Key");
+        if (keys.isEmpty()) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed.", 400);
+        }
         boolean quiet = XmlParser.containsValue(xml, "Quiet", "true");
         S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, keys);
 
