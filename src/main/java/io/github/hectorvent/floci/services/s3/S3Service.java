@@ -94,6 +94,9 @@ public class S3Service implements Resettable, ResourceProvider {
     }
     private final ConcurrentHashMap<String, Map<Integer, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
+    // Account-level (S3 Control) Block Public Access config, keyed by AWS account id.
+    // Distinct from the bucket-level configuration held on each Bucket.
+    private final ConcurrentHashMap<String, String> accountPublicAccessBlock = new ConcurrentHashMap<>();
 
     private final SqsService sqsService;
     private final SnsService snsService;
@@ -212,6 +215,7 @@ public class S3Service implements Resettable, ResourceProvider {
         memoryDataStore.clear();
         memoryMultipartStore.clear();
         multipartUploads.clear();
+        accountPublicAccessBlock.clear();
     }
 
     public Bucket createBucket(String bucketName, String region) {
@@ -2417,6 +2421,36 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setPublicAccessBlockConfiguration(null);
         bucketStore.put(bucketName, bucket);
+    }
+
+    // --- Account-level (S3 Control) Public Access Block ---
+    // AWS s3control PutPublicAccessBlock / GetPublicAccessBlock / DeletePublicAccessBlock,
+    // keyed by AccountId (from the x-amz-account-id header). AWS LZA's
+    // Custom::PutPublicAccessBlock custom resource drives these during the LoggingStack deploy.
+
+    public void putAccountPublicAccessBlock(String accountId, String configXml) {
+        accountPublicAccessBlock.put(requireAccountId(accountId), configXml);
+    }
+
+    public String getAccountPublicAccessBlock(String accountId) {
+        String xml = accountPublicAccessBlock.get(requireAccountId(accountId));
+        if (xml == null) {
+            throw new AwsException("NoSuchPublicAccessBlockConfiguration",
+                    "The public access block configuration was not found", 404);
+        }
+        return xml;
+    }
+
+    public void deleteAccountPublicAccessBlock(String accountId) {
+        accountPublicAccessBlock.remove(requireAccountId(accountId));
+    }
+
+    private static String requireAccountId(String accountId) {
+        if (accountId == null || accountId.isBlank()) {
+            throw new AwsException("InvalidRequest",
+                    "The x-amz-account-id header is required.", 400);
+        }
+        return accountId;
     }
 
     public String getBucketOwnershipControls(String bucketName) {

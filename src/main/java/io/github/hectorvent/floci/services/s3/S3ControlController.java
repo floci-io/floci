@@ -10,6 +10,7 @@ import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -112,6 +113,85 @@ public class S3ControlController {
                 .end("ListAccessPointsResult")
                 .build();
         return Response.ok(xml).build();
+    }
+
+    /**
+     * PutPublicAccessBlock — sets the account-level S3 Block Public Access configuration.
+     *
+     * <p>Account-scoped (keyed by the {@code x-amz-account-id} header), distinct from the
+     * bucket-level operation. AWS LZA's {@code Custom::PutPublicAccessBlock} custom resource
+     * calls this for every governed account during the LoggingStack deploy; without it the
+     * custom-resource Lambda reports FAILED and the stack rolls back.
+     *
+     * PUT /v20180820/configuration/publicAccessBlock
+     * Header: x-amz-account-id
+     * Body: {@code <PublicAccessBlockConfiguration>} with the four boolean flags
+     */
+    @PUT
+    @Path("/configuration/publicAccessBlock")
+    @Consumes(MediaType.WILDCARD)
+    public Response putPublicAccessBlock(
+            @HeaderParam("x-amz-account-id") String accountId,
+            String body) {
+        try {
+            s3Service.putAccountPublicAccessBlock(accountId, canonicalPublicAccessBlockXml(body));
+            return Response.ok().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * GetPublicAccessBlock — returns the account-level S3 Block Public Access configuration.
+     *
+     * GET /v20180820/configuration/publicAccessBlock
+     * Header: x-amz-account-id
+     */
+    @GET
+    @Path("/configuration/publicAccessBlock")
+    public Response getPublicAccessBlock(
+            @HeaderParam("x-amz-account-id") String accountId) {
+        try {
+            return Response.ok(s3Service.getAccountPublicAccessBlock(accountId)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * DeletePublicAccessBlock — removes the account-level S3 Block Public Access configuration.
+     *
+     * DELETE /v20180820/configuration/publicAccessBlock
+     * Header: x-amz-account-id
+     */
+    @DELETE
+    @Path("/configuration/publicAccessBlock")
+    public Response deletePublicAccessBlock(
+            @HeaderParam("x-amz-account-id") String accountId) {
+        try {
+            s3Service.deleteAccountPublicAccessBlock(accountId);
+            return Response.noContent().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * Normalises an incoming PublicAccessBlockConfiguration body into a canonical, namespaced
+     * document so read-back is well-formed regardless of the client's request formatting or
+     * namespace. Absent flags default to false, matching the AWS API.
+     */
+    private static String canonicalPublicAccessBlockXml(String requestXml) {
+        String xml = requestXml == null ? "" : requestXml;
+        return new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("PublicAccessBlockConfiguration", AwsNamespaces.S3_CONTROL)
+                .elem("BlockPublicAcls", XmlParser.extractFirst(xml, "BlockPublicAcls", "false"))
+                .elem("IgnorePublicAcls", XmlParser.extractFirst(xml, "IgnorePublicAcls", "false"))
+                .elem("BlockPublicPolicy", XmlParser.extractFirst(xml, "BlockPublicPolicy", "false"))
+                .elem("RestrictPublicBuckets", XmlParser.extractFirst(xml, "RestrictPublicBuckets", "false"))
+                .end("PublicAccessBlockConfiguration")
+                .build();
     }
 
     /**
