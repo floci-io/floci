@@ -50,15 +50,18 @@ class SesCustomVerificationEmailTemplateTest {
             for (String n : new String[] {NAME, "cvet-sdk-shared"}) {
                 try {
                     sesV2.deleteCustomVerificationEmailTemplate(b -> b.templateName(n));
-                } catch (Exception ignored) {
-                    // Best-effort cleanup: the template may already be gone.
+                } catch (Exception e) {
+                    // Best-effort cleanup (the template may already be gone); log so a real failure
+                    // is diagnosable rather than silently leaving state behind.
+                    System.out.println("Cleanup: failed to delete template " + n + ": " + e.getMessage());
                 }
             }
             for (String id : new String[] {FROM, RECIPIENT}) {
                 try {
                     sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(id).build());
-                } catch (Exception ignored) {
-                    // Best-effort cleanup.
+                } catch (Exception e) {
+                    // Best-effort cleanup; log so a real deletion failure is diagnosable.
+                    System.out.println("Cleanup: failed to delete identity " + id + ": " + e.getMessage());
                 }
             }
             sesV2.close();
