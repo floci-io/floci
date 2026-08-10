@@ -1734,7 +1734,7 @@ public class Ec2Service implements ContainerTeardown {
         }
         List<BlockDeviceMapping> declared = sourceImage.getBlockDeviceMappings();
         if (declared != null && !declared.isEmpty()) {
-            return declared;
+            return declared.stream().map(this::recapture).toList();
         }
         String rootDeviceName = sourceImage.getRootDeviceName();
         if (rootDeviceName == null || rootDeviceName.isBlank()) {
@@ -1749,6 +1749,28 @@ public class Ec2Service implements ContainerTeardown {
         mapping.setDeviceName(rootDeviceName);
         mapping.setEbs(ebs);
         return List.of(mapping);
+    }
+
+    /**
+     * A capture takes its own snapshot of each device. Handing back the source AMI's snapshot ids
+     * would leave two images sharing one snapshot, so deleting either would appear to take the
+     * other's backing with it.
+     */
+    private BlockDeviceMapping recapture(BlockDeviceMapping source) {
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(source.getDeviceName());
+        EbsBlockDevice sourceEbs = source.getEbs();
+        if (sourceEbs == null) {
+            return mapping;
+        }
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId(sourceEbs.getSnapshotId() != null ? "snap-" + randomHex(17) : null);
+        ebs.setVolumeSize(sourceEbs.getVolumeSize());
+        ebs.setVolumeType(sourceEbs.getVolumeType());
+        ebs.setDeleteOnTermination(sourceEbs.getDeleteOnTermination());
+        ebs.setEncrypted(sourceEbs.getEncrypted());
+        mapping.setEbs(ebs);
+        return mapping;
     }
 
     /** The image a CreateImage source was launched from, whether catalog-backed or registered. */

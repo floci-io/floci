@@ -30,6 +30,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -450,6 +451,24 @@ class Ec2ServiceTest {
         List<Snapshot> snapshots = service.describeSnapshots("us-east-1",
                 List.of(root.getEbs().getSnapshotId()), null, null);
         assertEquals(1, snapshots.size());
+    }
+
+    @Test
+    void createImageTakesItsOwnSnapshotRatherThanTheSourceAmisOne() {
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class));
+        Image source = service.registerImage("us-east-1", "source-image", null, null, "/dev/sda1",
+                List.of(blockDeviceMapping("snap-source", 16)));
+
+        Image image = service.createImage("us-east-1", runOne(service, source.getImageId()),
+                "captured", null, true);
+
+        BlockDeviceMapping captured = image.getBlockDeviceMappings().getFirst();
+        assertEquals("/dev/sda1", captured.getDeviceName());
+        assertEquals(16, captured.getEbs().getVolumeSize());
+        assertNotEquals("snap-source", captured.getEbs().getSnapshotId());
+
+        // Both snapshots exist, so deleting one image does not strand the other.
+        assertEquals(2, service.describeSnapshots("us-east-1", List.of(), List.of(), Map.of()).size());
     }
 
     private static String runOne(Ec2Service service, String imageId) {
