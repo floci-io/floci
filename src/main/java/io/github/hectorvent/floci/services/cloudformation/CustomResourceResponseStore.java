@@ -81,10 +81,22 @@ public class CustomResourceResponseStore implements CustomResourceLiveness {
             throw new IllegalStateException("No pending custom-resource token: " + token);
         }
         long idleNanos = idleTimeout.toNanos();
+        // The budget measures idleness of the WAIT, so it starts when the caller begins waiting rather
+        // than when the token was registered. Registration happens before the invoke, and a synchronous
+        // handler PUTs from inside the invoke the caller is blocked on: charging that execution time
+        // here would leave a slow handler — a cold container start, or two of them nested — with a
+        // budget already spent by the time await was entered. A handler that just returned is not idle.
+        entry.lastActivity.set(System.nanoTime());
         try {
             while (true) {
                 long remaining = idleNanos - (System.nanoTime() - entry.lastActivity.get());
                 if (remaining <= 0) {
+                    // A response that has already arrived is a response, whatever the clock says. The
+                    // future outranks the budget: complete() can land before await is ever entered, and
+                    // discarding a delivered response as a timeout fails a resource that succeeded.
+                    if (entry.future.isDone()) {
+                        return entry.future.get();
+                    }
                     throw new TimeoutException("No custom-resource activity for " + idleTimeout);
                 }
                 try {

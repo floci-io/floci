@@ -89,6 +89,44 @@ class CustomResourceResponseStoreTest {
     }
 
     @Test
+    void awaitReturnsAResponseThatArrivedBeforeTheBudgetWasChecked() throws Exception {
+        // A synchronous handler PUTs from inside the invoke the provisioner is blocked on, so its
+        // response can already be here by the time await is entered. Whatever the clock says, a
+        // response that arrived is a response — the future outranks the budget.
+        String token = store.register();
+        store.complete(token, success());
+
+        JsonNode response = store.await(token, Duration.ZERO);
+
+        assertEquals("SUCCESS", response.get("Status").asText());
+    }
+
+    @Test
+    void awaitBudgetsIdlenessFromWhenTheCallerStartsWaitingNotFromRegistration() throws Exception {
+        String token = store.register();
+        // The token is registered before the invoke, and a slow handler — a cold container start, or
+        // two of them nested — can burn longer than the whole budget before await is ever reached.
+        // That is the handler working, not the resource going idle, so it must not be charged here.
+        Thread.sleep(400);
+
+        Thread waiter = new Thread(() -> {
+            try {
+                Thread.sleep(100);
+                store.complete(token, success());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        waiter.setDaemon(true);
+        waiter.start();
+
+        JsonNode response = store.await(token, Duration.ofMillis(300));
+
+        assertEquals("SUCCESS", response.get("Status").asText());
+        waiter.join(2_000);
+    }
+
+    @Test
     void touchForAnUnknownTokenIsIgnored() {
         // Polls can outlive their await (timeout, rollback). Liveness for a token nobody is waiting
         // on is not an error — it is the normal tail of a resource that already failed.
