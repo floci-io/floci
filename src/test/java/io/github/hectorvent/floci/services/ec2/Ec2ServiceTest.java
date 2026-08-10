@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
@@ -25,9 +26,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -423,6 +426,32 @@ class Ec2ServiceTest {
         verify(resolver, never()).resolveImage(chainedAmi);
     }
 
+    @Test
+    void createImageOnACatalogSourceCarriesItsRootDevice() {
+        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
+        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
+        source.imageId = "ami-src";
+        source.architecture = "x86_64";
+        source.rootDeviceType = "ebs";
+        source.rootDeviceName = "/dev/xvda";
+        when(catalog.findByIdOrAlias("ami-src")).thenReturn(Optional.of(source));
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class), catalog);
+        String instanceId = runOne(service, "ami-src");
+
+        Image image = service.createImage("us-east-1", instanceId, "captured", null, true);
+
+        assertEquals("/dev/xvda", image.getRootDeviceName());
+        assertEquals(1, image.getBlockDeviceMappings().size());
+        BlockDeviceMapping root = image.getBlockDeviceMappings().getFirst();
+        assertEquals("/dev/xvda", root.getDeviceName());
+        assertNotNull(root.getEbs().getSnapshotId());
+
+        // The mapping's snapshot is registered, so DescribeSnapshots can resolve it.
+        List<Snapshot> snapshots = service.describeSnapshots("us-east-1",
+                List.of(root.getEbs().getSnapshotId()), null, null);
+        assertEquals(1, snapshots.size());
+    }
+
     private static String runOne(Ec2Service service, String imageId) {
         return service.runInstances("us-east-1", imageId, "t3.micro", 1, 1, null,
                 List.of(), null, null, List.of(), null, null)
@@ -431,9 +460,13 @@ class Ec2ServiceTest {
 
     /** mock=false so the container-manager and resolver interactions actually happen. */
     private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver) {
+        return liveService(containerManager, resolver, mock(Ec2ImageCatalog.class));
+    }
+
+    private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver,
+                                          Ec2ImageCatalog catalog) {
         return new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
-                resolver, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
-                new InMemoryStorageFactory());
+                resolver, catalog, new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
     }
 
     private static BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {

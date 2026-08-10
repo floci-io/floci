@@ -83,6 +83,7 @@ public class Ec2Service implements ContainerTeardown {
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
+    private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -1713,13 +1714,41 @@ public class Ec2Service implements ContainerTeardown {
         Image image = registerImage(region, name, description,
                 sourceImage != null ? sourceImage.getArchitecture() : null,
                 sourceImage != null ? sourceImage.getRootDeviceName() : null,
-                sourceImage != null ? sourceImage.getBlockDeviceMappings() : null);
+                captureBlockDeviceMappings(sourceImage));
 
         // Carry the launchable ancestor so RunInstances on this AMI starts the same guest instead
         // of falling through to the catalog default.
         image.setSourceImageId(resolveLaunchableImageId(region, source.getImageId()));
         registeredImages.put(key(region, image.getImageId()), image);
         return image;
+    }
+
+    /**
+     * The devices the captured AMI reports. A registered source carries its own mappings, while a
+     * catalog entry describes only its root device, so the root is rebuilt from that rather than
+     * leaving DescribeImages with an image that has no devices at all.
+     */
+    private List<BlockDeviceMapping> captureBlockDeviceMappings(Image sourceImage) {
+        if (sourceImage == null) {
+            return null;
+        }
+        List<BlockDeviceMapping> declared = sourceImage.getBlockDeviceMappings();
+        if (declared != null && !declared.isEmpty()) {
+            return declared;
+        }
+        String rootDeviceName = sourceImage.getRootDeviceName();
+        if (rootDeviceName == null || rootDeviceName.isBlank()) {
+            return null;
+        }
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId("snap-" + randomHex(17));
+        ebs.setVolumeSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+        ebs.setVolumeType("gp2");
+        ebs.setDeleteOnTermination(true);
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(rootDeviceName);
+        mapping.setEbs(ebs);
+        return List.of(mapping);
     }
 
     /** The image a CreateImage source was launched from, whether catalog-backed or registered. */
