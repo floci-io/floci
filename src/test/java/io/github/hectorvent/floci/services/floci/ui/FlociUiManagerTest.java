@@ -137,6 +137,21 @@ class FlociUiManagerTest {
     }
 
     @Test
+    void anIpv6LiteralHostIsBracketedSoTheEndpointStaysAParseableUrl() {
+        // Without brackets the port colon is indistinguishable from the address colons and the
+        // sidecar gets a URL no client can parse.
+        withUiConfig();
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.hostname()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4566);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(false);
+        when(dockerHostResolver.resolve()).thenReturn("fd00::2");
+
+        assertEquals("http://[fd00::2]:4566", newManager().resolveFlociEndpoint());
+    }
+
+    @Test
     void probeUsesSidecarContainerIpWhenContainerized() {
         // In a container the published host port is not reachable via localhost; the
         // probe must target the sidecar's container IP on the shared Docker network.

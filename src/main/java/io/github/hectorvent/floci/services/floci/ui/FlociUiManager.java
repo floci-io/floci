@@ -259,7 +259,20 @@ public class FlociUiManager {
         String host = dockerHostResolver.resolve();
         String scheme = derivedScheme(
                 config.tls().enabled(), config.services().ui().insecureSkipTlsVerify(), host);
-        return scheme + "://" + host + ":" + config.port();
+        return scheme + "://" + authorityHost(host) + ":" + config.port();
+    }
+
+    /**
+     * A host as it must appear in a URL authority.
+     *
+     * <p>An IPv6 literal has to be bracketed or the port separator is indistinguishable from the
+     * address's own colons and the result is unparseable. Names and IPv4 literals pass through.
+     */
+    static String authorityHost(String host) {
+        if (host == null || host.indexOf(':') < 0 || host.startsWith("[")) {
+            return host;
+        }
+        return "[" + host + "]";
     }
 
     /**
