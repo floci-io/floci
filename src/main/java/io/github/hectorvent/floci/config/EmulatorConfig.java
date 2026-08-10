@@ -1661,6 +1661,35 @@ public interface EmulatorConfig {
         boolean keepRunningOnShutdown();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Overrides the Floci endpoint handed to the UI sidecar, instead of deriving it from
+         * the resolved Docker host and {@link EmulatorConfig#tls()}.
+         * Env: {@code FLOCI_SERVICES_UI_ENDPOINT}
+         *
+         * <p>The derived value is {@code https://<floci-container-ip>:<port>} when TLS is on,
+         * which the sidecar's Node/Bun proxy rejects: Floci's self-signed certificate carries no
+         * IP SAN for its own container IP, so verification fails with
+         * {@code ERR_TLS_CERT_ALTNAME_INVALID} even when the CA is trusted. Floci's port does
+         * HTTP/HTTPS protocol detection, so pointing the sidecar at {@code http://<ip>:<port>}
+         * reaches the same server over the private container network with TLS left enabled.
+         *
+         * <p>Must be an absolute {@code http://} or {@code https://} URL. A blank or malformed
+         * value is a hard error rather than a silent fall back to the derived endpoint.
+         */
+        Optional<String> endpoint();
+
+        /**
+         * Disables TLS certificate verification in the UI sidecar's Node/Bun proxy by injecting
+         * {@code NODE_TLS_REJECT_UNAUTHORIZED=0}. Env: {@code FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY}
+         *
+         * <p>Trusting Floci's CA alone is not sufficient — it fixes the chain but not the missing
+         * IP SAN — so this is the only trust knob that makes an {@code https://<container-ip>}
+         * endpoint work. Scoped to the sidecar's connection to Floci; it does not affect Floci's
+         * own TLS. Prefer {@link #endpoint()} where an {@code http://} endpoint is acceptable.
+         */
+        @WithDefault("false")
+        boolean insecureSkipTlsVerify();
     }
 
     interface EcrServiceConfig {
