@@ -313,15 +313,34 @@ public class ContainerLifecycleManager {
      * {@code floci_emulator=floci-aws} (plus {@code floci_namespace} when configured) so both
      * {@code docker volume prune --filter label=floci=true} (all emulators) and
      * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
+     *
+     * <p>Both daemon calls here — the existence check and the create — travel the shared docker
+     * socket and are exposed to the same mid-call {@code Broken pipe} that {@link #create} and
+     * {@link #startWithRetry} already guard against, so the whole body runs under
+     * {@link DockerRetry}. A blip on the existence check is the nastier of the two: docker-java
+     * wraps a raw socket failure in a plain {@link RuntimeException}, which is neither
+     * {@code NotFoundException} nor {@code DockerException} and so escapes {@link #volumeExists}
+     * uncaught. That is what failed an LZA Prepare stage — a Lambda code volume could not be
+     * populated, which surfaced as {@code Lambda.InitError} on
+     * {@code Custom::LoadAcceleratorConfigTable} and rolled the stack back.
+     *
+     * <p>Re-checking existence <em>inside</em> the retried body is what makes retrying safe: when
+     * the daemon created the volume but the response was lost to the broken pipe, the next attempt
+     * sees it exists and does nothing. This is the volume analogue of {@link #startWithRetry}
+     * treating an HTTP 304 on retry as success. The retry deliberately wraps this body rather than
+     * living inside {@link #volumeExists}, which must keep reporting a failed inspect as "absent"
+     * for its other callers.
      */
     public void ensureVolume(String volumeName) {
-        if (!volumeExists(volumeName)) {
-            dockerClient.createVolumeCmd()
-                    .withName(volumeName)
-                    .withLabels(ContainerStorageHelper.defaultLabels(config))
-                    .exec();
-            LOG.debugv("Created volume {0}", volumeName);
-        }
+        DockerRetry.run(CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, () -> {
+            if (!volumeExists(volumeName)) {
+                dockerClient.createVolumeCmd()
+                        .withName(volumeName)
+                        .withLabels(ContainerStorageHelper.defaultLabels(config))
+                        .exec();
+                LOG.debugv("Created volume {0}", volumeName);
+            }
+        });
     }
 
     /**

@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.CreateVolumeCmd;
+import com.github.dockerjava.api.command.CreateVolumeResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesCmd;
@@ -23,11 +25,15 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
+import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -387,5 +393,100 @@ class ContainerLifecycleManagerVolumeTest {
                 Optional.of("0777"), "busybox:stable");
 
         verify(dockerClient, times(2)).createContainerCmd("busybox:stable");
+    }
+
+    /** Stubs {@code inspectVolumeCmd("vol").exec()} to defer to {@code behaviour}, counting calls. */
+    private AtomicInteger inspectVolumeBehaving(IntFunction<InspectVolumeResponse> behaviour) {
+        AtomicInteger calls = new AtomicInteger();
+        InspectVolumeCmd cmd = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("vol")).thenReturn(cmd);
+        when(cmd.exec()).thenAnswer(inv -> behaviour.apply(calls.incrementAndGet()));
+        return calls;
+    }
+
+    /** Stubs {@code createVolumeCmd()...exec()} to defer to {@code behaviour}, counting calls. */
+    private AtomicInteger createVolumeBehaving(IntConsumer behaviour) {
+        AtomicInteger calls = new AtomicInteger();
+        CreateVolumeCmd cmd = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenAnswer(inv -> {
+            behaviour.accept(calls.incrementAndGet());
+            return mock(CreateVolumeResponse.class);
+        });
+        return calls;
+    }
+
+    @Test
+    void ensureVolume_retriesTransientBrokenPipeOnCreate() {
+        inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+            if (attempt < 3) {
+                throw new RuntimeException(new IOException("Broken pipe"));
+            }
+        });
+
+        manager.ensureVolume("vol");
+
+        assertEquals(3, creates.get(),
+                "creating a volume must survive a transient Broken pipe, not fail the launch");
+    }
+
+    @Test
+    void ensureVolume_retriesTransientBrokenPipeOnTheExistenceCheck() {
+        AtomicInteger inspects = inspectVolumeBehaving(attempt -> {
+            if (attempt == 1) {
+                // docker-java wraps a raw socket failure in a plain RuntimeException, which is
+                // neither NotFoundException nor DockerException — so it escapes volumeExists.
+                throw new RuntimeException(new IOException("Broken pipe"));
+            }
+            throw new NotFoundException("No such volume: vol");
+        });
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+        });
+
+        manager.ensureVolume("vol");
+
+        assertEquals(2, inspects.get(), "a blip on the existence check must be retried, not escape");
+        assertEquals(1, creates.get(), "the retry must go on to create the volume");
+    }
+
+    @Test
+    void ensureVolume_retryFindsTheVolumeTheLostCreateLanded_andDoesNotCreateTwice() {
+        AtomicInteger inspects = inspectVolumeBehaving(attempt -> {
+            if (attempt == 1) {
+                throw new NotFoundException("No such volume: vol");
+            }
+            return mock(InspectVolumeResponse.class); // the lost create did reach the daemon
+        });
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+            // The daemon created the volume, then the socket died before the response.
+            throw new RuntimeException(new IOException("Broken pipe"));
+        });
+
+        assertDoesNotThrow(() -> manager.ensureVolume("vol"),
+                "a volume that already exists on retry is success, not failure");
+
+        assertEquals(1, creates.get(),
+                "re-checking existence inside the retry is what makes the retried body idempotent");
+        assertEquals(2, inspects.get(), "each retry must re-check existence before creating");
+    }
+
+    @Test
+    void ensureVolume_doesNotRetryNonTransientFailure() {
+        inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        DockerException rejected = new DockerException("volume name already in use", 409);
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+            throw rejected;
+        });
+
+        DockerException thrown =
+                assertThrows(DockerException.class, () -> manager.ensureVolume("vol"));
+
+        assertSame(rejected, thrown, "a genuine daemon rejection must surface unchanged");
+        assertEquals(1, creates.get(), "a name conflict never clears on a retry");
     }
 }
