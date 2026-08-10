@@ -168,6 +168,12 @@ public class IamQueryHandler {
             case "UpdateAccessKey" -> handleUpdateAccessKey(params);
             case "GetAccessKeyLastUsed" -> handleGetAccessKeyLastUsed(params);
 
+            case "ListOrganizationsFeatures" -> handleListOrganizationsFeatures(params);
+            case "EnableOrganizationsRootCredentialsManagement" -> handleEnableOrganizationsRootCredentialsManagement(params);
+            case "EnableOrganizationsRootSessions" -> handleEnableOrganizationsRootSessions(params);
+            case "DisableOrganizationsRootCredentialsManagement" -> handleDisableOrganizationsRootCredentialsManagement(params);
+            case "DisableOrganizationsRootSessions" -> handleDisableOrganizationsRootSessions(params);
+
             // Instance Profiles
             case "CreateInstanceProfile" -> handleCreateInstanceProfile(params);
             case "GetInstanceProfile" -> handleGetInstanceProfile(params);
@@ -1021,6 +1027,49 @@ public class IamQueryHandler {
                 .end("AccessKeyLastUsed")
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GetAccessKeyLastUsed", AwsNamespaces.IAM, result)).build();
+    }
+
+    // =========================================================================
+    // Centralized root access management (org-scoped, IAM Query endpoint)
+    // =========================================================================
+
+    private Response handleListOrganizationsFeatures(MultivaluedMap<String, String> params) {
+        return rootFeaturesResponse("ListOrganizationsFeatures", iamService.listOrganizationsFeatures());
+    }
+
+    private Response handleEnableOrganizationsRootCredentialsManagement(MultivaluedMap<String, String> params) {
+        return rootFeaturesResponse("EnableOrganizationsRootCredentialsManagement",
+                iamService.enableOrganizationsRootCredentialsManagement());
+    }
+
+    private Response handleEnableOrganizationsRootSessions(MultivaluedMap<String, String> params) {
+        return rootFeaturesResponse("EnableOrganizationsRootSessions",
+                iamService.enableOrganizationsRootSessions());
+    }
+
+    private Response handleDisableOrganizationsRootCredentialsManagement(MultivaluedMap<String, String> params) {
+        return rootFeaturesResponse("DisableOrganizationsRootCredentialsManagement",
+                iamService.disableOrganizationsRootCredentialsManagement());
+    }
+
+    private Response handleDisableOrganizationsRootSessions(MultivaluedMap<String, String> params) {
+        return rootFeaturesResponse("DisableOrganizationsRootSessions",
+                iamService.disableOrganizationsRootSessions());
+    }
+
+    /**
+     * Builds the shared {@code <EnabledFeatures><member>..</member></EnabledFeatures>} result used by
+     * both {@code ListOrganizationsFeatures} and the enable/disable ops. The org-scoped
+     * {@code OrganizationId} is intentionally omitted — LZA's root-user-management module reads only
+     * the enabled-feature set, and omitting it avoids coupling the IAM endpoint to Organizations.
+     */
+    private Response rootFeaturesResponse(String action, List<String> features) {
+        XmlBuilder xml = new XmlBuilder().start("EnabledFeatures");
+        for (String feature : features) {
+            xml.elem("member", feature);
+        }
+        String result = xml.end("EnabledFeatures").build();
+        return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.IAM, result)).build();
     }
 
     // =========================================================================

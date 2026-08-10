@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -88,6 +89,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
     private static final Pattern CUSTOM_SUFFIX_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
     private static final int ROLE_NAME_MAX_LENGTH = 64;
+    private static final String ROOT_FEATURES_KEY = "org-root-features";
+    public static final String FEATURE_ROOT_CREDENTIALS = "RootCredentialsManagement";
+    public static final String FEATURE_ROOT_SESSIONS = "RootSessions";
 
     private final StorageBackend<String, IamUser> users;
     private final StorageBackend<String, IamGroup> groups;
@@ -116,6 +120,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, OpenIDConnectProvider> oidcProviders;
     /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
+    private final StorageBackend<String, OrganizationRootFeatures> orgRootFeatures;
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -141,6 +146,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-password-policy.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-org-root-features.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -168,10 +174,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                regionResolver, seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, null);
     }
 
+    // 8-backend constructor (no org-root-features): kept for existing callers/tests;
+    // delegates with an in-memory root-features backend.
     IamService(StorageBackend<String, IamUser> users,
                StorageBackend<String, IamGroup> groups,
                StorageBackend<String, IamRole> roles,
@@ -186,6 +194,44 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
+                accountAliases, passwordPolicies, oidcProviders, serviceLinkedRoleDeletions,
+                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, seededAccountAlias);
+    }
+
+    // 9-backend constructor (no alias/OIDC/SLR backends): kept for existing callers/tests;
+    // delegates with in-memory backends for the omitted stores.
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, AccountPasswordPolicy> passwordPolicies,
+               StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
+                new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), orgRootFeatures, regionResolver, seedDeployerPrincipal, null);
+    }
+
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, String> accountAliases,
+               StorageBackend<String, AccountPasswordPolicy> passwordPolicies,
+               StorageBackend<String, OpenIDConnectProvider> oidcProviders,
+               StorageBackend<String, String> serviceLinkedRoleDeletions,
+               StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal,
+               String seededAccountAlias) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -197,6 +243,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.passwordPolicies = passwordPolicies;
         this.oidcProviders = oidcProviders;
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
+        this.orgRootFeatures = orgRootFeatures;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -1219,6 +1266,51 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         key.setStatus(status);
         accessKeys.put(accessKeyId, key);
+    }
+
+    // =========================================================================
+    // Centralized root access management (org-scoped, IAM Query endpoint)
+    // =========================================================================
+
+    /** Currently-enabled centralized root features, in enablement order. Empty for a fresh org. */
+    public List<String> listOrganizationsFeatures() {
+        return new ArrayList<>(currentRootFeatures().getEnabledFeatures());
+    }
+
+    public List<String> enableOrganizationsRootCredentialsManagement() {
+        return addRootFeature(FEATURE_ROOT_CREDENTIALS);
+    }
+
+    public List<String> enableOrganizationsRootSessions() {
+        return addRootFeature(FEATURE_ROOT_SESSIONS);
+    }
+
+    public List<String> disableOrganizationsRootCredentialsManagement() {
+        return removeRootFeature(FEATURE_ROOT_CREDENTIALS);
+    }
+
+    public List<String> disableOrganizationsRootSessions() {
+        return removeRootFeature(FEATURE_ROOT_SESSIONS);
+    }
+
+    private OrganizationRootFeatures currentRootFeatures() {
+        return orgRootFeatures.get(ROOT_FEATURES_KEY).orElseGet(OrganizationRootFeatures::new);
+    }
+
+    private List<String> addRootFeature(String feature) {
+        OrganizationRootFeatures features = currentRootFeatures();
+        features.getEnabledFeatures().add(feature);
+        orgRootFeatures.put(ROOT_FEATURES_KEY, features);
+        LOG.infov("Enabled centralized root feature {0}", feature);
+        return new ArrayList<>(features.getEnabledFeatures());
+    }
+
+    private List<String> removeRootFeature(String feature) {
+        OrganizationRootFeatures features = currentRootFeatures();
+        features.getEnabledFeatures().remove(feature);
+        orgRootFeatures.put(ROOT_FEATURES_KEY, features);
+        LOG.infov("Disabled centralized root feature {0}", feature);
+        return new ArrayList<>(features.getEnabledFeatures());
     }
 
     // =========================================================================
