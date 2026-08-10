@@ -336,8 +336,8 @@ public class CodeBuildRunner implements ContainerTeardown {
     // A copy that still hits a transient docker I/O error (e.g. a momentary socket reset) is
     // retried a few times before the build is failed. Idempotent: the copy re-stages the same
     // tar into the same path, so a retry cannot corrupt state.
-    private static final int SOURCE_COPY_MAX_ATTEMPTS = 6;
-    private static final long SOURCE_COPY_RETRY_BACKOFF_MS = 500L;
+    static final int SOURCE_COPY_MAX_ATTEMPTS = 6;
+    static final long SOURCE_COPY_RETRY_BACKOFF_MS = 500L;
 
     synchronized Semaphore sourceCopySlots() {
         if (!sourceCopySlotsResolved) {
@@ -864,7 +864,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     // Stages Floci's TLS certificate PEM into the container so the phase-session
     // prelude can build a combined CA bundle before any buildspec phase runs —
     // builds then trust the spoofed https://*.amazonaws.com endpoints Floci serves.
-    private void stageCaCertificate(String containerId) {
+    void stageCaCertificate(String containerId) {
         Path certPath = config.tls().certPath()
                 .filter(p -> !p.isBlank())
                 .map(Path::of)
@@ -886,13 +886,28 @@ public class CodeBuildRunner implements ContainerTeardown {
                 tar.write(pem);
                 tar.closeArchiveEntry();
             }
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath("/tmp")
-                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
-                    .exec();
+            byte[] tarBytes = bos.toByteArray();
+
+            // Same shared docker socket, same fan-out hazard as copySourceToContainer: an LZA Deploy
+            // stage stages this cert into its wave of build containers at once and the daemon drops
+            // the write mid-stream (Broken pipe). Serialise against the other staging steps and retry
+            // the transient I/O, re-opening a fresh stream over the tar bytes on each attempt.
+            underStagingSlot(() -> {
+                retryTransientDockerIo(SOURCE_COPY_MAX_ATTEMPTS, SOURCE_COPY_RETRY_BACKOFF_MS, () ->
+                        dockerClient.copyArchiveToContainerCmd(containerId)
+                                .withRemotePath("/tmp")
+                                .withTarInputStream(new ByteArrayInputStream(tarBytes))
+                                .exec());
+                return null;
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while staging Floci CA certificate into container " + containerId, e);
         } catch (Exception e) {
-            LOG.warnv("Could not stage Floci CA certificate into container {0}: {1}",
-                    containerId, e.getMessage());
+            // Proceeding CA-less lets the build run, then every spoofed HTTPS AWS call dies with a
+            // cryptic DEPTH_ZERO_SELF_SIGNED_CERT far from here. Fail the build now with the real cause.
+            throw new RuntimeException("Could not stage Floci CA certificate into container " + containerId
+                    + ": " + e.getMessage(), e);
         }
     }
 
