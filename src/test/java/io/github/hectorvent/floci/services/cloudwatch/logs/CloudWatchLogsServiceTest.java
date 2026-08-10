@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.*;
 class CloudWatchLogsServiceTest {
 
     private static final String REGION = "us-east-1";
+    private static final String KEY_ARN =
+            "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab";
 
     private CloudWatchLogsService service;
 
@@ -164,6 +166,48 @@ class CloudWatchLogsServiceTest {
         service.deleteRetentionPolicy("/app/logs", REGION);
         group = service.describeLogGroups("/app/logs", REGION).getFirst();
         assertNull(group.getRetentionInDays());
+    }
+
+    // ──────────────────────────── KMS key association ────────────────────────────
+
+    @Test
+    void associateAndDisassociateKmsKey() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        assertNull(service.describeLogGroups("/app/logs", REGION).getFirst().getKmsKeyId(),
+                "a freshly created log group has no CMK associated");
+
+        service.associateKmsKey("/app/logs", KEY_ARN, REGION);
+        assertEquals(KEY_ARN, service.describeLogGroups("/app/logs", REGION).getFirst().getKmsKeyId());
+
+        service.disassociateKmsKey("/app/logs", REGION);
+        assertNull(service.describeLogGroups("/app/logs", REGION).getFirst().getKmsKeyId());
+    }
+
+    @Test
+    void associateKmsKeyReplacesAnExistingAssociation() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.associateKmsKey("/app/logs", KEY_ARN, REGION);
+
+        String other = "arn:aws:kms:us-east-1:000000000000:key/99999999-9999-9999-9999-999999999999";
+        service.associateKmsKey("/app/logs", other, REGION);
+
+        assertEquals(other, service.describeLogGroups("/app/logs", REGION).getFirst().getKmsKeyId());
+    }
+
+    @Test
+    void associateKmsKeyOnMissingGroupThrows() {
+        assertThrows(AwsException.class, () -> service.associateKmsKey("/missing", KEY_ARN, REGION));
+    }
+
+    @Test
+    void associateKmsKeyWithoutKeyIdThrows() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        assertThrows(AwsException.class, () -> service.associateKmsKey("/app/logs", "", REGION));
+    }
+
+    @Test
+    void disassociateKmsKeyOnMissingGroupThrows() {
+        assertThrows(AwsException.class, () -> service.disassociateKmsKey("/missing", REGION));
     }
 
     @Test

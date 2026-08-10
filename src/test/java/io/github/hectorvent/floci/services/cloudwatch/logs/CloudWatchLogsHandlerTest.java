@@ -506,4 +506,75 @@ class CloudWatchLogsHandlerTest {
                 () -> handler.handle("StartQuery", request, REGION));
         assertEquals("InvalidParameterException", ex.getErrorCode());
     }
+
+    // ──────────────────────────── AssociateKmsKey / DisassociateKmsKey ────────────────────────────
+
+    private static final String KEY_ARN =
+            "arn:aws:kms:" + REGION + ":" + ACCOUNT + ":key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+    @Test
+    void associateKmsKeyIsEchoedBackByDescribeLogGroups() {
+        // LZA's Custom::UpdateSubscriptionFilter Lambda reads logGroup.kmsKeyId from
+        // DescribeLogGroups and only calls AssociateKmsKey when it differs from the target
+        // key ARN. If DescribeLogGroups never surfaces the field, the association never
+        // converges and the Lambda re-associates on every deploy.
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("logGroupName", GROUP);
+        associate.put("kmsKeyId", KEY_ARN);
+
+        assertEquals(200, handler.handle("AssociateKmsKey", associate, REGION).getStatus());
+
+        JsonNode group = describeGroup();
+        assertEquals(KEY_ARN, group.path("kmsKeyId").asText());
+    }
+
+    @Test
+    void describeLogGroupsOmitsKmsKeyIdWhenNoKeyIsAssociated() {
+        assertThat(describeGroup().has("kmsKeyId"), is(false));
+    }
+
+    @Test
+    void disassociateKmsKeyClearsTheAssociation() {
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("logGroupName", GROUP);
+        associate.put("kmsKeyId", KEY_ARN);
+        handler.handle("AssociateKmsKey", associate, REGION);
+
+        ObjectNode disassociate = MAPPER.createObjectNode();
+        disassociate.put("logGroupName", GROUP);
+        assertEquals(200, handler.handle("DisassociateKmsKey", disassociate, REGION).getStatus());
+
+        assertThat(describeGroup().has("kmsKeyId"), is(false));
+    }
+
+    @Test
+    void associateKmsKeyResolvesAnArnLogGroupIdentifier() {
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("logGroupIdentifier", GROUP_ARN);
+        associate.put("kmsKeyId", KEY_ARN);
+
+        assertEquals(200, handler.handle("AssociateKmsKey", associate, REGION).getStatus());
+        assertEquals(KEY_ARN, describeGroup().path("kmsKeyId").asText());
+    }
+
+    @Test
+    void associateKmsKeyOnUnknownLogGroupThrows() {
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("logGroupName", "/nope");
+        associate.put("kmsKeyId", KEY_ARN);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("AssociateKmsKey", associate, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    private JsonNode describeGroup() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupNamePrefix", GROUP);
+        Response response = handler.handle("DescribeLogGroups", request, REGION);
+        assertEquals(200, response.getStatus());
+        ArrayNode groups = (ArrayNode) ((ObjectNode) response.getEntity()).path("logGroups");
+        assertEquals(1, groups.size());
+        return groups.get(0);
+    }
 }

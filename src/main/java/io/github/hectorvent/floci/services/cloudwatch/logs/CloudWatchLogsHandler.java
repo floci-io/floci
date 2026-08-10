@@ -55,6 +55,8 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "AssociateKmsKey" -> handleAssociateKmsKey(request, region);
+            case "DisassociateKmsKey" -> handleDisassociateKmsKey(request, region);
             case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
             case "StartQuery" -> handleStartQuery(request, region);
             case "GetQueryResults" -> handleGetQueryResults(request, region);
@@ -110,6 +112,9 @@ public class CloudWatchLogsHandler {
                 node.put("retentionInDays", g.getRetentionInDays());
             }
             node.put("deletionProtectionEnabled", g.isDeletionProtectionEnabled());
+            if (g.getKmsKeyId() != null) {
+                node.put("kmsKeyId", g.getKmsKeyId());
+            }
             node.put("storedBytes", 0);
             node.put("metricFilterCount", 0);
             groupsArray.add(node);
@@ -314,6 +319,18 @@ public class CloudWatchLogsHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("success", success);
         return Response.ok(response).build();
+    }
+
+    private Response handleAssociateKmsKey(JsonNode request, String region) {
+        String groupName = resolveLogGroupName(request);
+        String kmsKeyId = request.path("kmsKeyId").asText(null);
+        logsService.associateKmsKey(groupName, kmsKeyId, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDisassociateKmsKey(JsonNode request, String region) {
+        logsService.disassociateKmsKey(resolveLogGroupName(request), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handlePutRetentionPolicy(JsonNode request, String region) {
