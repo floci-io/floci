@@ -5,6 +5,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
+import com.github.dockerjava.transport.DockerHttpClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
@@ -166,6 +167,21 @@ public class DockerClientProducer {
                 .responseTimeout(Duration.ofMinutes(5))
                 .build();
 
-        return DockerClientImpl.getInstance(clientConfig, httpClient);
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(httpClient, role));
+    }
+
+    /**
+     * Wraps the control-plane transport in {@link RetryingDockerHttpClient} so every short-lived
+     * docker call survives a transient socket drop; the streaming transport stays unwrapped —
+     * its requests (log-follow, exec output) hold hijacked or long-lived streams that must never
+     * be replayed, and its exec-start calls are the one request retrying could turn into a
+     * re-run command.
+     */
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role) {
+        if (!"control-plane".equals(role)) {
+            return transport;
+        }
+        LOG.info("Wrapping control-plane docker transport in transient-I/O retry");
+        return new RetryingDockerHttpClient(transport);
     }
 }
