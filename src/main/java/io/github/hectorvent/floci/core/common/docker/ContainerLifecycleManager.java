@@ -43,19 +43,6 @@ public class ContainerLifecycleManager {
 
     private static final Logger LOG = Logger.getLogger(ContainerLifecycleManager.class);
 
-    /**
-     * Container-create runs over the shared docker socket, which drops connections mid-call
-     * ({@code Broken pipe}) when many builds hit the daemon at once — e.g. an LZA Bootstrap
-     * stage fanning out ~15 CodeBuild actions. A create fails before source staging, so the
-     * copy-path retry never sees it; {@link DockerRetry} recovers it here at the create call.
-     *
-     * <p>Container-start travels the same socket and is just as exposed — a blip between create
-     * and start failed an LZA Prepare stage outright at a peak of only six live containers, so
-     * this is not a load threshold anyone can stay under. Start reuses the create budget.
-     */
-    private static final int CREATE_MAX_ATTEMPTS = 6;
-    private static final long CREATE_RETRY_BACKOFF_MS = 500L;
-
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
@@ -143,8 +130,7 @@ public class ContainerLifecycleManager {
         }
         createCmd.withLabels(mergedLabels(spec.labels()));
 
-        CreateContainerResponse response = DockerRetry.call(
-                CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, createCmd::exec);
+        CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
@@ -158,7 +144,7 @@ public class ContainerLifecycleManager {
      * @return information about the running container including resolved endpoints
      */
     public ContainerInfo startCreated(String containerId, ContainerSpec spec) {
-        startWithRetry(containerId);
+        startAcceptingAlreadyRunning(containerId);
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
@@ -179,25 +165,25 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Starts {@code containerId}, retrying a transient docker I/O error the same way
-     * {@link #create} does — the two calls share one socket and one failure mode.
+     * Starts {@code containerId}, treating "already running" as success. Transient socket blips
+     * are retried below this call, at the transport seam ({@link RetryingDockerHttpClient}); no
+     * retry may live here, where it would compound backoff on the transport's already-exhausted
+     * budget.
      *
-     * <p>A retried start is only safe because docker answers {@code start} on an already-running
-     * container with HTTP 304 rather than an error state. That is precisely what the retry meets
-     * when the daemon honoured a start whose response was lost to the broken pipe, so the
-     * resulting {@link NotModifiedException} reports the outcome we wanted and is swallowed.
+     * <p>The 304 handling is what makes the transport's replay safe: when the daemon honoured a
+     * start whose response was lost to a broken pipe, the replayed start meets HTTP 304 — a
+     * successful response at transport level, which docker-java converts to
+     * {@link NotModifiedException} above it. That reports the outcome we wanted and is swallowed.
      * Letting it escape would turn a recovered blip into a hard launch failure — the exact bug
      * the retry exists to remove.
      */
-    private void startWithRetry(String containerId) {
-        DockerRetry.run(CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, () -> {
-            try {
-                dockerClient.startContainerCmd(containerId).exec();
-            } catch (NotModifiedException alreadyRunning) {
-                LOG.debugv("Container {0} was already running (304) — treating start as done",
-                        containerId);
-            }
-        });
+    private void startAcceptingAlreadyRunning(String containerId) {
+        try {
+            dockerClient.startContainerCmd(containerId).exec();
+        } catch (NotModifiedException alreadyRunning) {
+            LOG.debugv("Container {0} was already running (304) — treating start as done",
+                    containerId);
+        }
     }
 
     /**
@@ -314,33 +300,21 @@ public class ContainerLifecycleManager {
      * {@code docker volume prune --filter label=floci=true} (all emulators) and
      * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
      *
-     * <p>Both daemon calls here — the existence check and the create — travel the shared docker
-     * socket and are exposed to the same mid-call {@code Broken pipe} that {@link #create} and
-     * {@link #startWithRetry} already guard against, so the whole body runs under
-     * {@link DockerRetry}. A blip on the existence check is the nastier of the two: docker-java
-     * wraps a raw socket failure in a plain {@link RuntimeException}, which is neither
-     * {@code NotFoundException} nor {@code DockerException} and so escapes {@link #volumeExists}
-     * uncaught. That is what failed an LZA Prepare stage — a Lambda code volume could not be
-     * populated, which surfaced as {@code Lambda.InitError} on
-     * {@code Custom::LoadAcceleratorConfigTable} and rolled the stack back.
-     *
-     * <p>Re-checking existence <em>inside</em> the retried body is what makes retrying safe: when
-     * the daemon created the volume but the response was lost to the broken pipe, the next attempt
-     * sees it exists and does nothing. This is the volume analogue of {@link #startWithRetry}
-     * treating an HTTP 304 on retry as success. The retry deliberately wraps this body rather than
-     * living inside {@link #volumeExists}, which must keep reporting a failed inspect as "absent"
-     * for its other callers.
+     * <p>Transient socket blips on both daemon calls here — the existence check and the create —
+     * are retried at the transport seam ({@link RetryingDockerHttpClient}). The existence guard
+     * is what keeps the transport's replay safe: {@code POST /volumes/create} with the same name
+     * is itself idempotent, and when the daemon created the volume but the response was lost to
+     * a broken pipe, the replayed create finds it already there while later calls see it exists
+     * and do nothing — the volume analogue of start treating an HTTP 304 as success.
      */
     public void ensureVolume(String volumeName) {
-        DockerRetry.run(CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, () -> {
-            if (!volumeExists(volumeName)) {
-                dockerClient.createVolumeCmd()
-                        .withName(volumeName)
-                        .withLabels(ContainerStorageHelper.defaultLabels(config))
-                        .exec();
-                LOG.debugv("Created volume {0}", volumeName);
-            }
-        });
+        if (!volumeExists(volumeName)) {
+            dockerClient.createVolumeCmd()
+                    .withName(volumeName)
+                    .withLabels(ContainerStorageHelper.defaultLabels(config))
+                    .exec();
+            LOG.debugv("Created volume {0}", volumeName);
+        }
     }
 
     /**
@@ -536,7 +510,7 @@ public class ContainerLifecycleManager {
         boolean running = Boolean.TRUE.equals(inspect.getState().getRunning());
 
         if (!running) {
-            startWithRetry(containerId);
+            startAcceptingAlreadyRunning(containerId);
             LOG.infov("Started adopted container {0}", containerId);
             inspect = dockerClient.inspectContainerCmd(containerId).exec();
         }

@@ -27,25 +27,23 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Starting a container must survive a transient docker I/O blip, exactly as creating one does.
+ * Start semantics that must hold with retries living at the transport seam
+ * ({@link RetryingDockerHttpClient}), not at this call site.
  *
- * <p>{@link ContainerLifecycleManager#create} wraps its daemon call in {@link DockerRetry} because
- * the shared docker socket drops connections mid-call under load; {@code startCreated} called
- * {@code startContainerCmd().exec()} bare, so a single {@code Broken pipe} between create and start
- * failed the launch outright. That is not hypothetical: it destroyed an LZA Prepare stage — the
- * Lambda container launch failed with {@code java.io.IOException: Broken pipe}, which surfaced as a
- * {@code Lambda.InitError} on {@code Custom::LoadAcceleratorConfigTable}, rolled the stack back, and
- * (with termination protection on) left it unredeployable. Peak concurrency at the time was six
- * containers, so this is a plain socket blip, not pool exhaustion.
+ * <p>The load-bearing piece the transport cannot provide: when the daemon honoured a start whose
+ * response was lost to a broken pipe, the transport's replay meets HTTP 304 — a perfectly
+ * successful response at transport level, which docker-java converts to
+ * {@link NotModifiedException} <em>above</em> the transport. The call site must treat it as
+ * success, or a recovered blip becomes a hard launch failure.
  *
- * <p>The retry must be idempotent-safe: docker answers {@code start} on an already-running container
- * with HTTP 304, which docker-java raises as {@link NotModifiedException}. When the daemon processed
- * a start whose response was lost to the broken pipe, the retry sees exactly that — and it means the
- * container is running, which is success, not failure.
+ * <p>Equally load-bearing in the other direction: this manager sees the docker API through a
+ * client whose transport has already spent the full retry budget, so it must not loop again
+ * itself — an outer loop would compound backoff on an already-exhausted inner one (~90s+ worst
+ * case for a single call) and multiply daemon pressure exactly when the socket is saturated.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class ContainerLifecycleManagerStartRetryTest {
+class ContainerLifecycleManagerStartTest {
 
     @Mock
     private ImageCacheService imageCacheService;
@@ -79,44 +77,43 @@ class ContainerLifecycleManagerStartRetryTest {
     }
 
     @Test
-    void startCreatedRetriesTransientBrokenPipeThenSucceeds() {
+    void startCreatedTreatsNotModifiedAsSuccess() {
         AtomicInteger execCalls = new AtomicInteger();
         DockerClient docker = dockerWhoseStartExec(execCalls, attempt -> {
-            if (attempt < 3) {
-                throw new RuntimeException(new IOException("Broken pipe"));
-            }
-        });
-
-        ContainerLifecycleManager.ContainerInfo info =
-                manager(docker).startCreated("container-abc", spec);
-
-        assertEquals("container-abc", info.containerId());
-        assertEquals(3, execCalls.get(),
-                "start must retry a transient Broken pipe, not fire the start exactly once");
-    }
-
-    @Test
-    void startCreatedTreatsNotModifiedOnRetryAsSuccess() {
-        AtomicInteger execCalls = new AtomicInteger();
-        DockerClient docker = dockerWhoseStartExec(execCalls, attempt -> {
-            if (attempt == 1) {
-                // The daemon started the container, then the socket died before the response.
-                throw new RuntimeException(new IOException("Broken pipe"));
-            }
-            // The retry therefore finds it already running: HTTP 304.
+            // The transport's retry replayed a start the daemon had honoured before the socket
+            // died; docker answered the replay with HTTP 304, raised here as NotModifiedException.
             throw new NotModifiedException("Container already started");
         });
 
         ContainerLifecycleManager.ContainerInfo info = assertDoesNotThrow(
                 () -> manager(docker).startCreated("container-abc", spec),
-                "a 304 on retry means the container is running — that is success, not failure");
+                "a 304 means the container is running — that is success, not failure");
 
         assertEquals("container-abc", info.containerId());
-        assertEquals(2, execCalls.get(), "the 304 must end the retry loop, not drive further attempts");
+        assertEquals(1, execCalls.get());
     }
 
     @Test
-    void startCreatedDoesNotRetryNonTransientFailure() {
+    void startCreatedDoesNotRetryOnTopOfTheTransport() {
+        AtomicInteger execCalls = new AtomicInteger();
+        RuntimeException transportGaveUp = new RuntimeException(new IOException("Broken pipe"));
+        DockerClient docker = dockerWhoseStartExec(execCalls, attempt -> {
+            throw transportGaveUp;
+        });
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> manager(docker).startCreated("container-abc", spec));
+
+        assertSame(transportGaveUp, thrown,
+                "a transient error surfacing here means the transport already spent the retry"
+                        + " budget; it must surface unchanged");
+        assertEquals(1, execCalls.get(),
+                "no call-site loop: an outer retry would compound backoff on an exhausted"
+                        + " inner one and multiply pressure on a saturated socket");
+    }
+
+    @Test
+    void startCreatedDoesNotSwallowNonTransientFailure() {
         AtomicInteger execCalls = new AtomicInteger();
         RuntimeException portConflict =
                 new RuntimeException("Bind for 0.0.0.0:80 failed: port is already allocated");
@@ -128,17 +125,14 @@ class ContainerLifecycleManagerStartRetryTest {
                 () -> manager(docker).startCreated("container-abc", spec));
 
         assertSame(portConflict, thrown, "a genuine daemon rejection must surface unchanged");
-        assertEquals(1, execCalls.get(),
-                "a port conflict never clears on a retry; retrying it just delays the failure");
+        assertEquals(1, execCalls.get());
     }
 
     @Test
-    void adoptRetriesTransientBrokenPipeThenSucceeds() {
+    void adoptTreatsNotModifiedAsSuccess() {
         AtomicInteger execCalls = new AtomicInteger();
         DockerClient docker = dockerWhoseStartExec(execCalls, attempt -> {
-            if (attempt < 3) {
-                throw new RuntimeException(new IOException("Broken pipe"));
-            }
+            throw new NotModifiedException("Container already started");
         });
 
         // adopt() inspects first, sees a stopped container, and starts it.
@@ -148,9 +142,9 @@ class ContainerLifecycleManagerStartRetryTest {
         when(inspectCmd.exec()).thenReturn(inspect);
         when(docker.inspectContainerCmd("container-abc")).thenReturn(inspectCmd);
 
-        manager(docker).adopt("container-abc", List.of());
+        assertDoesNotThrow(() -> manager(docker).adopt("container-abc", List.of()),
+                "adopting a container that turns out to be running already is success");
 
-        assertEquals(3, execCalls.get(),
-                "adopting a stopped container must retry a transient Broken pipe on start");
+        assertEquals(1, execCalls.get());
     }
 }

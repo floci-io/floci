@@ -417,64 +417,58 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
-    void ensureVolume_retriesTransientBrokenPipeOnCreate() {
+    void ensureVolume_createsMissingVolumeExactlyOnce() {
+        AtomicInteger inspects = inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+        });
+
+        manager.ensureVolume("vol");
+
+        assertEquals(1, inspects.get());
+        assertEquals(1, creates.get(), "a missing volume must be created");
+    }
+
+    @Test
+    void ensureVolume_doesNotCreateWhenVolumeAlreadyExists() {
+        // This existence guard is what keeps ensureVolume idempotent now that transient-I/O
+        // retries live at the transport: when the daemon created the volume but the response was
+        // lost to a broken pipe, the transport's replayed create finds the volume already there —
+        // POST /volumes/create with the same name is itself idempotent — and later ensureVolume
+        // calls see it exists and do nothing.
+        AtomicInteger inspects = inspectVolumeBehaving(attempt ->
+                mock(InspectVolumeResponse.class));
+
+        manager.ensureVolume("vol");
+
+        assertEquals(1, inspects.get());
+        verify(dockerClient, never()).createVolumeCmd();
+    }
+
+    @Test
+    void ensureVolume_doesNotRetryOnTopOfTheTransport() {
         inspectVolumeBehaving(attempt -> {
             throw new NotFoundException("No such volume: vol");
         });
+        RuntimeException transportGaveUp = new RuntimeException(new IOException("Broken pipe"));
         AtomicInteger creates = createVolumeBehaving(attempt -> {
-            if (attempt < 3) {
-                throw new RuntimeException(new IOException("Broken pipe"));
-            }
+            throw transportGaveUp;
         });
 
-        manager.ensureVolume("vol");
+        RuntimeException thrown =
+                assertThrows(RuntimeException.class, () -> manager.ensureVolume("vol"));
 
-        assertEquals(3, creates.get(),
-                "creating a volume must survive a transient Broken pipe, not fail the launch");
-    }
-
-    @Test
-    void ensureVolume_retriesTransientBrokenPipeOnTheExistenceCheck() {
-        AtomicInteger inspects = inspectVolumeBehaving(attempt -> {
-            if (attempt == 1) {
-                // docker-java wraps a raw socket failure in a plain RuntimeException, which is
-                // neither NotFoundException nor DockerException — so it escapes volumeExists.
-                throw new RuntimeException(new IOException("Broken pipe"));
-            }
-            throw new NotFoundException("No such volume: vol");
-        });
-        AtomicInteger creates = createVolumeBehaving(attempt -> {
-        });
-
-        manager.ensureVolume("vol");
-
-        assertEquals(2, inspects.get(), "a blip on the existence check must be retried, not escape");
-        assertEquals(1, creates.get(), "the retry must go on to create the volume");
-    }
-
-    @Test
-    void ensureVolume_retryFindsTheVolumeTheLostCreateLanded_andDoesNotCreateTwice() {
-        AtomicInteger inspects = inspectVolumeBehaving(attempt -> {
-            if (attempt == 1) {
-                throw new NotFoundException("No such volume: vol");
-            }
-            return mock(InspectVolumeResponse.class); // the lost create did reach the daemon
-        });
-        AtomicInteger creates = createVolumeBehaving(attempt -> {
-            // The daemon created the volume, then the socket died before the response.
-            throw new RuntimeException(new IOException("Broken pipe"));
-        });
-
-        assertDoesNotThrow(() -> manager.ensureVolume("vol"),
-                "a volume that already exists on retry is success, not failure");
-
+        assertSame(transportGaveUp, thrown,
+                "a transient error surfacing here means the transport already spent the retry"
+                        + " budget; it must surface unchanged");
         assertEquals(1, creates.get(),
-                "re-checking existence inside the retry is what makes the retried body idempotent");
-        assertEquals(2, inspects.get(), "each retry must re-check existence before creating");
+                "no call-site loop: an outer retry would compound backoff on an exhausted"
+                        + " inner one");
     }
 
     @Test
-    void ensureVolume_doesNotRetryNonTransientFailure() {
+    void ensureVolume_doesNotSwallowDaemonRejection() {
         inspectVolumeBehaving(attempt -> {
             throw new NotFoundException("No such volume: vol");
         });
