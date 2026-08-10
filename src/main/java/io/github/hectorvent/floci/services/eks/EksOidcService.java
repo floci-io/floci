@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
@@ -26,6 +27,7 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -73,7 +75,21 @@ public class EksOidcService implements OidcIssuerKeyLookup {
      * Keyed by cluster name so {@code DeleteCluster} can drop it.
      */
     public synchronized ClusterOidcKey ensureKey(String clusterName, String issuer) {
-        Optional<ClusterOidcKey> existing = keyStore.get(clusterName);
+        return ensureKey(null, clusterName, issuer);
+    }
+
+    /**
+     * As {@link #ensureKey}, but scoped to an explicit account. Startup and other work running
+     * without a request context must pass the owning account from the cluster record, since the
+     * request-scoped store would otherwise resolve to the default account.
+     */
+    public synchronized ClusterOidcKey ensureKeyForAccount(String accountId, String clusterName,
+                                                           String issuer) {
+        return ensureKey(accountId, clusterName, issuer);
+    }
+
+    private ClusterOidcKey ensureKey(String accountId, String clusterName, String issuer) {
+        Optional<ClusterOidcKey> existing = readKey(accountId, clusterName);
         if (existing.isPresent() && issuer.equals(existing.get().getIssuer())) {
             return existing.get();
         }
@@ -88,13 +104,28 @@ public class EksOidcService implements OidcIssuerKeyLookup {
                     UUID.randomUUID().toString(),
                     Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded()),
                     Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
-            keyStore.put(clusterName, key);
+            writeKey(accountId, clusterName, key);
             LOG.debugv("Generated IRSA OIDC signing key for EKS cluster {0}", clusterName);
             return key;
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("Failed to generate EKS OIDC signing keypair for cluster "
                     + clusterName + ": RSA unavailable", e);
         }
+    }
+
+    private Optional<ClusterOidcKey> readKey(String accountId, String clusterName) {
+        if (accountId != null && keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
+            return aware.getForAccount(accountId, clusterName);
+        }
+        return keyStore.get(clusterName);
+    }
+
+    private void writeKey(String accountId, String clusterName, ClusterOidcKey key) {
+        if (accountId != null && keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
+            aware.putForAccount(accountId, clusterName, key);
+            return;
+        }
+        keyStore.put(clusterName, key);
     }
 
     public void deleteKey(String clusterName) {
@@ -110,10 +141,21 @@ public class EksOidcService implements OidcIssuerKeyLookup {
         if (issuer == null || issuer.isBlank()) {
             return Optional.empty();
         }
-        return keyStore.scan(k -> true).stream()
+        // Scans every account, not just the caller's. An issuer URL is globally unique, and the
+        // account calling AssumeRoleWithWebIdentity need not be the one that owns the cluster.
+        // Account-scoped scanning would leave the key unfound, and an unfound issuer is treated as
+        // a third-party provider, so the token would be accepted with no validation at all.
+        return allKeys().stream()
                 .filter(key -> issuer.equals(key.getIssuer()))
                 .findFirst()
                 .map(key -> toPublicKey(key.getPublicKey()));
+    }
+
+    private List<ClusterOidcKey> allKeys() {
+        if (keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
+            return aware.scanAllAccounts();
+        }
+        return keyStore.scan(k -> true);
     }
 
     /**

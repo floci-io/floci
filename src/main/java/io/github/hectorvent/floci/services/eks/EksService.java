@@ -94,17 +94,34 @@ public class EksService implements TagHandler {
      */
     private void backfillOidcIdentities() {
         for (Cluster cluster : allClusters()) {
+            // Runs at startup with no request context, so the owning account must come from the
+            // cluster record and be passed explicitly, so the account-scoped put()/get() would
+            // resolve to the default account and strand a cluster owned by any other one.
+            String accountId = cluster.getAccountId() != null
+                    ? cluster.getAccountId()
+                    : regionResolver.getAccountId();
+
             if (cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
                     && cluster.getIdentity().getOidc().getIssuer() != null) {
-                oidcService.ensureKey(cluster.getName(), cluster.getIdentity().getOidc().getIssuer());
+                oidcService.ensureKeyForAccount(accountId, cluster.getName(),
+                        cluster.getIdentity().getOidc().getIssuer());
                 continue;
             }
             String issuer = oidcService.newIssuerUrl(config.defaultRegion());
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
-            oidcService.ensureKey(cluster.getName(), issuer);
-            storage.put(cluster.getName(), cluster);
-            LOG.infov("Backfilled IRSA OIDC issuer for existing EKS cluster {0}", cluster.getName());
+            oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+            putClusterForAccount(accountId, cluster);
+            LOG.infov("Backfilled IRSA OIDC issuer for existing EKS cluster {0} in account {1}",
+                    cluster.getName(), accountId);
         }
+    }
+
+    private void putClusterForAccount(String accountId, Cluster cluster) {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            aware.putForAccount(accountId, cluster.getName(), cluster);
+            return;
+        }
+        storage.put(cluster.getName(), cluster);
     }
 
     @PreDestroy

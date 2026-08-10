@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -70,6 +71,28 @@ class EksOidcServiceTest {
 
         assertNotEquals(original.getPrivateKey(), rotated.getPrivateKey());
         assertTrue(oidcService.findVerificationKey(ISSUER).isEmpty());
+    }
+
+    @Test
+    void findVerificationKeyResolvesAcrossAccounts() {
+        // STS must resolve an issuer regardless of which account owns the cluster: the caller need
+        // not be the owner, and an unresolved issuer is treated as a third-party provider — so the
+        // token would be accepted with no validation at all.
+        StorageBackend<String, ClusterOidcKey> raw = new InMemoryStorage<>();
+        var accountAware = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        EksOidcService service = new EksOidcService(new StorageFactory(null, null) {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return (StorageBackend<String, V>) accountAware;
+            }
+        }, new ObjectMapper());
+
+        service.ensureKeyForAccount("999999999999", CLUSTER, ISSUER);
+
+        // The lookup runs outside any request context, so it resolves to the default account.
+        assertTrue(service.findVerificationKey(ISSUER).isPresent());
     }
 
     @Test

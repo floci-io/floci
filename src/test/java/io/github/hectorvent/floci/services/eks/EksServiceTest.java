@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -247,6 +248,38 @@ class EksServiceTest {
         // be present so previously minted tokens still verify.
         assertEquals(issuer,
                 restarted.describeCluster("existing-cluster").getIdentity().getOidc().getIssuer());
+        assertTrue(oidcService.findVerificationKey(issuer).isPresent());
+    }
+
+    @Test
+    void initBackfillsUnderTheOwningAccountNotTheDefault() {
+        // Startup has no request context, so the account-scoped put() resolves to the default
+        // account. A cluster owned by another account must still be migrated in place, or the owner
+        // keeps an issuer-less record while a duplicate appears under the default account.
+        String otherAccount = "999999999999";
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> rawKeys = new InMemoryStorage<>();
+        var clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        var keyStore = new AccountAwareStorageBackend<>(rawKeys, null, "000000000000");
+
+        Cluster legacy = new Cluster();
+        legacy.setName("legacy-cluster");
+        legacy.setAccountId(otherAccount);
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        clusterStore.putForAccount(otherAccount, "legacy-cluster", legacy);
+
+        EksOidcService oidcService = new EksOidcService(
+                fixedStorageFactory(keyStore), new ObjectMapper());
+        new EksService(fixedStorageFactory(clusterStore), testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService).init();
+
+        Cluster migrated = clusterStore.getForAccount(otherAccount, "legacy-cluster").orElseThrow();
+        String issuer = migrated.getIdentity().getOidc().getIssuer();
+        assertNotNull(issuer);
+        // No duplicate stranded under the default account.
+        assertTrue(clusterStore.getForAccount("000000000000", "legacy-cluster").isEmpty());
+        // The signing key is stored under the owner too, and is still resolvable by issuer.
+        assertTrue(keyStore.getForAccount(otherAccount, "legacy-cluster").isPresent());
         assertTrue(oidcService.findVerificationKey(issuer).isPresent());
     }
 
