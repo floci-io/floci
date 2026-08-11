@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
@@ -19,12 +20,8 @@ import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -347,11 +344,8 @@ public class EksClusterManager {
      */
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(localFile)
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, localFile);
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -385,11 +379,8 @@ public class EksClusterManager {
                 ecrRegistryManager.effectivePort(), ecrRegistryManager.internalEndpoint());
         writeRegistriesYaml(clusterName, content);
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(REGISTRIES_TAR_ENTRY, content)))
-                    .withRemotePath("/etc")
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
+                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644);
             LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}",
                     ecrRegistryManager.internalEndpoint(), clusterName);
         } catch (Exception e) {
@@ -408,24 +399,6 @@ public class EksClusterManager {
         } catch (IOException e) {
             LOG.debugv("Could not write local registries.yaml copy for cluster {0}: {1}",
                     clusterName, e.getMessage());
-        }
-    }
-
-    private static byte[] tarSingleFile(String entryName, String content) {
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] data = content.getBytes(StandardCharsets.UTF_8);
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
-                TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                entry.setSize(data.length);
-                entry.setMode(0644);
-                tar.putArchiveEntry(entry);
-                tar.write(data);
-                tar.closeArchiveEntry();
-            }
-            return out.toByteArray();
-        } catch (IOException e) {
-            throw new IllegalStateException("Could not build in-memory tar for " + entryName, e);
         }
     }
 
