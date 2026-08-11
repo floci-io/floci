@@ -8,7 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
-import io.github.hectorvent.floci.core.common.docker.DockerRetry;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
@@ -1054,25 +1054,15 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
     }
 
-    /**
-     * Buffer for the tar-streaming pipe. The default {@link java.io.PipedInputStream} buffer is
-     * only 1KB, which forces a writer/reader thread hand-off (wait/notify) every 1KB. Streaming a
-     * ~90MB node_modules through that ran at ~0.5MB/s (≈3 min per cold start) — pure synchronization
-     * thrash, not I/O. A large buffer lets the tar writer stream ahead so throughput is bound by the
-     * Docker daemon, not the pipe.
-     */
-    private static final int TAR_PIPE_BUFFER_BYTES = 16 * 1024 * 1024;
-
     @FunctionalInterface
     interface DirectoryTarWriter {
         void write(Path sourceDir, OutputStream out) throws IOException;
     }
 
     /**
-     * The transport-level retry cannot replay a one-shot {@code InputStream} body — the streamed
-     * tar bytes are gone after the first attempt — so these copies retry here, where the whole
-     * operation (pipe, streamer thread, request) is rebuilt per attempt. Tar extract over the same
-     * path is idempotent, so a replay is safe.
+     * See {@link RetryingTarCopier}: these copies retry at the call site because the transport
+     * seam cannot replay a one-shot {@code InputStream} body. A failure throws so launch() cleans
+     * up the half-built container instead of leaking it.
      */
     static final int COPY_MAX_ATTEMPTS = 6;
     static final long COPY_RETRY_BACKOFF_MS = 500L;
@@ -1117,48 +1107,33 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // No per-copy gating here: the heavy /var/task populate for large code already holds a
         // POPULATE_SEMAPHORE permit; small-code direct copies and layer copies are light enough
         // to run unthrottled.
-        try {
-            DockerRetry.run(maxAttempts, backoffMillis, () ->
-                    streamDirTarIntoContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
-                            tarWriter, failOnTarFailure));
-        } catch (Exception e) {
-            // Fail loudly so launch() cleans up the half-built container instead of leaking it.
-            throw new RuntimeException("Failed to copy directory " + sourceDir + " into container "
-                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
-        }
-    }
-
-    private static void streamDirTarIntoContainer(DockerClient dockerClient, String containerId,
-                                                  Path sourceDir, String remotePath, String functionName,
-                                                  DirectoryTarWriter tarWriter, boolean failOnTarFailure)
-            throws IOException {
-        try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
-
-            AtomicReference<IOException> tarFailure = new AtomicReference<>();
-            Thread tarStreamer = new Thread(() -> {
-                try (pos) {
-                    tarWriter.write(sourceDir, pos);
-                } catch (IOException e) {
-                    if (failOnTarFailure) {
-                        tarFailure.set(e);
-                    } else {
-                        LOG.errorv("Failed to stream directory tar for function {0}: {1}",
-                                functionName, e.getMessage());
+        AtomicReference<IOException> tarFailure = new AtomicReference<>();
+        RetryingTarCopier.copyStreamed(dockerClient, containerId, remotePath,
+                "dir-" + functionName, out -> {
+                    tarFailure.set(null);
+                    try {
+                        tarWriter.write(sourceDir, out);
+                    } catch (IOException e) {
+                        if (failOnTarFailure) {
+                            tarFailure.set(e);
+                        } else {
+                            LOG.errorv("Failed to stream directory tar for function {0}: {1}",
+                                    functionName, e.getMessage());
+                        }
+                        throw e;
                     }
-                }
-            }, "tar-streamer-dir-" + functionName);
-            tarStreamer.start();
-
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(remotePath)
-                    .withTarInputStream(pis)
-                    .exec();
-            if (failOnTarFailure) {
-                waitForTarStreamer(tarStreamer, tarFailure, functionName, sourceDir);
-            }
-            LOG.debugv("Copied directory {0} into container {1} at {2}", sourceDir, containerId, remotePath);
+                },
+                maxAttempts, backoffMillis);
+        // The copier only fails an attempt when the daemon rejects the truncated stream; the
+        // strict path must also surface a tar-producer failure the daemon happened to accept.
+        IOException failure = tarFailure.get();
+        if (failOnTarFailure && failure != null) {
+            IOException cause = new IOException("Failed to stream tar for function " + functionName
+                    + " from " + sourceDir, failure);
+            throw new RuntimeException("Failed to copy directory " + sourceDir + " into container "
+                    + containerId + " for function " + functionName + ": " + cause.getMessage(), cause);
         }
+        LOG.debugv("Copied directory {0} into container {1} at {2}", sourceDir, containerId, remotePath);
     }
 
     private void copyFileToContainer(DockerClient dockerClient, String containerId,
@@ -1170,58 +1145,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     void copyFileToContainer(DockerClient dockerClient, String containerId,
                              Path sourceFile, String remotePath, String entryName, String functionName,
                              int maxAttempts, long backoffMillis) {
-        try {
-            DockerRetry.run(maxAttempts, backoffMillis, () ->
-                    streamFileTarIntoContainer(dockerClient, containerId, sourceFile, remotePath, entryName, functionName));
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to copy file " + sourceFile + " into container "
-                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
-        }
-    }
-
-    private void streamFileTarIntoContainer(DockerClient dockerClient, String containerId,
-                                            Path sourceFile, String remotePath, String entryName,
-                                            String functionName) throws IOException {
-        try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
-
-            new Thread(() -> {
-                try (TarArchiveOutputStream tar = newTarStream(pos)) {
-                    TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                    entry.setSize(Files.size(sourceFile));
-                    entry.setMode(0755);
-                    tar.putArchiveEntry(entry);
-                    try (var fis = Files.newInputStream(sourceFile)) {
-                        fis.transferTo(tar);
-                    }
-                    tar.closeArchiveEntry();
-                } catch (IOException e) {
-                    LOG.errorv("Failed to stream file tar for function {0}: {1}", functionName, e.getMessage());
-                }
-            }, "tar-streamer-file-" + functionName).start();
-
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(remotePath)
-                    .withTarInputStream(pis)
-                    .exec();
-            LOG.debugv("Copied file {0} as {1} into container {2} at {3}", sourceFile, entryName, containerId, remotePath);
-        }
-    }
-
-    private static void waitForTarStreamer(Thread tarStreamer, AtomicReference<IOException> tarFailure,
-                                           String functionName, Path sourcePath) throws IOException {
-        try {
-            tarStreamer.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while streaming tar for function " + functionName
-                    + " from " + sourcePath, e);
-        }
-        IOException failure = tarFailure.get();
-        if (failure != null) {
-            throw new IOException("Failed to stream tar for function " + functionName
-                    + " from " + sourcePath, failure);
-        }
+        RetryingTarCopier.copyFile(dockerClient, containerId, remotePath, entryName, sourceFile,
+                0755, maxAttempts, backoffMillis);
+        LOG.debugv("Copied file {0} as {1} into container {2} at {3}", sourceFile, entryName, containerId, remotePath);
     }
 
     private static boolean isProvidedRuntime(String runtime) {
@@ -1445,7 +1371,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * are preserved without truncation.
      */
     private static void createTarFromDir(Path sourceDir, OutputStream out) throws IOException {
-        try (TarArchiveOutputStream tar = newTarStream(out);
+        try (TarArchiveOutputStream tar = RetryingTarCopier.newTarStream(out);
              var stream = Files.walk(sourceDir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
                 if (Files.isDirectory(path)) {
@@ -1462,12 +1388,5 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 tar.closeArchiveEntry();
             }
         }
-    }
-
-    private static TarArchiveOutputStream newTarStream(OutputStream out) {
-        TarArchiveOutputStream tar = new TarArchiveOutputStream(out);
-        tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-        tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_STAR);
-        return tar;
     }
 }
