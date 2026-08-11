@@ -85,6 +85,13 @@ public class CodeBuildRunner implements ContainerTeardown {
     private static final List<String> SHELL_PHASES = List.of("INSTALL", "PRE_BUILD", "BUILD", "POST_BUILD");
     static final String CONTAINER_CA_CERT_PATH = "/tmp/floci-ca.pem";
 
+    // AWS's published per-computeType memory tiers (general-purpose family, plus the
+    // Lambda-compute family). Unlike Lambda/ECS/Batch, build containers previously got
+    // no memory cap at all — a real CodeBuild project always declares a computeType, so
+    // the null/unrecognized fallback below only guards against a value floci doesn't
+    // know about yet; it must never leave a build container unbounded (issues/0005).
+    private static final int DEFAULT_COMPUTE_TYPE_MEMORY_MB = 3072;
+
     // Wrapper for the bash driver: each command entry runs in its own child shell
     // that first restores the variable and cwd snapshot of the previous entry, sources
     // the entry, then snapshots again. declare -p re-declares variables with their
@@ -479,6 +486,11 @@ public class CodeBuildRunner implements ContainerTeardown {
                     || (build.getEnvironment() != null
                     && Boolean.TRUE.equals(build.getEnvironment().getPrivilegedMode()));
 
+            String computeType = build.getEnvironment() != null && build.getEnvironment().getComputeType() != null
+                    ? build.getEnvironment().getComputeType()
+                    : (project.getEnvironment() != null ? project.getEnvironment().getComputeType() : null);
+            int memoryMb = resolveComputeTypeMemoryMb(computeType);
+
             Map<String, Object> logsMap = new java.util.HashMap<>();
             logsMap.put("groupName", logGroup);
             logsMap.put("streamName", logStream);
@@ -507,6 +519,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .withEmbeddedDns()
                     .withHostDockerInternalOnLinux()
                     .withPrivileged(privileged)
+                    .withMemoryMb(memoryMb)
                     .withLogRotation()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "codebuild", buildId, regionResolver.getAccountId(), region))
@@ -724,6 +737,24 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     static String secondarySourceDir(String sourceIdentifier) {
         return "/codebuild/output/src-" + sourceIdentifier + "/src";
+    }
+
+    static int resolveComputeTypeMemoryMb(String computeType) {
+        if (computeType == null) {
+            return DEFAULT_COMPUTE_TYPE_MEMORY_MB;
+        }
+        return switch (computeType) {
+            case "BUILD_GENERAL1_SMALL" -> 3072;
+            case "BUILD_GENERAL1_MEDIUM" -> 7168;
+            case "BUILD_GENERAL1_LARGE" -> 15360;
+            case "BUILD_GENERAL1_2XLARGE" -> 145 * 1024;
+            case "BUILD_LAMBDA_1GB" -> 1024;
+            case "BUILD_LAMBDA_2GB" -> 2048;
+            case "BUILD_LAMBDA_4GB" -> 4096;
+            case "BUILD_LAMBDA_8GB" -> 8192;
+            case "BUILD_LAMBDA_10GB" -> 10240;
+            default -> DEFAULT_COMPUTE_TYPE_MEMORY_MB;
+        };
     }
 
     List<String> buildEnvList(String region, Build build, Project project,
