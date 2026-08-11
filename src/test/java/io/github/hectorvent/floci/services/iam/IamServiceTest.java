@@ -811,6 +811,17 @@ class IamServiceTest {
         IamPolicy bedrockReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockReadOnly");
         assertEquals("AmazonBedrockReadOnly", bedrockReadOnly.getPolicyName());
         assertEquals("/", bedrockReadOnly.getPath());
+
+        // LZA's OperationsStack attaches these to its AWS Backup service roles.
+        IamPolicy backup = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup");
+        assertEquals("AWSBackupServiceRolePolicyForBackup", backup.getPolicyName());
+        assertEquals("/service-role/", backup.getPath());
+
+        IamPolicy restore = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores");
+        assertEquals("AWSBackupServiceRolePolicyForRestores", restore.getPolicyName());
+        assertEquals("/service-role/", restore.getPath());
     }
 
     @Test
