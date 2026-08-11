@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.docker.DockerRetry;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
@@ -1067,6 +1068,15 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         void write(Path sourceDir, OutputStream out) throws IOException;
     }
 
+    /**
+     * The transport-level retry cannot replay a one-shot {@code InputStream} body — the streamed
+     * tar bytes are gone after the first attempt — so these copies retry here, where the whole
+     * operation (pipe, streamer thread, request) is rebuilt per attempt. Tar extract over the same
+     * path is idempotent, so a replay is safe.
+     */
+    static final int COPY_MAX_ATTEMPTS = 6;
+    static final long COPY_RETRY_BACKOFF_MS = 500L;
+
     private void copyDirToContainer(DockerClient dockerClient, String containerId,
                                     Path sourceDir, String remotePath, String functionName) {
         copyDirToContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
@@ -1077,7 +1087,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                                    Path sourceDir, String remotePath, String functionName,
                                    DirectoryTarWriter tarWriter) {
         copyDirToContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
-                tarWriter, false);
+                tarWriter, false, COPY_MAX_ATTEMPTS, COPY_RETRY_BACKOFF_MS);
+    }
+
+    void copyDirToContainer(DockerClient dockerClient, String containerId,
+                            Path sourceDir, String remotePath, String functionName,
+                            int maxAttempts, long backoffMillis) {
+        copyDirToContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
+                ContainerLauncher::createTarFromDir, false, maxAttempts, backoffMillis);
     }
 
     private void copyDirToContainerStrict(DockerClient dockerClient, String containerId,
@@ -1090,15 +1107,31 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                                          Path sourceDir, String remotePath, String functionName,
                                          DirectoryTarWriter tarWriter) {
         copyDirToContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
-                tarWriter, true);
+                tarWriter, true, COPY_MAX_ATTEMPTS, COPY_RETRY_BACKOFF_MS);
     }
 
     private static void copyDirToContainer(DockerClient dockerClient, String containerId,
                                            Path sourceDir, String remotePath, String functionName,
-                                           DirectoryTarWriter tarWriter, boolean failOnTarFailure) {
+                                           DirectoryTarWriter tarWriter, boolean failOnTarFailure,
+                                           int maxAttempts, long backoffMillis) {
         // No per-copy gating here: the heavy /var/task populate for large code already holds a
         // POPULATE_SEMAPHORE permit; small-code direct copies and layer copies are light enough
         // to run unthrottled.
+        try {
+            DockerRetry.run(maxAttempts, backoffMillis, () ->
+                    streamDirTarIntoContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
+                            tarWriter, failOnTarFailure));
+        } catch (Exception e) {
+            // Fail loudly so launch() cleans up the half-built container instead of leaking it.
+            throw new RuntimeException("Failed to copy directory " + sourceDir + " into container "
+                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
+        }
+    }
+
+    private static void streamDirTarIntoContainer(DockerClient dockerClient, String containerId,
+                                                  Path sourceDir, String remotePath, String functionName,
+                                                  DirectoryTarWriter tarWriter, boolean failOnTarFailure)
+            throws IOException {
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
              java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
@@ -1125,15 +1158,30 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 waitForTarStreamer(tarStreamer, tarFailure, functionName, sourceDir);
             }
             LOG.debugv("Copied directory {0} into container {1} at {2}", sourceDir, containerId, remotePath);
-        } catch (Exception e) {
-            // Fail loudly so launch() cleans up the half-built container instead of leaking it.
-            throw new RuntimeException("Failed to copy directory " + sourceDir + " into container "
-                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
         }
     }
 
     private void copyFileToContainer(DockerClient dockerClient, String containerId,
                                      Path sourceFile, String remotePath, String entryName, String functionName) {
+        copyFileToContainer(dockerClient, containerId, sourceFile, remotePath, entryName, functionName,
+                COPY_MAX_ATTEMPTS, COPY_RETRY_BACKOFF_MS);
+    }
+
+    void copyFileToContainer(DockerClient dockerClient, String containerId,
+                             Path sourceFile, String remotePath, String entryName, String functionName,
+                             int maxAttempts, long backoffMillis) {
+        try {
+            DockerRetry.run(maxAttempts, backoffMillis, () ->
+                    streamFileTarIntoContainer(dockerClient, containerId, sourceFile, remotePath, entryName, functionName));
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to copy file " + sourceFile + " into container "
+                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
+        }
+    }
+
+    private void streamFileTarIntoContainer(DockerClient dockerClient, String containerId,
+                                            Path sourceFile, String remotePath, String entryName,
+                                            String functionName) throws IOException {
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
              java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
@@ -1157,9 +1205,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     .withTarInputStream(pis)
                     .exec();
             LOG.debugv("Copied file {0} as {1} into container {2} at {3}", sourceFile, entryName, containerId, remotePath);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to copy file " + sourceFile + " into container "
-                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
         }
     }
 
