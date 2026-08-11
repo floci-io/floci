@@ -40,12 +40,15 @@ public class Ec2QueryHandler {
     private final Ec2Service service;
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
+    private final Ec2IpamService ipamService;
 
     @Inject
-    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService) {
+    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
+                           Ec2IpamService ipamService) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
+        this.ipamService = ipamService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -222,6 +225,20 @@ public class Ec2QueryHandler {
                 case "RequestSpotInstances" -> handleRequestSpotInstances(params, region);
                 case "DescribeSpotInstanceRequests" -> handleDescribeSpotInstanceRequests(params, region);
                 case "CancelSpotInstanceRequests" -> handleCancelSpotInstanceRequests(params, region);
+                // IPAM
+                case "EnableIpamOrganizationAdminAccount" -> handleEnableIpamOrgAdmin(params);
+                case "DisableIpamOrganizationAdminAccount" -> handleDisableIpamOrgAdmin(params);
+                case "CreateIpam" -> handleCreateIpam(params, region);
+                case "DescribeIpams" -> handleDescribeIpams(params, region);
+                case "DeleteIpam" -> handleDeleteIpam(params, region);
+                case "CreateIpamPool" -> handleCreateIpamPool(params, region);
+                case "DescribeIpamPools" -> handleDescribeIpamPools(params, region);
+                case "DeleteIpamPool" -> handleDeleteIpamPool(params, region);
+                case "ProvisionIpamPoolCidr" -> handleProvisionIpamPoolCidr(params, region);
+                case "GetIpamPoolCidrs" -> handleGetIpamPoolCidrs(params, region);
+                case "AllocateIpamPoolCidr" -> handleAllocateIpamPoolCidr(params, region);
+                case "ReleaseIpamPoolAllocation" -> handleReleaseIpamPoolAllocation(params, region);
+                case "GetIpamPoolAllocations" -> handleGetIpamPoolAllocations(params, region);
                 default -> ec2Error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", 400);
             };
@@ -1091,6 +1108,231 @@ public class Ec2QueryHandler {
                 .start("unsuccessful").end("unsuccessful")
                 .end("DeleteFlowLogsResponse");
         return xmlResponse(xml.build());
+    }
+
+    // ─── IPAM ─────────────────────────────────────────────────────────────────
+
+    private Response handleEnableIpamOrgAdmin(MultivaluedMap<String, String> p) {
+        ipamService.enableIpamOrganizationAdminAccount(p.getFirst("DelegatedAdminAccountId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("EnableIpamOrganizationAdminAccountResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("success", "true")
+                .end("EnableIpamOrganizationAdminAccountResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDisableIpamOrgAdmin(MultivaluedMap<String, String> p) {
+        ipamService.disableIpamOrganizationAdminAccount(p.getFirst("DelegatedAdminAccountId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DisableIpamOrganizationAdminAccountResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("success", "true")
+                .end("DisableIpamOrganizationAdminAccountResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateIpam(MultivaluedMap<String, String> p, String region) {
+        List<String> operatingRegions = new ArrayList<>();
+        for (int i = 1; p.getFirst("OperatingRegion." + i + ".RegionName") != null; i++) {
+            operatingRegions.add(p.getFirst("OperatingRegion." + i + ".RegionName"));
+        }
+        if (operatingRegions.isEmpty()) {
+            operatingRegions.add(region);
+        }
+        Ipam ipam = ipamService.createIpam(region, p.getFirst("Description"), operatingRegions);
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateIpamResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpam(xml, "ipam", ipam);
+        xml.end("CreateIpamResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIpams(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "IpamId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "IpamIds.member");
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIpamsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamSet");
+        for (Ipam ipam : ipamService.describeIpams(region, ids)) {
+            writeIpam(xml, "item", ipam);
+        }
+        xml.end("ipamSet").end("DescribeIpamsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteIpam(MultivaluedMap<String, String> p, String region) {
+        Ipam ipam = ipamService.deleteIpam(region, p.getFirst("IpamId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteIpamResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpam(xml, "ipam", ipam);
+        xml.end("DeleteIpamResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateIpamPool(MultivaluedMap<String, String> p, String region) {
+        IpamPool pool = ipamService.createIpamPool(region,
+                p.getFirst("IpamScopeId"),
+                p.getFirst("Locale"),
+                p.getFirst("SourceIpamPoolId"),
+                p.getFirst("AddressFamily"),
+                p.getFirst("Description"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateIpamPoolResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPool(xml, "ipamPool", pool);
+        xml.end("CreateIpamPoolResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIpamPools(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "IpamPoolId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "IpamPoolIds.member");
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIpamPoolsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolSet");
+        for (IpamPool pool : ipamService.describeIpamPools(region, ids)) {
+            writeIpamPool(xml, "item", pool);
+        }
+        xml.end("ipamPoolSet").end("DescribeIpamPoolsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteIpamPool(MultivaluedMap<String, String> p, String region) {
+        IpamPool pool = ipamService.deleteIpamPool(region, p.getFirst("IpamPoolId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteIpamPoolResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPool(xml, "ipamPool", pool);
+        xml.end("DeleteIpamPoolResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleProvisionIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
+        IpamPoolCidr cidr = ipamService.provisionIpamPoolCidr(region,
+                p.getFirst("IpamPoolId"), p.getFirst("Cidr"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ProvisionIpamPoolCidrResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolCidr")
+                .elem("cidr", cidr.getCidr())
+                .elem("state", cidr.getState())
+                .end("ipamPoolCidr")
+                .end("ProvisionIpamPoolCidrResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetIpamPoolCidrs(MultivaluedMap<String, String> p, String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetIpamPoolCidrsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolCidrSet");
+        for (IpamPoolCidr cidr : ipamService.getIpamPoolCidrs(region, p.getFirst("IpamPoolId"))) {
+            xml.start("item")
+                    .elem("cidr", cidr.getCidr())
+                    .elem("state", cidr.getState())
+                    .end("item");
+        }
+        xml.end("ipamPoolCidrSet").end("GetIpamPoolCidrsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleAllocateIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
+        String netmask = p.getFirst("NetmaskLength");
+        IpamPoolAllocation allocation = ipamService.allocateIpamPoolCidr(region,
+                p.getFirst("IpamPoolId"),
+                netmask != null ? Integer.valueOf(netmask) : null,
+                p.getFirst("Cidr"),
+                p.getFirst("Description"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AllocateIpamPoolCidrResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPoolAllocation(xml, "ipamPoolAllocation", allocation);
+        xml.end("AllocateIpamPoolCidrResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleReleaseIpamPoolAllocation(MultivaluedMap<String, String> p, String region) {
+        ipamService.releaseIpamPoolAllocation(region,
+                p.getFirst("IpamPoolId"),
+                p.getFirst("IpamPoolAllocationId"),
+                p.getFirst("Cidr"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ReleaseIpamPoolAllocationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("success", "true")
+                .end("ReleaseIpamPoolAllocationResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetIpamPoolAllocations(MultivaluedMap<String, String> p, String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetIpamPoolAllocationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolAllocationSet");
+        for (IpamPoolAllocation allocation
+                : ipamService.getIpamPoolAllocations(region, p.getFirst("IpamPoolId"))) {
+            writeIpamPoolAllocation(xml, "item", allocation);
+        }
+        xml.end("ipamPoolAllocationSet").end("GetIpamPoolAllocationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private void writeIpam(XmlBuilder xml, String wrapper, Ipam ipam) {
+        xml.start(wrapper)
+                .elem("ipamId", ipam.getIpamId())
+                .elem("ipamArn", ipam.getIpamArn())
+                .elem("ipamRegion", ipam.getRegion())
+                .elem("ownerId", ipam.getOwnerId())
+                .elem("publicDefaultScopeId", ipam.getPublicDefaultScopeId())
+                .elem("privateDefaultScopeId", ipam.getPrivateDefaultScopeId())
+                .elem("scopeCount", String.valueOf(ipam.getScopes().size()))
+                .elem("state", ipam.getState());
+        if (ipam.getDescription() != null) {
+            xml.elem("description", ipam.getDescription());
+        }
+        xml.start("operatingRegionSet");
+        for (String operatingRegion : ipam.getOperatingRegions()) {
+            xml.start("item").elem("regionName", operatingRegion).end("item");
+        }
+        xml.end("operatingRegionSet").end(wrapper);
+    }
+
+    private void writeIpamPool(XmlBuilder xml, String wrapper, IpamPool pool) {
+        xml.start(wrapper)
+                .elem("ipamPoolId", pool.getIpamPoolId())
+                .elem("ipamPoolArn", pool.getIpamPoolArn())
+                .elem("ipamScopeId", pool.getIpamScopeId())
+                .elem("ownerId", pool.getOwnerId())
+                .elem("locale", pool.getLocale())
+                .elem("addressFamily", pool.getAddressFamily())
+                .elem("state", pool.getState());
+        if (pool.getSourceIpamPoolId() != null) {
+            xml.elem("sourceIpamPoolId", pool.getSourceIpamPoolId());
+        }
+        if (pool.getDescription() != null) {
+            xml.elem("description", pool.getDescription());
+        }
+        xml.end(wrapper);
+    }
+
+    private void writeIpamPoolAllocation(XmlBuilder xml, String wrapper, IpamPoolAllocation allocation) {
+        xml.start(wrapper)
+                .elem("ipamPoolAllocationId", allocation.getIpamPoolAllocationId())
+                .elem("cidr", allocation.getCidr())
+                .elem("resourceType", allocation.getResourceType());
+        if (allocation.getDescription() != null) {
+            xml.elem("description", allocation.getDescription());
+        }
+        xml.end(wrapper);
     }
 
     private Response handleCreateVpcEndpoint(MultivaluedMap<String, String> p, String region) {
