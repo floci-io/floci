@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -129,15 +130,35 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
      *
      * <p>Entries with no account segment at all — persisted before multi-account support was
      * added — are attributed to {@code defaultAccountId} rather than skipped, mirroring how
-     * {@link #get} treats them on a per-key lookup. This keeps a bulk startup reload (which has
-     * no per-key caller to trigger that migrate-on-read path) from silently losing pre-existing
-     * data on upgrade.
+     * {@link #get} treats them on a per-key lookup. Unlike {@code get()}'s per-key migration,
+     * this bulk scan has no single caller-supplied key to migrate on demand, so it migrates (or
+     * discards) every bare legacy key it finds immediately: already-prefixed keys are loaded
+     * first so a legacy key can never win a collision against one that's since been written
+     * under its proper prefix, and any bare key superseded that way is deleted outright rather
+     * than left to linger — otherwise it would still be sitting in storage to collide again,
+     * non-deterministically, on a later restart.
      */
     public Map<String, V> scanAllAccountsRaw() {
         Map<String, V> result = new LinkedHashMap<>();
+        List<String> legacyKeys = new ArrayList<>();
         for (String rawKey : delegate.keys()) {
-            String effectiveKey = rawKey.indexOf('/') < 0 ? defaultAccountId + "/" + rawKey : rawKey;
-            delegate.get(rawKey).ifPresent(v -> result.put(effectiveKey, v));
+            if (rawKey.indexOf('/') < 0) {
+                legacyKeys.add(rawKey);
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
+        }
+        for (String rawKey : legacyKeys) {
+            String effectiveKey = defaultAccountId + "/" + rawKey;
+            if (result.containsKey(effectiveKey)) {
+                delegate.delete(rawKey);
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(v -> {
+                delegate.put(effectiveKey, v);
+                delegate.delete(rawKey);
+                result.put(effectiveKey, v);
+            });
         }
         return result;
     }
