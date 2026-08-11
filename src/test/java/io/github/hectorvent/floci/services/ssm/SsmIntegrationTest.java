@@ -335,6 +335,41 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void documentPermission_modifyAndDescribeRoundTrip() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "AwsAccelerator-SessionManagerLogging",
+                    "PermissionType": "Share",
+                    "AccountIdsToAdd": ["444444444444"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "AwsAccelerator-SessionManagerLogging",
+                    "PermissionType": "Share"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountIds", hasItem("444444444444"))
+            .body("AccountSharingInfoList[0].AccountId", equalTo("444444444444"))
+            .body("AccountSharingInfoList[0].SharedDocumentVersion", notNullValue());
+    }
+
+    @Test
     void listAssociations_returnsEmptyList() {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListAssociations")

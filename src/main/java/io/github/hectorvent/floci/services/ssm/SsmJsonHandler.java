@@ -63,6 +63,9 @@ public class SsmJsonHandler {
             // Patch Manager (read-only: AWS-owned predefined baselines)
             case "DescribePatchBaselines" -> handleDescribePatchBaselines(request, region);
             case "GetDefaultPatchBaseline" -> handleGetDefaultPatchBaseline(request, region);
+            // Document share permissions (documents not modeled; share state is)
+            case "ModifyDocumentPermission" -> handleModifyDocumentPermission(request, region);
+            case "DescribeDocumentPermission" -> handleDescribeDocumentPermission(request, region);
             // Read-only list operations (resources not modeled: empty results)
             case "ListDocuments" -> handleListDocuments(request, region);
             case "ListAssociations" -> handleListAssociations(request, region);
@@ -258,6 +261,36 @@ public class SsmJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("BaselineId", baselineId);
         response.put("OperatingSystem", (operatingSystem == null || operatingSystem.isBlank()) ? "WINDOWS" : operatingSystem);
+        return Response.ok(response).build();
+    }
+
+    private Response handleModifyDocumentPermission(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        List<String> accountIdsToAdd = new ArrayList<>();
+        request.path("AccountIdsToAdd").forEach(n -> accountIdsToAdd.add(n.asText()));
+        List<String> accountIdsToRemove = new ArrayList<>();
+        request.path("AccountIdsToRemove").forEach(n -> accountIdsToRemove.add(n.asText()));
+
+        ssmService.modifyDocumentPermission(name, accountIdsToAdd, accountIdsToRemove, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeDocumentPermission(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        List<String> accountIds = ssmService.describeDocumentPermission(name, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode ids = objectMapper.createArrayNode();
+        accountIds.forEach(ids::add);
+        response.set("AccountIds", ids);
+        ArrayNode sharingInfo = objectMapper.createArrayNode();
+        for (String accountId : accountIds) {
+            ObjectNode info = objectMapper.createObjectNode();
+            info.put("AccountId", accountId);
+            info.put("SharedDocumentVersion", "$DEFAULT");
+            sharingInfo.add(info);
+        }
+        response.set("AccountSharingInfoList", sharingInfo);
         return Response.ok(response).build();
     }
 

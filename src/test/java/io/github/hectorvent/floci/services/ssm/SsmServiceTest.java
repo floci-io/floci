@@ -20,8 +20,38 @@ class SsmServiceTest {
         ssmService = new SsmService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 5
         );
+    }
+
+    @Test
+    void describeDocumentPermissionEmptyByDefault() {
+        List<String> accountIds = ssmService.describeDocumentPermission("MyDoc", "us-east-1");
+        assertTrue(accountIds.isEmpty());
+    }
+
+    @Test
+    void modifyDocumentPermissionAddsAndRemovesAccounts() {
+        String region = "us-east-1";
+        ssmService.modifyDocumentPermission("ShareDoc",
+                List.of("111111111111", "222222222222"), List.of(), region);
+        assertEquals(List.of("111111111111", "222222222222"),
+                ssmService.describeDocumentPermission("ShareDoc", region));
+
+        ssmService.modifyDocumentPermission("ShareDoc",
+                List.of(), List.of("111111111111"), region);
+        assertEquals(List.of("222222222222"),
+                ssmService.describeDocumentPermission("ShareDoc", region));
+    }
+
+    @Test
+    void modifyDocumentPermissionIsIdempotentAndRegionScoped() {
+        String region = "us-east-1";
+        ssmService.modifyDocumentPermission("Doc", List.of("333333333333"), List.of(), region);
+        ssmService.modifyDocumentPermission("Doc", List.of("333333333333"), List.of(), region);
+        assertEquals(List.of("333333333333"), ssmService.describeDocumentPermission("Doc", region));
+        assertTrue(ssmService.describeDocumentPermission("Doc", "eu-west-1").isEmpty());
     }
 
     @Test

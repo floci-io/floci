@@ -29,6 +29,7 @@ public class SsmService implements ResourceProvider {
 
     private final StorageBackend<String, Parameter> parameterStore;
     private final StorageBackend<String, List<ParameterHistory>> historyStore;
+    private final StorageBackend<String, List<String>> documentPermissionStore;
     private final int maxParameterHistory;
     private final RegionResolver regionResolver;
 
@@ -41,6 +42,9 @@ public class SsmService implements ResourceProvider {
                 storageFactory.create("ssm", "ssm-history.json",
                         new TypeReference<>() {
                         }),
+                storageFactory.create("ssm", "ssm-document-permissions.json",
+                        new TypeReference<>() {
+                        }),
                 config.services().ssm().maxParameterHistory(),
                 regionResolver
         );
@@ -51,16 +55,19 @@ public class SsmService implements ResourceProvider {
      */
     SsmService(StorageBackend<String, Parameter> parameterStore,
                StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
                int maxParameterHistory) {
-        this(parameterStore, historyStore, maxParameterHistory,
+        this(parameterStore, historyStore, documentPermissionStore, maxParameterHistory,
                 new RegionResolver("us-east-1", "000000000000"));
     }
 
     SsmService(StorageBackend<String, Parameter> parameterStore,
                StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
                int maxParameterHistory, RegionResolver regionResolver) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
+        this.documentPermissionStore = documentPermissionStore;
         this.maxParameterHistory = maxParameterHistory;
         this.regionResolver = regionResolver;
     }
@@ -246,6 +253,33 @@ public class SsmService implements ResourceProvider {
             parameterStore.put(storageKey, param);
         }
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
+    }
+
+    // ──────────────────────── Document Share Permissions ─────────────────────
+    // SSM documents themselves are not modeled (ListDocuments returns empty), but
+    // document *share* state is tracked against any document name so that callers
+    // like LZA's Custom::SSMShareDocument handler can round-trip
+    // ModifyDocumentPermission -> DescribeDocumentPermission.
+
+    public List<String> describeDocumentPermission(String name, String region) {
+        return documentPermissionStore.get(regionKey(region, name))
+                .map(List::copyOf)
+                .orElse(List.of());
+    }
+
+    public void modifyDocumentPermission(String name, List<String> accountIdsToAdd,
+                                         List<String> accountIdsToRemove, String region) {
+        String storageKey = regionKey(region, name);
+        List<String> accountIds = new ArrayList<>(
+                documentPermissionStore.get(storageKey).orElse(List.of()));
+        for (String accountId : accountIdsToAdd) {
+            if (!accountIds.contains(accountId)) {
+                accountIds.add(accountId);
+            }
+        }
+        accountIds.removeAll(accountIdsToRemove);
+        documentPermissionStore.put(storageKey, accountIds);
+        LOG.debugv("Modified document permission for {0}: {1} account(s) shared", name, accountIds.size());
     }
 
     // ──────────────────────────── Patch Baselines ────────────────────────────
