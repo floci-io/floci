@@ -91,7 +91,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void load() {
+    public synchronized void load() {
         if (!Files.exists(filePath)) {
             LOG.debugv("No persistent file found at {0}, starting with empty store", filePath);
             return;
@@ -102,7 +102,21 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
             store.putAll(data);
             LOG.infov("Loaded {0} entries from {1}", store.size(), filePath);
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to load data from {0}", filePath);
+            quarantineUnreadableFile(e);
+        }
+    }
+
+    private void quarantineUnreadableFile(IOException cause) {
+        Path quarantine = filePath.resolveSibling(filePath.getFileName() + ".corrupt");
+        try {
+            Files.move(filePath, quarantine, StandardCopyOption.REPLACE_EXISTING);
+            LOG.errorv(cause, "Failed to load persisted data from {0}; moved the unreadable file to "
+                    + "{1} and started with an empty store. This store's state was lost.",
+                    filePath, quarantine);
+        } catch (IOException moveError) {
+            LOG.errorv(cause, "Failed to load persisted data from {0}; could not quarantine it ({1}). "
+                    + "Starting with an empty store. This store's state was lost.",
+                    filePath, moveError.getMessage());
         }
     }
 
