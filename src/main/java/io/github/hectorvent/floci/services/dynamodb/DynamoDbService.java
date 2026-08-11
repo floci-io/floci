@@ -148,7 +148,7 @@ public class DynamoDbService {
         }
         for (String key : itemStore.keys()) {
             itemStore.get(key).ifPresent(items ->
-                itemsByTable.put(key, new ConcurrentSkipListMap<>(items)));
+                itemsByTable.put(scopedItemsKey(key), new ConcurrentSkipListMap<>(items)));
         }
     }
 
@@ -1356,7 +1356,7 @@ public class DynamoDbService {
             allTables = aware.scanAllAccountsRaw();
         } else {
             allTables = new HashMap<>();
-            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(k, v)));
+            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(scopedItemsKey(k), v)));
         }
         for (Map.Entry<String, TableDefinition> entry : allTables.entrySet()) {
             String rawKey = entry.getKey();
