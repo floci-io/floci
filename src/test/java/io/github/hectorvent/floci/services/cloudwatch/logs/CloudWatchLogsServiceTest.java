@@ -374,6 +374,64 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void getLogEventsRejectsMalformedNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, "f/not-a-token", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("The specified nextToken is invalid.", exception.getMessage());
+    }
+
+    @Test
+    void getLogEventsRejectsNegativeNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, "b/-1", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("The specified nextToken is invalid.", exception.getMessage());
+    }
+
+    @Test
+    void getLogEventsRejectsOverflowNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, "f/2147483648", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("The specified nextToken is invalid.", exception.getMessage());
+    }
+
+    @Test
+    void getLogEventsRejectsUnrecognizedNextTokens() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        for (String token : List.of("", "x/1", "garbage")) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, token, REGION));
+
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertEquals(400, exception.getHttpStatus());
+            assertEquals("The specified nextToken is invalid.", exception.getMessage());
+        }
+    }
+
+    @Test
     void getLogEventsStartFromTailWithNoToken() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
