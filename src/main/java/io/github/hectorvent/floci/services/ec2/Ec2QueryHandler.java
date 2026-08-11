@@ -40,14 +40,16 @@ public class Ec2QueryHandler {
     private final Ec2Service service;
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
+    private final Ec2EbsEncryptionService ebsEncryptionService;
     private final Ec2IpamService ipamService;
 
     @Inject
     public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
-                           Ec2IpamService ipamService) {
+                           Ec2EbsEncryptionService ebsEncryptionService, Ec2IpamService ipamService) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
+        this.ebsEncryptionService = ebsEncryptionService;
         this.ipamService = ipamService;
     }
 
@@ -67,6 +69,13 @@ public class Ec2QueryHandler {
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
+                // EBS encryption defaults
+                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
+                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(region);
+                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(region);
+                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
+                case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
+                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
                 // VPCs
                 case "CreateVpc" -> handleCreateVpc(params, region);
                 case "DescribeVpcs" -> handleDescribeVpcs(params, region);
@@ -521,6 +530,56 @@ public class Ec2QueryHandler {
             service.createTags(region, List.of(rule.getSecurityGroupRuleId()), ruleTags);
             rule.setTags(new ArrayList<>(ruleTags));
         }
+    }
+
+    // ─── EBS encryption defaults ─────────────────────────────────────────────
+
+    private Response handleGetEbsEncryptionByDefault(String region) {
+        return ebsEncryptionBooleanResponse("GetEbsEncryptionByDefaultResponse",
+                ebsEncryptionService.getEbsEncryptionByDefault(region));
+    }
+
+    private Response handleEnableEbsEncryptionByDefault(String region) {
+        return ebsEncryptionBooleanResponse("EnableEbsEncryptionByDefaultResponse",
+                ebsEncryptionService.enableEbsEncryptionByDefault(region));
+    }
+
+    private Response handleDisableEbsEncryptionByDefault(String region) {
+        return ebsEncryptionBooleanResponse("DisableEbsEncryptionByDefaultResponse",
+                ebsEncryptionService.disableEbsEncryptionByDefault(region));
+    }
+
+    private Response handleGetEbsDefaultKmsKeyId(String region) {
+        return ebsKmsKeyResponse("GetEbsDefaultKmsKeyIdResponse",
+                ebsEncryptionService.getEbsDefaultKmsKeyId(region));
+    }
+
+    private Response handleModifyEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        return ebsKmsKeyResponse("ModifyEbsDefaultKmsKeyIdResponse",
+                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId")));
+    }
+
+    private Response handleResetEbsDefaultKmsKeyId(String region) {
+        return ebsKmsKeyResponse("ResetEbsDefaultKmsKeyIdResponse",
+                ebsEncryptionService.resetEbsDefaultKmsKeyId(region));
+    }
+
+    private Response ebsEncryptionBooleanResponse(String rootElement, boolean enabled) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(rootElement, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("ebsEncryptionByDefault", String.valueOf(enabled))
+                .end(rootElement);
+        return xmlResponse(xml.build());
+    }
+
+    private Response ebsKmsKeyResponse(String rootElement, String kmsKeyId) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(rootElement, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("kmsKeyId", kmsKeyId)
+                .end(rootElement);
+        return xmlResponse(xml.build());
     }
 
     private Response xmlResponse(String xml) {
