@@ -126,14 +126,18 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
      * storage key. Unlike {@link #scanAllAccountsAsMap()}, the account segment is preserved
      * rather than stripped, so entries that share a logical key across different accounts
      * (e.g. two accounts each owning a resource named "orders") remain distinguishable.
+     *
+     * <p>Entries with no account segment at all — persisted before multi-account support was
+     * added — are attributed to {@code defaultAccountId} rather than skipped, mirroring how
+     * {@link #get} treats them on a per-key lookup. This keeps a bulk startup reload (which has
+     * no per-key caller to trigger that migrate-on-read path) from silently losing pre-existing
+     * data on upgrade.
      */
     public Map<String, V> scanAllAccountsRaw() {
         Map<String, V> result = new LinkedHashMap<>();
         for (String rawKey : delegate.keys()) {
-            if (rawKey.indexOf('/') < 0) {
-                continue;
-            }
-            delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
+            String effectiveKey = rawKey.indexOf('/') < 0 ? defaultAccountId + "/" + rawKey : rawKey;
+            delegate.get(rawKey).ifPresent(v -> result.put(effectiveKey, v));
         }
         return result;
     }
