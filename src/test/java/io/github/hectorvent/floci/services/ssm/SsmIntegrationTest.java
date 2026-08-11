@@ -235,6 +235,92 @@ class SsmIntegrationTest {
             .body("InvalidParameters", contains("/missing"));
     }
 
+    // ── Service settings (LZA ssm-block-public-document-sharing) ──
+
+    @Test
+    @Order(11)
+    void getServiceSettingDefault() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "SettingId": "/ssm/documents/console/public-sharing-permission" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ServiceSetting.SettingId", equalTo("/ssm/documents/console/public-sharing-permission"))
+            .body("ServiceSetting.SettingValue", equalTo("Enable"))
+            .body("ServiceSetting.Status", equalTo("Default"))
+            .body("ServiceSetting.ARN", endsWith(":servicesetting/ssm/documents/console/public-sharing-permission"))
+            .body("ServiceSetting.LastModifiedDate", notNullValue());
+    }
+
+    @Test
+    @Order(12)
+    void updateServiceSetting() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "SettingId": "/ssm/documents/console/public-sharing-permission",
+                    "SettingValue": "Disable"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "SettingId": "/ssm/documents/console/public-sharing-permission" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ServiceSetting.SettingValue", equalTo("Disable"))
+            .body("ServiceSetting.Status", equalTo("Customized"));
+    }
+
+    @Test
+    @Order(13)
+    void resetServiceSetting() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ResetServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "SettingId": "/ssm/documents/console/public-sharing-permission" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ServiceSetting.SettingValue", equalTo("Enable"))
+            .body("ServiceSetting.Status", equalTo("Default"));
+    }
+
+    @Test
+    @Order(14)
+    void getUnknownServiceSettingReturnsError() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "SettingId": "/ssm/bogus/does-not-exist" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ServiceSettingNotFound"));
+    }
+
     // ── Issue #956: DescribePatchBaselines / GetDefaultPatchBaseline (AWS-owned predefined) ──
 
     @Test

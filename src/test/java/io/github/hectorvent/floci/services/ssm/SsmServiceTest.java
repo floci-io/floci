@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.ssm;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -242,5 +244,86 @@ class SsmServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 ssmService.getDocument("Doc", "eu-west-1"));
         assertEquals("InvalidDocument", ex.getErrorCode());
+    }
+
+    // ── Service settings (LZA ssm-block-public-document-sharing) ──
+
+    private static final String PUBLIC_SHARING = "/ssm/documents/console/public-sharing-permission";
+
+    @Test
+    void getServiceSettingReturnsDefaultWhenNeverCustomized() {
+        ServiceSetting setting = ssmService.getServiceSetting(PUBLIC_SHARING, "us-east-1");
+
+        assertEquals(PUBLIC_SHARING, setting.getSettingId());
+        assertEquals("Enable", setting.getSettingValue());
+        assertEquals("Default", setting.getStatus());
+        assertEquals("arn:aws:ssm:us-east-1:000000000000:servicesetting" + PUBLIC_SHARING,
+                setting.getArn());
+        assertNotNull(setting.getLastModifiedDate());
+        assertNotNull(setting.getLastModifiedUser());
+    }
+
+    @Test
+    void updateServiceSettingCustomizesValueAndStatus() {
+        ssmService.updateServiceSetting(PUBLIC_SHARING, "Disable", "us-east-1");
+        ServiceSetting setting = ssmService.getServiceSetting(PUBLIC_SHARING, "us-east-1");
+
+        assertEquals("Disable", setting.getSettingValue());
+        assertEquals("Customized", setting.getStatus());
+        assertNotNull(setting.getLastModifiedDate());
+    }
+
+    @Test
+    void resetServiceSettingRestoresDefault() {
+        ssmService.updateServiceSetting(PUBLIC_SHARING, "Disable", "us-east-1");
+        ServiceSetting reset = ssmService.resetServiceSetting(PUBLIC_SHARING, "us-east-1");
+        assertEquals("Enable", reset.getSettingValue());
+
+        ServiceSetting after = ssmService.getServiceSetting(PUBLIC_SHARING, "us-east-1");
+        assertEquals("Enable", after.getSettingValue());
+        assertEquals("Default", after.getStatus());
+    }
+
+    @Test
+    void unknownServiceSettingThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.getServiceSetting("/ssm/bogus/does-not-exist", "us-east-1"));
+        assertEquals("ServiceSettingNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void updateUnknownServiceSettingThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.updateServiceSetting("/ssm/bogus/does-not-exist", "x", "us-east-1"));
+        assertEquals("ServiceSettingNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void serviceSettingsAreRegionScoped() {
+        ssmService.updateServiceSetting(PUBLIC_SHARING, "Disable", "us-east-1");
+
+        ServiceSetting other = ssmService.getServiceSetting(PUBLIC_SHARING, "eu-west-1");
+        assertEquals("Enable", other.getSettingValue());
+        assertEquals("Default", other.getStatus());
+    }
+
+    @Test
+    void serviceSettingsAreAccountScoped() {
+        // LZA assumes a role into each member account and updates the setting
+        // there; a shared store must still keep per-account values separate.
+        InMemoryStorage<String, ServiceSetting> sharedSettings = new InMemoryStorage<>();
+        SsmService accountA = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                sharedSettings, 5, new RegionResolver("us-east-1", "111111111111"));
+        SsmService accountB = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                sharedSettings, 5, new RegionResolver("us-east-1", "222222222222"));
+
+        accountA.updateServiceSetting(PUBLIC_SHARING, "Disable", "us-east-1");
+
+        assertEquals("Disable", accountA.getServiceSetting(PUBLIC_SHARING, "us-east-1").getSettingValue());
+        ServiceSetting b = accountB.getServiceSetting(PUBLIC_SHARING, "us-east-1");
+        assertEquals("Enable", b.getSettingValue());
+        assertEquals("arn:aws:ssm:us-east-1:222222222222:servicesetting" + PUBLIC_SHARING, b.getArn());
     }
 }

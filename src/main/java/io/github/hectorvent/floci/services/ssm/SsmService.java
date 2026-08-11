@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
+import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -29,10 +30,22 @@ public class SsmService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
+    /**
+     * Account-default values for the service settings floci models. AWS rejects
+     * unknown setting ids with ServiceSettingNotFound; so do we.
+     */
+    private static final Map<String, String> SERVICE_SETTING_DEFAULTS = Map.of(
+            "/ssm/documents/console/public-sharing-permission", "Enable",
+            "/ssm/parameter-store/default-parameter-tier", "Standard",
+            "/ssm/parameter-store/high-throughput-enabled", "false",
+            "/ssm/managed-instance/activation-tier", "standard"
+    );
+
     private final StorageBackend<String, Parameter> parameterStore;
     private final StorageBackend<String, List<ParameterHistory>> historyStore;
     private final StorageBackend<String, List<String>> documentPermissionStore;
     private final StorageBackend<String, SsmDocument> documentStore;
+    private final StorageBackend<String, ServiceSetting> serviceSettingStore;
     private final int maxParameterHistory;
     private final RegionResolver regionResolver;
 
@@ -51,6 +64,9 @@ public class SsmService implements ResourceProvider {
                 storageFactory.create("ssm", "ssm-documents.json",
                         new TypeReference<>() {
                         }),
+                storageFactory.create("ssm", "ssm-service-settings.json",
+                        new TypeReference<>() {
+                        }),
                 config.services().ssm().maxParameterHistory(),
                 regionResolver
         );
@@ -64,18 +80,32 @@ public class SsmService implements ResourceProvider {
                StorageBackend<String, List<String>> documentPermissionStore,
                int maxParameterHistory) {
         this(parameterStore, historyStore, documentPermissionStore, new InMemoryStorage<>(),
-                maxParameterHistory, new RegionResolver("us-east-1", "000000000000"));
+                new InMemoryStorage<>(), maxParameterHistory,
+                new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    /**
+     * Package-private constructor for testing without CDI.
+     */
+    SsmService(StorageBackend<String, Parameter> parameterStore,
+               StorageBackend<String, List<ParameterHistory>> historyStore,
+               int maxParameterHistory) {
+        this(parameterStore, historyStore, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), maxParameterHistory,
+                new RegionResolver("us-east-1", "000000000000"));
     }
 
     SsmService(StorageBackend<String, Parameter> parameterStore,
                StorageBackend<String, List<ParameterHistory>> historyStore,
                StorageBackend<String, List<String>> documentPermissionStore,
                StorageBackend<String, SsmDocument> documentStore,
+               StorageBackend<String, ServiceSetting> serviceSettingStore,
                int maxParameterHistory, RegionResolver regionResolver) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
         this.documentPermissionStore = documentPermissionStore;
         this.documentStore = documentStore;
+        this.serviceSettingStore = serviceSettingStore;
         this.maxParameterHistory = maxParameterHistory;
         this.regionResolver = regionResolver;
     }
@@ -397,6 +427,58 @@ public class SsmService implements ResourceProvider {
                 .map(PatchBaselineIdentity::baselineId)
                 .orElseThrow(() -> new AwsException("DoesNotExistException",
                         "No default patch baseline exists for operating system " + os, 400));
+    }
+
+    /**
+     * Read a service setting for the calling account. Never-customized settings
+     * report their account default with status "Default".
+     */
+    public ServiceSetting getServiceSetting(String settingId, String region) {
+        String defaultValue = requireKnownSetting(settingId);
+        return serviceSettingStore.get(settingKey(region, settingId))
+                .orElseGet(() -> defaultSetting(settingId, defaultValue, region));
+    }
+
+    public void updateServiceSetting(String settingId, String settingValue, String region) {
+        requireKnownSetting(settingId);
+        ServiceSetting setting = new ServiceSetting(settingId, settingValue,
+                settingArn(settingId, region), "Customized",
+                "arn:aws:iam::" + regionResolver.getAccountId() + ":root");
+        serviceSettingStore.put(settingKey(region, settingId), setting);
+    }
+
+    public ServiceSetting resetServiceSetting(String settingId, String region) {
+        String defaultValue = requireKnownSetting(settingId);
+        serviceSettingStore.delete(settingKey(region, settingId));
+        return defaultSetting(settingId, defaultValue, region);
+    }
+
+    private String requireKnownSetting(String settingId) {
+        String defaultValue = SERVICE_SETTING_DEFAULTS.get(settingId);
+        if (defaultValue == null) {
+            throw new AwsException("ServiceSettingNotFound",
+                    "The specified service setting was not found: " + settingId, 400);
+        }
+        return defaultValue;
+    }
+
+    private ServiceSetting defaultSetting(String settingId, String defaultValue, String region) {
+        return new ServiceSetting(settingId, defaultValue, settingArn(settingId, region),
+                "Default", "System");
+    }
+
+    /**
+     * Service settings are per-account per-region: LZA assumes a role into each
+     * member account before updating, so the caller's resolved account scopes the key.
+     */
+    private String settingKey(String region, String settingId) {
+        return regionResolver.getAccountId() + "::" + regionKey(region, settingId);
+    }
+
+    private String settingArn(String settingId, String region) {
+        // Setting ids begin with "/", so concatenation yields .../servicesetting/ssm/...
+        return "arn:aws:ssm:" + region + ":" + regionResolver.getAccountId()
+                + ":servicesetting" + settingId;
     }
 
     private static String regionKey(String region, String name) {

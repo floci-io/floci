@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
+import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -61,6 +62,10 @@ public class SsmJsonHandler {
             case "ListCommandInvocations" -> handleListCommandInvocations(request, region);
             case "CancelCommand" -> handleCancelCommand(request, region);
             case "DescribeInstanceInformation" -> handleDescribeInstanceInformation(request, region);
+            // Service settings (LZA ssm-block-public-document-sharing)
+            case "GetServiceSetting" -> handleGetServiceSetting(request, region);
+            case "UpdateServiceSetting" -> handleUpdateServiceSetting(request, region);
+            case "ResetServiceSetting" -> handleResetServiceSetting(request, region);
             // Patch Manager (read-only: AWS-owned predefined baselines)
             case "DescribePatchBaselines" -> handleDescribePatchBaselines(request, region);
             case "GetDefaultPatchBaseline" -> handleGetDefaultPatchBaseline(request, region);
@@ -423,6 +428,44 @@ public class SsmJsonHandler {
         node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
         node.put("ARN", p.getArn());
         node.put("DataType", p.getDataType());
+        return node;
+    }
+
+    // ── Service settings ───────────────────────────────────────────────────
+
+    private Response handleGetServiceSetting(JsonNode request, String region) {
+        String settingId = request.path("SettingId").asText();
+        ServiceSetting setting = ssmService.getServiceSetting(settingId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ServiceSetting", serviceSettingToNode(setting));
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateServiceSetting(JsonNode request, String region) {
+        String settingId = request.path("SettingId").asText();
+        String settingValue = request.path("SettingValue").asText();
+        ssmService.updateServiceSetting(settingId, settingValue, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleResetServiceSetting(JsonNode request, String region) {
+        String settingId = request.path("SettingId").asText();
+        ServiceSetting setting = ssmService.resetServiceSetting(settingId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ServiceSetting", serviceSettingToNode(setting));
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode serviceSettingToNode(ServiceSetting s) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("SettingId", s.getSettingId());
+        node.put("SettingValue", s.getSettingValue());
+        node.put("LastModifiedDate", s.getLastModifiedDate().toEpochMilli() / 1000.0);
+        node.put("LastModifiedUser", s.getLastModifiedUser());
+        node.put("ARN", s.getArn());
+        node.put("Status", s.getStatus());
         return node;
     }
 
