@@ -121,6 +121,23 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return result;
     }
 
+    /**
+     * Returns all entries across every account, keyed by the raw {@code accountId/logicalKey}
+     * storage key. Unlike {@link #scanAllAccountsAsMap()}, the account segment is preserved
+     * rather than stripped, so entries that share a logical key across different accounts
+     * (e.g. two accounts each owning a resource named "orders") remain distinguishable.
+     */
+    public Map<String, V> scanAllAccountsRaw() {
+        Map<String, V> result = new LinkedHashMap<>();
+        for (String rawKey : delegate.keys()) {
+            if (rawKey.indexOf('/') < 0) {
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
+        }
+        return result;
+    }
+
     public Optional<V> getForAccount(String accountId, String key) {
         return delegate.get(accountId + "/" + key);
     }
