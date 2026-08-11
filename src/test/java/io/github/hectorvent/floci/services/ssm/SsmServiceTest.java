@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -175,5 +176,71 @@ class SsmServiceTest {
         assertEquals(5, history.size());
         assertEquals("v3", history.get(0).getValue());
         assertEquals("v7", history.get(4).getValue());
+    }
+
+    @Test
+    void getDocumentUnknownThrowsInvalidDocument() {
+        // The AWS SDK maps this code to its InvalidDocument exception class;
+        // LZA's session-manager-settings Lambda branches on it to create the doc.
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.getDocument("SSM-SessionManagerRunShell", "us-east-1"));
+        assertEquals("InvalidDocument", ex.getErrorCode());
+    }
+
+    @Test
+    void createAndGetDocument() {
+        String region = "us-east-1";
+        String content = "{\"schemaVersion\":\"1.0\",\"inputs\":{\"runAsEnabled\":false}}";
+        ssmService.createDocument("SSM-SessionManagerRunShell", content, "Session", region);
+
+        SsmDocument doc = ssmService.getDocument("SSM-SessionManagerRunShell", region);
+        assertEquals("SSM-SessionManagerRunShell", doc.getName());
+        assertEquals(content, doc.getContent());
+        assertEquals("Session", doc.getDocumentType());
+        assertEquals(1, doc.getDocumentVersion());
+        assertEquals("Active", doc.getStatus());
+    }
+
+    @Test
+    void createDocumentTwiceThrowsAlreadyExists() {
+        String region = "us-east-1";
+        ssmService.createDocument("Doc", "{}", "Command", region);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.createDocument("Doc", "{}", "Command", region));
+        assertEquals("DocumentAlreadyExists", ex.getErrorCode());
+    }
+
+    @Test
+    void updateDocumentBumpsVersion() {
+        String region = "us-east-1";
+        ssmService.createDocument("Doc", "{\"a\":1}", "Session", region);
+
+        SsmDocument updated = ssmService.updateDocument("Doc", "{\"a\":2}", region);
+        assertEquals(2, updated.getDocumentVersion());
+        assertEquals("{\"a\":2}", ssmService.getDocument("Doc", region).getContent());
+    }
+
+    @Test
+    void updateDocumentSameContentThrowsDuplicateDocumentContent() {
+        String region = "us-east-1";
+        ssmService.createDocument("Doc", "{\"a\":1}", "Session", region);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.updateDocument("Doc", "{\"a\":1}", region));
+        assertEquals("DuplicateDocumentContent", ex.getErrorCode());
+    }
+
+    @Test
+    void updateDocumentUnknownThrowsInvalidDocument() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.updateDocument("Missing", "{}", "us-east-1"));
+        assertEquals("InvalidDocument", ex.getErrorCode());
+    }
+
+    @Test
+    void documentsAreRegionScoped() {
+        ssmService.createDocument("Doc", "{}", "Session", "us-east-1");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.getDocument("Doc", "eu-west-1"));
+        assertEquals("InvalidDocument", ex.getErrorCode());
     }
 }

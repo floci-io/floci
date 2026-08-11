@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
+import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -63,7 +64,11 @@ public class SsmJsonHandler {
             // Patch Manager (read-only: AWS-owned predefined baselines)
             case "DescribePatchBaselines" -> handleDescribePatchBaselines(request, region);
             case "GetDefaultPatchBaseline" -> handleGetDefaultPatchBaseline(request, region);
-            // Document share permissions (documents not modeled; share state is)
+            // Documents
+            case "GetDocument" -> handleGetDocument(request, region);
+            case "CreateDocument" -> handleCreateDocument(request, region);
+            case "UpdateDocument" -> handleUpdateDocument(request, region);
+            // Document share permissions
             case "ModifyDocumentPermission" -> handleModifyDocumentPermission(request, region);
             case "DescribeDocumentPermission" -> handleDescribeDocumentPermission(request, region);
             // Read-only list operations (resources not modeled: empty results)
@@ -262,6 +267,49 @@ public class SsmJsonHandler {
         response.put("BaselineId", baselineId);
         response.put("OperatingSystem", (operatingSystem == null || operatingSystem.isBlank()) ? "WINDOWS" : operatingSystem);
         return Response.ok(response).build();
+    }
+
+    private Response handleGetDocument(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        SsmDocument document = ssmService.getDocument(name, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Name", document.getName());
+        response.put("DocumentType", document.getDocumentType());
+        response.put("DocumentVersion", String.valueOf(document.getDocumentVersion()));
+        response.put("Content", document.getContent());
+        response.put("Status", document.getStatus());
+        return Response.ok(response).build();
+    }
+
+    private Response handleCreateDocument(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        String content = request.path("Content").asText();
+        String documentType = request.path("DocumentType").asText("Command");
+
+        SsmDocument document = ssmService.createDocument(name, content, documentType, region);
+        return Response.ok(documentDescriptionResponse(document)).build();
+    }
+
+    private Response handleUpdateDocument(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        String content = request.path("Content").asText();
+
+        SsmDocument document = ssmService.updateDocument(name, content, region);
+        return Response.ok(documentDescriptionResponse(document)).build();
+    }
+
+    private ObjectNode documentDescriptionResponse(SsmDocument document) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode description = objectMapper.createObjectNode();
+        description.put("Name", document.getName());
+        description.put("DocumentType", document.getDocumentType());
+        description.put("DocumentVersion", String.valueOf(document.getDocumentVersion()));
+        description.put("Status", document.getStatus());
+        description.put("LatestVersion", String.valueOf(document.getDocumentVersion()));
+        description.put("DefaultVersion", String.valueOf(document.getDocumentVersion()));
+        response.set("DocumentDescription", description);
+        return response;
     }
 
     private Response handleModifyDocumentPermission(JsonNode request, String region) {

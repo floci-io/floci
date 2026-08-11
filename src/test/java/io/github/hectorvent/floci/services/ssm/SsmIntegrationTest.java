@@ -409,4 +409,95 @@ class SsmIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("UnsupportedOperation"));
     }
+
+    @Test
+    void getDocument_unknownReturnsInvalidDocument() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "No-Such-Document"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidDocument"));
+    }
+
+    @Test
+    void document_createGetUpdateRoundTrip() {
+        // Create — mirrors LZA's session-manager-settings Lambda (DocumentType Session)
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "SSM-SessionManagerRunShell",
+                    "DocumentType": "Session",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\",\\"inputs\\":{\\"runAsEnabled\\":false}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentDescription.Name", equalTo("SSM-SessionManagerRunShell"))
+            .body("DocumentDescription.DocumentType", equalTo("Session"))
+            .body("DocumentDescription.DocumentVersion", equalTo("1"))
+            .body("DocumentDescription.Status", equalTo("Active"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "SSM-SessionManagerRunShell"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Name", equalTo("SSM-SessionManagerRunShell"))
+            .body("DocumentType", equalTo("Session"))
+            .body("DocumentVersion", equalTo("1"))
+            .body("Content", containsString("runAsEnabled"));
+
+        // Update with changed content bumps the version
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "SSM-SessionManagerRunShell",
+                    "DocumentVersion": "$LATEST",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\",\\"inputs\\":{\\"runAsEnabled\\":true}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentDescription.DocumentVersion", equalTo("2"));
+
+        // Update with identical content fails DuplicateDocumentContent
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "SSM-SessionManagerRunShell",
+                    "DocumentVersion": "$LATEST",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\",\\"inputs\\":{\\"runAsEnabled\\":true}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("DuplicateDocumentContent"));
+    }
 }
