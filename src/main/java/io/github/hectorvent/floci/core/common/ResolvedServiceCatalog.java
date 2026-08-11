@@ -490,7 +490,11 @@ public class ResolvedServiceCatalog {
                         storageMode(config.storage().services().guardduty().mode(), config.storage().mode()),
                         config.storage().services().guardduty().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class))
+                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class)),
+                descriptor("route53resolver", "route53resolver", config.services().route53resolver().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("Route53Resolver."), Set.of("route53resolver"), Set.of(), Set.of())
         ));
     }
 
