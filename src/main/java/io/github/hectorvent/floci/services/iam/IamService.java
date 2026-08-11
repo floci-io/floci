@@ -947,11 +947,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Map<String, PolicyVersion> versions = policy.getVersions();
         PolicyVersion version;
         synchronized (versions) {
-            int nextVersionNum = versions.size() + 1;
-            if (nextVersionNum > 5) {
+            if (versions.size() >= 5) {
                 throw new AwsException("LimitExceeded",
                         "A managed policy can have up to 5 versions.", 409);
             }
+            // AWS version ids are monotonic and never reissued after a DeletePolicyVersion,
+            // so derive the next id from the highest surviving one, not the version count.
+            int nextVersionNum = versions.keySet().stream()
+                    .mapToInt(id -> Integer.parseInt(id.substring(1)))
+                    .max().orElse(0) + 1;
             String versionId = "v" + nextVersionNum;
             version = new PolicyVersion(versionId, document, setAsDefault);
             if (setAsDefault) {

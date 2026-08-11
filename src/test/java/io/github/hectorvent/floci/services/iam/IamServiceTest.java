@@ -384,6 +384,22 @@ class IamServiceTest {
     }
 
     @Test
+    void createPolicyVersionAfterDeletionDoesNotReuseVersionIds() {
+        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        String arn = policy.getArn();
+        for (int i = 2; i <= 5; i++) {
+            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", true);
+        }
+        // Prune the oldest non-default version (what CloudFormation does at the cap) and
+        // create another. AWS version ids are monotonic — a deleted id is never reissued,
+        // so the new version must be v6, not a rewrite of the surviving v5.
+        iamService.deletePolicyVersion(arn, "v1");
+        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":6}", true);
+        assertEquals("v6", next.getVersionId());
+        assertEquals("{\"v\":5}", iamService.getPolicyVersion(arn, "v5").getDocument());
+    }
+
+    @Test
     void deletePolicyWithAttachmentsFails() {
         iamService.createUser("alice", "/");
         IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
