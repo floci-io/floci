@@ -373,6 +373,13 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CloudApiService."), Set.of("cloudcontrolapi"), Set.of(), Set.of()),
+                // SSO Admin (IAM Identity Center) signs with scope "sso"; its Smithy target
+                // prefix is the AWS-internal codename SWBExternalService (cf. config's
+                // StarlingDoveService above).
+                descriptor("sso", "ssoadmin", config.services().ssoadmin().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("SWBExternalService."), Set.of("sso"), Set.of(), Set.of()),
                 descriptor("autoscaling", "autoscaling", config.services().autoscaling().enabled(), true,
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),

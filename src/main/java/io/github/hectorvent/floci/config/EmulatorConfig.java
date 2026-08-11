@@ -638,6 +638,12 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+        SsoAdminServiceConfig ssoadmin();
+    }
+
+    interface SsoAdminServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface IotServiceConfig {
