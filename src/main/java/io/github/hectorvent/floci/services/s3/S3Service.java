@@ -217,10 +217,10 @@ public class S3Service implements Resettable {
 
         bucketStore.delete(bucketName);
         if (inMemory) {
-            String prefix = bucketName + "/";
+            String prefix = ownerId() + "/" + bucketName + "/";
             memoryDataStore.keySet().removeIf(k -> k.startsWith(prefix));
         } else {
-            deleteDirectory(dataRoot.resolve(bucketName));
+            deleteDirectory(dataRoot.resolve(ownerId()).resolve(bucketName));
         }
         LOG.infov("Deleted bucket: {0}", bucketName);
     }
@@ -659,8 +659,8 @@ public class S3Service implements Resettable {
         getObjectMetadata(bucketName, key, versionId);
         if (inMemory) {
             byte[] data = versionId != null
-                    ? memoryDataStore.get(versionedKey(bucketName, key, versionId))
-                    : memoryDataStore.get(objectKey(bucketName, key));
+                    ? memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId))
+                    : memoryDataStore.get(physicalKey(bucketName, key));
             if (data == null) {
                 throw new IllegalStateException("S3 object data is missing for " + bucketName + "/" + key);
             }
@@ -2564,14 +2564,27 @@ public class S3Service implements Resettable {
 
     private static final String DATA_SUFFIX = ".s3data";
 
+    // Byte storage (memoryDataStore / on-disk files) is a plain field, not a StorageBackend,
+    // so unlike bucketStore/objectStore it gets no automatic account prefixing from
+    // AccountAwareStorageBackend. bucketStore only enforces bucket-name uniqueness within an
+    // account, so two accounts can each own a bucket named e.g. "orders" — without scoping
+    // the physical key/path by account here too, their object bytes would collide.
+    private String physicalKey(String bucketName, String key) {
+        return ownerId() + "/" + objectKey(bucketName, key);
+    }
+
+    private String physicalVersionedKey(String bucketName, String key, String versionId) {
+        return ownerId() + "/" + versionedKey(bucketName, key, versionId);
+    }
+
     private Path resolveObjectPath(String bucketName, String key) {
-        Path bucketDir = dataRoot.resolve(bucketName).normalize();
-        
+        Path bucketDir = dataRoot.resolve(ownerId()).resolve(bucketName).normalize();
+
         String safeKey = key;
         while (safeKey.startsWith("/")) {
             safeKey = safeKey.substring(1);
         }
-        
+
         Path resolved = bucketDir.resolve(safeKey + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(bucketDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
@@ -2580,13 +2593,13 @@ public class S3Service implements Resettable {
     }
 
     private Path resolveVersionedPath(String bucketName, String key, String versionId) {
-        Path baseDir = dataRoot.resolve(".versions").resolve(bucketName).normalize();
-        
+        Path baseDir = dataRoot.resolve(ownerId()).resolve(".versions").resolve(bucketName).normalize();
+
         String safeKey = key;
         while (safeKey.startsWith("/")) {
             safeKey = safeKey.substring(1);
         }
-        
+
         Path resolved = baseDir.resolve(safeKey).resolve(versionId + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(baseDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
@@ -2596,7 +2609,7 @@ public class S3Service implements Resettable {
 
     private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {
         if (inMemory) {
-            memoryDataStore.put(versionedKey(bucketName, key, versionId), data);
+            memoryDataStore.put(physicalVersionedKey(bucketName, key, versionId), data);
             return;
         }
         try {
@@ -2610,7 +2623,7 @@ public class S3Service implements Resettable {
 
     private byte[] readVersionedFile(String bucketName, String key, String versionId) {
         if (inMemory) {
-            return memoryDataStore.get(versionedKey(bucketName, key, versionId));
+            return memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId));
         }
         try {
             return Files.readAllBytes(resolveVersionedPath(bucketName, key, versionId));
@@ -2621,7 +2634,7 @@ public class S3Service implements Resettable {
 
     private void writeFile(String bucketName, String key, byte[] data) {
         if (inMemory) {
-            memoryDataStore.put(objectKey(bucketName, key), data);
+            memoryDataStore.put(physicalKey(bucketName, key), data);
             return;
         }
         try {
@@ -2635,7 +2648,7 @@ public class S3Service implements Resettable {
 
     private byte[] readFile(String bucketName, String key) {
         if (inMemory) {
-            return memoryDataStore.get(objectKey(bucketName, key));
+            return memoryDataStore.get(physicalKey(bucketName, key));
         }
         try {
             return Files.readAllBytes(resolveObjectPath(bucketName, key));
@@ -2646,7 +2659,7 @@ public class S3Service implements Resettable {
 
     private void deleteFile(String bucketName, String key) {
         if (inMemory) {
-            memoryDataStore.remove(objectKey(bucketName, key));
+            memoryDataStore.remove(physicalKey(bucketName, key));
             return;
         }
         try {
@@ -2658,7 +2671,7 @@ public class S3Service implements Resettable {
 
     private void deleteVersionedFile(String bucketName, String key, String versionId) {
         if (inMemory) {
-            memoryDataStore.remove(versionedKey(bucketName, key, versionId));
+            memoryDataStore.remove(physicalVersionedKey(bucketName, key, versionId));
             return;
         }
         try {

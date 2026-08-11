@@ -195,7 +195,8 @@ class S3VersioningServiceTest {
         S3Object v1 = diskService.putObject("versioned-bucket", "test.txt",
                 "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
 
-        Path versionedPath = tempDir.resolve(".versions")
+        Path versionedPath = tempDir.resolve("000000000000")
+                .resolve(".versions")
                 .resolve("versioned-bucket")
                 .resolve("test.txt")
                 .resolve(v1.getVersionId() + ".s3data");
