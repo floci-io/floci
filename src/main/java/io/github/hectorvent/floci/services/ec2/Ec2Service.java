@@ -1714,7 +1714,7 @@ public class Ec2Service implements ContainerTeardown {
         Image image = registerImage(region, name, description,
                 sourceImage != null ? sourceImage.getArchitecture() : null,
                 sourceImage != null ? sourceImage.getRootDeviceName() : null,
-                captureBlockDeviceMappings(sourceImage));
+                captureBlockDeviceMappings(region, source, sourceImage));
 
         // Carry the launchable ancestor so RunInstances on this AMI starts the same guest instead
         // of falling through to the catalog default.
@@ -1724,13 +1724,54 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     /**
-     * The devices the captured AMI reports. A registered source carries its own mappings, while a
-     * catalog entry describes only its root device, so the root is rebuilt from that rather than
-     * leaving DescribeImages with an image that has no devices at all.
+     * The devices the captured AMI reports. AWS captures what the source AMI describes plus any
+     * volume attached to the instance afterwards, so a data volume added post-launch is part of
+     * the image rather than being dropped.
      */
-    private List<BlockDeviceMapping> captureBlockDeviceMappings(Image sourceImage) {
+    private List<BlockDeviceMapping> captureBlockDeviceMappings(String region, Instance source,
+                                                                Image sourceImage) {
+        List<BlockDeviceMapping> mappings = new ArrayList<>(sourceImageMappings(sourceImage));
+        Set<String> devices = mappings.stream()
+                .map(BlockDeviceMapping::getDeviceName)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        for (Volume volume : volumes.scan(k -> true)) {
+            if (!region.equals(volume.getRegion())
+                    || volume.getVolumeId().equals(source.getRootVolumeId())) {
+                continue;
+            }
+            for (VolumeAttachment attachment : volume.getAttachments()) {
+                if (!source.getInstanceId().equals(attachment.getInstanceId())
+                        || !devices.add(attachment.getDevice())) {
+                    continue;
+                }
+                mappings.add(attachedMapping(volume, attachment));
+            }
+        }
+        return mappings.isEmpty() ? null : mappings;
+    }
+
+    /** The device an attached volume contributes, snapshotted as of the capture. */
+    private BlockDeviceMapping attachedMapping(Volume volume, VolumeAttachment attachment) {
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId("snap-" + randomHex(17));
+        ebs.setVolumeSize(volume.getSize());
+        ebs.setVolumeType(volume.getVolumeType());
+        ebs.setDeleteOnTermination(attachment.isDeleteOnTermination());
+        ebs.setEncrypted(volume.isEncrypted());
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(attachment.getDevice());
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
+    /**
+     * A registered source carries its own mappings, while a catalog entry describes only its root
+     * device, so the root is rebuilt from that rather than leaving the capture with no devices.
+     */
+    private List<BlockDeviceMapping> sourceImageMappings(Image sourceImage) {
         if (sourceImage == null) {
-            return null;
+            return List.of();
         }
         List<BlockDeviceMapping> declared = sourceImage.getBlockDeviceMappings();
         if (declared != null && !declared.isEmpty()) {
@@ -1738,7 +1779,7 @@ public class Ec2Service implements ContainerTeardown {
         }
         String rootDeviceName = sourceImage.getRootDeviceName();
         if (rootDeviceName == null || rootDeviceName.isBlank()) {
-            return null;
+            return List.of();
         }
         EbsBlockDevice ebs = new EbsBlockDevice();
         ebs.setSnapshotId("snap-" + randomHex(17));

@@ -225,6 +225,8 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
+| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 
 ### Tags
 

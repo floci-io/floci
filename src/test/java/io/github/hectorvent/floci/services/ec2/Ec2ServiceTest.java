@@ -471,6 +471,32 @@ class Ec2ServiceTest {
         assertEquals(2, service.describeSnapshots("us-east-1", List.of(), List.of(), Map.of()).size());
     }
 
+    @Test
+    void createImageCapturesAVolumeAttachedAfterLaunch() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Image sourceAmi = service.registerImage("us-east-1", "source-image", null, null, "/dev/sda1",
+                List.of(blockDeviceMapping("snap-source", 8)));
+        Instance inst = service.runInstances("us-east-1", sourceAmi.getImageId(), "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        Volume data = service.createVolume("us-east-1", inst.getPlacement().getAvailabilityZone(),
+                "gp3", 50, false, 0, null, null, List.of());
+        service.attachVolume("us-east-1", data.getVolumeId(), inst.getInstanceId(), "/dev/sdf");
+
+        Image image = service.createImage("us-east-1", inst.getInstanceId(), "captured", null, true);
+
+        // The root device the source AMI describes, plus the volume attached after launch.
+        assertEquals(2, image.getBlockDeviceMappings().size());
+        BlockDeviceMapping attached = image.getBlockDeviceMappings().stream()
+                .filter(m -> "/dev/sdf".equals(m.getDeviceName()))
+                .findFirst().orElseThrow();
+        assertEquals(50, attached.getEbs().getVolumeSize());
+        assertEquals("gp3", attached.getEbs().getVolumeType());
+        assertNotNull(attached.getEbs().getSnapshotId());
+    }
+
     private static String runOne(Ec2Service service, String imageId) {
         return service.runInstances("us-east-1", imageId, "t3.micro", 1, 1, null,
                 List.of(), null, null, List.of(), null, null)
