@@ -16,6 +16,11 @@ import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -2397,6 +2402,90 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(122)
+    void listObjectVersionsPagesEachVersionEntry() {
+        String bucket = "versions-entry-pagination-test-bucket";
+        String firstVersionId = null;
+        String secondVersionId = null;
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            given()
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+            .when()
+                .put("/" + bucket + "?versioning")
+            .then()
+                .statusCode(200);
+
+            firstVersionId = given()
+                .body("v1")
+            .when()
+                .put("/" + bucket + "/log.txt")
+            .then()
+                .statusCode(200)
+                .header("x-amz-version-id", notNullValue())
+                .extract().header("x-amz-version-id");
+            secondVersionId = given()
+                .body("v2")
+            .when()
+                .put("/" + bucket + "/log.txt")
+            .then()
+                .statusCode(200)
+                .header("x-amz-version-id", notNullValue())
+                .extract().header("x-amz-version-id");
+            assertNotEquals(firstVersionId, secondVersionId);
+
+            // max-keys bounds Version entries, not distinct keys, so the second version of the same
+            // key spills onto the next page instead of riding along on the first one.
+            String firstPage = given()
+            .when()
+                .get("/" + bucket + "?versions&max-keys=1")
+            .then()
+                .statusCode(200)
+                .body(containsString("<IsTruncated>true</IsTruncated>"))
+                .body(containsString("<NextKeyMarker>log.txt</NextKeyMarker>"))
+                .extract().body().asString();
+            assertEquals(1, countOccurrences(firstPage, "<Version>"));
+
+            // Resuming inside a key needs the version id alongside the key marker.
+            String nextVersionIdMarker = xmlElementValue(firstPage, "NextVersionIdMarker");
+            assertNotNull(nextVersionIdMarker);
+            String remainingVersionId =
+                    nextVersionIdMarker.equals(firstVersionId) ? secondVersionId : firstVersionId;
+            assertTrue(firstPage.contains("<VersionId>" + nextVersionIdMarker + "</VersionId>"));
+            assertFalse(firstPage.contains("<VersionId>" + remainingVersionId + "</VersionId>"));
+
+            String secondPage = given()
+            .when()
+                .get("/" + bucket + "?versions&max-keys=1&key-marker=log.txt&version-id-marker="
+                        + nextVersionIdMarker)
+            .then()
+                .statusCode(200)
+                .body(containsString("<IsTruncated>false</IsTruncated>"))
+                .body(containsString("<VersionIdMarker>" + nextVersionIdMarker + "</VersionIdMarker>"))
+                .body(containsString("<VersionId>" + remainingVersionId + "</VersionId>"))
+                .extract().body().asString();
+            assertEquals(1, countOccurrences(secondPage, "<Version>"));
+            assertFalse(secondPage.contains("<VersionId>" + nextVersionIdMarker + "</VersionId>"));
+
+            // A version-id marker on its own has no key to resume within, and AWS rejects it.
+            given()
+            .when()
+                .get("/" + bucket + "?versions&version-id-marker=" + nextVersionIdMarker)
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"));
+        } finally {
+            if (firstVersionId != null) {
+                given().when().delete("/" + bucket + "/log.txt?versionId=" + firstVersionId);
+            }
+            if (secondVersionId != null) {
+                given().when().delete("/" + bucket + "/log.txt?versionId=" + secondVersionId);
+            }
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(104)
     void cleanupPaginationBucket() {
         given().when().delete("/pag-test-bucket/a.txt");
@@ -2731,5 +2820,24 @@ class S3IntegrationTest {
 
     private static String asciiSlice(byte[] bytes, int start, int length) {
         return new String(bytes, start, length, StandardCharsets.US_ASCII);
+    }
+
+    private static int countOccurrences(String body, String token) {
+        int count = 0;
+        for (int idx = body.indexOf(token); idx >= 0; idx = body.indexOf(token, idx + token.length())) {
+            count++;
+        }
+        return count;
+    }
+
+    /** Text of the first {@code <name>...</name>} element, or {@code null} when the element is absent. */
+    private static String xmlElementValue(String body, String name) {
+        String open = "<" + name + ">";
+        int start = body.indexOf(open);
+        if (start < 0) {
+            return null;
+        }
+        int end = body.indexOf("</" + name + ">", start + open.length());
+        return end < 0 ? null : body.substring(start + open.length(), end);
     }
 }
