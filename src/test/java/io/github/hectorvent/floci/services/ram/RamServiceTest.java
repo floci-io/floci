@@ -65,12 +65,23 @@ class RamServiceTest {
     }
 
     @Test
-    void directAccountPrincipalIsVisibleOnlyToThatAccount() {
+    void directAccountPrincipalIsVisibleToTheSharedAccount() {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
         assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
-        assertTrue(service.getResourceShares("333333333333", "OTHER-ACCOUNTS").isEmpty());
+    }
+
+    @Test
+    void accountPrincipalShareIsVisibleToAnyNonOwningCaller() {
+        // LZA's Custom::GetResourceShare Lambda runs on launched-container placeholder
+        // credentials, so its caller resolves to the emulator default account rather than
+        // the function's account. OTHER-ACCOUNTS must therefore return every non-owned
+        // share and leave the narrowing to the Lambda's own owningAccountId+name filter.
+        service.createResourceShare(
+                "ipam-pool-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        assertEquals(1, service.getResourceShares("000000000000", "OTHER-ACCOUNTS").size());
     }
 
     @Test

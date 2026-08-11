@@ -20,13 +20,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * real AWS), find the share via GetResourceShares(OTHER-ACCOUNTS), and read the shared ARNs via
  * ListResources.
  *
- * <p>An OU/organization-ARN principal is treated as covering every org account: floci's org is
- * the only org, so membership checks reduce to "is the caller not the owner".
+ * <p>Principals are stored but not enforced for visibility: floci's org is the only org, and
+ * launched containers call in with placeholder credentials that resolve to the default account,
+ * so OTHER-ACCOUNTS simply means "every share the caller does not own".
  */
 @ApplicationScoped
 public class RamService {
-
-    private static final String ORGANIZATIONS_ARN_PREFIX = "arn:aws:organizations::";
 
     private volatile boolean sharingWithOrganizationEnabled;
 
@@ -94,15 +93,12 @@ public class RamService {
         if ("SELF".equals(resourceOwner)) {
             return owned;
         }
-        if (owned) {
-            return false;
-        }
-        for (String principal : share.getPrincipals()) {
-            if (principal.equals(callerAccountId) || principal.startsWith(ORGANIZATIONS_ARN_PREFIX)) {
-                return true;
-            }
-        }
-        return false;
+        // OTHER-ACCOUNTS: every non-owned share is visible, regardless of principals.
+        // Launched-container credentials resolve to the emulator default account, so a
+        // principal-based check would hide account-principal shares from the very Lambda
+        // they were shared with (LZA's Custom::GetResourceShare filters client-side by
+        // owningAccountId + name anyway).
+        return !owned;
     }
 
     /** {@code arn:aws:ec2:...:transit-gateway/tgw-1} → {@code ec2:TransitGateway}. */
