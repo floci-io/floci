@@ -2589,7 +2589,12 @@ public class S3Service implements Resettable {
         if (!resolved.startsWith(bucketDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
         }
+        migrateLegacyFileIfPresent(legacyObjectPath(bucketName, safeKey), resolved);
         return resolved;
+    }
+
+    private Path legacyObjectPath(String bucketName, String safeKey) {
+        return dataRoot.resolve(bucketName).normalize().resolve(safeKey + DATA_SUFFIX);
     }
 
     private Path resolveVersionedPath(String bucketName, String key, String versionId) {
@@ -2604,7 +2609,29 @@ public class S3Service implements Resettable {
         if (!resolved.startsWith(baseDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
         }
+        Path legacyBaseDir = dataRoot.resolve(".versions").resolve(bucketName).normalize();
+        migrateLegacyFileIfPresent(legacyBaseDir.resolve(safeKey).resolve(versionId + DATA_SUFFIX), resolved);
         return resolved;
+    }
+
+    /**
+     * Before object bytes were account-scoped on disk, every object lived at this bucket/key
+     * path with no account segment. An installation upgrading past that change must not lose
+     * access to objects already written under the old layout, so a read/write/delete that
+     * resolves to a not-yet-migrated new-layout path transparently relocates the legacy file
+     * first — mirroring how {@link io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend#get}
+     * migrates a pre-multi-account storage key on first read.
+     */
+    private void migrateLegacyFileIfPresent(Path legacyPath, Path newPath) {
+        if (Files.exists(newPath) || !Files.exists(legacyPath)) {
+            return;
+        }
+        try {
+            Files.createDirectories(newPath.getParent());
+            Files.move(legacyPath, newPath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to migrate legacy S3 object file to account-scoped layout", e);
+        }
     }
 
     private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {
