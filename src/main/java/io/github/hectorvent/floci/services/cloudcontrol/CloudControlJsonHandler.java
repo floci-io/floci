@@ -31,7 +31,7 @@ public class CloudControlJsonHandler {
             case "DeleteResource" -> progressResponse(
                     service.deleteResource(region, required(request, "TypeName"), required(request, "Identifier")));
             case "GetResourceRequestStatus" -> progressResponse(
-                    service.requestStatus(required(request, "RequestToken")));
+                    service.requestStatus(requestToken(request)));
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + action + " is not supported.", 400);
         };
@@ -74,6 +74,18 @@ public class CloudControlJsonHandler {
         String value = request.path(field).asText(null);
         if (value == null || value.isBlank()) {
             throw new AwsException("InvalidRequestException", field + " is required.", 400);
+        }
+        return value;
+    }
+
+    /**
+     * GetResourceRequestStatus declares only RequestTokenNotFoundException, so an absent token
+     * reports that rather than the InvalidRequestException the other operations declare.
+     */
+    private String requestToken(JsonNode request) {
+        String value = request.path("RequestToken").asText(null);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("RequestTokenNotFoundException", "RequestToken is required.", 404);
         }
         return value;
     }

@@ -153,8 +153,12 @@ class CloudControlIntegrationTest {
                 "{\"TypeName\":\"AWS::EC2::VPC\"}");
         assertErrorCode(ct, "CloudApiService.GetResource",
                 "{\"TypeName\":\"AWS::EC2::VPC\"}");
-        assertErrorCode(ct, "CloudApiService.GetResourceRequestStatus", "{}");
         assertErrorCode(ct, "CloudApiService.ListResources", "{}");
+
+        // GetResourceRequestStatus does not declare InvalidRequestException. Its only declared
+        // error is RequestTokenNotFoundException, which is what an absent token reports.
+        assertErrorCode(ct, "CloudApiService.GetResourceRequestStatus", "{}",
+                404, "RequestTokenNotFoundException");
 
         // DesiredState is a required member of CreateResourceInput. An absent one used to become
         // an empty object and provision anyway.
@@ -167,14 +171,19 @@ class CloudControlIntegrationTest {
     }
 
     private void assertErrorCode(String contentType, String target, String body) {
+        assertErrorCode(contentType, target, body, 400, "InvalidRequestException");
+    }
+
+    private void assertErrorCode(String contentType, String target, String body,
+                                 int statusCode, String errorCode) {
         given()
                 .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(contentType, TEXT)))
                 .contentType(contentType)
                 .header("X-Amz-Target", target)
                 .body(body)
                 .when().post("/")
-                .then().statusCode(400)
-                .body("__type", containsString("InvalidRequestException"));
+                .then().statusCode(statusCode)
+                .body("__type", containsString(errorCode));
     }
 
     @Test
