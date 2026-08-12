@@ -254,6 +254,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
 | CreateRoute | Adds a route to a route table. |
+| ReplaceRoute | Replaces the target of an existing route. |
 | DeleteRoute | Removes a route from a route table. |
 
 ### Network ACLs
@@ -273,6 +274,27 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | DescribePrefixLists | Returns prefix lists known to the local EC2 service. |
+| CreateManagedPrefixList | Creates a customer-managed prefix list with its initial entries. |
+| DescribeManagedPrefixLists | Lists customer-managed and AWS-managed prefix lists. |
+| GetManagedPrefixListEntries | Returns the entries of a prefix list, optionally at an earlier version. |
+| ModifyManagedPrefixList | Adds or removes entries, renames the list, or raises its entry limit. |
+| DeleteManagedPrefixList | Deletes a customer-managed prefix list. |
+
+Two AWS-managed prefix lists exist in every region without being created —
+`com.amazonaws.<region>.s3` (`pl-63a5400a`) and `com.amazonaws.<region>.dynamodb`
+(`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. They are owned by `AWS`,
+read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
+modifying or deleting one returns `UnsupportedOperation`.
+
+Entries are versioned. A prefix list starts at version 1, and each `ModifyManagedPrefixList`
+that adds or removes entries stores a new version and bumps the counter, so
+`GetManagedPrefixListEntries` can serve an earlier `TargetVersion`. Renaming the list or
+changing `MaxEntries` does not create a version. Passing `CurrentVersion` makes the
+modification conditional: a stale value returns `PrefixListVersionMismatch`. Removals are applied before
+additions, so one call can replace an entry's description by removing and re-adding the CIDR.
+
+Creation is synchronous: a new list is returned as `create-complete` rather than passing
+through `create-in-progress`, since nothing about it is slow locally.
 
 ### NAT Gateways
 

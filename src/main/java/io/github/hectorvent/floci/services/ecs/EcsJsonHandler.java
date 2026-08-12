@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.Deployment;
+import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
@@ -497,13 +499,16 @@ public class EcsJsonHandler {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         List<String> serviceIds = jsonArrayToList(req.path("services"));
 
-        List<EcsServiceModel> found = service.describeServices(cluster, serviceIds, region);
+        EcsService.DescribeServicesResult found =
+                service.describeServicesDetailed(cluster, serviceIds, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(s -> arr.add(serviceNode(s)));
+        found.services().forEach(s -> arr.add(serviceNode(s)));
         resp.set("services", arr);
-        resp.set("failures", objectMapper.createArrayNode());
+        ArrayNode failures = objectMapper.createArrayNode();
+        found.failures().forEach(f -> failures.add(failureNode(f)));
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
@@ -1149,6 +1154,34 @@ public class EcsJsonHandler {
             networkConfig.set("awsvpcConfiguration", awsvpcNode);
             n.set("networkConfiguration", networkConfig);
         }
+        ArrayNode deployments = objectMapper.createArrayNode();
+        service.deploymentsFor(s).forEach(d -> deployments.add(deploymentNode(d)));
+        n.set("deployments", deployments);
+        return n;
+    }
+
+    private ObjectNode failureNode(Failure f) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("arn", f.arn());
+        n.put("reason", f.reason());
+        if (f.detail() != null) { n.put("detail", f.detail()); }
+        return n;
+    }
+
+    private ObjectNode deploymentNode(Deployment d) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("id", d.getId());
+        n.put("status", d.getStatus());
+        n.put("taskDefinition", d.getTaskDefinition());
+        n.put("desiredCount", d.getDesiredCount());
+        n.put("pendingCount", d.getPendingCount());
+        n.put("runningCount", d.getRunningCount());
+        n.put("failedTasks", d.getFailedTasks());
+        n.put("rolloutState", d.getRolloutState());
+        n.put("rolloutStateReason", d.getRolloutStateReason());
+        if (d.getLaunchType() != null) { n.put("launchType", d.getLaunchType().name()); }
+        if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
+        if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
         return n;
     }
 

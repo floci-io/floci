@@ -49,9 +49,45 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 | `CreateService` | Create a long-running service |
 | `UpdateService` | Update desired count, task definition, or deployment config |
 | `DeleteService` | Delete a service (supports `force`) |
-| `DescribeServices` | Describe one or more services |
+| `DescribeServices` | Describe one or more services (includes `deployments`, see below) |
 | `ListServices` | List service ARNs in a cluster |
 | `ListServicesByNamespace` | List services filtered by Cloud Map namespace |
+
+#### Service deployments
+
+An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,
+synthesized from the service's current state rather than tracked as a rollout. This is
+what AWS's `ServicesStable` waiter accepts on, so `aws ecs wait services-stable`, the
+SDK waiters, and Terraform's `aws_ecs_service` all converge normally. A deleted
+(`INACTIVE`) service reports an empty list.
+
+`rolloutState` is `COMPLETED` once `runningCount` reaches `desiredCount`, and
+`IN_PROGRESS` before that. The deployment `id` is derived from the service ARN and its
+task definition, so it is stable across calls and across restarts, and rolls over when
+the task definition changes. `createdAt` tracks the deployment rather than the service:
+it is the service's creation time until a task-definition change starts a new
+deployment, and moves with it thereafter.
+
+Known differences from AWS:
+
+- There is never a second `ACTIVE` deployment draining alongside the `PRIMARY` one;
+  Floci swaps the task definition in place.
+- `deployments` is reported for every service. AWS omits it for services that use the
+  `CODE_DEPLOY` or `EXTERNAL` deployment controller, but Floci does not yet record
+  `deploymentController`, and `ECS` is the AWS default.
+- `pendingCount` is always `0`, matching the top-level service field.
+- `forceNewDeployment` does not mint a new deployment `id`.
+- `updatedAt` equals `createdAt`. AWS advances it as a rollout progresses; Floci has no
+  intermediate rollout state to report.
+
+#### Unknown services
+
+A service reference that does not resolve is returned in `failures` with
+`reason: MISSING` and the ARN the service would have had, rather than being dropped from
+the response. `DescribeServices` therefore returns partial results instead of erroring, as
+AWS does, and `aws ecs wait services-stable` on a nonexistent service fails immediately
+instead of polling for its full timeout. A reference supplied as an ARN is echoed back
+unchanged.
 
 ### Task Sets
 

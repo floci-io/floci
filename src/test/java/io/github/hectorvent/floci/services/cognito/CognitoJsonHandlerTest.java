@@ -385,6 +385,79 @@ class CognitoJsonHandlerTest {
                 "CreateUserPoolClient must not return RefreshTokenRotation when not set");
     }
 
+    // Issue #1563 — AdminLinkProviderForUser
+
+    @Test
+    void adminLinkProviderForUserReturnsEmptyBody() {
+        String poolId = createPoolWithUser("link-pool", "alice");
+
+        Response response = handler.handle("AdminLinkProviderForUser",
+                linkRequest(poolId, "alice", "Google", "google-sub-123"), "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        JsonNode body = (JsonNode) response.getEntity();
+        assertTrue(body.isObject());
+        assertTrue(body.isEmpty(), "AdminLinkProviderForUser returns an empty JSON object");
+    }
+
+    @Test
+    void adminLinkProviderForUserIdentitySurfacesInAdminGetUser() {
+        String poolId = createPoolWithUser("link-getuser-pool", "alice");
+        handler.handle("AdminLinkProviderForUser",
+                linkRequest(poolId, "alice", "Google", "google-sub-123"), "us-east-1");
+
+        ObjectNode getUser = mapper.createObjectNode();
+        getUser.put("UserPoolId", poolId);
+        getUser.put("Username", "alice");
+        JsonNode body = (JsonNode) handler.handle("AdminGetUser", getUser, "us-east-1").getEntity();
+
+        String identities = StreamSupport.stream(Spliterators.spliteratorUnknownSize(
+                        body.get("UserAttributes").elements(), 0), false)
+                .filter(n -> "identities".equals(n.get("Name").asText()))
+                .map(n -> n.get("Value").asText())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("identities attribute missing from AdminGetUser"));
+        assertTrue(identities.contains("\"userId\":\"google-sub-123\""), identities);
+        assertTrue(identities.contains("\"providerName\":\"Google\""), identities);
+    }
+
+    @Test
+    void adminLinkProviderForUserUnknownUserThrows() {
+        String poolId = createPoolWithUser("link-missing-pool", "alice");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                handler.handle("AdminLinkProviderForUser",
+                        linkRequest(poolId, "ghost", "Google", "google-sub-123"), "us-east-1"));
+        assertEquals("UserNotFoundException", exception.getErrorCode());
+    }
+
+    private String createPoolWithUser(String poolName, String username) {
+        ObjectNode poolReq = mapper.createObjectNode();
+        poolReq.put("PoolName", poolName);
+        JsonNode poolBody = (JsonNode) handler.handle("CreateUserPool", poolReq, "us-east-1").getEntity();
+        String poolId = poolBody.get("UserPool").get("Id").asText();
+
+        ObjectNode createUser = mapper.createObjectNode();
+        createUser.put("UserPoolId", poolId);
+        createUser.put("Username", username);
+        handler.handle("AdminCreateUser", createUser, "us-east-1");
+        return poolId;
+    }
+
+    private ObjectNode linkRequest(String poolId, String destinationUsername,
+            String sourceProviderName, String sourceUserId) {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("UserPoolId", poolId);
+        request.putObject("DestinationUser")
+                .put("ProviderName", "Cognito")
+                .put("ProviderAttributeValue", destinationUsername);
+        request.putObject("SourceUser")
+                .put("ProviderName", sourceProviderName)
+                .put("ProviderAttributeName", "Cognito_Subject")
+                .put("ProviderAttributeValue", sourceUserId);
+        return request;
+    }
+
     private Set<String> schemaNames(JsonNode pool) {
         return StreamSupport.stream(
                         Spliterators.spliteratorUnknownSize(pool.get("SchemaAttributes").elements(), 0), false)

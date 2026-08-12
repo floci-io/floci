@@ -367,10 +367,17 @@ public class CloudFrontService {
         if (alias == null || !alias.startsWith("*.") || hostname == null) {
             return false;
         }
-        String suffix = alias.substring(1);
-        return hostname.length() > suffix.length()
-                && hostname.regionMatches(true, hostname.length() - suffix.length(),
-                        suffix, 0, suffix.length());
+        String suffix = alias.substring(1);          // ".example.com"
+        if (hostname.length() <= suffix.length()
+                || !hostname.regionMatches(true, hostname.length() - suffix.length(),
+                        suffix, 0, suffix.length())) {
+            return false;
+        }
+        // A CloudFront wildcard replaces exactly one label, so the part standing in for the "*"
+        // must not itself contain a dot: "*.example.com" covers marketing.example.com but not
+        // marketing.product.example.com. AWS is explicit that names at a level higher or lower
+        // than the wildcard are not covered.
+        return hostname.lastIndexOf('.', hostname.length() - suffix.length() - 1) < 0;
     }
 
     private static String stripPort(String host) {
