@@ -461,6 +461,7 @@ public class CloudFormationService {
                             name -> exports.get(exportKey(region, name)));
 
                     StackResource resource = stack.getResources().get(logicalId);
+                    StackResource previousResource = resource;
                     if (resource == null) {
                         resource = new StackResource();
                         resource.setLogicalId(logicalId);
@@ -510,6 +511,18 @@ public class CloudFormationService {
                     if ("CREATE_FAILED".equals(resource.getStatus())
                             || "UPDATE_FAILED".equals(resource.getStatus())) {
                         failedResource = resource;
+                        if (!isCreate && previousResource != null) {
+                            // Provisioners work on a copy of the stored resource metadata. Keep the
+                            // last known-good identity and status when an update attempt fails so a
+                            // later retry or stack deletion still manages the original resource.
+                            // The rollback walker must also know this resource is already restored;
+                            // otherwise an earlier UPDATE_COMPLETE status looks like an unhandled
+                            // mutation and incorrectly turns a safe rollback into ROLLBACK_FAILED.
+                            previousResource.getAttributes().put(
+                                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR,
+                                    "true");
+                            stack.getResources().put(logicalId, previousResource);
+                        }
                         break;
                     }
                 }
@@ -915,6 +928,7 @@ public class CloudFormationService {
         copy.setResourceType(source.getResourceType());
         copy.setStatus(source.getStatus());
         copy.setStatusReason(source.getStatusReason());
+        copy.setDeletionPolicy(source.getDeletionPolicy());
         copy.setUpdateReplacePolicy(source.getUpdateReplacePolicy());
         copy.setTimestamp(source.getTimestamp());
         copy.setAttributes(new HashMap<>(source.getAttributes()));
