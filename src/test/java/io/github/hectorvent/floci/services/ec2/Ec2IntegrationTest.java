@@ -39,6 +39,16 @@ class Ec2IntegrationTest {
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
 
+    // Issue #31: DescribeNetworkInterfaces has no owner/account scoping in the in-memory
+    // Ec2Service store — it is filtered by region only. describeNetworkInterfacesWithMaxResultsNoNextToken
+    // and describeNetworkInterfacesMultipagePagination paginate over *every* ENI in the request's
+    // region with no NetworkInterfaceId/filter, so they flake whenever another test (in this class
+    // or another integration test class sharing the JVM-wide store) has already created ENIs in
+    // us-east-1. Isolate them to a region no other test in the suite touches, mirroring the
+    // per-test-region idiom used by CloudFormationEc2IntegrationTest.
+    private static final String ENI_ISOLATED_AUTH_HEADER =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/sa-east-1/ec2/aws4_request";
+
     private static String instanceId;
     private static String vpcId;
     private static String subnetId;
@@ -2235,12 +2245,12 @@ class Ec2IntegrationTest {
     void describeNetworkInterfacesWithMaxResultsNoNextToken() {
         // When MaxResults exceeds the number of available ENIs,
         // all results are returned and nextToken is omitted.
-        // This test works regardless of how many instances exist
-        // (including zero, e.g. when run in isolation).
+        // Uses an isolated region (see ENI_ISOLATED_AUTH_HEADER) so the assertion holds
+        // regardless of how many ENIs other tests have created elsewhere in the account.
         String body = given()
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("MaxResults", "5")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", ENI_ISOLATED_AUTH_HEADER)
         .when()
             .post("/")
         .then()
@@ -2289,34 +2299,38 @@ class Ec2IntegrationTest {
     // Self-contained test: launches additional instances, tests full
     // pagination cycle (MaxResults truncation + NextToken continuation),
     // then terminates the extra instances. Does not affect other tests.
+    //
+    // Runs in an isolated region (see ENI_ISOLATED_AUTH_HEADER) so the exact ENI counts below
+    // hold regardless of what other tests have created elsewhere in the account (issue #31).
+    // SubnetId/SecurityGroupId are intentionally omitted (rather than reusing the class's
+    // us-east-1 subnetId/securityGroupId) since those ids don't exist in the isolated region;
+    // RunInstances falls back to that region's auto-provisioned default subnet/security group.
 
     @Test
     @Order(92)
     void describeNetworkInterfacesMultipagePagination() {
-        // ── Launch 5 additional instances to have 6 total ENIs ──
+        // ── Launch 6 instances in the isolated region to have 6 total ENIs ──
         List<String> batchIds = given()
             .formParam("Action", "RunInstances")
             .formParam("ImageId", "ami-0abcdef1234567890")
             .formParam("InstanceType", "t2.micro")
-            .formParam("MinCount", "5")
-            .formParam("MaxCount", "5")
+            .formParam("MinCount", "6")
+            .formParam("MaxCount", "6")
             .formParam("KeyName", "test-key")
-            .formParam("SubnetId", subnetId)
-            .formParam("SecurityGroupId.1", securityGroupId)
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", ENI_ISOLATED_AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
         .extract().xmlPath().getList("RunInstancesResponse.instancesSet.item.instanceId", String.class);
 
-        assert batchIds.size() == 5 : "Expected 5 new instances, got " + batchIds.size();
+        assert batchIds.size() == 6 : "Expected 6 new instances, got " + batchIds.size();
 
         // ── Page 1: MaxResults=5, expect 5 ENIs + nextToken ──
         String nextToken = given()
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("MaxResults", "5")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", ENI_ISOLATED_AUTH_HEADER)
         .when()
             .post("/")
         .then()
@@ -2327,30 +2341,29 @@ class Ec2IntegrationTest {
 
         assert nextToken != null && !nextToken.isEmpty() : "Expected non-empty nextToken on truncated page";
 
-        // ── Page 2: use NextToken, expect remaining ENIs, no nextToken ──
+        // ── Page 2: use NextToken, expect remaining ENI, no nextToken ──
         String body = given()
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("MaxResults", "5")
             .formParam("NextToken", nextToken)
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", ENI_ISOLATED_AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()",
-                    org.hamcrest.Matchers.greaterThanOrEqualTo(1))
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(1))
         .extract().body().asString();
 
         // Final page must NOT contain a nextToken element
         org.hamcrest.MatcherAssert.assertThat(body,
                 not(containsString("<nextToken>")));
 
-        // ── Cleanup: terminate the 5 extra instances ──
+        // ── Cleanup: terminate the 6 extra instances ──
         for (String id : batchIds) {
             given()
                 .formParam("Action", "TerminateInstances")
                 .formParam("InstanceId.1", id)
-                .header("Authorization", AUTH_HEADER)
+                .header("Authorization", ENI_ISOLATED_AUTH_HEADER)
             .when()
                 .post("/")
             .then()
