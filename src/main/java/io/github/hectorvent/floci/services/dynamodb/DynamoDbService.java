@@ -138,15 +138,23 @@ public class DynamoDbService {
 
     private void loadPersistedItems() {
         if (itemStore == null) return;
+        // No request scope at startup, so itemStore.keys() would only see the default account.
+        // scanAllAccountsRaw() returns every account's items already in the "accountId/
+        // region::tableName" key format itemsByTable expects.
+        if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
+            aware.scanAllAccountsRaw().forEach((rawKey, items) ->
+                itemsByTable.put(rawKey, new ConcurrentSkipListMap<>(items)));
+            return;
+        }
         for (String key : itemStore.keys()) {
             itemStore.get(key).ifPresent(items ->
-                itemsByTable.put(key, new ConcurrentSkipListMap<>(items)));
+                itemsByTable.put(scopedItemsKey(key), new ConcurrentSkipListMap<>(items)));
         }
     }
 
     private void persistItems(String storageKey) {
         if (itemStore == null) return;
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items != null) {
             itemStore.put(storageKey, new HashMap<>(items));
         } else {
@@ -309,7 +317,7 @@ public class DynamoDbService {
         }
 
         tableStore.put(storageKey, table);
-        itemsByTable.put(storageKey, new ConcurrentSkipListMap<>());
+        itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
     }
@@ -321,7 +329,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         // Update dynamic counts
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items != null) {
             table.setItemCount(items.size());
         }
@@ -340,8 +348,8 @@ public class DynamoDbService {
             throw resourceNotFoundException(canonicalTableName);
         }
         tableStore.delete(storageKey);
-        itemsByTable.remove(storageKey);
-        itemLocks.remove(storageKey);
+        itemsByTable.remove(scopedItemsKey(storageKey));
+        itemLocks.remove(scopedItemsKey(storageKey));
         if (itemStore != null) {
             itemStore.delete(storageKey);
         }
@@ -402,7 +410,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, normalizedItem);
 
         withItemLock(storageKey, itemKey, () -> {
-            var tableItems = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
+            var tableItems = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
 
             JsonNode existing = tableItems.get(itemKey);
 
@@ -432,7 +440,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key, true);
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) {
             LOG.tracev("Got item from {0}: key={1} item=<not found>", canonicalTableName, itemKey);
             return null;
@@ -462,7 +470,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsByTable.get(storageKey);
+            var items = itemsByTable.get(scopedItemsKey(storageKey));
             if (items == null) return null;
 
             if (conditionExpression != null) {
@@ -509,7 +517,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
+            var items = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
 
             // Get existing item or create new one from key
             JsonNode existing = items.get(itemKey);
@@ -653,7 +661,7 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new QueryResult(List.of(), 0, null);
 
         // Resolve key names: use GSI or table keys
@@ -826,7 +834,7 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new ScanResult(List.of(), 0, null);
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
@@ -982,7 +990,7 @@ public class DynamoDbService {
         //   * Same token + different request body  → IdempotentParameterMismatchException.
         //   * No token, or expired token           → proceed normally.
         if (clientRequestToken != null && !clientRequestToken.isEmpty() && rawRequest != null) {
-            String cacheKey = region + "::" + clientRequestToken;
+            String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
             String requestHash = sha256(rawRequest.toString());
             long nowNanos = System.nanoTime();
 
@@ -1161,7 +1169,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key);
-        var tableItems = itemsByTable.get(storageKey);
+        var tableItems = itemsByTable.get(scopedItemsKey(storageKey));
         JsonNode existing = tableItems != null ? tableItems.get(itemKey) : null;
 
         try {
@@ -1340,20 +1348,22 @@ public class DynamoDbService {
 
     void deleteExpiredItems() {
         int totalDeleted = 0;
+        // Runs with no request scope and must sweep every account's tables, not just the
+        // default one — scanAllAccountsRaw()'s key matches itemsByTable's directly.
         Map<String, TableDefinition> allTables;
         if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
-            allTables = aware.scanAllAccountsAsMap();
+            allTables = aware.scanAllAccountsRaw();
         } else {
             allTables = new HashMap<>();
-            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(k, v)));
+            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(scopedItemsKey(k), v)));
         }
         for (Map.Entry<String, TableDefinition> entry : allTables.entrySet()) {
-            String storageKey = entry.getKey();
+            String rawKey = entry.getKey();
             TableDefinition table = entry.getValue();
             if (!table.isTtlEnabled() || table.getTtlAttributeName() == null) {
                 continue;
             }
-            var items = itemsByTable.get(storageKey);
+            var items = itemsByTable.get(rawKey);
             if (items == null) continue;
 
             List<String> expiredKeys = items.entrySet().stream()
@@ -1363,6 +1373,9 @@ public class DynamoDbService {
 
             if (expiredKeys.isEmpty()) continue;
 
+            int slash = rawKey.indexOf('/');
+            String accountId = slash >= 0 ? rawKey.substring(0, slash) : null;
+            String storageKey = slash >= 0 ? rawKey.substring(slash + 1) : rawKey;
             String region = storageKey.split("::", 2)[0];
             for (String itemKey : expiredKeys) {
                 JsonNode removed = items.remove(itemKey);
@@ -1375,11 +1388,21 @@ public class DynamoDbService {
                     }
                 }
             }
-            persistItems(storageKey);
+            persistItemsForAccount(accountId, storageKey, items);
             totalDeleted += expiredKeys.size();
         }
         if (totalDeleted > 0) {
             LOG.infov("TTL sweeper removed {0} expired items", totalDeleted);
+        }
+    }
+
+    /** Like {@link #persistItems}, but for callers with no ambient request account to rely on. */
+    private void persistItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items) {
+        if (itemStore == null) return;
+        if (accountId != null && itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
+            aware.putForAccount(accountId, storageKey, new HashMap<>(items));
+        } else {
+            itemStore.put(storageKey, new HashMap<>(items));
         }
     }
 
@@ -2291,9 +2314,17 @@ public class DynamoDbService {
         return region + "::" + tableName;
     }
 
+    // itemsByTable/itemLocks are plain fields, unlike tableStore/itemStore, so they get no
+    // automatic account prefixing — without this, two accounts with a same-named table would
+    // share one item map. Matches scanAllAccountsRaw()'s key format, so a raw key from there
+    // can be used directly as an itemsByTable/itemLocks key.
+    private String scopedItemsKey(String storageKey) {
+        return regionResolver.getAccountId() + "/" + storageKey;
+    }
+
     private ReentrantLock lockFor(String storageKey, String itemKey) {
         return itemLocks
-                .computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(itemKey, k -> new ReentrantLock());
     }
 
@@ -2647,7 +2678,7 @@ public class DynamoDbService {
         }
 
         ExportDescription finalDesc = desc;
-        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(storageKey);
+        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(scopedItemsKey(storageKey));
         List<JsonNode> snapshot = tableItems != null
                 ? List.copyOf(tableItems.values())
                 : List.of();

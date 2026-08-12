@@ -3,8 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
@@ -396,7 +395,7 @@ class Ec2ServiceTest {
 
     @Test
     void describeSnapshotsDefaultsToOwnedSnapshots() {
-        InMemoryStorage<String, Snapshot> snapshotStore = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Snapshot> snapshotStore = AccountAwareStorageBackend.inMemory("000000000000");
         Snapshot foreign = new Snapshot();
         foreign.setSnapshotId("snap-foreign");
         foreign.setOwnerId("111111111111");
@@ -834,26 +833,26 @@ class Ec2ServiceTest {
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> overrides;
+        private final Map<String, AccountAwareStorageBackend<?>> overrides;
 
         private InMemoryStorageFactory() {
             this(Map.of());
         }
 
-        private InMemoryStorageFactory(Map<String, StorageBackend<String, ?>> overrides) {
+        private InMemoryStorageFactory(Map<String, AccountAwareStorageBackend<?>> overrides) {
             super(null, null);
             this.overrides = overrides;
         }
 
         @Override
         @SuppressWarnings("unchecked")
-        public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
-            StorageBackend<String, ?> override = overrides.get(fileName);
+            AccountAwareStorageBackend<?> override = overrides.get(fileName);
             if (override != null) {
-                return (StorageBackend<String, V>) override;
+                return (AccountAwareStorageBackend<V>) override;
             }
-            return new InMemoryStorage<>();
+            return AccountAwareStorageBackend.inMemory("000000000000");
         }
     }
 }
