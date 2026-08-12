@@ -70,11 +70,11 @@ public class CodePipelineService {
     public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
                                CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                                LambdaService lambdaService, S3Service s3Service) {
-        this.pipelineStore = (AccountAwareStorageBackend<CodePipelinePipeline>) storageFactory.create(
+        this.pipelineStore = storageFactory.create(
                 "codepipeline", "codepipeline-pipelines.json", new TypeReference<Map<String, CodePipelinePipeline>>() {});
-        this.executionStore = (AccountAwareStorageBackend<CodePipelineExecution>) storageFactory.create(
+        this.executionStore = storageFactory.create(
                 "codepipeline", "codepipeline-executions.json", new TypeReference<Map<String, CodePipelineExecution>>() {});
-        this.itemStore = (AccountAwareStorageBackend<CodePipelineStoredItem>) storageFactory.create(
+        this.itemStore = storageFactory.create(
                 "codepipeline", "codepipeline-items.json", new TypeReference<Map<String, CodePipelineStoredItem>>() {});
         this.mapper = mapper;
         this.codeBuildService = codeBuildService;
