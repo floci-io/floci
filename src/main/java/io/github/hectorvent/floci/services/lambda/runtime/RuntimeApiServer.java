@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.lambda.model.ExtensionEvent;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
 import io.github.hectorvent.floci.services.lambda.model.RegisteredExtension;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
@@ -22,6 +23,8 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * Per-container HTTP server implementing the AWS Lambda Runtime API and, for
@@ -448,7 +451,18 @@ public class RuntimeApiServer {
     private void tryListen(CompletableFuture<Void> started, Router router, long deadline) {
         if (started.isDone()) return;
         httpServer = vertx.createHttpServer(new HttpServerOptions()
-                .setMaxFormAttributeSize(-1));
+                .setMaxFormAttributeSize(-1)
+                // Real AWS's Runtime/Extensions API is plain HTTP/1.1. Vert.x defaults to
+                // accepting an h2c upgrade, which the JDK HttpClient used in tests and by some
+                // language runtimes opts into unless told otherwise. That multiplexes every
+                // request from one client (e.g. an extension's register + its own /event/next
+                // long-poll) onto a single connection/stream-set, so stop()'s close of that
+                // connection can race a just-flushed response's HTTP/2 stream-completion
+                // bookkeeping instead of tearing down an already-idle connection — see #2180.
+                // Disabling h2c makes the client fall back to a plain HTTP/1.1 request
+                // automatically (no client-side change needed) and matches AWS's actual wire
+                // protocol.
+                .setHttp2ClearTextEnabled(false));
         httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
             if (result.succeeded()) {
                 LOG.infov("RuntimeApiServer started on port {0}", String.valueOf(port));
@@ -468,7 +482,7 @@ public class RuntimeApiServer {
     public CompletableFuture<Void> stop() {
         CompletableFuture<Void> closed;
         List<RoutingContext> contextsToClose204;
-        List<Runnable> dispatches = new ArrayList<>();
+        List<Supplier<Future<Void>>> dispatches = new ArrayList<>();
         List<PendingInvocation> invocationsToFailContainerStopped;
 
         synchronized (lock) {
@@ -490,9 +504,10 @@ public class RuntimeApiServer {
                 RoutingContext waitingCtx = ext.takeWaitingContext();
                 if (waitingCtx != null) {
                     dispatches.add(() -> {
-                        if (!waitingCtx.response().ended()) {
-                            sendExtensionEvent(waitingCtx, shutdownEvent);
+                        if (waitingCtx.response().ended()) {
+                            return Future.succeededFuture();
                         }
+                        return sendExtensionEvent(waitingCtx, shutdownEvent);
                     });
                 } else {
                     ext.getPendingEvents().offer(shutdownEvent);
@@ -503,32 +518,52 @@ public class RuntimeApiServer {
             pendingQueue.clear();
         }
 
-        if (httpServer != null) {
-            httpServer.close(ar -> {
-                if (ar.succeeded()) {
-                    LOG.debugv("RuntimeApiServer on port {0} closed", String.valueOf(port));
-                    closed.complete(null);
-                } else {
-                    LOG.warnv(ar.cause(), "RuntimeApiServer on port {0} failed to close cleanly", String.valueOf(port));
-                    closed.completeExceptionally(ar.cause());
-                }
-            });
+        Runnable closeServer = () -> {
+            if (httpServer != null) {
+                httpServer.close(ar -> {
+                    if (ar.succeeded()) {
+                        LOG.debugv("RuntimeApiServer on port {0} closed", String.valueOf(port));
+                        closed.complete(null);
+                    } else {
+                        LOG.warnv(ar.cause(), "RuntimeApiServer on port {0} failed to close cleanly", String.valueOf(port));
+                        closed.completeExceptionally(ar.cause());
+                    }
+                });
+            } else {
+                closed.complete(null);
+            }
+        };
+
+        // Wake any parked /next pollers with 204 (container shutting down — runtime will exit) and
+        // dispatch SHUTDOWN to every extension already parked on /event/next, then close the HTTP
+        // server. Each write is scheduled on the event loop via vertx.runOnContext(...), and the
+        // server is closed only once every write's response has actually been flushed — tracked by
+        // remainingWrites, decremented from each end() future's completion rather than when the
+        // scheduled handler returns (response.end() is asynchronous, so the bytes are not on the
+        // wire yet when the handler returns). So a parked extension's SHUTDOWN — or a poller's 204
+        // — is fully written before its connection is torn down, instead of racing
+        // httpServer.close() and orphaning the extension with an EOF. See issue #2142.
+        int parkedWrites = contextsToClose204.size() + dispatches.size();
+        if (parkedWrites == 0) {
+            closeServer.run();
         } else {
-            closed.complete(null);
-        }
-
-        // Wake any parked /next pollers with 204 (container shutting down — runtime will exit).
-        for (RoutingContext ctx : contextsToClose204) {
-            vertx.runOnContext(v -> {
-                if (!ctx.response().ended()) {
-                    ctx.response().setStatusCode(204).end();
+            AtomicInteger remainingWrites = new AtomicInteger(parkedWrites);
+            Runnable afterWrite = () -> {
+                if (remainingWrites.decrementAndGet() == 0) {
+                    closeServer.run();
                 }
-            });
-        }
-
-        // Dispatch SHUTDOWN to every extension that was already parked on /event/next.
-        for (Runnable dispatch : dispatches) {
-            vertx.runOnContext(v -> dispatch.run());
+            };
+            for (RoutingContext ctx : contextsToClose204) {
+                vertx.runOnContext(v -> {
+                    Future<Void> written = ctx.response().ended()
+                            ? Future.succeededFuture()
+                            : ctx.response().setStatusCode(204).end();
+                    written.onComplete(ar -> afterWrite.run());
+                });
+            }
+            for (Supplier<Future<Void>> dispatch : dispatches) {
+                vertx.runOnContext(v -> dispatch.get().onComplete(ar -> afterWrite.run()));
+            }
         }
 
         // Fail queued invocations that were never consumed by /next.
@@ -657,7 +692,7 @@ public class RuntimeApiServer {
                 .end(body);
     }
 
-    private void sendExtensionEvent(RoutingContext ctx, ExtensionEvent event) {
+    private Future<Void> sendExtensionEvent(RoutingContext ctx, ExtensionEvent event) {
         JsonObject body = new JsonObject().put("eventType", event.getType().name());
         if (event.getType() == ExtensionEvent.Type.INVOKE) {
             body.put("requestId", event.getRequestId())
@@ -667,7 +702,7 @@ public class RuntimeApiServer {
             body.put("shutdownReason", event.getShutdownReason())
                     .put("deadlineMs", event.getDeadlineMs());
         }
-        ctx.response()
+        return ctx.response()
                 .setStatusCode(200)
                 .putHeader("Content-Type", "application/json")
                 .putHeader(EXTENSION_EVENT_ID_HEADER, UUID.randomUUID().toString())

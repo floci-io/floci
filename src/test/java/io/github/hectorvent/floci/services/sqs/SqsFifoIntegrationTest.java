@@ -153,6 +153,71 @@ class SqsFifoIntegrationTest {
 
     @Test
     @Order(8)
+    void delayedMessageDoesNotBlockVisibleMessageInSameGroup() throws InterruptedException {
+        // Issue #2104: a message still waiting out DelaySeconds must not lock
+        // its message group — only in-flight messages do.
+        String delayQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "fifo-delay-lock.fifo")
+            .formParam("Attribute.1.Name", "FifoQueue")
+            .formParam("Attribute.1.Value", "true")
+            .formParam("Attribute.2.Name", "DelaySeconds")
+            .formParam("Attribute.2.Value", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SendMessage")
+            .formParam("QueueUrl", delayQueueUrl)
+            .formParam("MessageBody", "A")
+            .formParam("MessageGroupId", "group-a")
+            .formParam("MessageDeduplicationId", "a1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        Thread.sleep(1100);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SendMessage")
+            .formParam("QueueUrl", delayQueueUrl)
+            .formParam("MessageBody", "B")
+            .formParam("MessageGroupId", "group-a")
+            .formParam("MessageDeduplicationId", "b1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", delayQueueUrl)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Body>A</Body>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", delayQueueUrl)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(9)
     void deleteFifoQueue() {
         given()
             .contentType("application/x-www-form-urlencoded")

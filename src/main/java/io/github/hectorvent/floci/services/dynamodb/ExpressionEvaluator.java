@@ -1001,7 +1001,9 @@ final class ExpressionEvaluator {
         if (a.has("NS") && b.has("NS")) {
             JsonNode aArr = a.get("NS"), bArr = b.get("NS");
             if (aArr.size() != bArr.size()) return false;
-            var aSet = new java.util.HashSet<BigDecimal>();
+            // TreeSet membership goes through compareTo, so 1 and 1.0 are the same member.
+            // BigDecimal.equals() is scale-sensitive and would treat them as different.
+            var aSet = new java.util.TreeSet<BigDecimal>();
             try {
                 aArr.forEach(e -> aSet.add(new BigDecimal(e.asText())));
                 for (JsonNode e : bArr) { if (!aSet.contains(new BigDecimal(e.asText()))) return false; }
