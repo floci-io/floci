@@ -98,9 +98,9 @@ The current implementation is limited to custom buses with the `Name`, `Descript
 `Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
 rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
 resource replacement; Floci currently rejects that update until generic replacement handling is
-available. Changing `Description` or `Tags` during `UpdateStack` is also rejected until transactional
-resource rollback is available; this prevents a failed stack update from leaving the live bus in the
-rejected configuration.
+available. `Policy` is applied when the bus is created. Changing `Description`, `Tags`, or `Policy`
+during `UpdateStack` is rejected until transactional resource rollback is available; this prevents a
+failed stack update from leaving the live bus in the rejected configuration.
 
 ## Secrets Manager Target Attachments
 

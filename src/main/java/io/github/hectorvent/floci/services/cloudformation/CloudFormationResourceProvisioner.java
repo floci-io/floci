@@ -122,6 +122,7 @@ public class CloudFormationResourceProvisioner {
     private static final String INLINE_CLEANUP_GROUP_TARGETS_ATTR = "__FlociInlineCleanupGroupTargets";
     private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
+    private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
     private static final Set<String> EVENT_BUS_SUPPORTED_PROPERTIES =
             Set.of("Name", "Description", "Tags", "Policy");
     private static final Pattern EVENT_BUS_TAG_PATTERN =
@@ -2861,10 +2862,13 @@ public class CloudFormationResourceProvisioner {
         }
         Map<String, String> tags = parseEventBusTags(
                 props != null ? props.get("Tags") : null, engine);
+        JsonNode policy = resolveEventBusPolicy(props, engine);
 
         EventBus bus;
+        boolean createdBus = false;
         try {
             bus = eventBridgeService.createEventBus(busName, description, tags, region);
+            createdBus = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
             boolean stackAlreadyOwnsBus = existingBusName != null && existingBusName.equals(busName);
@@ -2882,7 +2886,7 @@ public class CloudFormationResourceProvisioner {
                 r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
                 throw e;
             }
-            validateEventBusMutablePropertiesUnchanged(r, bus, description, tags);
+            validateEventBusMutablePropertiesUnchanged(r, bus, description, tags, policy);
         }
 
         // Record identity before applying the policy: rollbackCreatedResources skips any resource
@@ -2893,12 +2897,13 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("Name", busName);
         r.getAttributes().put(EVENT_BUS_CREATED_TIME_ATTR, eventBusCreatedTime(bus));
         recordEventBusManagedTagKeys(r, tags.keySet());
+        recordEventBusManagedPolicy(r, policy);
 
-        // Optional inline resource policy (rare for CDK EventBus constructs). Applied after the bus
-        // exists so an adopted bus picks up a policy change on update too.
-        if (props != null && props.has("Policy") && !props.get("Policy").isNull()) {
-            String policyJson = engine.resolveNode(props.get("Policy")).toString();
-            eventBridgeService.putPermission(busName, null, null, null, null, policyJson, region);
+        // Apply an optional inline resource policy only during creation. Updating it is rejected by
+        // validateEventBusMutablePropertiesUnchanged until stack updates can roll back live resource
+        // mutations transactionally.
+        if (createdBus && !policy.isNull()) {
+            eventBridgeService.putPermission(busName, null, null, null, null, policy.toString(), region);
         }
     }
 
@@ -2989,7 +2994,7 @@ public class CloudFormationResourceProvisioner {
 
     private void validateEventBusMutablePropertiesUnchanged(
             StackResource resource, EventBus bus, String requestedDescription,
-            Map<String, String> requestedTags) {
+            Map<String, String> requestedTags, JsonNode requestedPolicy) {
         if (!Objects.equals(bus.getDescription(), requestedDescription)) {
             throw unsupportedEventBusMutableUpdate();
         }
@@ -2997,24 +3002,62 @@ public class CloudFormationResourceProvisioner {
         // Stacks persisted by the older EventBus provisioner have no managed-key metadata. There
         // is no reliable way to distinguish their CloudFormation tags from tags added out of band,
         // so allow this one-time adoption and start tracking the requested keys afterwards.
-        if (!resource.getAttributes().containsKey(EVENT_BUS_MANAGED_TAG_KEYS_ATTR)) {
-            return;
-        }
-
-        Map<String, String> currentManagedTags = new LinkedHashMap<>();
-        for (String key : eventBusManagedTagKeys(resource)) {
-            if (bus.getTags().containsKey(key)) {
-                currentManagedTags.put(key, bus.getTags().get(key));
+        if (resource.getAttributes().containsKey(EVENT_BUS_MANAGED_TAG_KEYS_ATTR)) {
+            Map<String, String> currentManagedTags = new LinkedHashMap<>();
+            for (String key : eventBusManagedTagKeys(resource)) {
+                if (bus.getTags().containsKey(key)) {
+                    currentManagedTags.put(key, bus.getTags().get(key));
+                }
+            }
+            if (!currentManagedTags.equals(requestedTags)) {
+                throw unsupportedEventBusMutableUpdate();
             }
         }
-        if (!currentManagedTags.equals(requestedTags)) {
-            throw unsupportedEventBusMutableUpdate();
+
+        String managedPolicy = resource.getAttributes().get(EVENT_BUS_MANAGED_POLICY_ATTR);
+        JsonNode policyToCompare = managedPolicy != null
+                ? parseEventBusPolicy(managedPolicy, "stored CloudFormation metadata")
+                : parseEventBusPolicy(bus.getPolicy(), "the existing event bus");
+        if (managedPolicy != null || !requestedPolicy.isNull()) {
+            if (!policyToCompare.equals(requestedPolicy)) {
+                throw unsupportedEventBusMutableUpdate();
+            }
+        }
+    }
+
+    private JsonNode resolveEventBusPolicy(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("Policy") || props.get("Policy").isNull()) {
+            return JsonNodeFactory.instance.nullNode();
+        }
+        return engine.resolveNode(props.get("Policy"));
+    }
+
+    private JsonNode parseEventBusPolicy(String policy, String source) {
+        if (policy == null) {
+            return JsonNodeFactory.instance.nullNode();
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(policy);
+            return parsed != null ? parsed : JsonNodeFactory.instance.nullNode();
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Invalid EventBus policy in " + source + ": " + e.getMessage(), 500);
+        }
+    }
+
+    private void recordEventBusManagedPolicy(StackResource resource, JsonNode policy) {
+        try {
+            resource.getAttributes().put(EVENT_BUS_MANAGED_POLICY_ATTR,
+                    objectMapper.writeValueAsString(policy));
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Failed to store EventBus managed-policy metadata: " + e.getMessage(), 500);
         }
     }
 
     private AwsException unsupportedEventBusMutableUpdate() {
         return new AwsException("ValidationError",
-                "Updating AWS::Events::EventBus Description or Tags is not supported "
+                "Updating AWS::Events::EventBus Description, Tags, or Policy is not supported "
                         + "until transactional rollback is available.", 400);
     }
 

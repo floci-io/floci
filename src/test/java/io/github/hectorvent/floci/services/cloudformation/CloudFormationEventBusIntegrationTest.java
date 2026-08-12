@@ -158,6 +158,31 @@ class CloudFormationEventBusIntegrationTest {
                 """.formatted(busName, tags);
     }
 
+    private static String eventBusWithPolicyTemplate(String busName, String statementId) {
+        return """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": {
+                        "Name": "%s",
+                        "Policy": {
+                          "Version": "2012-10-17",
+                          "Statement": [{
+                            "Sid": "%s",
+                            "Effect": "Allow",
+                            "Principal": "*",
+                            "Action": "events:PutEvents",
+                            "Resource": "*"
+                          }]
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName, statementId);
+    }
+
     private void callEventBridge(String target, String body, int expectedStatus) {
         given()
             .contentType("application/x-amz-json-1.1")
@@ -509,6 +534,42 @@ class CloudFormationEventBusIntegrationTest {
                 || tags.contains("\"Key\":\"add\"")
                 || tags.contains("\"Value\":\"after\"")) {
             throw new AssertionError("failed update changed event bus tags: " + tags);
+        }
+
+        deleteStack(stackName);
+        awaitStackDeleted(stackName);
+    }
+
+    @Test
+    void mutableEventBusPolicyUpdateRollsBackWithoutChangingPolicy() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "policy-bus-" + suffix;
+        String stackName = "eventbus-policy-" + suffix;
+        String originalTemplate = eventBusWithPolicyTemplate(busName, "Before");
+
+        createStack(stackName, originalTemplate);
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        updateStack(stackName, originalTemplate);
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        updateStack(stackName, eventBusWithPolicyTemplate(busName, "After"));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Policy", containsString("Before"));
+
+        String activeTemplate = getTemplate(stackName);
+        if (!activeTemplate.contains("Before") || activeTemplate.contains("After")) {
+            throw new AssertionError("failed policy update replaced the active template: " + activeTemplate);
         }
 
         deleteStack(stackName);
