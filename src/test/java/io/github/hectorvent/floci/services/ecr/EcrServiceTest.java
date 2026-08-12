@@ -52,7 +52,9 @@ class EcrServiceTest {
         when(registryManager.getProxyEndpoint()).thenReturn("http://localhost:5000");
         when(registryManager.internalRepoName(anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> inv.getArgument(0) + "/" + inv.getArgument(1) + "/" + inv.getArgument(2));
-        // ensureStarted() is a no-op on the mock — no Docker calls in any test below.
+        // The mock never talks to Docker; report the backing registry as available so the
+        // data-plane operations run. Registry-unavailable behaviour has its own tests below.
+        when(registryManager.tryEnsureStarted()).thenReturn(true);
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
@@ -77,7 +79,6 @@ class EcrServiceTest {
         assertTrue(repo.getRepositoryArn().startsWith("arn:aws:ecr:us-east-1:000000000000:repository/"));
         assertTrue(repo.getRepositoryUri().contains("localhost:"));
         assertEquals("MUTABLE", repo.getImageTagMutability());
-        Mockito.verify(registryManager).ensureStarted();
     }
 
     @Test
@@ -111,6 +112,66 @@ class EcrServiceTest {
         assertTrue(repo.isScanOnPush());
         assertEquals("dev", repo.getTags().get("env"));
         assertEquals("platform", repo.getTags().get("team"));
+    }
+
+    // ------------------------------------------------------------
+    // Registry unavailable (Floci inside Docker with no Docker daemon)
+    // ------------------------------------------------------------
+
+    @Test
+    void createRepository_succeedsAsMetadataWhenRegistryIsUnavailable() {
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        Repository repo = service.createRepository(REPO, null, "IMMUTABLE", true, null, null,
+                Map.of("Project", "choudoufu"), REGION);
+
+        assertEquals(REPO, repo.getRepositoryName());
+        assertEquals(ACCOUNT, repo.getRegistryId());
+        assertEquals("arn:aws:ecr:" + REGION + ":" + ACCOUNT + ":repository/" + REPO,
+                repo.getRepositoryArn());
+        assertTrue(repo.getRepositoryUri().endsWith("/" + REPO), repo.getRepositoryUri());
+        assertEquals("IMMUTABLE", repo.getImageTagMutability());
+        assertEquals("choudoufu", repo.getTags().get("Project"));
+    }
+
+    @Test
+    void repositoryMetadataCrudWorksWhenRegistryIsUnavailable() {
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        service.createRepository(REPO, null, null, null, null, null, Map.of("env", "dev"), REGION);
+
+        assertEquals(1, service.describeRepositories(List.of(REPO), null, REGION).size());
+        assertEquals("dev", service.listTagsForResource(REPO, null, REGION).get("env"));
+
+        service.tagResource(REPO, null, Map.of("team", "platform"), REGION);
+        assertEquals("platform", service.listTagsForResource(REPO, null, REGION).get("team"));
+
+        service.deleteRepository(REPO, null, false, REGION);
+        assertThrows(AwsException.class,
+                () -> service.describeRepositories(List.of(REPO), null, REGION));
+    }
+
+    @Test
+    void dataPlaneOperationsFailWithServerExceptionWhenRegistryIsUnavailable() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        AwsException auth = assertThrows(AwsException.class, () -> service.getAuthorizationToken());
+        assertEquals("ServerException", auth.getErrorCode());
+        assertEquals(500, auth.getHttpStatus());
+        assertTrue(auth.getMessage().contains("Docker"), auth.getMessage());
+
+        assertEquals("ServerException",
+                assertThrows(AwsException.class, () -> service.listImages(REPO, null, REGION)).getErrorCode());
+        assertEquals("ServerException",
+                assertThrows(AwsException.class,
+                        () -> service.describeImages(REPO, null, null, REGION)).getErrorCode());
+        assertEquals("ServerException",
+                assertThrows(AwsException.class,
+                        () -> service.batchGetImage(REPO, List.of(), null, null, REGION)).getErrorCode());
+        assertEquals("ServerException",
+                assertThrows(AwsException.class,
+                        () -> service.batchDeleteImage(REPO, List.of(), null, REGION)).getErrorCode());
     }
 
     // ------------------------------------------------------------
@@ -173,7 +234,7 @@ class EcrServiceTest {
         assertNotNull(data.getExpiresAt());
         String decoded = new String(Base64.getDecoder().decode(data.getAuthorizationToken()));
         assertTrue(decoded.startsWith("AWS:"), "decoded token should start with AWS: but was: " + decoded);
-        Mockito.verify(registryManager).ensureStarted();
+        Mockito.verify(registryManager).tryEnsureStarted();
     }
 
     @Test
