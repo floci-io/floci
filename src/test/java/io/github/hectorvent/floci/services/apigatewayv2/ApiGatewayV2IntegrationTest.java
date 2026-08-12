@@ -243,14 +243,16 @@ class ApiGatewayV2IntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"stageName":"prod","deploymentId":"%s","autoDeploy":false}
+                        {"stageName":"prod","deploymentId":"%s","autoDeploy":false,"tags":{"environment":"test","owner":"platform"}}
                         """.formatted(deploymentId))
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then()
                 .statusCode(201)
                 .body("stageName", equalTo("prod"))
                 .body("autoDeploy", equalTo(false))
-                .body("deploymentId", equalTo(deploymentId));
+                .body("deploymentId", equalTo(deploymentId))
+                .body("tags.environment", equalTo("test"))
+                .body("tags.owner", equalTo("platform"));
     }
 
     @Test @Order(51)
@@ -261,7 +263,9 @@ class ApiGatewayV2IntegrationTest {
                 .statusCode(200)
                 .body("stageName", equalTo("prod"))
                 .body("deploymentId", equalTo(deploymentId))
-                .body("autoDeploy", equalTo(false));
+                .body("autoDeploy", equalTo(false))
+                .body("tags.environment", equalTo("test"))
+                .body("tags.owner", equalTo("platform"));
     }
 
     @Test @Order(52)
@@ -270,7 +274,24 @@ class ApiGatewayV2IntegrationTest {
                 .when().get("/v2/apis/" + apiId + "/stages")
                 .then()
                 .statusCode(200)
-                .body("items.stageName", hasItem("prod"));
+                .body("items.stageName", hasItem("prod"))
+                .body("items.find { it.stageName == 'prod' }.tags.environment", equalTo("test"))
+                .body("items.find { it.stageName == 'prod' }.tags.owner", equalTo("platform"));
+    }
+
+    @Test @Order(53)
+    void updateStageReturnsTags() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"autoDeploy":true}
+                        """)
+                .when().patch("/v2/apis/" + apiId + "/stages/prod")
+                .then()
+                .statusCode(200)
+                .body("autoDeploy", equalTo(true))
+                .body("tags.environment", equalTo("test"))
+                .body("tags.owner", equalTo("platform"));
     }
 
     // ──────────────────────────── Cleanup ────────────────────────────
