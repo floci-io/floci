@@ -507,8 +507,12 @@ public class CloudFormationService {
                 return;
             }
 
-            // CloudFormation deletes resources whose Condition turns false during an update.
-            deleteInactiveConditionResources(stack, resources, conditions, region);
+            // CloudFormation re-evaluates conditions on every update. A resource whose Condition
+            // turns false is removed from the stack: its physical resource is deleted unless a
+            // DeletionPolicy retains it, and if deletion fails AWS still drops the resource from
+            // stack management, emits DELETE_FAILED, and lets the update complete.
+            List<String> conditionDeletionFailures =
+                    deleteInactiveConditionResources(stack, resources, conditions, region);
 
             CloudFormationTemplateEngine finalEngine = new CloudFormationTemplateEngine(
                     accountId, region, stack.getStackName(),
@@ -555,10 +559,15 @@ public class CloudFormationService {
             });
 
             String completeStatus = isCreate ? "CREATE_COMPLETE" : "UPDATE_COMPLETE";
+            String completionReason = conditionDeletionFailures.isEmpty()
+                    ? null
+                    : "The following resource(s) failed to delete and were removed from the stack: ["
+                            + String.join(", ", conditionDeletionFailures) + "].";
             stack.setStatus(completeStatus);
+            stack.setStatusReason(completionReason);
             stack.setLastUpdatedTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", completeStatus, null);
+                    "AWS::CloudFormation::Stack", completeStatus, completionReason);
             persistStack(stack);
             LOG.infov("Stack {0} execution complete: {1}", stack.getStackName(), completeStatus);
 
@@ -665,16 +674,21 @@ public class CloudFormationService {
     }
 
     /**
-     * Deletes resources that were provisioned by an earlier execution but whose resource-level
-     * {@code Condition} is false in the current template. Resources removed from the template
-     * entirely are outside this condition-specific cleanup.
+     * Removes resources that were provisioned by an earlier execution but whose resource-level
+     * {@code Condition} is false in the current template. Physical deletion honors the resource's
+     * deletion policy. A failed physical deletion leaves the resource in the underlying service but
+     * still removes it from stack management. Resources removed from the template entirely are
+     * outside this condition-specific cleanup.
+     *
+     * @return logical IDs whose physical deletion failed
      */
-    private void deleteInactiveConditionResources(Stack stack, JsonNode resources,
-                                                   Map<String, Boolean> conditions, String region) {
+    private List<String> deleteInactiveConditionResources(Stack stack, JsonNode resources,
+                                                           Map<String, Boolean> conditions, String region) {
         if (!resources.isObject()) {
-            return;
+            return List.of();
         }
 
+        List<String> failedResources = new ArrayList<>();
         List<StackResource> ordered = new ArrayList<>(stack.getResources().values());
         Collections.reverse(ordered);
         for (StackResource resource : ordered) {
@@ -687,11 +701,7 @@ public class CloudFormationService {
                 continue;
             }
 
-            if (resource.getPhysicalId() == null) {
-                stack.getResources().remove(resource.getLogicalId());
-                continue;
-            }
-            if (skipRetainedResource(stack, resource, false)) {
+            if (resource.getPhysicalId() == null || skipRetainedResource(stack, resource, false)) {
                 stack.getResources().remove(resource.getLogicalId());
                 continue;
             }
@@ -700,21 +710,21 @@ public class CloudFormationService {
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
                 provisioner.delete(resource, region);
-                resource.setStatus("DELETE_COMPLETE");
-                resource.setStatusReason(null);
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
                 stack.getResources().remove(resource.getLogicalId());
             } catch (Exception e) {
-                resource.setStatus("DELETE_FAILED");
-                resource.setStatusReason(e.getMessage());
+                failedResources.add(resource.getLogicalId());
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_FAILED", e.getMessage());
+                stack.getResources().remove(resource.getLogicalId());
                 LOG.warnv("Failed to delete condition-disabled {0} ({1}) in stack {2}: {3}",
                         resource.getResourceType(), resource.getPhysicalId(),
                         stack.getStackName(), e.getMessage());
             }
         }
+
+        return failedResources;
     }
 
     private void deleteStackResources(Stack stack, String region) {

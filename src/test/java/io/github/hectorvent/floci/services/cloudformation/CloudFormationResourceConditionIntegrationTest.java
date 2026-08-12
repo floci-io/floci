@@ -157,6 +157,118 @@ class CloudFormationResourceConditionIntegrationTest {
         }
     }
 
+    @Test
+    void updateStack_whenConditionDeletionFails_completesAndLeavesResourceUnmanaged() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-delete-fail-" + suffix;
+        String bucketName = "condition-delete-fail-" + suffix;
+
+        String enabledTemplate = """
+                {
+                  "Conditions": {
+                    "Enabled": { "Fn::Equals": ["enabled", "enabled"] }
+                  },
+                  "Resources": {
+                    "OptionalBucket": {
+                      "Type": "AWS::S3::Bucket",
+                      "Condition": "Enabled",
+                      "Properties": { "BucketName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(bucketName);
+        String disabledTemplate = """
+                {
+                  "Conditions": {
+                    "Enabled": { "Fn::Equals": ["enabled", "disabled"] }
+                  },
+                  "Resources": {
+                    "OptionalBucket": {
+                      "Type": "AWS::S3::Bucket",
+                      "Condition": "Enabled",
+                      "Properties": { "BucketName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(bucketName);
+
+        createStack(stackName, enabledTemplate);
+        try {
+            given()
+                .header("Host", bucketName + ".localhost")
+            .when()
+                .get("/")
+            .then()
+                .statusCode(200);
+
+            given()
+                .contentType("text/plain")
+                .body("prevent condition-disabled bucket deletion")
+            .when()
+                .put("/" + bucketName + "/object.txt")
+            .then()
+                .statusCode(200);
+
+            updateStack(stackName, disabledTemplate);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
+                .body(containsString("<StackStatusReason>"))
+                .body(containsString("OptionalBucket"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<LogicalResourceId>OptionalBucket</LogicalResourceId>")));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<LogicalResourceId>OptionalBucket</LogicalResourceId>"))
+                .body(containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>"))
+                .body(containsString("<ResourceStatusReason>"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetTemplate")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("[&quot;enabled&quot;, &quot;disabled&quot;]"))
+                .body(not(containsString("[&quot;enabled&quot;, &quot;enabled&quot;]")));
+
+            given()
+                .header("Host", bucketName + ".localhost")
+            .when()
+                .get("/")
+            .then()
+                .statusCode(200);
+        } finally {
+            given().header("Host", bucketName + ".localhost").delete("/object.txt");
+            given().header("Host", bucketName + ".localhost").delete("/");
+            deleteStack(stackName);
+        }
+    }
+
     private static void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
