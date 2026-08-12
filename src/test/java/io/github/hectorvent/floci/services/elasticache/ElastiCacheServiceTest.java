@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
@@ -53,7 +53,7 @@ class ElastiCacheServiceTest {
         when(ecConfig.defaultImage()).thenReturn("valkey/valkey:8");
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
 
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         when(containerManager.start(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());

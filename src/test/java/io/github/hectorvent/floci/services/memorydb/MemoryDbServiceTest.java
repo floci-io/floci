@@ -4,7 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerHandle;
@@ -71,7 +71,7 @@ class MemoryDbServiceTest {
                 AwsArnUtils.Arn.of(inv.getArgument(0), inv.getArgument(1),
                         "000000000000", inv.getArgument(2)).toString());
 
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         when(containerManager.start(anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("cid", "cluster", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), anyBoolean(), anyInt(), anyString(), anyInt(), any());
