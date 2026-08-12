@@ -1394,13 +1394,34 @@ public class LambdaService {
 
     // ──────────────────────────── Permissions (Policy) ────────────────────────────
 
-    public Map<String, Object> addPermission(String region, String functionName, Map<String, Object> request) {
-        LambdaFunction fn = getFunction(region, functionName);
+    /**
+     * The ARN a resource-policy statement is scoped to: the bare function ARN, or
+     * {@code <functionArn>:<qualifier>} for an alias/version-scoped permission.
+     *
+     * <p>AWS keeps a SEPARATE resource policy per qualifier, so the qualifier is part of a
+     * statement's identity — the same {@code StatementId} may exist on the function and on
+     * each alias. We derive that identity from the statement's own {@code Resource} rather
+     * than storing a parallel field, which keeps already-persisted (always unqualified)
+     * statements readable as the function's own policy (#2124).
+     */
+    private static String policyResourceArn(LambdaFunction fn, String qualifier) {
+        return qualifier == null ? fn.getFunctionArn() : fn.getFunctionArn() + ":" + qualifier;
+    }
+
+    private static boolean scopedTo(Map<String, Object> statement, String resourceArn) {
+        return resourceArn.equals(statement.get("Resource"));
+    }
+
+    public Map<String, Object> addPermission(String region, String functionName, String qualifier, Map<String, Object> request) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        LambdaFunction fn = getFunction(region, ref.name());
+        String resourceArn = policyResourceArn(fn, ref.qualifier());
         String statementId = (String) request.get("StatementId");
         if (statementId == null || statementId.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "StatementId is required", 400);
         }
         fn.getPolicies().stream()
+                .filter(s -> scopedTo(s, resourceArn))
                 .filter(s -> statementId.equals(s.get("Sid")))
                 .findFirst()
                 .ifPresent(s -> {
@@ -1424,7 +1445,7 @@ public class LambdaService {
             statement.put("Principal", principal);
         }
         statement.put("Action", action);
-        statement.put("Resource", fn.getFunctionArn());
+        statement.put("Resource", resourceArn);
         if (sourceArn != null) {
             statement.put("Condition", Map.of("ArnLike", Map.of("AWS:SourceArn", sourceArn)));
         } else if (sourceAccount != null) {
@@ -1437,22 +1458,30 @@ public class LambdaService {
         return statement;
     }
 
-    public Map<String, Object> getPolicy(String region, String functionName) {
-        LambdaFunction fn = getFunction(region, functionName);
-        if (fn.getPolicies().isEmpty()) {
+    public Map<String, Object> getPolicy(String region, String functionName, String qualifier) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        LambdaFunction fn = getFunction(region, ref.name());
+        String resourceArn = policyResourceArn(fn, ref.qualifier());
+        List<Map<String, Object>> statements = fn.getPolicies().stream()
+                .filter(s -> scopedTo(s, resourceArn))
+                .toList();
+        if (statements.isEmpty()) {
             throw new AwsException("ResourceNotFoundException",
-                    "Function not found: " + functionName, 404);
+                    "The resource you requested does not exist.", 404);
         }
         Map<String, Object> policy = new java.util.LinkedHashMap<>();
         policy.put("Version", "2012-10-17");
         policy.put("Id", "default");
-        policy.put("Statement", fn.getPolicies());
+        policy.put("Statement", statements);
         return Map.of("policy", policy, "revisionId", fn.getRevisionId());
     }
 
-    public void removePermission(String region, String functionName, String statementId) {
-        LambdaFunction fn = getFunction(region, functionName);
-        boolean removed = fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")));
+    public void removePermission(String region, String functionName, String qualifier, String statementId) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        LambdaFunction fn = getFunction(region, ref.name());
+        String resourceArn = policyResourceArn(fn, ref.qualifier());
+        boolean removed = fn.getPolicies()
+                .removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
         if (!removed) {
             throw new AwsException("ResourceNotFoundException",
                     "Statement " + statementId + " not found in function " + functionName, 404);

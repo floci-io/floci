@@ -173,6 +173,7 @@ class S3VectorsTest {
                         .queryVector(VectorData.builder().float32(1.0f, 0.1f, 0.0f).build())
                         .topK(1)
                         .returnMetadata(true)
+                        .returnDistance(true)
                         .build()
         );
         assertThat(response.vectors()).hasSize(1);
