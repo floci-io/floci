@@ -539,9 +539,9 @@ public class SwfService implements Resettable {
     /**
      * Applies a decider's decisions in order.
      *
-     * <p>Decisions after a closing decision (Complete/Fail/Cancel/ContinueAsNew) are
-     * dropped, matching SWF: the execution is already closed, so a later decision has
-     * nothing to act on.
+     * <p>A closing decision (Complete/Fail/Cancel/ContinueAsNew) must be last: the live
+     * service rejects the whole batch with {@code ValidationException} rather than applying
+     * the prefix, so this is validated before any state changes.
      */
     public void respondDecisionTaskCompleted(String taskToken, List<Decision> decisions, String executionContext) {
         SwfWorkflowExecution located = executionForDecisionToken(taskToken);
@@ -552,6 +552,10 @@ public class SwfService implements Resettable {
             if (task == null || !taskToken.equals(task.getTaskToken())) {
                 throw SwfFaults.unknownTaskToken();
             }
+
+            // Rejected before anything is mutated: the live service answers 400 and leaves
+            // the task outstanding, so the decider can retry with a corrected batch.
+            requireCloseIsLastDecision(decisions);
 
             SwfHistoryEvent completed = appendEvent(execution, "DecisionTaskCompleted");
             completed.attr("executionContext", executionContext)
@@ -573,6 +577,21 @@ public class SwfService implements Resettable {
                 scheduleDecisionTask(execution);
             }
             executionStore.put(executionKey(execution), execution);
+        }
+    }
+
+    /**
+     * Rejects a batch whose closing decision is not last, with the live service's message.
+     * The closing decision itself may appear only once and only in final position.
+     */
+    private void requireCloseIsLastDecision(List<Decision> decisions) {
+        if (decisions == null || decisions.size() < 2) {
+            return;
+        }
+        for (int i = 0; i < decisions.size() - 1; i++) {
+            if (SwfConstants.CLOSING_DECISIONS.contains(decisions.get(i).type())) {
+                throw SwfFaults.validation("Close must be last decision in list");
+            }
         }
     }
 

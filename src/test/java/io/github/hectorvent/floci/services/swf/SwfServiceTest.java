@@ -133,21 +133,46 @@ class SwfServiceTest {
     }
 
     @Test
-    void respondDecisionTaskCompleted_dropsDecisionsAfterAClosingDecision() {
+    void respondDecisionTaskCompleted_rejectsABatchWhoseClosingDecisionIsNotLast() {
         String runId = start("wf-after-close");
         SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
 
-        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
-                new Decision("CompleteWorkflowExecution", Map.of("result", "done")),
-                new Decision("ScheduleActivityTask", Map.of(
-                        "activityId", "too-late",
-                        "activityType", Map.of("name", "A", "version", "1")))), null);
+        // The live service rejects the whole batch rather than applying the prefix.
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                        new Decision("CompleteWorkflowExecution", Map.of("result", "done")),
+                        new Decision("ScheduleActivityTask", Map.of(
+                                "activityId", "too-late",
+                                "activityType", Map.of("name", "A", "version", "1")))), null));
+        assertEquals("ValidationException", thrown.getErrorCode());
+        assertEquals("Close must be last decision in list", thrown.getMessage());
+        assertEquals("com.amazon.coral.validate#ValidationException", thrown.jsonType());
 
+        // Nothing was applied and the task is still outstanding, so the decider can retry.
         SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-after-close", runId);
-        assertEquals("CLOSED", execution.getExecutionStatus());
+        assertEquals("OPEN", execution.getExecutionStatus());
+        assertTrue(execution.getActivities().isEmpty());
+        assertNull(lastAttribute(execution, "DecisionTaskCompleted", "scheduledEventId"),
+                "a rejected batch must not append DecisionTaskCompleted");
+
+        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                new Decision("CompleteWorkflowExecution", Map.of("result", "done"))), null);
+        assertEquals("COMPLETED",
+                service.describeWorkflowExecution(DOMAIN, "wf-after-close", runId).getCloseStatus());
+    }
+
+    @Test
+    void respondDecisionTaskCompleted_acceptsAClosingDecisionInFinalPosition() {
+        String runId = start("wf-close-last");
+        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+
+        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                new Decision("RecordMarker", Map.of("markerName", "m-1")),
+                new Decision("CompleteWorkflowExecution", Map.of("result", "done"))), null);
+
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-close-last", runId);
+        assertEquals("m-1", lastAttribute(execution, "MarkerRecorded", "markerName"));
         assertEquals("COMPLETED", execution.getCloseStatus());
-        assertTrue(execution.getActivities().isEmpty(),
-                "a decision after the closing decision must be dropped");
     }
 
     @Test

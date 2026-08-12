@@ -76,7 +76,9 @@ All 39 modeled operations are implemented.
 A decision that cannot be applied appends its `*Failed` event with the AWS cause
 (`ACTIVITY_TYPE_DOES_NOT_EXIST`, `ACTIVITY_ID_ALREADY_IN_USE`, `TIMER_ID_UNKNOWN`,
 `UNHANDLED_DECISION`, …) instead of failing the request, and the decider is given a
-fresh decision task. Decisions that follow a closing decision are dropped.
+fresh decision task. A closing decision must be last in the batch: a batch with anything
+after it is rejected with `ValidationException` ("Close must be last decision in list") and
+no decision is applied.
 
 ## Timeouts
 
@@ -202,7 +204,7 @@ Faults use the AWS codes and messages, so SDK error handling works unchanged:
 | `WorkflowExecutionAlreadyStartedFault` | `StartWorkflowExecution` while an execution with that `workflowId` is open |
 | `DefaultUndefinedFault` | A required field is absent from both the request and the type's defaults |
 | `TooManyTagsFault` | More than 50 tags on a domain |
-| `ValidationException` | Missing required member or a value outside an enum |
+| `ValidationException` | Missing required member, a value outside an enum, or a closing decision that is not last |
 
 ## Limitations
 

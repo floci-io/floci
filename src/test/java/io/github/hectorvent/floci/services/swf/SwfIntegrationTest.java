@@ -528,6 +528,53 @@ class SwfIntegrationTest {
     }
 
     @Test
+    void respondDecisionTaskCompleted_closeNotLast_returnsCoralValidationException() {
+        String domain = uniqueName("close-order");
+        registerDomain(domain);
+        registerWorkflowType(domain, "TestWf", "1.0");
+        registerActivityType(domain, "TestAct", "1.0");
+        String runId = startExecution(domain, "wf-close-order", null);
+        String token = pollDecisionToken(domain);
+
+        // The live service rejects the batch outright instead of applying the prefix, and
+        // this fault is namespaced com.amazon.coral.validate, not com.amazonaws.swf.base.model.
+        call("RespondDecisionTaskCompleted", """
+                {"taskToken": "%s", "decisions": [
+                   {"decisionType": "CompleteWorkflowExecution",
+                    "completeWorkflowExecutionDecisionAttributes": {"result": "early"}},
+                   {"decisionType": "ScheduleActivityTask",
+                    "scheduleActivityTaskDecisionAttributes": {
+                      "activityId": "after-close",
+                      "activityType": {"name": "TestAct", "version": "1.0"}
+                    }}]}
+                """.formatted(token))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazon.coral.validate#ValidationException"))
+                .body("message", equalTo("Close must be last decision in list"));
+
+        // The execution is untouched and the same token still works for a valid batch.
+        call("DescribeWorkflowExecution", """
+                {"domain": "%s", "execution": {"workflowId": "wf-close-order"}}
+                """.formatted(domain))
+                .then()
+                .body("executionInfo.executionStatus", equalTo("OPEN"));
+
+        call("RespondDecisionTaskCompleted", """
+                {"taskToken": "%s", "decisions": [
+                   {"decisionType": "CompleteWorkflowExecution",
+                    "completeWorkflowExecutionDecisionAttributes": {"result": "ok"}}]}
+                """.formatted(token))
+                .then().statusCode(200);
+
+        call("DescribeWorkflowExecution", """
+                {"domain": "%s", "execution": {"workflowId": "wf-close-order", "runId": "%s"}}
+                """.formatted(domain, runId))
+                .then()
+                .body("executionInfo.closeStatus", equalTo("COMPLETED"));
+    }
+
+    @Test
     void closingDecisionWithOpenActivity_failsWithUnhandledDecision() {
         String domain = uniqueName("unhandled");
         registerDomain(domain);

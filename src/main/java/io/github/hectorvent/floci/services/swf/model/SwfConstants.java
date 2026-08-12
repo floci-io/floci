@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.swf.model;
 
+import java.util.Set;
+
 /**
  * Wire-level constants shared by the SWF service and handler.
  *
@@ -13,6 +15,16 @@ public final class SwfConstants {
 
     public static final String FAULT_NAMESPACE = "com.amazonaws.swf.base.model#";
     public static final String VALIDATION_NAMESPACE = "com.amazon.coral.validate#";
+
+    /**
+     * Decision types that close the execution. SWF requires one of these to be the last
+     * decision in a batch and rejects the batch outright otherwise.
+     */
+    public static final Set<String> CLOSING_DECISIONS = Set.of(
+            "CompleteWorkflowExecution",
+            "FailWorkflowExecution",
+            "CancelWorkflowExecution",
+            "ContinueAsNewWorkflowExecution");
 
     public static final String UNKNOWN_RESOURCE = "UnknownResourceFault";
     public static final String DOMAIN_ALREADY_EXISTS = "DomainAlreadyExistsFault";
