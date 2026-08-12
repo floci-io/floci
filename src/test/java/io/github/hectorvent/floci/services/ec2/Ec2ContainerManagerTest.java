@@ -10,6 +10,7 @@ import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.command.PingCmd;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -41,12 +42,15 @@ import java.util.function.BooleanSupplier;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -370,6 +374,70 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
     }
 
+    @Test
+    void launchRunsInstanceAsMetadataOnlyWhenNoDockerDaemonIsReachable() throws Exception {
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient, false);
+
+        Instance instance = instance("i-nodocker");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertEquals("running", instance.getState().getName());
+        assertNull(instance.getDockerContainerId());
+        verify(harness.lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(harness.metadataServer, never()).registerContainer(anyString(), anyString(), any());
+    }
+
+    @Test
+    void launchTerminatesGenuineContainerFailureWhileDockerIsHealthy() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.create(any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("no such image: ubuntu:24.04"));
+
+        Instance instance = instance("i-badimage");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void launchDegradesToRunningWhenDockerDisappearsMidLaunch() throws Exception {
+        LaunchHarness harness = launchHarness();
+        PingCmd ping = mock(PingCmd.class);
+        when(harness.dockerClient.pingCmd()).thenReturn(ping);
+        doNothing().doThrow(new RuntimeException("No such file or directory")).when(ping).exec();
+        when(harness.lifecycleManager.create(any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("No such file or directory"));
+
+        Instance instance = instance("i-dockergone");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void metadataOnlyInstanceStopsStartsAndTerminatesWithoutAContainer() throws Exception {
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient, false);
+        Instance instance = instance("i-lifecycle");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        assertEquals("running", instance.getState().getName());
+
+        harness.manager.stop(instance);
+        assertEquals("stopped", instance.getState().getName());
+
+        harness.manager.start(instance);
+        assertEquals("running", instance.getState().getName());
+
+        harness.manager.terminate(instance);
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        assertTrue(instance.getTerminatedAt() > 0);
+    }
+
     private static LaunchHarness launchHarness() {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(RETURNS_SELF));
@@ -395,6 +463,7 @@ class Ec2ContainerManagerTest {
         when(ec2.imdsPort()).thenReturn(9169);
 
         DockerClient dockerClient = mock(DockerClient.class);
+        stubDockerPing(dockerClient, true);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         Ec2ContainerManager manager = new Ec2ContainerManager(
@@ -408,7 +477,16 @@ class Ec2ContainerManagerTest {
                 config,
                 metadataServer,
                 mock(Ec2PortForwardManager.class));
-        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder);
+        return new LaunchHarness(manager, dockerClient, lifecycleManager, metadataServer, logStreamer, builder);
+    }
+
+    /** Stubs the daemon reachability probe every launch makes before touching Docker. */
+    private static void stubDockerPing(DockerClient dockerClient, boolean reachable) {
+        PingCmd ping = mock(PingCmd.class);
+        when(dockerClient.pingCmd()).thenReturn(ping);
+        if (!reachable) {
+            doThrow(new RuntimeException("No such file or directory")).when(ping).exec();
+        }
     }
 
     private static Instance instance(String instanceId) {
@@ -441,6 +519,7 @@ class Ec2ContainerManagerTest {
 
     private record LaunchHarness(Ec2ContainerManager manager,
                                  DockerClient dockerClient,
+                                 ContainerLifecycleManager lifecycleManager,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
                                  ContainerBuilder.Builder builder) {

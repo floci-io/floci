@@ -1629,7 +1629,10 @@ public class Ec2Service implements ContainerTeardown {
         if (instance == null) {
             return false;
         }
-        if (config.services().ec2().mock()) {
+        // Mock mode and instances launched with no Docker daemon reachable have nothing to
+        // inspect, so the recorded lifecycle state is the answer. Reporting those as not
+        // running would make AutoScaling replace healthy instances in a loop.
+        if (config.services().ec2().mock() || instance.getDockerContainerId() == null) {
             String state = instance.getState() != null ? instance.getState().getName() : null;
             return state == null
                     || (!"shutting-down".equals(state) && !"terminated".equals(state) && !"stopping".equals(state));

@@ -16,6 +16,10 @@
 
 Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned.
 
+### Without a Docker daemon
+
+When no Docker daemon is reachable — Floci running inside Docker without `/var/run/docker.sock` mounted, or a stopped daemon on the host — instances are emulated as metadata only. `RunInstances` returns an instance in `running` that honours `StopInstances`, `StartInstances`, `TerminateInstances` and `RebootInstances` through the same state machine, so clients that wait for `running` (the Terraform/OpenTofu `aws_instance` resource, for one) work unchanged. There is no guest behind those instances, so SSH, UserData execution, IMDS from inside the instance and SSM command execution stay unavailable until a daemon is reachable. Instances launched while Docker is available keep their container and full behaviour.
+
 ## AMI to Docker Image Mapping
 
 Floci resolves AMI IDs to Docker images from the EC2 image catalog at

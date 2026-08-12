@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -25,8 +26,13 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -48,6 +54,31 @@ class Ec2ServiceTest {
         service.terminateInstances("us-east-1", List.of(instanceId));
         assertFalse(service.isInstanceContainerRunning(instanceId));
         verifyNoInteractions(containerManager);
+    }
+
+    @Test
+    void instanceWithoutABackingContainerCountsAsRunningOutsideMockMode() {
+        // No Docker daemon reachable: Ec2ContainerManager brings the instance to running with
+        // no container id. Reporting it as not running would make AutoScaling replace it.
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        doAnswer(invocation -> {
+            invocation.getArgument(0, Instance.class).setState(InstanceState.running());
+            return null;
+        }).when(containerManager).launch(any(Instance.class), any(), any(), anyString(), anySet());
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        String instanceId = reservation.getInstances().getFirst().getInstanceId();
+
+        List<Reservation> described = service.describeInstances("us-east-1", List.of(instanceId), Map.of());
+        Instance instance = described.getFirst().getInstances().getFirst();
+        assertEquals("running", instance.getState().getName());
+        assertNull(instance.getDockerContainerId());
+        assertTrue(service.isInstanceContainerRunning(instanceId));
     }
 
     @Test
