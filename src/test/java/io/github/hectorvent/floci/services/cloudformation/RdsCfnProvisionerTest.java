@@ -341,6 +341,42 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void binaryOnlySecretFailsBeforeRdsProvisioning() {
+        SecretVersion version = mock(SecretVersion.class);
+        when(version.getSecretString()).thenReturn(null);
+        when(secretsManagerService.getSecretValue(any(), any(), any(), any())).thenReturn(version);
+
+        StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:secretsmanager:my-secret}}"}
+                """);
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains(
+                "secret my-secret has no SecretString value to resolve"));
+        verifyNoInteractions(rdsService);
+    }
+
+    @Test
+    void missingSecretJsonKeyFailsBeforeRdsProvisioning() {
+        SecretVersion version = mock(SecretVersion.class);
+        when(version.getSecretString()).thenReturn("{\"username\":\"admin\"}");
+        when(secretsManagerService.getSecretValue(any(), any(), any(), any())).thenReturn(version);
+
+        StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin",
+                 "MasterUserPassword":"{{resolve:secretsmanager:my-secret:SecretString:password}}"}
+                """);
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains(
+                "JSON key 'password' not found in secret my-secret"));
+        verifyNoInteractions(rdsService);
+    }
+
+    @Test
     void extraSecretsManagerSuffixFailsWithoutReadingSecretOrCreatingDatabase() {
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
