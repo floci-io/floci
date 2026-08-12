@@ -13,6 +13,7 @@ public class StackResource {
     private String logicalId;
     private String physicalId;
     private String resourceType;
+    private String deletionPolicy;
     private String status = "CREATE_IN_PROGRESS";
     private String statusReason;
     private Instant timestamp = Instant.now();
@@ -24,6 +25,8 @@ public class StackResource {
     public void setPhysicalId(String physicalId) { this.physicalId = physicalId; }
     public String getResourceType() { return resourceType; }
     public void setResourceType(String resourceType) { this.resourceType = resourceType; }
+    public String getDeletionPolicy() { return deletionPolicy; }
+    public void setDeletionPolicy(String deletionPolicy) { this.deletionPolicy = deletionPolicy; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
     public String getStatusReason() { return statusReason; }

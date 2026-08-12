@@ -159,10 +159,16 @@ class CloudFrontServiceTest {
                 distribution(true, List.of("marketing.example.test")), Map.of());
 
         assertEquals(wildcard.getId(), service.findByHost("www.example.test").getId());
-        assertEquals(wildcard.getId(), service.findByHost("a.b.example.test").getId());
         assertEquals(specificWildcard.getId(), service.findByHost("item.shop.example.test").getId());
         assertEquals(exact.getId(), service.findByHost("marketing.example.test").getId());
+        // A wildcard replaces exactly one label, so it covers neither a higher nor a lower level:
+        // "*.example.test" matches www.example.test but not a.b.example.test, and not the apex.
+        // Per AWS: "you can't add alternate domain names that are at levels higher or lower than
+        // the wildcard. For example, you can't add ... example.com or marketing.product.example.com."
+        assertNull(service.findByHost("a.b.example.test"));
         assertNull(service.findByHost("example.test"));
+        // ...and the deeper wildcard is likewise single-level.
+        assertNull(service.findByHost("a.b.shop.example.test"));
     }
 
     @Test
