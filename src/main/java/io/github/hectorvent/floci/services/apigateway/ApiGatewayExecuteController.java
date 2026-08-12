@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.Integration;
@@ -94,6 +95,7 @@ public class ApiGatewayExecuteController {
     private final SqsQueryHandler sqsQueryHandler;
     private final ApiGatewayExecuteRouteContext routeContext;
     private final JwtSignatureVerifier jwtSignatureVerifier;
+    private final RequestContext requestContext;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -104,7 +106,8 @@ public class ApiGatewayExecuteController {
                                        ElbV2Service elbV2Service,
                                        SqsQueryHandler sqsQueryHandler,
                                        ApiGatewayExecuteRouteContext routeContext,
-                                       JwtSignatureVerifier jwtSignatureVerifier) {
+                                       JwtSignatureVerifier jwtSignatureVerifier,
+                                       RequestContext requestContext) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -117,6 +120,7 @@ public class ApiGatewayExecuteController {
         this.sqsQueryHandler = sqsQueryHandler;
         this.routeContext = routeContext;
         this.jwtSignatureVerifier = jwtSignatureVerifier;
+        this.requestContext = requestContext;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -256,6 +260,11 @@ public class ApiGatewayExecuteController {
         String region = regionResolver.resolveRegion(headers);
         String httpApiRegion = routeContext.httpApiRegion();
         if (httpApiRegion != null) {
+            Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayV2Service.findApiOwner(apiId);
+            if (owner.isPresent()) {
+                applyApiOwnerContext(owner.get());
+                httpApiRegion = owner.get().region();
+            }
             return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, httpApiRegion);
         }
 
@@ -272,6 +281,12 @@ public class ApiGatewayExecuteController {
         try {
             apiGatewayService.getRestApi(region, apiId);
         } catch (AwsException restApiError) {
+            Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayV2Service.findApiOwner(apiId);
+            if (owner.isPresent()) {
+                applyApiOwnerContext(owner.get());
+                return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, owner.get().region());
+            }
+
             String v2Region = apiGatewayV2Service.resolveApiRegion(preferredRegion, apiId);
             try {
                 apiGatewayV2Service.getApi(v2Region, apiId);
@@ -356,6 +371,11 @@ public class ApiGatewayExecuteController {
                     .entity(jsonMessage("Unsupported integration type: " + integration.getType()))
                     .type(MediaType.APPLICATION_JSON).build();
         };
+    }
+
+    private void applyApiOwnerContext(ApiGatewayV2Service.ApiOwner owner) {
+        requestContext.setAccountId(owner.accountId());
+        requestContext.setRegion(owner.region());
     }
 
     // ──────────────────────────── AWS_PROXY ────────────────────────────

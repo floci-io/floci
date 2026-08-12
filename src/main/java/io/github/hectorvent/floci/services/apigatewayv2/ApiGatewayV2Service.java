@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -15,6 +16,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -23,7 +25,7 @@ public class ApiGatewayV2Service {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayV2Service.class);
 
-    private final StorageBackend<String, Api> apiStore;
+    private final AccountAwareStorageBackend<Api> apiStore;
     private final StorageBackend<String, Route> routeStore;
     private final StorageBackend<String, Integration> integrationStore;
     private final StorageBackend<String, Authorizer> authorizerStore;
@@ -34,6 +36,8 @@ public class ApiGatewayV2Service {
     private final StorageBackend<String, Model> modelStore;
     private final StorageBackend<String, VpcLink> vpcLinkStore;
     private final RegionResolver regionResolver;
+
+    public record ApiOwner(String accountId, String region) {}
 
     @Inject
     public ApiGatewayV2Service(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -86,7 +90,7 @@ public class ApiGatewayV2Service {
         Map<String, String> tags = (Map<String, String>) request.get("tags");
         String overrideId = ReservedTags.extractOverrideApiId(tags);
         String apiId = overrideId != null ? overrideId : shortId(10);
-        if (apiStore.get(apiKey(region, apiId)).isPresent()) {
+        if (findApiOwner(apiId).isPresent()) {
             throw new AwsException("ConflictException",
                     "API with id '" + apiId + "' already exists", 409);
         }
@@ -142,6 +146,27 @@ public class ApiGatewayV2Service {
                 .map(k -> k.substring(0, k.indexOf("::")))
                 .findFirst()
                 .orElse(preferredRegion);
+    }
+
+    /** Resolves the account and region that own an API ID for data-plane requests. */
+    public Optional<ApiOwner> findApiOwner(String apiId) {
+        List<AccountAwareStorageBackend.AccountEntry<Api>> matches = apiStore
+                .scanAllAccountEntries(key -> key.endsWith("::" + apiId));
+        if (matches.size() > 1) {
+            throw new AwsException("ConflictException",
+                    "API id '" + apiId + "' is ambiguous across accounts", 409);
+        }
+        return matches.stream()
+                .findFirst()
+                .map(entry -> new ApiOwner(entry.accountId(), regionFromApiKey(entry.key())));
+    }
+
+    private static String regionFromApiKey(String key) {
+        int delimiter = key.indexOf("::");
+        if (delimiter <= 0) {
+            throw new IllegalStateException("Invalid API storage key: " + key);
+        }
+        return key.substring(0, delimiter);
     }
 
     public List<Api> getApis(String region) {
