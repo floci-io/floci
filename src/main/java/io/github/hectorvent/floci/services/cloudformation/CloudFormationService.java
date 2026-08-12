@@ -507,6 +507,9 @@ public class CloudFormationService {
                 return;
             }
 
+            // CloudFormation deletes resources whose Condition turns false during an update.
+            deleteInactiveConditionResources(stack, resources, conditions, region);
+
             CloudFormationTemplateEngine finalEngine = new CloudFormationTemplateEngine(
                     accountId, region, stack.getStackName(),
                     stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
@@ -659,6 +662,59 @@ public class CloudFormationService {
             }
         }
         return failedResources;
+    }
+
+    /**
+     * Deletes resources that were provisioned by an earlier execution but whose resource-level
+     * {@code Condition} is false in the current template. Resources removed from the template
+     * entirely are outside this condition-specific cleanup.
+     */
+    private void deleteInactiveConditionResources(Stack stack, JsonNode resources,
+                                                   Map<String, Boolean> conditions, String region) {
+        if (!resources.isObject()) {
+            return;
+        }
+
+        List<StackResource> ordered = new ArrayList<>(stack.getResources().values());
+        Collections.reverse(ordered);
+        for (StackResource resource : ordered) {
+            JsonNode resDef = resources.get(resource.getLogicalId());
+            if (resDef == null) {
+                continue;
+            }
+            String condition = resDef.path("Condition").asText(null);
+            if (condition == null || conditions.getOrDefault(condition, false)) {
+                continue;
+            }
+
+            if (resource.getPhysicalId() == null) {
+                stack.getResources().remove(resource.getLogicalId());
+                continue;
+            }
+            if (skipRetainedResource(stack, resource, false)) {
+                stack.getResources().remove(resource.getLogicalId());
+                continue;
+            }
+
+            addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                    resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+            try {
+                provisioner.delete(resource, region);
+                resource.setStatus("DELETE_COMPLETE");
+                resource.setStatusReason(null);
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_COMPLETE", null);
+                stack.getResources().remove(resource.getLogicalId());
+            } catch (Exception e) {
+                resource.setStatus("DELETE_FAILED");
+                resource.setStatusReason(e.getMessage());
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_FAILED", e.getMessage());
+                LOG.warnv("Failed to delete condition-disabled {0} ({1}) in stack {2}: {3}",
+                        resource.getResourceType(), resource.getPhysicalId(),
+                        stack.getStackName(), e.getMessage());
+            }
+        }
     }
 
     private void deleteStackResources(Stack stack, String region) {
@@ -1104,14 +1160,18 @@ public class CloudFormationService {
         Set<String> allIds = new LinkedHashSet<>();
         resources.fieldNames().forEachRemaining(allIds::add);
 
-        Map<String, Set<String>> dependencies = new HashMap<>();
+        Set<String> activeIds = new LinkedHashSet<>();
         for (String logicalId : allIds) {
             JsonNode resDef = resources.get(logicalId);
-
             String condition = resDef.path("Condition").asText(null);
-            if (condition != null && !conditions.getOrDefault(condition, false)) {
-                continue;
+            if (condition == null || conditions.getOrDefault(condition, false)) {
+                activeIds.add(logicalId);
             }
+        }
+
+        Map<String, Set<String>> dependencies = new HashMap<>();
+        for (String logicalId : activeIds) {
+            JsonNode resDef = resources.get(logicalId);
 
             Set<String> deps = new LinkedHashSet<>();
             collectDependencies(resDef.path("Properties"), allIds, deps);
@@ -1129,7 +1189,7 @@ public class CloudFormationService {
         }
 
         Map<String, Integer> inDegree = new HashMap<>();
-        for (String id : allIds) {
+        for (String id : activeIds) {
             inDegree.put(id, 0);
         }
         for (var entry : dependencies.entrySet()) {
@@ -1141,7 +1201,7 @@ public class CloudFormationService {
         }
 
         Deque<String> queue = new ArrayDeque<>();
-        for (String id : allIds) {
+        for (String id : activeIds) {
             if (inDegree.get(id) == 0) {
                 queue.add(id);
             }
@@ -1162,7 +1222,7 @@ public class CloudFormationService {
             }
         }
 
-        for (String id : allIds) {
+        for (String id : activeIds) {
             if (!sorted.contains(id)) {
                 sorted.add(id);
             }
