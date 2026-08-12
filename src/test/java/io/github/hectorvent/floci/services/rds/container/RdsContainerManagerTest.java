@@ -18,11 +18,15 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
 
+import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.Bind;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
@@ -154,6 +158,74 @@ class RdsContainerManagerTest {
         verify(lifecycleManager).removeIfExists("floci-rds-db1");
         verify(lifecycleManager).createAndStart(spec.capture());
         assertEquals("floci-rds-db1", spec.getValue().name());
+    }
+
+    @Test
+    void tryStartReportsUnavailableInsteadOfThrowingWhenNoDockerDaemonIsReachable() {
+        // Floci running inside Docker without a mounted daemon socket: the RDS control plane must
+        // keep working, so the failure is reported rather than propagated.
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.getDockerClient()).thenThrow(
+                new RuntimeException("java.net.SocketException: No such file or directory"));
+
+        RdsContainerManager manager = newManager(config, lifecycleManager);
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertNull(manager.tryStart("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0",
+                    "root", "password", "db"), "attempt " + attempt + " should report unavailable");
+        }
+        assertFalse(manager.isDockerReachable());
+    }
+
+    @Test
+    void tryStartPropagatesFailuresRaisedWhileTheDaemonIsReachable() {
+        // A reachable daemon that cannot start the container is a genuine failure, not a
+        // degraded mode: CreateDBInstance must still surface it.
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("no such image: mysql:8.0"));
+        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+        RdsContainerManager manager = newManager(config, lifecycleManager);
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.tryStart("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0",
+                        "root", "password", "db"));
+        assertEquals("no such image: mysql:8.0", failure.getMessage());
+    }
+
+    @Test
+    void tryStartReturnsTheHandleOnceADaemonIsReachable() {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+
+        RdsContainerManager manager = newManager(config, lifecycleManager);
+
+        RdsContainerHandle handle = manager.tryStart("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0",
+                "root", "password", "db");
+
+        assertEquals("container-id", handle.getContainerId());
+        assertEquals(3306, handle.getPort());
+    }
+
+    private RdsContainerManager newManager(EmulatorConfig config, ContainerLifecycleManager lifecycleManager) {
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        return new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager,
+                logStreamer,
+                mock(ContainerDetector.class),
+                config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
     }
 
     private static EmulatorConfig config(Path hostRoot) {

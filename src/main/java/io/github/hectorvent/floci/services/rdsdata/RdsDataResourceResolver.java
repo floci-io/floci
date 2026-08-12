@@ -52,19 +52,40 @@ class RdsDataResourceResolver {
                 "resourceArn does not resolve to a local RDS resource: " + resourceArn, 400);
     }
 
-    private static DatabaseTarget fromCluster(DbCluster cluster) {
-        return target(cluster.getDbClusterArn(), cluster.getEngine(), cluster.getContainerHost(), cluster.getContainerPort(),
-                cluster.getMasterUsername(), cluster.getMasterPassword(), cluster.getDatabaseName());
+    private DatabaseTarget fromCluster(DbCluster cluster) {
+        DbCluster resolved = hasRuntime(cluster.getContainerHost(), cluster.getContainerPort())
+                ? cluster
+                : rdsService.ensureClusterBackend(cluster.getDbClusterIdentifier());
+        return target(resolved.getDbClusterArn(), resolved.getEngine(), resolved.getContainerHost(),
+                resolved.getContainerPort(), resolved.getMasterUsername(), resolved.getMasterPassword(),
+                resolved.getDatabaseName());
     }
 
-    private static DatabaseTarget fromInstance(DbInstance instance) {
-        return target(instance.getDbInstanceArn(), instance.getEngine(), instance.getContainerHost(), instance.getContainerPort(),
-                instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
+    private DatabaseTarget fromInstance(DbInstance instance) {
+        DbInstance resolved = hasRuntime(instance.getContainerHost(), instance.getContainerPort())
+                ? instance
+                : rdsService.ensureInstanceBackend(instance.getDbInstanceIdentifier());
+        return target(resolved.getDbInstanceArn(), resolved.getEngine(), resolved.getContainerHost(),
+                resolved.getContainerPort(), resolved.getMasterUsername(), resolved.getMasterPassword(),
+                resolved.getDbName());
     }
 
-    private static DatabaseTarget target(String arn, DatabaseEngine engine, String host, int port,
-                                         String username, String password, String databaseName) {
-        if (host == null || host.isBlank() || port <= 0) {
+    private static boolean hasRuntime(String host, int port) {
+        return host != null && !host.isBlank() && port > 0;
+    }
+
+    private DatabaseTarget target(String arn, DatabaseEngine engine, String host, int port,
+                                  String username, String password, String databaseName) {
+        if (!hasRuntime(host, port)) {
+            // The Data API is RDS's data plane: it needs a real database, which Floci can only
+            // provide through a Docker container. Name the missing daemon rather than reporting a
+            // generic runtime failure, and use the Data API's modelled server-side error shape.
+            if (!rdsService.isBackendRuntimeAvailable()) {
+                throw new AwsException("InternalServerErrorException",
+                        "The RDS backing database is unavailable because no Docker daemon is reachable "
+                                + "from Floci. DB instance and cluster metadata operations are supported; "
+                                + "Data API execution requires Docker.", 500);
+            }
             throw new AwsException("BadRequestException",
                     "RDS resource runtime is not available for Data API execution.", 400);
         }

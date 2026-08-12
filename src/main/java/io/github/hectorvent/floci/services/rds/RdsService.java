@@ -314,16 +314,27 @@ public class RdsService implements Resettable {
         } else {
             placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
             if (!mock) {
-                // Standalone instance — start its own container
+                // Standalone instance — start its own container. A DB instance record is metadata:
+                // its identifier, ARN, endpoint address and tags are derived from configuration and
+                // need no Docker, so the instance is created and reaches 'available' even when no
+                // daemon is reachable. Only connecting to the database needs the container.
                 String image = imageForEngine(engine, engineVersion);
-                instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
-                RdsContainerHandle handle = containerManager.start(id, instanceVolumeId, engine, image, masterUsername, masterPassword, dbName);
-                backendHost = handle.getHost();
-                backendPort = handle.getPort();
-                containerId = handle.getContainerId();
-                containerHost = handle.getHost();
-                containerPort = handle.getPort();
-                instanceDockerVolumeName = volumeName(instanceVolumeId, id);
+                String candidateVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+                RdsContainerHandle handle = containerManager.tryStart(id, candidateVolumeId, engine,
+                        image, masterUsername, masterPassword, dbName);
+                if (handle != null) {
+                    backendHost = handle.getHost();
+                    backendPort = handle.getPort();
+                    containerId = handle.getContainerId();
+                    containerHost = handle.getHost();
+                    containerPort = handle.getPort();
+                    instanceVolumeId = candidateVolumeId;
+                    instanceDockerVolumeName = volumeName(candidateVolumeId, id);
+                } else {
+                    LOG.warnv("DB instance {0} created without a backing database container: no "
+                            + "Docker daemon is reachable. Metadata operations work; connections to "
+                            + "the database do not until a daemon appears.", id);
+                }
             }
         }
 
@@ -351,7 +362,7 @@ public class RdsService implements Resettable {
             attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId);
         }
 
-        if (!mock) {
+        if (!mock && hasBackend(backendHost, backendPort)) {
             proxyManager.startProxy(id, engine, iamEnabled, proxyPort, backendHost, backendPort,
                     masterUsername, masterPassword, dbName,
                     (user, pw) -> validateDbPassword(id, user, pw));
@@ -578,11 +589,12 @@ public class RdsService implements Resettable {
                     LOG.warnv("Error stopping container during reboot of {0}: {1}", id, e.getMessage());
                 }
                 String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-                RdsContainerHandle handle = containerManager.start(id, instance.getVolumeId(), instance.getEngine(), image,
-                        instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
-                instance.setContainerId(handle.getContainerId());
-                instance.setContainerHost(handle.getHost());
-                instance.setContainerPort(handle.getPort());
+                RdsContainerHandle handle = containerManager.tryStart(id, instance.getVolumeId(),
+                        instance.getEngine(), image, instance.getMasterUsername(),
+                        instance.getMasterPassword(), instance.getDbName());
+                instance.setContainerId(handle != null ? handle.getContainerId() : null);
+                instance.setContainerHost(handle != null ? handle.getHost() : null);
+                instance.setContainerPort(handle != null ? handle.getPort() : 0);
             }
         }
 
@@ -590,17 +602,132 @@ public class RdsService implements Resettable {
         instances.put(id, instance);
 
         if (!mock) {
-            String effectiveMasterUser = instance.getMasterUsername() != null
-                    ? instance.getMasterUsername() : "root";
-            proxyManager.startProxy(id, instance.getEngine(),
-                    instance.isIamDatabaseAuthenticationEnabled(),
-                    instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
-                    effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
-                    (user, pw) -> validateDbPassword(id, user, pw));
+            if (hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+                String effectiveMasterUser = instance.getMasterUsername() != null
+                        ? instance.getMasterUsername() : "root";
+                proxyManager.startProxy(id, instance.getEngine(),
+                        instance.isIamDatabaseAuthenticationEnabled(),
+                        instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
+                        effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
+                        (user, pw) -> validateDbPassword(id, user, pw));
+            } else {
+                // No backing container — created or last rebooted while no daemon was reachable.
+                instance = ensureInstanceBackend(id);
+            }
         }
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
+    }
+
+    /**
+     * Reports whether a recorded backend address points at a live database container.
+     */
+    private static boolean hasBackend(String host, int port) {
+        return host != null && !host.isBlank() && port > 0;
+    }
+
+    /**
+     * Starts the backing database container and auth proxy for a DB instance recorded without one,
+     * because no Docker daemon was reachable when it was created or restored. Every operation that
+     * needs the live database calls this first, so the backend comes up as soon as a daemon
+     * appears. Instances that already have a backend, and mock-mode instances, are left untouched.
+     *
+     * @return the instance, with its container fields populated when a backend became available
+     */
+    public DbInstance ensureInstanceBackend(String id) {
+        DbInstance instance = getDbInstance(id);
+        if (config.services().rds().mock()
+                || hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+            return instance;
+        }
+
+        String clusterId = instance.getDbClusterIdentifier();
+        if (clusterId != null && !clusterId.isBlank()) {
+            DbCluster cluster = ensureClusterBackend(clusterId);
+            if (!hasBackend(cluster.getContainerHost(), cluster.getContainerPort())) {
+                return instance;
+            }
+            instance.setContainerId(cluster.getContainerId());
+            instance.setContainerHost(cluster.getContainerHost());
+            instance.setContainerPort(cluster.getContainerPort());
+            instance.setVolumeId(cluster.getVolumeId());
+            instance.setDockerVolumeName(cluster.getDockerVolumeName());
+        } else {
+            String volumeId = instance.getVolumeId() != null
+                    ? instance.getVolumeId()
+                    : String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+            String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
+            RdsContainerHandle handle = containerManager.tryStart(id, volumeId, instance.getEngine(),
+                    image, instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
+            if (handle == null) {
+                return instance;
+            }
+            instance.setContainerId(handle.getContainerId());
+            instance.setContainerHost(handle.getHost());
+            instance.setContainerPort(handle.getPort());
+            instance.setVolumeId(volumeId);
+            instance.setDockerVolumeName(volumeName(volumeId, id));
+        }
+
+        String effectiveMasterUser = instance.getMasterUsername() != null
+                ? instance.getMasterUsername() : "root";
+        proxyManager.startProxy(id, instance.getEngine(),
+                instance.isIamDatabaseAuthenticationEnabled(), instance.getProxyPort(),
+                instance.getContainerHost(), instance.getContainerPort(), effectiveMasterUser,
+                instance.getMasterPassword(), instance.getDbName(),
+                (user, pw) -> validateDbPassword(id, user, pw));
+        instances.put(id, instance);
+        LOG.infov("Backing database container for DB instance {0} started on retry", id);
+        return instance;
+    }
+
+    /**
+     * The {@link #ensureInstanceBackend} counterpart for DB clusters.
+     *
+     * @return the cluster, with its container fields populated when a backend became available
+     */
+    public DbCluster ensureClusterBackend(String id) {
+        DbCluster cluster = getDbCluster(id);
+        if (config.services().rds().mock()
+                || hasBackend(cluster.getContainerHost(), cluster.getContainerPort())) {
+            return cluster;
+        }
+
+        String volumeId = cluster.getVolumeId() != null
+                ? cluster.getVolumeId()
+                : String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+        String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
+        RdsContainerHandle handle = containerManager.tryStart(id, volumeId, cluster.getEngine(), image,
+                cluster.getMasterUsername(), cluster.getMasterPassword(), cluster.getDatabaseName());
+        if (handle == null) {
+            return cluster;
+        }
+        cluster.setContainerId(handle.getContainerId());
+        cluster.setContainerHost(handle.getHost());
+        cluster.setContainerPort(handle.getPort());
+        cluster.setVolumeId(volumeId);
+        cluster.setDockerVolumeName(volumeName(volumeId, id));
+
+        String effectiveMasterUser = cluster.getMasterUsername() != null
+                ? cluster.getMasterUsername() : "root";
+        proxyManager.startProxy(id, cluster.getEngine(),
+                cluster.isIamDatabaseAuthenticationEnabled(), cluster.getProxyPort(),
+                cluster.getContainerHost(), cluster.getContainerPort(), effectiveMasterUser,
+                cluster.getMasterPassword(), cluster.getDatabaseName(),
+                (user, pw) -> validateDbClusterPassword(id, user, pw));
+        clusters.put(id, cluster);
+        LOG.infov("Backing database container for DB cluster {0} started on retry", id);
+        return cluster;
+    }
+
+    /**
+     * Whether Floci can reach a Docker daemon at all. The RDS data plane (a real database
+     * connection) cannot be emulated without one, so callers use this to raise a modelled error
+     * naming the missing daemon instead of reporting a generic runtime failure.
+     */
+    public boolean isBackendRuntimeAvailable() {
+        return config.services().rds().mock() || containerManager.isDockerReachable();
     }
 
     public void deleteDbInstance(String id) {
@@ -622,11 +749,11 @@ public class RdsService implements Resettable {
 
         String clusterId = instance.getDbClusterIdentifier();
         if (clusterId == null || clusterId.isBlank()) {
-            // Standalone — stop its container and clean up its Docker volume (neither exists in mock mode)
-            if (!mock) {
-                if (instance.getContainerId() != null) {
-                    containerManager.stop(buildHandle(instance));
-                }
+            // Standalone — stop its container and clean up its Docker volume. Neither exists in mock
+            // mode, nor for an instance created while no Docker daemon was reachable, and touching
+            // Docker in those cases would fail a delete that is otherwise pure metadata.
+            if (!mock && instance.getContainerId() != null) {
+                containerManager.stop(buildHandle(instance));
                 containerManager.removeVolume(instance.getDbInstanceIdentifier(), instance.getVolumeId());
             }
         } else {
@@ -689,12 +816,19 @@ public class RdsService implements Resettable {
         if (!mock) {
             String image = imageForEngine(engine, engineVersion);
             String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
-            RdsContainerHandle handle = containerManager.start(id, clusterVolumeId, engine, image, masterUsername, masterPassword, databaseName);
-            cluster.setContainerId(handle.getContainerId());
-            cluster.setContainerHost(handle.getHost());
-            cluster.setContainerPort(handle.getPort());
-            cluster.setVolumeId(clusterVolumeId);
-            cluster.setDockerVolumeName(volumeName(clusterVolumeId, id));
+            RdsContainerHandle handle = containerManager.tryStart(id, clusterVolumeId, engine, image,
+                    masterUsername, masterPassword, databaseName);
+            if (handle != null) {
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+                cluster.setVolumeId(clusterVolumeId);
+                cluster.setDockerVolumeName(volumeName(clusterVolumeId, id));
+            } else {
+                LOG.warnv("DB cluster {0} created without a backing database container: no Docker "
+                        + "daemon is reachable. Metadata operations work; connections to the "
+                        + "database do not until a daemon appears.", id);
+            }
         }
         cluster.setDbSubnetGroupName(placement.dbSubnetGroupName());
         cluster.setVpcId(placement.vpcId());
@@ -705,7 +839,7 @@ public class RdsService implements Resettable {
         cluster.setDbClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
         cluster.setDbClusterArn(regionResolver.buildArn("rds", effectiveRegion, "cluster:" + id));
 
-        if (!mock) {
+        if (!mock && hasBackend(cluster.getContainerHost(), cluster.getContainerPort())) {
             String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
             proxyManager.startProxy(id, engine, iamEnabled, proxyPort, cluster.getContainerHost(), cluster.getContainerPort(),
                     effectiveMasterUser, masterPassword, databaseName,
@@ -761,8 +895,8 @@ public class RdsService implements Resettable {
             proxyManager.stopProxy(id);
             if (cluster.getContainerId() != null) {
                 containerManager.stop(buildClusterHandle(cluster));
+                containerManager.removeVolume(id, cluster.getVolumeId());
             }
-            containerManager.removeVolume(id, cluster.getVolumeId());
         }
 
         releaseProxyPort(cluster.getProxyPort());
@@ -1118,20 +1252,24 @@ public class RdsService implements Resettable {
             }
             try {
                 String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
-                RdsContainerHandle handle = containerManager.start(cluster.getDbClusterIdentifier(),
+                RdsContainerHandle handle = containerManager.tryStart(cluster.getDbClusterIdentifier(),
                         cluster.getVolumeId(), cluster.getEngine(), image,
                         cluster.getMasterUsername(), cluster.getMasterPassword(), cluster.getDatabaseName());
-                cluster.setContainerId(handle.getContainerId());
-                cluster.setContainerHost(handle.getHost());
-                cluster.setContainerPort(handle.getPort());
+                cluster.setContainerId(handle != null ? handle.getContainerId() : null);
+                cluster.setContainerHost(handle != null ? handle.getHost() : null);
+                cluster.setContainerPort(handle != null ? handle.getPort() : 0);
 
-                String effectiveMasterUser = cluster.getMasterUsername() != null
-                        ? cluster.getMasterUsername() : "root";
-                proxyManager.startProxy(cluster.getDbClusterIdentifier(), cluster.getEngine(),
-                        cluster.isIamDatabaseAuthenticationEnabled(), proxyPort,
-                        handle.getHost(), handle.getPort(), effectiveMasterUser,
-                        cluster.getMasterPassword(), cluster.getDatabaseName(),
-                        (user, pw) -> validateDbClusterPassword(cluster.getDbClusterIdentifier(), user, pw));
+                if (handle != null) {
+                    String effectiveMasterUser = cluster.getMasterUsername() != null
+                            ? cluster.getMasterUsername() : "root";
+                    proxyManager.startProxy(cluster.getDbClusterIdentifier(), cluster.getEngine(),
+                            cluster.isIamDatabaseAuthenticationEnabled(), proxyPort,
+                            handle.getHost(), handle.getPort(), effectiveMasterUser,
+                            cluster.getMasterPassword(), cluster.getDatabaseName(),
+                            (user, pw) -> validateDbClusterPassword(cluster.getDbClusterIdentifier(), user, pw));
+                }
+                // The cluster record survives a restart with no reachable Docker daemon; its
+                // container is retried the next time something needs the live database.
                 cluster.setStatus(DbInstanceStatus.AVAILABLE);
             } catch (Exception e) {
                 releaseProxyPort(proxyPort);
@@ -1163,12 +1301,10 @@ public class RdsService implements Resettable {
                     DbCluster cluster = clusters.get(clusterId).orElseThrow(() ->
                             new AwsException("DBClusterNotFoundFault",
                                     "DB cluster " + clusterId + " not found.", 404));
+                    // A cluster restored without a backing container leaves its members without one
+                    // too; both are retried when something needs the live database.
                     backendHost = cluster.getContainerHost();
                     backendPort = cluster.getContainerPort();
-                    if (backendHost == null || backendPort <= 0) {
-                        throw new AwsException("InvalidDBClusterStateFault",
-                                "DB cluster " + clusterId + " runtime is not available.", 400);
-                    }
                     instance.setContainerId(cluster.getContainerId());
                     instance.setContainerHost(cluster.getContainerHost());
                     instance.setContainerPort(cluster.getContainerPort());
@@ -1182,23 +1318,25 @@ public class RdsService implements Resettable {
                         instance.setDockerVolumeName(volumeName(instance.getVolumeId(), instance.getDbInstanceIdentifier()));
                     }
                     String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-                    RdsContainerHandle handle = containerManager.start(instance.getDbInstanceIdentifier(),
+                    RdsContainerHandle handle = containerManager.tryStart(instance.getDbInstanceIdentifier(),
                             instance.getVolumeId(), instance.getEngine(), image,
                             instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
-                    backendHost = handle.getHost();
-                    backendPort = handle.getPort();
-                    instance.setContainerId(handle.getContainerId());
-                    instance.setContainerHost(handle.getHost());
-                    instance.setContainerPort(handle.getPort());
+                    backendHost = handle != null ? handle.getHost() : null;
+                    backendPort = handle != null ? handle.getPort() : 0;
+                    instance.setContainerId(handle != null ? handle.getContainerId() : null);
+                    instance.setContainerHost(backendHost);
+                    instance.setContainerPort(backendPort);
                 }
 
-                String effectiveMasterUser = instance.getMasterUsername() != null
-                        ? instance.getMasterUsername() : "root";
-                proxyManager.startProxy(instance.getDbInstanceIdentifier(), instance.getEngine(),
-                        instance.isIamDatabaseAuthenticationEnabled(), proxyPort,
-                        backendHost, backendPort, effectiveMasterUser,
-                        instance.getMasterPassword(), instance.getDbName(),
-                        (user, pw) -> validateDbPassword(instance.getDbInstanceIdentifier(), user, pw));
+                if (hasBackend(backendHost, backendPort)) {
+                    String effectiveMasterUser = instance.getMasterUsername() != null
+                            ? instance.getMasterUsername() : "root";
+                    proxyManager.startProxy(instance.getDbInstanceIdentifier(), instance.getEngine(),
+                            instance.isIamDatabaseAuthenticationEnabled(), proxyPort,
+                            backendHost, backendPort, effectiveMasterUser,
+                            instance.getMasterPassword(), instance.getDbName(),
+                            (user, pw) -> validateDbPassword(instance.getDbInstanceIdentifier(), user, pw));
+                }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
             } catch (Exception e) {
                 releaseProxyPort(proxyPort);
