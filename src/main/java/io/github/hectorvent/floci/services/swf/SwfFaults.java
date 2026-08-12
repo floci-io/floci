@@ -82,14 +82,14 @@ final class SwfFaults {
                 "ActivityType=[name=" + name + ", version=" + version + "]");
     }
 
-    static AwsException workflowTypeNotDeprecated(String name, String version) {
+    /**
+     * Raised by DeleteWorkflowType/DeleteActivityType before the type is deprecated. Unlike
+     * the other type faults, the live service answers with prose rather than the type
+     * descriptor, and uses the same wording for both workflow and activity types.
+     */
+    static AwsException typeNotDeprecated() {
         return fault(SwfConstants.TYPE_NOT_DEPRECATED,
-                "WorkflowType=[name=" + name + ", version=" + version + "]");
-    }
-
-    static AwsException activityTypeNotDeprecated(String name, String version) {
-        return fault(SwfConstants.TYPE_NOT_DEPRECATED,
-                "ActivityType=[name=" + name + ", version=" + version + "]");
+                "The type is currently registered and cannot be deleted in its current state");
     }
 
     /**

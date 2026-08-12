@@ -14,6 +14,7 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -937,6 +938,229 @@ class SwfIntegrationTest {
                 .body("events.find { it.eventType == 'ChildWorkflowExecutionCompleted' }"
                         + ".childWorkflowExecutionCompletedEventAttributes.startedEventId",
                         equalTo(childStartedEventId));
+    }
+
+    @Test
+    void activityTypeDeprecationLifecycle_blocksSchedulingAndGatesDeletion() {
+        String domain = uniqueName("act-lifecycle");
+        registerDomain(domain);
+        registerWorkflowType(domain, "TestWf", "1.0");
+        registerActivityType(domain, "TestAct", "1.0");
+
+        call("DeprecateActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain)).then().statusCode(200);
+
+        // Deprecating twice reports the type descriptor, not prose.
+        call("DeprecateActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#TypeDeprecatedFault"))
+                .body("message", equalTo("ActivityType=[name=TestAct, version=1.0]"));
+
+        // A deprecated type stays describable and is listed under DEPRECATED.
+        call("DescribeActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain))
+                .then()
+                .statusCode(200)
+                .body("typeInfo.status", equalTo("DEPRECATED"))
+                .body("typeInfo.deprecationDate", notNullValue());
+
+        call("ListActivityTypes", """
+                {"domain": "%s", "registrationStatus": "DEPRECATED"}
+                """.formatted(domain))
+                .then()
+                .statusCode(200)
+                .body("typeInfos.activityType.name", hasItem("TestAct"));
+
+        // Scheduling a deprecated type fails the decision rather than the request.
+        startExecution(domain, "wf-dep-act", null);
+        String token = pollDecisionToken(domain);
+        call("RespondDecisionTaskCompleted", """
+                {"taskToken": "%s", "decisions": [
+                   {"decisionType": "ScheduleActivityTask",
+                    "scheduleActivityTaskDecisionAttributes": {
+                      "activityId": "a1",
+                      "activityType": {"name": "TestAct", "version": "1.0"}
+                    }}]}
+                """.formatted(token)).then().statusCode(200);
+
+        call("DescribeWorkflowExecution", """
+                {"domain": "%s", "execution": {"workflowId": "wf-dep-act"}}
+                """.formatted(domain))
+                .then()
+                .body("executionInfo.executionStatus", equalTo("OPEN"));
+
+        call("GetWorkflowExecutionHistory", """
+                {"domain": "%s", "execution": {"workflowId": "wf-dep-act"}}
+                """.formatted(domain))
+                .then()
+                .body("events.find { it.eventType == 'ScheduleActivityTaskFailed' }"
+                        + ".scheduleActivityTaskFailedEventAttributes.cause",
+                        equalTo("ACTIVITY_TYPE_DEPRECATED"));
+
+        // Delete is gated on deprecation, and reports prose rather than the descriptor.
+        call("UndeprecateActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain)).then().statusCode(200);
+
+        call("UndeprecateActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#TypeAlreadyExistsFault"));
+
+        call("DeleteActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#TypeNotDeprecatedFault"))
+                .body("message",
+                        equalTo("The type is currently registered and cannot be deleted in its current state"));
+
+        call("DeprecateActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain)).then().statusCode(200);
+        call("DeleteActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain)).then().statusCode(200);
+
+        call("DescribeActivityType", """
+                {"domain": "%s", "activityType": {"name": "TestAct", "version": "1.0"}}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#UnknownResourceFault"))
+                .body("message", equalTo("Unknown type: ActivityType=[name=TestAct, version=1.0]"));
+    }
+
+    @Test
+    void deleteWorkflowType_isGatedOnDeprecationAndReportsProse() {
+        String domain = uniqueName("wf-delete");
+        registerDomain(domain);
+        registerWorkflowType(domain, "TestWf", "1.0");
+
+        call("DeleteWorkflowType", """
+                {"domain": "%s", "workflowType": {"name": "TestWf", "version": "1.0"}}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#TypeNotDeprecatedFault"))
+                .body("message",
+                        equalTo("The type is currently registered and cannot be deleted in its current state"));
+
+        call("DeprecateWorkflowType", """
+                {"domain": "%s", "workflowType": {"name": "TestWf", "version": "1.0"}}
+                """.formatted(domain)).then().statusCode(200);
+        call("DeleteWorkflowType", """
+                {"domain": "%s", "workflowType": {"name": "TestWf", "version": "1.0"}}
+                """.formatted(domain)).then().statusCode(200);
+
+        call("DeleteWorkflowType", """
+                {"domain": "%s", "workflowType": {"name": "TestWf", "version": "1.0"}}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#UnknownResourceFault"))
+                .body("message", equalTo("Unknown type: WorkflowType=[name=TestWf, version=1.0]"));
+    }
+
+    @Test
+    void listWorkflowTypes_filtersByRegistrationStatusAndName() {
+        String domain = uniqueName("wf-list");
+        registerDomain(domain);
+        registerWorkflowType(domain, "Alpha", "1.0");
+        registerWorkflowType(domain, "Beta", "1.0");
+
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED"}
+                """.formatted(domain))
+                .then()
+                .statusCode(200)
+                .body("typeInfos.workflowType.name", hasItem("Alpha"))
+                .body("typeInfos.workflowType.name", hasItem("Beta"))
+                .body("typeInfos[0].status", equalTo("REGISTERED"))
+                .body("typeInfos[0].creationDate", notNullValue());
+
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "name": "Alpha"}
+                """.formatted(domain))
+                .then()
+                .body("typeInfos.size()", equalTo(1))
+                .body("typeInfos[0].workflowType.name", equalTo("Alpha"));
+
+        call("DeprecateWorkflowType", """
+                {"domain": "%s", "workflowType": {"name": "Alpha", "version": "1.0"}}
+                """.formatted(domain)).then().statusCode(200);
+
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "DEPRECATED"}
+                """.formatted(domain))
+                .then()
+                .body("typeInfos.size()", equalTo(1))
+                .body("typeInfos[0].workflowType.name", equalTo("Alpha"));
+
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED"}
+                """.formatted(domain))
+                .then()
+                .body("typeInfos.workflowType.name", not(hasItem("Alpha")))
+                .body("typeInfos.workflowType.name", hasItem("Beta"));
+    }
+
+    @Test
+    void respondActivityTaskFailed_recordsReasonAndDetailsThenClosesTheToken() {
+        String domain = uniqueName("act-fail");
+        registerDomain(domain);
+        registerWorkflowType(domain, "TestWf", "1.0");
+        registerActivityType(domain, "TestAct", "1.0");
+        String runId = startExecution(domain, "wf-act-fail", null);
+
+        String token = pollDecisionToken(domain);
+        call("RespondDecisionTaskCompleted", """
+                {"taskToken": "%s", "decisions": [
+                   {"decisionType": "ScheduleActivityTask",
+                    "scheduleActivityTaskDecisionAttributes": {
+                      "activityId": "a-fail",
+                      "activityType": {"name": "TestAct", "version": "1.0"}
+                    }}]}
+                """.formatted(token)).then().statusCode(200);
+
+        String activityToken = call("PollForActivityTask", """
+                {"domain": "%s", "taskList": {"name": "floci-tl"}, "identity": "w"}
+                """.formatted(domain))
+                .then().statusCode(200)
+                .extract().path("taskToken");
+
+        call("RespondActivityTaskFailed", """
+                {"taskToken": "%s", "reason": "boom", "details": "stack trace here"}
+                """.formatted(activityToken)).then().statusCode(200);
+
+        call("GetWorkflowExecutionHistory", """
+                {"domain": "%s", "execution": {"workflowId": "wf-act-fail", "runId": "%s"}}
+                """.formatted(domain, runId))
+                .then()
+                .body("events.eventType", hasItem("ActivityTaskFailed"))
+                .body("events.find { it.eventType == 'ActivityTaskFailed' }"
+                        + ".activityTaskFailedEventAttributes.reason", equalTo("boom"))
+                .body("events.find { it.eventType == 'ActivityTaskFailed' }"
+                        + ".activityTaskFailedEventAttributes.details", equalTo("stack trace here"))
+                // A failed activity schedules a decision task so the decider can retry or fail.
+                .body("events[-1].eventType", equalTo("DecisionTaskScheduled"));
+
+        // The token is genuine but its task has closed, so the fault names the scheduled event.
+        call("RespondActivityTaskFailed", """
+                {"taskToken": "%s", "reason": "boom", "details": "again"}
+                """.formatted(activityToken))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#UnknownResourceFault"))
+                .body("message", equalTo("Unknown activity, scheduledEventId = 5"));
     }
 
     // ───────────────────────────── Counting and tags ─────────────────────────

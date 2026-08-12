@@ -246,7 +246,7 @@ public class SwfService implements Resettable {
         requireDomain(domainName);
         SwfWorkflowType type = findWorkflowType(domainName, name, version);
         if (!type.isDeprecated()) {
-            throw SwfFaults.workflowTypeNotDeprecated(name, version);
+            throw SwfFaults.typeNotDeprecated();
         }
         workflowTypeStore.delete(typeKey(domainName, name, version));
     }
@@ -325,7 +325,7 @@ public class SwfService implements Resettable {
         requireDomain(domainName);
         SwfActivityType type = findActivityType(domainName, name, version);
         if (!type.isDeprecated()) {
-            throw SwfFaults.activityTypeNotDeprecated(name, version);
+            throw SwfFaults.typeNotDeprecated();
         }
         activityTypeStore.delete(typeKey(domainName, name, version));
     }
