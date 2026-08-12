@@ -88,6 +88,10 @@ services:
     doc: docs/services/step-functions.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/stepfunctions/StepFunctionsJsonHandler.java, mode: switch }
+  - service: swf
+    doc: docs/services/swf.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/swf/SwfJsonHandler.java, mode: switch }
   - service: wafv2
     doc: docs/services/wafv2.md
     sources:

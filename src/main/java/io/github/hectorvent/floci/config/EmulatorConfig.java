@@ -550,6 +550,7 @@ public interface EmulatorConfig {
         KmsServiceConfig kms();
         CognitoServiceConfig cognito();
         StepFunctionsServiceConfig stepfunctions();
+        SwfServiceConfig swf();
         CloudFormationServiceConfig cloudformation();
         AcmServiceConfig acm();
         AthenaServiceConfig athena();
@@ -1074,6 +1075,26 @@ public interface EmulatorConfig {
         /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
         @WithDefault("true")
         boolean allowPlaintextHttp();
+    }
+
+    interface SwfServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Run the background sweep that expires activity, decision, workflow and timer
+         * timeouts. Setting this to {@code false} leaves timeouts recorded but never
+         * fired, which is useful for tests that drive the clock themselves.
+         */
+        @WithDefault("true")
+        boolean timeoutSweepEnabled();
+
+        /**
+         * How often the timeout sweep runs. SWF timeouts are specified in whole seconds,
+         * so a 1s sweep bounds the observable lateness of an expiry at one second.
+         */
+        @WithDefault("1")
+        long timeoutSweepIntervalSeconds();
     }
 
     interface CloudFormationServiceConfig {

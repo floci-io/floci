@@ -185,6 +185,10 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
     acm:

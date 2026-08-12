@@ -1,0 +1,1876 @@
+package io.github.hectorvent.floci.services.swf;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.swf.model.SwfActivityTask;
+import io.github.hectorvent.floci.services.swf.model.SwfActivityType;
+import io.github.hectorvent.floci.services.swf.model.SwfConstants;
+import io.github.hectorvent.floci.services.swf.model.SwfDecisionTask;
+import io.github.hectorvent.floci.services.swf.model.SwfDomain;
+import io.github.hectorvent.floci.services.swf.model.SwfHistoryEvent;
+import io.github.hectorvent.floci.services.swf.model.SwfTimer;
+import io.github.hectorvent.floci.services.swf.model.SwfWorkflowExecution;
+import io.github.hectorvent.floci.services.swf.model.SwfWorkflowType;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
+
+/**
+ * Amazon SWF domain logic: registration, the workflow execution state machine, and
+ * the decision/activity task lifecycle.
+ *
+ * <p>Storage layout. Domains and types are keyed by ARN-like composite keys and live in
+ * {@link StorageBackend}s so they survive restarts under persistent storage modes.
+ * Executions are keyed {@code domain/workflowId/runId}. Task tokens are an in-memory
+ * index only: SWF tokens do not outlive a service restart, and a token that resolved
+ * after a restart would point at a decision the emulator can no longer honour.
+ *
+ * <p>Event ordering. Every state transition appends to the execution's history under the
+ * execution's monotonic {@code nextEventId}. All mutation is serialized per execution via
+ * {@link #executionLock(String)} because deciders and workers poll concurrently, and a
+ * torn history (two events sharing an id, or an activity closing twice) is
+ * indistinguishable from corruption to an SDK-driven decider.
+ *
+ * <p>Timeouts are enforced by {@link SwfTimeoutSweeper} calling {@link #sweep()}, not by
+ * per-task threads.
+ */
+@ApplicationScoped
+public class SwfService implements Resettable {
+
+    private static final Logger LOG = Logger.getLogger(SwfService.class);
+
+    private static final int MAX_TAGS = 50;
+    private static final int DEFAULT_HISTORY_PAGE_SIZE = 1000;
+
+    private final StorageBackend<String, SwfDomain> domainStore;
+    private final StorageBackend<String, SwfWorkflowType> workflowTypeStore;
+    private final StorageBackend<String, SwfActivityType> activityTypeStore;
+    private final StorageBackend<String, SwfWorkflowExecution> executionStore;
+
+    private final Map<String, String> decisionTokens = new ConcurrentHashMap<>();
+    private final Map<String, String> activityTokens = new ConcurrentHashMap<>();
+    private final Map<String, Object> executionLocks = new ConcurrentHashMap<>();
+
+    private final RegionResolver regionResolver;
+    private final Clock clock;
+
+    @Inject
+    public SwfService(StorageFactory storageFactory, RegionResolver regionResolver, Clock clock) {
+        this.domainStore = storageFactory.create("swf", "swf-domains.json",
+                new TypeReference<Map<String, SwfDomain>>() {});
+        this.workflowTypeStore = storageFactory.create("swf", "swf-workflow-types.json",
+                new TypeReference<Map<String, SwfWorkflowType>>() {});
+        this.activityTypeStore = storageFactory.create("swf", "swf-activity-types.json",
+                new TypeReference<Map<String, SwfActivityType>>() {});
+        this.executionStore = storageFactory.create("swf", "swf-executions.json",
+                new TypeReference<Map<String, SwfWorkflowExecution>>() {});
+        this.regionResolver = regionResolver;
+        this.clock = clock;
+    }
+
+    @Override
+    public void clear() {
+        decisionTokens.clear();
+        activityTokens.clear();
+        executionLocks.clear();
+    }
+
+    // ──────────────────────────────── Domains ────────────────────────────────
+
+    public void registerDomain(String name, String description, String retentionDays,
+                               Map<String, String> tags, String region) {
+        requireName(name, "name");
+        if (retentionDays == null || retentionDays.isEmpty()) {
+            throw SwfFaults.missingRequired("workflowExecutionRetentionPeriodInDays");
+        }
+        validateRetentionPeriod(retentionDays);
+        if (tags != null && tags.size() > MAX_TAGS) {
+            throw SwfFaults.fault(SwfConstants.TOO_MANY_TAGS, name);
+        }
+        if (domainStore.get(name).isPresent()) {
+            throw SwfFaults.domainAlreadyExists(name);
+        }
+
+        SwfDomain domain = new SwfDomain();
+        domain.setName(name);
+        domain.setDescription(description);
+        domain.setWorkflowExecutionRetentionPeriodInDays(retentionDays);
+        domain.setCreationDate(now());
+        domain.setArn(domainArn(name, region));
+        if (tags != null) {
+            domain.getTags().putAll(tags);
+        }
+        domainStore.put(name, domain);
+        LOG.debugv("Registered SWF domain {0}", name);
+    }
+
+    public SwfDomain describeDomain(String name) {
+        requireName(name, "name");
+        return domainStore.get(name).orElseThrow(() -> SwfFaults.unknownDomain(name));
+    }
+
+    /**
+     * Resolves a domain for operations that act on its contents. Deprecated domains stay
+     * readable — SWF only rejects registration and execution-starting operations on them —
+     * so the deprecation check lives at those call sites instead of here.
+     */
+    private SwfDomain requireDomain(String name) {
+        requireName(name, "domain");
+        return domainStore.get(name).orElseThrow(() -> SwfFaults.unknownDomain(name));
+    }
+
+    public List<SwfDomain> listDomains(String registrationStatus) {
+        String status = requireRegistrationStatus(registrationStatus);
+        List<SwfDomain> domains = domainStore.scan(k -> true);
+        domains.removeIf(d -> !status.equals(d.getStatus()));
+        domains.sort(Comparator.comparing(SwfDomain::getName));
+        return domains;
+    }
+
+    public void deprecateDomain(String name) {
+        SwfDomain domain = requireDomain(name);
+        if (domain.isDeprecated()) {
+            throw SwfFaults.domainDeprecated(name);
+        }
+        domain.setStatus(SwfConstants.STATUS_DEPRECATED);
+        domain.setDeprecationDate(now());
+        domainStore.put(name, domain);
+    }
+
+    public void undeprecateDomain(String name) {
+        SwfDomain domain = requireDomain(name);
+        if (!domain.isDeprecated()) {
+            throw SwfFaults.domainAlreadyExists(name);
+        }
+        domain.setStatus(SwfConstants.STATUS_REGISTERED);
+        domain.setDeprecationDate(null);
+        domainStore.put(name, domain);
+    }
+
+    // ───────────────────────────── Workflow types ────────────────────────────
+
+    public void registerWorkflowType(String domainName, SwfWorkflowType type) {
+        SwfDomain domain = requireDomain(domainName);
+        if (domain.isDeprecated()) {
+            throw SwfFaults.domainDeprecated(domainName);
+        }
+        requireName(type.getName(), "name");
+        requireName(type.getVersion(), "version");
+
+        String key = typeKey(domainName, type.getName(), type.getVersion());
+        if (workflowTypeStore.get(key).isPresent()) {
+            throw SwfFaults.workflowTypeAlreadyExists(type.getName(), type.getVersion());
+        }
+        type.setDomain(domainName);
+        type.setCreationDate(now());
+        workflowTypeStore.put(key, type);
+    }
+
+    public SwfWorkflowType describeWorkflowType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        return findWorkflowType(domainName, name, version);
+    }
+
+    private SwfWorkflowType findWorkflowType(String domainName, String name, String version) {
+        requireName(name, "workflowType.name");
+        requireName(version, "workflowType.version");
+        return workflowTypeStore.get(typeKey(domainName, name, version))
+                .orElseThrow(() -> SwfFaults.unknownWorkflowType(name, version));
+    }
+
+    public List<SwfWorkflowType> listWorkflowTypes(String domainName, String name,
+                                                   String registrationStatus, boolean reverseOrder) {
+        requireDomain(domainName);
+        String status = requireRegistrationStatus(registrationStatus);
+        String prefix = domainName + "/";
+        List<SwfWorkflowType> types = workflowTypeStore.scan(k -> k.startsWith(prefix));
+        types.removeIf(t -> !status.equals(t.getStatus()));
+        if (name != null && !name.isEmpty()) {
+            types.removeIf(t -> !name.equals(t.getName()));
+        }
+        types.sort(Comparator.comparing(SwfWorkflowType::getName).thenComparing(SwfWorkflowType::getVersion));
+        if (reverseOrder) {
+            java.util.Collections.reverse(types);
+        }
+        return types;
+    }
+
+    public void deprecateWorkflowType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        SwfWorkflowType type = findWorkflowType(domainName, name, version);
+        if (type.isDeprecated()) {
+            throw SwfFaults.workflowTypeDeprecated(name, version);
+        }
+        type.setStatus(SwfConstants.STATUS_DEPRECATED);
+        type.setDeprecationDate(now());
+        workflowTypeStore.put(typeKey(domainName, name, version), type);
+    }
+
+    public void undeprecateWorkflowType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        SwfWorkflowType type = findWorkflowType(domainName, name, version);
+        if (!type.isDeprecated()) {
+            throw SwfFaults.workflowTypeAlreadyExists(name, version);
+        }
+        type.setStatus(SwfConstants.STATUS_REGISTERED);
+        type.setDeprecationDate(null);
+        workflowTypeStore.put(typeKey(domainName, name, version), type);
+    }
+
+    /** SWF only deletes a type that is already deprecated. */
+    public void deleteWorkflowType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        SwfWorkflowType type = findWorkflowType(domainName, name, version);
+        if (!type.isDeprecated()) {
+            throw SwfFaults.workflowTypeNotDeprecated(name, version);
+        }
+        workflowTypeStore.delete(typeKey(domainName, name, version));
+    }
+
+    // ───────────────────────────── Activity types ────────────────────────────
+
+    public void registerActivityType(String domainName, SwfActivityType type) {
+        SwfDomain domain = requireDomain(domainName);
+        if (domain.isDeprecated()) {
+            throw SwfFaults.domainDeprecated(domainName);
+        }
+        requireName(type.getName(), "name");
+        requireName(type.getVersion(), "version");
+
+        String key = typeKey(domainName, type.getName(), type.getVersion());
+        if (activityTypeStore.get(key).isPresent()) {
+            throw SwfFaults.activityTypeAlreadyExists(type.getName(), type.getVersion());
+        }
+        type.setDomain(domainName);
+        type.setCreationDate(now());
+        activityTypeStore.put(key, type);
+    }
+
+    public SwfActivityType describeActivityType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        return findActivityType(domainName, name, version);
+    }
+
+    private SwfActivityType findActivityType(String domainName, String name, String version) {
+        requireName(name, "activityType.name");
+        requireName(version, "activityType.version");
+        return activityTypeStore.get(typeKey(domainName, name, version))
+                .orElseThrow(() -> SwfFaults.unknownActivityType(name, version));
+    }
+
+    public List<SwfActivityType> listActivityTypes(String domainName, String name,
+                                                   String registrationStatus, boolean reverseOrder) {
+        requireDomain(domainName);
+        String status = requireRegistrationStatus(registrationStatus);
+        String prefix = domainName + "/";
+        List<SwfActivityType> types = activityTypeStore.scan(k -> k.startsWith(prefix));
+        types.removeIf(t -> !status.equals(t.getStatus()));
+        if (name != null && !name.isEmpty()) {
+            types.removeIf(t -> !name.equals(t.getName()));
+        }
+        types.sort(Comparator.comparing(SwfActivityType::getName).thenComparing(SwfActivityType::getVersion));
+        if (reverseOrder) {
+            java.util.Collections.reverse(types);
+        }
+        return types;
+    }
+
+    public void deprecateActivityType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        SwfActivityType type = findActivityType(domainName, name, version);
+        if (type.isDeprecated()) {
+            throw SwfFaults.activityTypeDeprecated(name, version);
+        }
+        type.setStatus(SwfConstants.STATUS_DEPRECATED);
+        type.setDeprecationDate(now());
+        activityTypeStore.put(typeKey(domainName, name, version), type);
+    }
+
+    public void undeprecateActivityType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        SwfActivityType type = findActivityType(domainName, name, version);
+        if (!type.isDeprecated()) {
+            throw SwfFaults.activityTypeAlreadyExists(name, version);
+        }
+        type.setStatus(SwfConstants.STATUS_REGISTERED);
+        type.setDeprecationDate(null);
+        activityTypeStore.put(typeKey(domainName, name, version), type);
+    }
+
+    public void deleteActivityType(String domainName, String name, String version) {
+        requireDomain(domainName);
+        SwfActivityType type = findActivityType(domainName, name, version);
+        if (!type.isDeprecated()) {
+            throw SwfFaults.activityTypeNotDeprecated(name, version);
+        }
+        activityTypeStore.delete(typeKey(domainName, name, version));
+    }
+
+    // ─────────────────────────── Execution lifecycle ─────────────────────────
+
+    public String startWorkflowExecution(StartWorkflowExecutionRequest request) {
+        SwfDomain domain = requireDomain(request.domain());
+        if (domain.isDeprecated()) {
+            throw SwfFaults.domainDeprecated(request.domain());
+        }
+        requireName(request.workflowId(), "workflowId");
+
+        SwfWorkflowType type = findWorkflowType(request.domain(), request.typeName(), request.typeVersion());
+        if (type.isDeprecated()) {
+            throw SwfFaults.workflowTypeDeprecated(type.getName(), type.getVersion());
+        }
+        if (findOpenExecution(request.domain(), request.workflowId()).isPresent()) {
+            throw SwfFaults.executionAlreadyStarted();
+        }
+
+        SwfWorkflowExecution execution = buildExecution(request, type);
+        appendWorkflowExecutionStarted(execution, request.input(), null);
+        scheduleDecisionTask(execution);
+        executionStore.put(executionKey(execution), execution);
+        LOG.debugv("Started SWF execution {0}/{1} run {2}",
+                execution.getDomain(), execution.getWorkflowId(), execution.getRunId());
+        return execution.getRunId();
+    }
+
+    private SwfWorkflowExecution buildExecution(StartWorkflowExecutionRequest request, SwfWorkflowType type) {
+        SwfWorkflowExecution execution = new SwfWorkflowExecution();
+        execution.setDomain(request.domain());
+        execution.setWorkflowId(request.workflowId());
+        execution.setRunId(newRunId());
+        execution.setWorkflowTypeName(type.getName());
+        execution.setWorkflowTypeVersion(type.getVersion());
+        execution.setInput(request.input());
+        execution.setStartTimestamp(now());
+        if (request.tagList() != null) {
+            execution.setTagList(new ArrayList<>(request.tagList()));
+        }
+
+        execution.setTaskList(resolveRequired(request.taskList(), type.getDefaultTaskList(),
+                "defaultTaskList"));
+        execution.setExecutionStartToCloseTimeout(resolveRequired(request.executionStartToCloseTimeout(),
+                type.getDefaultExecutionStartToCloseTimeout(), "defaultExecutionStartToCloseTimeout"));
+        execution.setTaskStartToCloseTimeout(resolveRequired(request.taskStartToCloseTimeout(),
+                type.getDefaultTaskStartToCloseTimeout(), "defaultTaskStartToCloseTimeout"));
+        execution.setChildPolicy(validateChildPolicy(resolveRequired(request.childPolicy(),
+                type.getDefaultChildPolicy(), "defaultChildPolicy")));
+        execution.setTaskPriority(firstNonEmpty(request.taskPriority(), type.getDefaultTaskPriority()));
+        execution.setLambdaRole(firstNonEmpty(request.lambdaRole(), type.getDefaultLambdaRole()));
+        return execution;
+    }
+
+    /**
+     * StartWorkflowExecution fields that fall back to the workflow type's registration
+     * default. When neither is set SWF rejects the call with DefaultUndefinedFault naming
+     * the missing type-level default rather than the request field.
+     */
+    private String resolveRequired(String requested, String typeDefault, String defaultFieldName) {
+        String value = firstNonEmpty(requested, typeDefault);
+        if (value == null) {
+            throw SwfFaults.defaultUndefined(defaultFieldName);
+        }
+        return value;
+    }
+
+    public SwfWorkflowExecution describeWorkflowExecution(String domainName, String workflowId, String runId) {
+        requireDomain(domainName);
+        return requireExecution(domainName, workflowId, runId);
+    }
+
+    private SwfWorkflowExecution requireExecution(String domainName, String workflowId, String runId) {
+        requireName(workflowId, "execution.workflowId");
+        if (runId == null || runId.isEmpty()) {
+            return findOpenExecution(domainName, workflowId)
+                    .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, ""));
+        }
+        return executionStore.get(executionKey(domainName, workflowId, runId))
+                .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
+    }
+
+    private Optional<SwfWorkflowExecution> findOpenExecution(String domainName, String workflowId) {
+        String prefix = domainName + "/" + workflowId + "/";
+        return executionStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(SwfWorkflowExecution::isOpen)
+                .findFirst();
+    }
+
+    public List<SwfHistoryEvent> getWorkflowExecutionHistory(String domainName, String workflowId, String runId,
+                                                             boolean reverseOrder) {
+        requireDomain(domainName);
+        SwfWorkflowExecution execution = requireExecution(domainName, workflowId, runId);
+        List<SwfHistoryEvent> events = new ArrayList<>(execution.getEvents());
+        if (reverseOrder) {
+            java.util.Collections.reverse(events);
+        }
+        return events;
+    }
+
+    public int historyPageSize(Integer requested) {
+        if (requested == null || requested <= 0) {
+            return DEFAULT_HISTORY_PAGE_SIZE;
+        }
+        return Math.min(requested, DEFAULT_HISTORY_PAGE_SIZE);
+    }
+
+    public List<SwfWorkflowExecution> listExecutions(String domainName, ExecutionFilter filter, boolean closed) {
+        requireDomain(domainName);
+        String prefix = domainName + "/";
+        List<SwfWorkflowExecution> executions = executionStore.scan(k -> k.startsWith(prefix));
+        executions.removeIf(e -> closed == e.isOpen());
+        executions.removeIf(filter.negate());
+        executions.sort(Comparator.comparingDouble(SwfWorkflowExecution::getStartTimestamp).reversed());
+        return executions;
+    }
+
+    public int countPendingActivityTasks(String domainName, String taskList) {
+        requireDomain(domainName);
+        requireName(taskList, "taskList.name");
+        int count = 0;
+        for (SwfWorkflowExecution execution : executionsIn(domainName)) {
+            for (SwfActivityTask task : execution.getActivities().values()) {
+                if (SwfActivityTask.STATE_SCHEDULED.equals(task.getState()) && taskList.equals(task.getTaskList())) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    public int countPendingDecisionTasks(String domainName, String taskList) {
+        requireDomain(domainName);
+        requireName(taskList, "taskList.name");
+        int count = 0;
+        for (SwfWorkflowExecution execution : executionsIn(domainName)) {
+            SwfDecisionTask task = execution.getDecisionTask();
+            if (task != null && SwfDecisionTask.STATE_SCHEDULED.equals(task.getState())
+                    && taskList.equals(task.getTaskList())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private List<SwfWorkflowExecution> executionsIn(String domainName) {
+        String prefix = domainName + "/";
+        return executionStore.scan(k -> k.startsWith(prefix));
+    }
+
+    // ────────────────────────────── Decision tasks ───────────────────────────
+
+    /**
+     * Claims the oldest scheduled decision task on {@code taskList}, or returns empty when
+     * none is available. SWF long-polls for up to 60s; the emulator answers immediately and
+     * lets the caller decide whether to poll again, which keeps request threads free.
+     */
+    public Optional<SwfDecisionTask> pollForDecisionTask(String domainName, String taskList, String identity) {
+        requireDomain(domainName);
+        requireName(taskList, "taskList.name");
+
+        List<SwfWorkflowExecution> candidates = executionsIn(domainName);
+        candidates.sort(Comparator.comparingDouble(e -> {
+            SwfDecisionTask task = e.getDecisionTask();
+            return task != null ? task.getScheduledTimestamp() : Double.MAX_VALUE;
+        }));
+
+        for (SwfWorkflowExecution candidate : candidates) {
+            SwfDecisionTask claimed = tryClaimDecisionTask(candidate, taskList, identity);
+            if (claimed != null) {
+                return Optional.of(claimed);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private SwfDecisionTask tryClaimDecisionTask(SwfWorkflowExecution candidate, String taskList, String identity) {
+        synchronized (executionLock(executionKey(candidate))) {
+            SwfWorkflowExecution execution = executionStore.get(executionKey(candidate)).orElse(null);
+            if (execution == null || !execution.isOpen()) {
+                return null;
+            }
+            SwfDecisionTask task = execution.getDecisionTask();
+            if (task == null || !SwfDecisionTask.STATE_SCHEDULED.equals(task.getState())
+                    || !taskList.equals(task.getTaskList())) {
+                return null;
+            }
+
+            task.setState(SwfDecisionTask.STATE_STARTED);
+            task.setIdentity(identity);
+            task.setStartedTimestamp(now());
+            SwfHistoryEvent started = appendEvent(execution, "DecisionTaskStarted");
+            started.attr("identity", identity)
+                    .attr("scheduledEventId", task.getScheduledEventId())
+                    .attr("startedOnPreviousTaskCompletion", Boolean.FALSE);
+            task.setStartedEventId(started.getEventId());
+
+            String token = newTaskToken();
+            task.setTaskToken(token);
+            decisionTokens.put(token, executionKey(execution));
+            executionStore.put(executionKey(execution), execution);
+            return task;
+        }
+    }
+
+    public SwfWorkflowExecution executionForDecisionToken(String taskToken) {
+        if (taskToken == null || taskToken.isEmpty()) {
+            throw SwfFaults.missingRequired("taskToken");
+        }
+        String key = decisionTokens.get(taskToken);
+        if (key == null) {
+            throw SwfFaults.unknownTaskToken();
+        }
+        return executionStore.get(key).orElseThrow(SwfFaults::unknownTaskToken);
+    }
+
+    /**
+     * Applies a decider's decisions in order.
+     *
+     * <p>Decisions after a closing decision (Complete/Fail/Cancel/ContinueAsNew) are
+     * dropped, matching SWF: the execution is already closed, so a later decision has
+     * nothing to act on.
+     */
+    public void respondDecisionTaskCompleted(String taskToken, List<Decision> decisions, String executionContext) {
+        SwfWorkflowExecution located = executionForDecisionToken(taskToken);
+        synchronized (executionLock(executionKey(located))) {
+            SwfWorkflowExecution execution = executionStore.get(executionKey(located))
+                    .orElseThrow(SwfFaults::unknownTaskToken);
+            SwfDecisionTask task = execution.getDecisionTask();
+            if (task == null || !taskToken.equals(task.getTaskToken())) {
+                throw SwfFaults.unknownTaskToken();
+            }
+
+            SwfHistoryEvent completed = appendEvent(execution, "DecisionTaskCompleted");
+            completed.attr("executionContext", executionContext)
+                    .attr("scheduledEventId", task.getScheduledEventId())
+                    .attr("startedEventId", task.getStartedEventId());
+            long decisionEventId = completed.getEventId();
+
+            decisionTokens.remove(taskToken);
+            execution.setDecisionTask(null);
+            execution.setDecisionTaskOutstanding(false);
+            if (executionContext != null) {
+                execution.setLatestExecutionContext(executionContext);
+            }
+
+            applyDecisions(execution, decisions, decisionEventId);
+
+            if (execution.isOpen() && (execution.isDecisionNeeded() || hasNothingPending(execution))) {
+                execution.setDecisionNeeded(false);
+                scheduleDecisionTask(execution);
+            }
+            executionStore.put(executionKey(execution), execution);
+        }
+    }
+
+    private void applyDecisions(SwfWorkflowExecution execution, List<Decision> decisions, long decisionEventId) {
+        if (decisions == null) {
+            return;
+        }
+        for (Decision decision : decisions) {
+            if (!execution.isOpen()) {
+                LOG.debugv("Dropping {0} decision: execution {1} already closed",
+                        decision.type(), execution.getRunId());
+                return;
+            }
+            applyDecision(execution, decision, decisionEventId);
+        }
+    }
+
+    private void applyDecision(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        switch (decision.type()) {
+            case "ScheduleActivityTask" -> scheduleActivityTask(execution, decision, decisionEventId);
+            case "RequestCancelActivityTask" -> requestCancelActivityTask(execution, decision, decisionEventId);
+            case "CompleteWorkflowExecution" -> completeWorkflowExecution(execution, decision, decisionEventId);
+            case "FailWorkflowExecution" -> failWorkflowExecution(execution, decision, decisionEventId);
+            case "CancelWorkflowExecution" -> cancelWorkflowExecution(execution, decision, decisionEventId);
+            case "ContinueAsNewWorkflowExecution" -> continueAsNew(execution, decision, decisionEventId);
+            case "RecordMarker" -> recordMarker(execution, decision, decisionEventId);
+            case "StartTimer" -> startTimer(execution, decision, decisionEventId);
+            case "CancelTimer" -> cancelTimer(execution, decision, decisionEventId);
+            case "SignalExternalWorkflowExecution" -> signalExternal(execution, decision, decisionEventId);
+            case "RequestCancelExternalWorkflowExecution" -> cancelExternal(execution, decision, decisionEventId);
+            case "StartChildWorkflowExecution" -> startChild(execution, decision, decisionEventId);
+            case "ScheduleLambdaFunction" -> scheduleLambdaFunction(execution, decision, decisionEventId);
+            default -> throw SwfFaults.validationConstraint(decision.type(), "decisions.1.member.decisionType",
+                    "Member must satisfy enum value set: [ScheduleActivityTask, RequestCancelActivityTask, "
+                            + "CompleteWorkflowExecution, FailWorkflowExecution, CancelWorkflowExecution, "
+                            + "ContinueAsNewWorkflowExecution, RecordMarker, StartTimer, CancelTimer, "
+                            + "SignalExternalWorkflowExecution, RequestCancelExternalWorkflowExecution, "
+                            + "StartChildWorkflowExecution, ScheduleLambdaFunction]");
+        }
+    }
+
+    private void scheduleActivityTask(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String activityId = decision.string("activityId");
+        String typeName = decision.nested("activityType", "name");
+        String typeVersion = decision.nested("activityType", "version");
+
+        SwfActivityType type = activityTypeStore.get(typeKey(execution.getDomain(), typeName, typeVersion))
+                .orElse(null);
+        if (type == null) {
+            appendScheduleActivityTaskFailed(execution, decision, decisionEventId, "ACTIVITY_TYPE_DOES_NOT_EXIST");
+            return;
+        }
+        if (type.isDeprecated()) {
+            appendScheduleActivityTaskFailed(execution, decision, decisionEventId, "ACTIVITY_TYPE_DEPRECATED");
+            return;
+        }
+        SwfActivityTask existing = execution.getActivities().get(activityId);
+        if (existing != null && existing.isOpen()) {
+            appendScheduleActivityTaskFailed(execution, decision, decisionEventId, "ACTIVITY_ID_ALREADY_IN_USE");
+            return;
+        }
+
+        String taskList = firstNonEmpty(decision.nested("taskList", "name"), type.getDefaultTaskList());
+        if (taskList == null) {
+            appendScheduleActivityTaskFailed(execution, decision, decisionEventId, "DEFAULT_TASK_LIST_UNDEFINED");
+            return;
+        }
+        String scheduleToStart = firstNonEmpty(decision.string("scheduleToStartTimeout"),
+                type.getDefaultTaskScheduleToStartTimeout());
+        String scheduleToClose = firstNonEmpty(decision.string("scheduleToCloseTimeout"),
+                type.getDefaultTaskScheduleToCloseTimeout());
+        String startToClose = firstNonEmpty(decision.string("startToCloseTimeout"),
+                type.getDefaultTaskStartToCloseTimeout());
+        String heartbeat = firstNonEmpty(decision.string("heartbeatTimeout"),
+                type.getDefaultTaskHeartbeatTimeout());
+        if (scheduleToStart == null) {
+            appendScheduleActivityTaskFailed(execution, decision, decisionEventId,
+                    "DEFAULT_SCHEDULE_TO_START_TIMEOUT_UNDEFINED");
+            return;
+        }
+        if (startToClose == null) {
+            appendScheduleActivityTaskFailed(execution, decision, decisionEventId,
+                    "DEFAULT_START_TO_CLOSE_TIMEOUT_UNDEFINED");
+            return;
+        }
+
+        SwfHistoryEvent scheduled = appendEvent(execution, "ActivityTaskScheduled");
+        scheduled.attr("activityType", Map.of("name", typeName, "version", typeVersion))
+                .attr("activityId", activityId)
+                .attr("input", decision.string("input"))
+                .attr("control", decision.string("control"))
+                .attr("scheduleToStartTimeout", scheduleToStart)
+                .attr("scheduleToCloseTimeout", scheduleToClose)
+                .attr("startToCloseTimeout", startToClose)
+                .attr("heartbeatTimeout", heartbeat)
+                .attr("taskList", Map.of("name", taskList))
+                .attr("taskPriority", firstNonEmpty(decision.string("taskPriority"), type.getDefaultTaskPriority()))
+                .attr("decisionTaskCompletedEventId", decisionEventId)
+                .attr("immediatelyStart", Boolean.FALSE);
+
+        SwfActivityTask task = new SwfActivityTask();
+        task.setDomain(execution.getDomain());
+        task.setWorkflowId(execution.getWorkflowId());
+        task.setRunId(execution.getRunId());
+        task.setActivityId(activityId);
+        task.setActivityTypeName(typeName);
+        task.setActivityTypeVersion(typeVersion);
+        task.setTaskList(taskList);
+        task.setTaskPriority(firstNonEmpty(decision.string("taskPriority"), type.getDefaultTaskPriority()));
+        task.setInput(decision.string("input"));
+        task.setControl(decision.string("control"));
+        task.setScheduleToStartTimeout(scheduleToStart);
+        task.setScheduleToCloseTimeout(scheduleToClose);
+        task.setStartToCloseTimeout(startToClose);
+        task.setHeartbeatTimeout(heartbeat);
+        task.setScheduledEventId(scheduled.getEventId());
+        task.setDecisionTaskCompletedEventId(decisionEventId);
+        task.setScheduledTimestamp(scheduled.getEventTimestamp());
+        execution.getActivities().put(activityId, task);
+    }
+
+    private void appendScheduleActivityTaskFailed(SwfWorkflowExecution execution, Decision decision,
+                                                  long decisionEventId, String cause) {
+        appendEvent(execution, "ScheduleActivityTaskFailed")
+                .attr("activityType", Map.of(
+                        "name", nullToEmpty(decision.nested("activityType", "name")),
+                        "version", nullToEmpty(decision.nested("activityType", "version"))))
+                .attr("activityId", nullToEmpty(decision.string("activityId")))
+                .attr("cause", cause)
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+        execution.setDecisionNeeded(true);
+    }
+
+    private void requestCancelActivityTask(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String activityId = decision.string("activityId");
+        SwfActivityTask task = execution.getActivities().get(activityId);
+        if (task == null || !task.isOpen()) {
+            appendEvent(execution, "RequestCancelActivityTaskFailed")
+                    .attr("activityId", nullToEmpty(activityId))
+                    .attr("cause", "ACTIVITY_ID_UNKNOWN")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+
+        SwfHistoryEvent requested = appendEvent(execution, "ActivityTaskCancelRequested");
+        requested.attr("decisionTaskCompletedEventId", decisionEventId).attr("activityId", activityId);
+        task.setCancelRequested(true);
+        task.setLatestCancelRequestedEventId(requested.getEventId());
+
+        // A scheduled-but-unstarted activity has no worker to observe the cancellation,
+        // so SWF cancels it immediately rather than waiting for a heartbeat.
+        if (SwfActivityTask.STATE_SCHEDULED.equals(task.getState())) {
+            appendEvent(execution, "ActivityTaskCanceled")
+                    .attr("scheduledEventId", task.getScheduledEventId())
+                    .attr("startedEventId", 0L)
+                    .attr("latestCancelRequestedEventId", requested.getEventId());
+            task.setState(SwfActivityTask.STATE_CLOSED);
+            execution.setDecisionNeeded(true);
+        }
+    }
+
+    private void completeWorkflowExecution(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        if (hasOpenWork(execution)) {
+            appendEvent(execution, "CompleteWorkflowExecutionFailed")
+                    .attr("cause", "UNHANDLED_DECISION")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+        appendEvent(execution, "WorkflowExecutionCompleted")
+                .attr("result", decision.string("result"))
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_COMPLETED);
+    }
+
+    private void failWorkflowExecution(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        if (hasOpenWork(execution)) {
+            appendEvent(execution, "FailWorkflowExecutionFailed")
+                    .attr("cause", "UNHANDLED_DECISION")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+        appendEvent(execution, "WorkflowExecutionFailed")
+                .attr("reason", decision.string("reason"))
+                .attr("details", decision.string("details"))
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_FAILED);
+    }
+
+    private void cancelWorkflowExecution(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        if (hasOpenWork(execution)) {
+            appendEvent(execution, "CancelWorkflowExecutionFailed")
+                    .attr("cause", "UNHANDLED_DECISION")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+        appendEvent(execution, "WorkflowExecutionCanceled")
+                .attr("details", decision.string("details"))
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_CANCELED);
+    }
+
+    private void continueAsNew(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String version = firstNonEmpty(decision.string("workflowTypeVersion"), execution.getWorkflowTypeVersion());
+        SwfWorkflowType type = workflowTypeStore
+                .get(typeKey(execution.getDomain(), execution.getWorkflowTypeName(), version)).orElse(null);
+        if (type == null) {
+            appendEvent(execution, "ContinueAsNewWorkflowExecutionFailed")
+                    .attr("cause", "WORKFLOW_TYPE_DOES_NOT_EXIST")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+        if (type.isDeprecated()) {
+            appendEvent(execution, "ContinueAsNewWorkflowExecutionFailed")
+                    .attr("cause", "WORKFLOW_TYPE_DEPRECATED")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+
+        StartWorkflowExecutionRequest request = new StartWorkflowExecutionRequest(
+                execution.getDomain(), execution.getWorkflowId(), type.getName(), version,
+                decision.nested("taskList", "name"), decision.string("taskPriority"),
+                decision.string("input"), decision.string("executionStartToCloseTimeout"),
+                decision.string("taskStartToCloseTimeout"), decision.string("childPolicy"),
+                decision.stringList("tagList"), decision.string("lambdaRole"));
+
+        SwfWorkflowExecution next = buildExecution(request, type);
+        next.setContinuedExecutionRunId(execution.getRunId());
+
+        appendEvent(execution, "WorkflowExecutionContinuedAsNew")
+                .attr("input", decision.string("input"))
+                .attr("decisionTaskCompletedEventId", decisionEventId)
+                .attr("newExecutionRunId", next.getRunId())
+                .attr("executionStartToCloseTimeout", next.getExecutionStartToCloseTimeout())
+                .attr("taskList", Map.of("name", next.getTaskList()))
+                .attr("taskPriority", next.getTaskPriority())
+                .attr("taskStartToCloseTimeout", next.getTaskStartToCloseTimeout())
+                .attr("childPolicy", next.getChildPolicy())
+                .attr("tagList", next.getTagList().isEmpty() ? null : new ArrayList<>(next.getTagList()))
+                .attr("workflowType", Map.of("name", type.getName(), "version", version))
+                .attr("lambdaRole", next.getLambdaRole());
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_CONTINUED_AS_NEW);
+
+        appendWorkflowExecutionStarted(next, decision.string("input"), execution.getRunId());
+        scheduleDecisionTask(next);
+        executionStore.put(executionKey(next), next);
+    }
+
+    private void recordMarker(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        appendEvent(execution, "MarkerRecorded")
+                .attr("markerName", decision.string("markerName"))
+                .attr("details", decision.string("details"))
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+    }
+
+    private void startTimer(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String timerId = decision.string("timerId");
+        SwfTimer existing = execution.getTimers().get(timerId);
+        if (existing != null && !existing.isCanceled()) {
+            appendEvent(execution, "StartTimerFailed")
+                    .attr("timerId", nullToEmpty(timerId))
+                    .attr("cause", "TIMER_ID_ALREADY_IN_USE")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+
+        String startToFire = decision.string("startToFireTimeout");
+        SwfHistoryEvent started = appendEvent(execution, "TimerStarted");
+        started.attr("timerId", timerId)
+                .attr("control", decision.string("control"))
+                .attr("startToFireTimeout", startToFire)
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+
+        SwfTimer timer = new SwfTimer();
+        timer.setTimerId(timerId);
+        timer.setControl(decision.string("control"));
+        timer.setStartToFireTimeout(startToFire);
+        timer.setStartedEventId(started.getEventId());
+        timer.setDecisionTaskCompletedEventId(decisionEventId);
+        timer.setStartedTimestamp(started.getEventTimestamp());
+        timer.setFireTimestamp(started.getEventTimestamp() + parseSeconds(startToFire, 0));
+        execution.getTimers().put(timerId, timer);
+    }
+
+    private void cancelTimer(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String timerId = decision.string("timerId");
+        SwfTimer timer = execution.getTimers().get(timerId);
+        if (timer == null || timer.isCanceled()) {
+            appendEvent(execution, "CancelTimerFailed")
+                    .attr("timerId", nullToEmpty(timerId))
+                    .attr("cause", "TIMER_ID_UNKNOWN")
+                    .attr("decisionTaskCompletedEventId", decisionEventId);
+            execution.setDecisionNeeded(true);
+            return;
+        }
+        appendEvent(execution, "TimerCanceled")
+                .attr("timerId", timerId)
+                .attr("startedEventId", timer.getStartedEventId())
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+        timer.setCanceled(true);
+        execution.getTimers().remove(timerId);
+    }
+
+    private void signalExternal(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String targetWorkflowId = decision.string("workflowId");
+        String targetRunId = decision.string("runId");
+        String signalName = decision.string("signalName");
+
+        SwfHistoryEvent initiated = appendEvent(execution, "SignalExternalWorkflowExecutionInitiated");
+        initiated.attr("workflowId", targetWorkflowId)
+                .attr("runId", targetRunId)
+                .attr("signalName", signalName)
+                .attr("input", decision.string("input"))
+                .attr("decisionTaskCompletedEventId", decisionEventId)
+                .attr("control", decision.string("control"));
+
+        SwfWorkflowExecution target = resolveTarget(execution.getDomain(), targetWorkflowId, targetRunId);
+        if (target == null || !target.isOpen()) {
+            appendEvent(execution, "SignalExternalWorkflowExecutionFailed")
+                    .attr("workflowId", nullToEmpty(targetWorkflowId))
+                    .attr("runId", targetRunId)
+                    .attr("cause", "UNKNOWN_EXTERNAL_WORKFLOW_EXECUTION")
+                    .attr("initiatedEventId", initiated.getEventId())
+                    .attr("decisionTaskCompletedEventId", decisionEventId)
+                    .attr("control", decision.string("control"));
+            execution.setDecisionNeeded(true);
+            return;
+        }
+
+        deliverSignal(target, signalName, decision.string("input"),
+                Map.of("workflowId", execution.getWorkflowId(), "runId", execution.getRunId()),
+                initiated.getEventId());
+        appendEvent(execution, "ExternalWorkflowExecutionSignaled")
+                .attr("workflowExecution", Map.of("workflowId", target.getWorkflowId(),
+                        "runId", target.getRunId()))
+                .attr("initiatedEventId", initiated.getEventId());
+    }
+
+    private void cancelExternal(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String targetWorkflowId = decision.string("workflowId");
+        String targetRunId = decision.string("runId");
+
+        SwfHistoryEvent initiated = appendEvent(execution, "RequestCancelExternalWorkflowExecutionInitiated");
+        initiated.attr("workflowId", targetWorkflowId)
+                .attr("runId", targetRunId)
+                .attr("decisionTaskCompletedEventId", decisionEventId)
+                .attr("control", decision.string("control"));
+
+        SwfWorkflowExecution target = resolveTarget(execution.getDomain(), targetWorkflowId, targetRunId);
+        if (target == null || !target.isOpen()) {
+            appendEvent(execution, "RequestCancelExternalWorkflowExecutionFailed")
+                    .attr("workflowId", nullToEmpty(targetWorkflowId))
+                    .attr("runId", targetRunId)
+                    .attr("cause", "UNKNOWN_EXTERNAL_WORKFLOW_EXECUTION")
+                    .attr("initiatedEventId", initiated.getEventId())
+                    .attr("decisionTaskCompletedEventId", decisionEventId)
+                    .attr("control", decision.string("control"));
+            execution.setDecisionNeeded(true);
+            return;
+        }
+
+        deliverCancelRequest(target, Map.of("workflowId", execution.getWorkflowId(),
+                "runId", execution.getRunId()), initiated.getEventId(), null);
+        appendEvent(execution, "ExternalWorkflowExecutionCancelRequested")
+                .attr("workflowExecution", Map.of("workflowId", target.getWorkflowId(),
+                        "runId", target.getRunId()))
+                .attr("initiatedEventId", initiated.getEventId());
+    }
+
+    private void startChild(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        String childWorkflowId = decision.string("workflowId");
+        String typeName = decision.nested("workflowType", "name");
+        String typeVersion = decision.nested("workflowType", "version");
+
+        SwfWorkflowType type = workflowTypeStore.get(typeKey(execution.getDomain(), typeName, typeVersion))
+                .orElse(null);
+        if (type == null || type.isDeprecated()) {
+            appendStartChildFailed(execution, decision, decisionEventId,
+                    type == null ? "WORKFLOW_TYPE_DOES_NOT_EXIST" : "WORKFLOW_TYPE_DEPRECATED", 0L);
+            return;
+        }
+        if (findOpenExecution(execution.getDomain(), childWorkflowId).isPresent()) {
+            appendStartChildFailed(execution, decision, decisionEventId, "WORKFLOW_ALREADY_RUNNING", 0L);
+            return;
+        }
+
+        SwfHistoryEvent initiated = appendEvent(execution, "StartChildWorkflowExecutionInitiated");
+        String childPolicy = firstNonEmpty(decision.string("childPolicy"), type.getDefaultChildPolicy());
+        String taskList = firstNonEmpty(decision.nested("taskList", "name"), type.getDefaultTaskList());
+        initiated.attr("workflowId", childWorkflowId)
+                .attr("workflowType", Map.of("name", typeName, "version", typeVersion))
+                .attr("control", decision.string("control"))
+                .attr("input", decision.string("input"))
+                .attr("executionStartToCloseTimeout", firstNonEmpty(
+                        decision.string("executionStartToCloseTimeout"),
+                        type.getDefaultExecutionStartToCloseTimeout()))
+                .attr("taskList", taskList != null ? Map.of("name", taskList) : null)
+                .attr("taskPriority", firstNonEmpty(decision.string("taskPriority"), type.getDefaultTaskPriority()))
+                .attr("decisionTaskCompletedEventId", decisionEventId)
+                .attr("childPolicy", childPolicy)
+                .attr("taskStartToCloseTimeout", firstNonEmpty(decision.string("taskStartToCloseTimeout"),
+                        type.getDefaultTaskStartToCloseTimeout()))
+                .attr("tagList", decision.stringList("tagList"))
+                .attr("lambdaRole", firstNonEmpty(decision.string("lambdaRole"), type.getDefaultLambdaRole()));
+
+        StartWorkflowExecutionRequest request = new StartWorkflowExecutionRequest(
+                execution.getDomain(), childWorkflowId, typeName, typeVersion,
+                decision.nested("taskList", "name"), decision.string("taskPriority"),
+                decision.string("input"), decision.string("executionStartToCloseTimeout"),
+                decision.string("taskStartToCloseTimeout"), decision.string("childPolicy"),
+                decision.stringList("tagList"), decision.string("lambdaRole"));
+
+        SwfWorkflowExecution child;
+        try {
+            child = buildExecution(request, type);
+        } catch (AwsException e) {
+            LOG.debugv("Child workflow {0} rejected: {1}", childWorkflowId, e.getMessage());
+            appendStartChildFailed(execution, decision, decisionEventId,
+                    causeForDefaultUndefined(e.getMessage()), initiated.getEventId());
+            return;
+        }
+        child.setParentWorkflowId(execution.getWorkflowId());
+        child.setParentRunId(execution.getRunId());
+        child.setParentInitiatedEventId(initiated.getEventId());
+
+        appendWorkflowExecutionStarted(child, decision.string("input"), null);
+        scheduleDecisionTask(child);
+        executionStore.put(executionKey(child), child);
+        execution.getChildExecutions().put(childWorkflowId, child.getRunId());
+
+        appendEvent(execution, "ChildWorkflowExecutionStarted")
+                .attr("workflowExecution", Map.of("workflowId", child.getWorkflowId(),
+                        "runId", child.getRunId()))
+                .attr("workflowType", Map.of("name", typeName, "version", typeVersion))
+                .attr("initiatedEventId", initiated.getEventId());
+    }
+
+    /** Maps a DefaultUndefinedFault message onto the matching child-start failure cause. */
+    private String causeForDefaultUndefined(String message) {
+        if (message == null) {
+            return "OPERATION_NOT_PERMITTED";
+        }
+        return switch (message) {
+            case "defaultExecutionStartToCloseTimeout" -> "DEFAULT_EXECUTION_START_TO_CLOSE_TIMEOUT_UNDEFINED";
+            case "defaultTaskStartToCloseTimeout" -> "DEFAULT_TASK_START_TO_CLOSE_TIMEOUT_UNDEFINED";
+            case "defaultTaskList" -> "DEFAULT_TASK_LIST_UNDEFINED";
+            case "defaultChildPolicy" -> "DEFAULT_CHILD_POLICY_UNDEFINED";
+            default -> "OPERATION_NOT_PERMITTED";
+        };
+    }
+
+    private void appendStartChildFailed(SwfWorkflowExecution execution, Decision decision,
+                                        long decisionEventId, String cause, long initiatedEventId) {
+        appendEvent(execution, "StartChildWorkflowExecutionFailed")
+                .attr("workflowType", Map.of(
+                        "name", nullToEmpty(decision.nested("workflowType", "name")),
+                        "version", nullToEmpty(decision.nested("workflowType", "version"))))
+                .attr("cause", cause)
+                .attr("workflowId", nullToEmpty(decision.string("workflowId")))
+                .attr("initiatedEventId", initiatedEventId)
+                .attr("decisionTaskCompletedEventId", decisionEventId)
+                .attr("control", decision.string("control"));
+        execution.setDecisionNeeded(true);
+    }
+
+    /**
+     * Lambda-backed activities are recorded but not invoked. Emitting Scheduled followed by
+     * ScheduleLambdaFunctionFailed keeps a decider that uses them unblocked with a cause it
+     * models, instead of stalling on an event that never arrives.
+     */
+    private void scheduleLambdaFunction(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+        appendEvent(execution, "ScheduleLambdaFunctionFailed")
+                .attr("id", nullToEmpty(decision.string("id")))
+                .attr("name", nullToEmpty(decision.string("name")))
+                .attr("cause", "LAMBDA_SERVICE_NOT_AVAILABLE_IN_REGION")
+                .attr("decisionTaskCompletedEventId", decisionEventId);
+        execution.setDecisionNeeded(true);
+    }
+
+    // ────────────────────────────── Activity tasks ───────────────────────────
+
+    public Optional<SwfActivityTask> pollForActivityTask(String domainName, String taskList, String identity) {
+        requireDomain(domainName);
+        requireName(taskList, "taskList.name");
+
+        List<SwfWorkflowExecution> candidates = executionsIn(domainName);
+        candidates.sort(Comparator.comparingDouble(SwfWorkflowExecution::getStartTimestamp));
+        for (SwfWorkflowExecution candidate : candidates) {
+            SwfActivityTask claimed = tryClaimActivityTask(candidate, taskList, identity);
+            if (claimed != null) {
+                return Optional.of(claimed);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private SwfActivityTask tryClaimActivityTask(SwfWorkflowExecution candidate, String taskList, String identity) {
+        synchronized (executionLock(executionKey(candidate))) {
+            SwfWorkflowExecution execution = executionStore.get(executionKey(candidate)).orElse(null);
+            if (execution == null || !execution.isOpen()) {
+                return null;
+            }
+            SwfActivityTask task = execution.getActivities().values().stream()
+                    .filter(t -> SwfActivityTask.STATE_SCHEDULED.equals(t.getState()))
+                    .filter(t -> taskList.equals(t.getTaskList()))
+                    .min(Comparator.comparingDouble(SwfActivityTask::getScheduledTimestamp))
+                    .orElse(null);
+            if (task == null) {
+                return null;
+            }
+
+            task.setState(SwfActivityTask.STATE_STARTED);
+            task.setIdentity(identity);
+            double startedAt = now();
+            task.setStartedTimestamp(startedAt);
+            task.setLastHeartbeatTimestamp(startedAt);
+            SwfHistoryEvent started = appendEvent(execution, "ActivityTaskStarted");
+            started.attr("identity", identity).attr("scheduledEventId", task.getScheduledEventId());
+            task.setStartedEventId(started.getEventId());
+            execution.setLatestActivityTaskTimestamp(started.getEventTimestamp());
+
+            String token = newTaskToken();
+            task.setTaskToken(token);
+            activityTokens.put(token, executionKey(execution) + "|" + task.getActivityId());
+            executionStore.put(executionKey(execution), execution);
+            return task;
+        }
+    }
+
+    /** True when the worker holding {@code taskToken} should abandon the activity. */
+    public boolean recordActivityTaskHeartbeat(String taskToken, String details) {
+        return withActivityToken(taskToken, (execution, task) -> {
+            task.setLastHeartbeatTimestamp(now());
+            if (details != null) {
+                task.setControl(details);
+            }
+            executionStore.put(executionKey(execution), execution);
+            return task.isCancelRequested();
+        });
+    }
+
+    public void respondActivityTaskCompleted(String taskToken, String result) {
+        withActivityToken(taskToken, (execution, task) -> {
+            appendEvent(execution, "ActivityTaskCompleted")
+                    .attr("result", result)
+                    .attr("scheduledEventId", task.getScheduledEventId())
+                    .attr("startedEventId", task.getStartedEventId());
+            closeActivity(execution, task, taskToken);
+            return null;
+        });
+    }
+
+    public void respondActivityTaskFailed(String taskToken, String reason, String details) {
+        withActivityToken(taskToken, (execution, task) -> {
+            appendEvent(execution, "ActivityTaskFailed")
+                    .attr("reason", reason)
+                    .attr("details", details)
+                    .attr("scheduledEventId", task.getScheduledEventId())
+                    .attr("startedEventId", task.getStartedEventId());
+            closeActivity(execution, task, taskToken);
+            return null;
+        });
+    }
+
+    public void respondActivityTaskCanceled(String taskToken, String details) {
+        withActivityToken(taskToken, (execution, task) -> {
+            appendEvent(execution, "ActivityTaskCanceled")
+                    .attr("details", details)
+                    .attr("scheduledEventId", task.getScheduledEventId())
+                    .attr("startedEventId", task.getStartedEventId())
+                    .attr("latestCancelRequestedEventId", task.getLatestCancelRequestedEventId());
+            closeActivity(execution, task, taskToken);
+            return null;
+        });
+    }
+
+    private void closeActivity(SwfWorkflowExecution execution, SwfActivityTask task, String taskToken) {
+        task.setState(SwfActivityTask.STATE_CLOSED);
+        activityTokens.remove(taskToken);
+        scheduleDecisionTaskIfIdle(execution);
+        executionStore.put(executionKey(execution), execution);
+    }
+
+    private <T> T withActivityToken(String taskToken, ActivityTokenAction<T> action) {
+        if (taskToken == null || taskToken.isEmpty()) {
+            throw SwfFaults.missingRequired("taskToken");
+        }
+        String pointer = activityTokens.get(taskToken);
+        if (pointer == null) {
+            throw SwfFaults.unknownTaskToken();
+        }
+        int separator = pointer.lastIndexOf('|');
+        String executionKey = pointer.substring(0, separator);
+        String activityId = pointer.substring(separator + 1);
+
+        synchronized (executionLock(executionKey)) {
+            SwfWorkflowExecution execution = executionStore.get(executionKey)
+                    .orElseThrow(SwfFaults::unknownTaskToken);
+            SwfActivityTask task = execution.getActivities().get(activityId);
+            if (task == null || !taskToken.equals(task.getTaskToken()) || !task.isOpen()) {
+                throw SwfFaults.unknownTaskToken();
+            }
+            return action.apply(execution, task);
+        }
+    }
+
+    private interface ActivityTokenAction<T> {
+        T apply(SwfWorkflowExecution execution, SwfActivityTask task);
+    }
+
+    // ───────────────────────── External execution control ────────────────────
+
+    public void signalWorkflowExecution(String domainName, String workflowId, String runId,
+                                        String signalName, String input) {
+        requireDomain(domainName);
+        requireName(signalName, "signalName");
+        SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
+        synchronized (executionLock(executionKey(located))) {
+            SwfWorkflowExecution execution = executionStore.get(executionKey(located))
+                    .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
+            if (!execution.isOpen()) {
+                throw SwfFaults.unknownExecution(workflowId, nullToEmpty(runId));
+            }
+            deliverSignal(execution, signalName, input, null, null);
+        }
+    }
+
+    private void deliverSignal(SwfWorkflowExecution execution, String signalName, String input,
+                               Map<String, String> externalExecution, Long externalInitiatedEventId) {
+        appendEvent(execution, "WorkflowExecutionSignaled")
+                .attr("signalName", signalName)
+                .attr("input", input)
+                .attr("externalWorkflowExecution", externalExecution)
+                .attr("externalInitiatedEventId", externalInitiatedEventId);
+        scheduleDecisionTaskIfIdle(execution);
+        executionStore.put(executionKey(execution), execution);
+    }
+
+    public void requestCancelWorkflowExecution(String domainName, String workflowId, String runId) {
+        requireDomain(domainName);
+        SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
+        synchronized (executionLock(executionKey(located))) {
+            SwfWorkflowExecution execution = executionStore.get(executionKey(located))
+                    .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
+            if (!execution.isOpen()) {
+                throw SwfFaults.unknownExecution(workflowId, nullToEmpty(runId));
+            }
+            deliverCancelRequest(execution, null, null, null);
+        }
+    }
+
+    private void deliverCancelRequest(SwfWorkflowExecution execution, Map<String, String> externalExecution,
+                                      Long externalInitiatedEventId, String cause) {
+        appendEvent(execution, "WorkflowExecutionCancelRequested")
+                .attr("externalWorkflowExecution", externalExecution)
+                .attr("externalInitiatedEventId", externalInitiatedEventId)
+                .attr("cause", cause);
+        execution.setCancelRequested(true);
+        scheduleDecisionTaskIfIdle(execution);
+        executionStore.put(executionKey(execution), execution);
+    }
+
+    public void terminateWorkflowExecution(String domainName, String workflowId, String runId,
+                                           String reason, String details, String childPolicy) {
+        requireDomain(domainName);
+        SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
+        synchronized (executionLock(executionKey(located))) {
+            SwfWorkflowExecution execution = executionStore.get(executionKey(located))
+                    .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
+            if (!execution.isOpen()) {
+                throw SwfFaults.unknownExecution(workflowId, nullToEmpty(runId));
+            }
+            String policy = validateChildPolicy(firstNonEmpty(childPolicy, execution.getChildPolicy()));
+            terminate(execution, reason, details, policy, null);
+        }
+    }
+
+    private void terminate(SwfWorkflowExecution execution, String reason, String details,
+                           String childPolicy, String cause) {
+        appendEvent(execution, "WorkflowExecutionTerminated")
+                .attr("reason", reason)
+                .attr("details", details)
+                .attr("childPolicy", childPolicy)
+                .attr("cause", cause);
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_TERMINATED);
+        executionStore.put(executionKey(execution), execution);
+    }
+
+    // ──────────────────────────────── Tagging ────────────────────────────────
+
+    public Map<String, String> listTagsForResource(String resourceArn) {
+        return domainForArn(resourceArn).getTags();
+    }
+
+    public void tagResource(String resourceArn, Map<String, String> tags) {
+        SwfDomain domain = domainForArn(resourceArn);
+        if (tags != null) {
+            if (domain.getTags().size() + tags.size() > MAX_TAGS) {
+                throw SwfFaults.fault(SwfConstants.TOO_MANY_TAGS, domain.getName());
+            }
+            domain.getTags().putAll(tags);
+        }
+        domainStore.put(domain.getName(), domain);
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys) {
+        SwfDomain domain = domainForArn(resourceArn);
+        if (tagKeys != null) {
+            tagKeys.forEach(domain.getTags()::remove);
+        }
+        domainStore.put(domain.getName(), domain);
+    }
+
+    /**
+     * SWF tagging targets a domain by ARN. The domain name is the segment after
+     * {@code /domain/}; anything else is not a taggable SWF resource.
+     */
+    private SwfDomain domainForArn(String resourceArn) {
+        if (resourceArn == null || resourceArn.isEmpty()) {
+            throw SwfFaults.missingRequired("resourceArn");
+        }
+        int marker = resourceArn.indexOf("/domain/");
+        if (marker < 0) {
+            throw SwfFaults.unknownDomain(resourceArn);
+        }
+        String name = resourceArn.substring(marker + "/domain/".length());
+        return domainStore.get(name).orElseThrow(() -> SwfFaults.unknownDomain(name));
+    }
+
+    // ──────────────────────────────── Timeouts ───────────────────────────────
+
+    /**
+     * Applies every timeout that has come due: activity schedule-to-start,
+     * start-to-close, schedule-to-close and heartbeat; decision task start-to-close;
+     * workflow execution start-to-close; and pending timers.
+     *
+     * <p>Called on a fixed interval by {@link SwfTimeoutSweeper} rather than from a
+     * per-task timer, so a restart cannot leave orphaned timeout threads behind.
+     */
+    public void sweep() {
+        double nowSeconds = now();
+        for (String key : executionStore.keys()) {
+            synchronized (executionLock(key)) {
+                SwfWorkflowExecution execution = executionStore.get(key).orElse(null);
+                if (execution == null || !execution.isOpen()) {
+                    continue;
+                }
+                boolean changed = fireTimers(execution, nowSeconds)
+                        | timeOutActivities(execution, nowSeconds)
+                        | timeOutDecisionTask(execution, nowSeconds);
+                if (timeOutExecution(execution, nowSeconds)) {
+                    changed = true;
+                } else if (changed && execution.isOpen()) {
+                    scheduleDecisionTaskIfIdle(execution);
+                }
+                if (changed) {
+                    executionStore.put(key, execution);
+                }
+            }
+        }
+    }
+
+    private boolean fireTimers(SwfWorkflowExecution execution, double nowSeconds) {
+        List<SwfTimer> due = execution.getTimers().values().stream()
+                .filter(t -> !t.isCanceled() && t.getFireTimestamp() <= nowSeconds)
+                .sorted(Comparator.comparingDouble(SwfTimer::getFireTimestamp))
+                .toList();
+        for (SwfTimer timer : due) {
+            appendEvent(execution, "TimerFired")
+                    .attr("timerId", timer.getTimerId())
+                    .attr("startedEventId", timer.getStartedEventId());
+            execution.getTimers().remove(timer.getTimerId());
+        }
+        return !due.isEmpty();
+    }
+
+    private boolean timeOutActivities(SwfWorkflowExecution execution, double nowSeconds) {
+        boolean changed = false;
+        for (SwfActivityTask task : new ArrayList<>(execution.getActivities().values())) {
+            if (!task.isOpen()) {
+                continue;
+            }
+            String timeoutType = dueActivityTimeout(task, nowSeconds);
+            if (timeoutType == null) {
+                continue;
+            }
+            appendEvent(execution, "ActivityTaskTimedOut")
+                    .attr("timeoutType", timeoutType)
+                    .attr("scheduledEventId", task.getScheduledEventId())
+                    .attr("startedEventId", task.getStartedEventId() != null ? task.getStartedEventId() : 0L);
+            task.setState(SwfActivityTask.STATE_CLOSED);
+            if (task.getTaskToken() != null) {
+                activityTokens.remove(task.getTaskToken());
+            }
+            changed = true;
+        }
+        return changed;
+    }
+
+    /**
+     * The first activity timeout that has elapsed, or null. SCHEDULE_TO_CLOSE is checked
+     * first because it bounds the others; HEARTBEAT only applies once the task is started
+     * and a heartbeat timeout was configured.
+     */
+    private String dueActivityTimeout(SwfActivityTask task, double nowSeconds) {
+        Double scheduleToClose = timeoutSeconds(task.getScheduleToCloseTimeout());
+        if (scheduleToClose != null && nowSeconds - task.getScheduledTimestamp() >= scheduleToClose) {
+            return "SCHEDULE_TO_CLOSE";
+        }
+        if (SwfActivityTask.STATE_SCHEDULED.equals(task.getState())) {
+            Double scheduleToStart = timeoutSeconds(task.getScheduleToStartTimeout());
+            if (scheduleToStart != null && nowSeconds - task.getScheduledTimestamp() >= scheduleToStart) {
+                return "SCHEDULE_TO_START";
+            }
+            return null;
+        }
+        Double startToClose = timeoutSeconds(task.getStartToCloseTimeout());
+        if (startToClose != null && task.getStartedTimestamp() != null
+                && nowSeconds - task.getStartedTimestamp() >= startToClose) {
+            return "START_TO_CLOSE";
+        }
+        Double heartbeat = timeoutSeconds(task.getHeartbeatTimeout());
+        if (heartbeat != null && task.getLastHeartbeatTimestamp() != null
+                && nowSeconds - task.getLastHeartbeatTimestamp() >= heartbeat) {
+            return "HEARTBEAT";
+        }
+        return null;
+    }
+
+    private boolean timeOutDecisionTask(SwfWorkflowExecution execution, double nowSeconds) {
+        SwfDecisionTask task = execution.getDecisionTask();
+        if (task == null || !SwfDecisionTask.STATE_STARTED.equals(task.getState())) {
+            return false;
+        }
+        Double startToClose = timeoutSeconds(task.getStartToCloseTimeout());
+        if (startToClose == null || task.getStartedTimestamp() == null
+                || nowSeconds - task.getStartedTimestamp() < startToClose) {
+            return false;
+        }
+        appendEvent(execution, "DecisionTaskTimedOut")
+                .attr("timeoutType", "START_TO_CLOSE")
+                .attr("scheduledEventId", task.getScheduledEventId())
+                .attr("startedEventId", task.getStartedEventId());
+        if (task.getTaskToken() != null) {
+            decisionTokens.remove(task.getTaskToken());
+        }
+        execution.setDecisionTask(null);
+        execution.setDecisionTaskOutstanding(false);
+        scheduleDecisionTask(execution);
+        return true;
+    }
+
+    private boolean timeOutExecution(SwfWorkflowExecution execution, double nowSeconds) {
+        Double startToClose = timeoutSeconds(execution.getExecutionStartToCloseTimeout());
+        if (startToClose == null || nowSeconds - execution.getStartTimestamp() < startToClose) {
+            return false;
+        }
+        appendEvent(execution, "WorkflowExecutionTimedOut")
+                .attr("timeoutType", "START_TO_CLOSE")
+                .attr("childPolicy", execution.getChildPolicy());
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_TIMED_OUT);
+        return true;
+    }
+
+    // ─────────────────────────── History and lifecycle ───────────────────────
+
+    private void appendWorkflowExecutionStarted(SwfWorkflowExecution execution, String input,
+                                                String continuedFromRunId) {
+        SwfHistoryEvent event = appendEvent(execution, "WorkflowExecutionStarted");
+        event.attr("input", input)
+                .attr("executionStartToCloseTimeout", execution.getExecutionStartToCloseTimeout())
+                .attr("taskStartToCloseTimeout", execution.getTaskStartToCloseTimeout())
+                .attr("childPolicy", execution.getChildPolicy())
+                .attr("taskList", Map.of("name", execution.getTaskList()))
+                .attr("taskPriority", execution.getTaskPriority())
+                .attr("workflowType", Map.of("name", execution.getWorkflowTypeName(),
+                        "version", execution.getWorkflowTypeVersion()))
+                .attr("tagList", execution.getTagList().isEmpty() ? null
+                        : new ArrayList<>(execution.getTagList()))
+                .attr("continuedExecutionRunId", continuedFromRunId)
+                .attr("lambdaRole", execution.getLambdaRole());
+        if (execution.getParentWorkflowId() != null) {
+            event.attr("parentWorkflowExecution", Map.of("workflowId", execution.getParentWorkflowId(),
+                            "runId", execution.getParentRunId()))
+                    .attr("parentInitiatedEventId", execution.getParentInitiatedEventId());
+        } else {
+            // The live service reports 0 rather than omitting the member on root executions.
+            event.attr("parentInitiatedEventId", 0L);
+        }
+    }
+
+    private void scheduleDecisionTask(SwfWorkflowExecution execution) {
+        SwfHistoryEvent scheduled = appendEvent(execution, "DecisionTaskScheduled");
+        scheduled.attr("taskList", Map.of("name", execution.getTaskList()))
+                .attr("taskPriority", execution.getTaskPriority())
+                .attr("startToCloseTimeout", execution.getTaskStartToCloseTimeout())
+                .attr("scheduleToStartTimeout", SwfConstants.TIMEOUT_NONE);
+
+        SwfDecisionTask task = new SwfDecisionTask();
+        task.setDomain(execution.getDomain());
+        task.setWorkflowId(execution.getWorkflowId());
+        task.setRunId(execution.getRunId());
+        task.setTaskList(execution.getTaskList());
+        task.setTaskPriority(execution.getTaskPriority());
+        task.setStartToCloseTimeout(execution.getTaskStartToCloseTimeout());
+        task.setScheduledEventId(scheduled.getEventId());
+        task.setScheduledTimestamp(scheduled.getEventTimestamp());
+        task.setPreviousStartedEventId(lastStartedDecisionEventId(execution));
+        execution.setDecisionTask(task);
+        execution.setDecisionTaskOutstanding(true);
+    }
+
+    /**
+     * Schedules a decision task unless one is already outstanding. SWF permits only one
+     * decision task per execution at a time; while one is outstanding the need is recorded
+     * and satisfied when that task completes.
+     */
+    private void scheduleDecisionTaskIfIdle(SwfWorkflowExecution execution) {
+        if (!execution.isOpen()) {
+            return;
+        }
+        if (execution.isDecisionTaskOutstanding()) {
+            execution.setDecisionNeeded(true);
+            return;
+        }
+        scheduleDecisionTask(execution);
+    }
+
+    private long lastStartedDecisionEventId(SwfWorkflowExecution execution) {
+        long last = 0;
+        for (SwfHistoryEvent event : execution.getEvents()) {
+            if ("DecisionTaskStarted".equals(event.getEventType())) {
+                last = event.getEventId();
+            }
+        }
+        return last;
+    }
+
+    private SwfHistoryEvent appendEvent(SwfWorkflowExecution execution, String eventType) {
+        SwfHistoryEvent event = new SwfHistoryEvent(execution.allocateEventId(), now(), eventType);
+        execution.getEvents().add(event);
+        return event;
+    }
+
+    private void closeExecution(SwfWorkflowExecution execution, String closeStatus) {
+        execution.setExecutionStatus(SwfConstants.EXECUTION_STATUS_CLOSED);
+        execution.setCloseStatus(closeStatus);
+        execution.setCloseTimestamp(now());
+
+        SwfDecisionTask task = execution.getDecisionTask();
+        if (task != null && task.getTaskToken() != null) {
+            decisionTokens.remove(task.getTaskToken());
+        }
+        execution.setDecisionTask(null);
+        execution.setDecisionTaskOutstanding(false);
+        for (SwfActivityTask activity : execution.getActivities().values()) {
+            if (activity.getTaskToken() != null) {
+                activityTokens.remove(activity.getTaskToken());
+            }
+            activity.setState(SwfActivityTask.STATE_CLOSED);
+        }
+        execution.getTimers().clear();
+
+        notifyParent(execution);
+        applyChildPolicy(execution);
+    }
+
+    /**
+     * Reports a child's outcome to its parent so the parent's decider observes the
+     * matching ChildWorkflowExecution* event. CONTINUED_AS_NEW is deliberately silent:
+     * the continuation run carries the parent link and reports for itself.
+     */
+    private void notifyParent(SwfWorkflowExecution execution) {
+        if (execution.getParentWorkflowId() == null || execution.getParentRunId() == null) {
+            return;
+        }
+        if (SwfConstants.CLOSE_STATUS_CONTINUED_AS_NEW.equals(execution.getCloseStatus())) {
+            return;
+        }
+        String parentKey = executionKey(execution.getDomain(), execution.getParentWorkflowId(),
+                execution.getParentRunId());
+        SwfWorkflowExecution parent = executionStore.get(parentKey).orElse(null);
+        if (parent == null || !parent.isOpen()) {
+            return;
+        }
+
+        String eventType = switch (execution.getCloseStatus()) {
+            case SwfConstants.CLOSE_STATUS_COMPLETED -> "ChildWorkflowExecutionCompleted";
+            case SwfConstants.CLOSE_STATUS_FAILED -> "ChildWorkflowExecutionFailed";
+            case SwfConstants.CLOSE_STATUS_CANCELED -> "ChildWorkflowExecutionCanceled";
+            case SwfConstants.CLOSE_STATUS_TERMINATED -> "ChildWorkflowExecutionTerminated";
+            case SwfConstants.CLOSE_STATUS_TIMED_OUT -> "ChildWorkflowExecutionTimedOut";
+            default -> null;
+        };
+        if (eventType == null) {
+            return;
+        }
+
+        SwfHistoryEvent event = appendEvent(parent, eventType);
+        event.attr("workflowExecution", Map.of("workflowId", execution.getWorkflowId(),
+                        "runId", execution.getRunId()))
+                .attr("workflowType", Map.of("name", execution.getWorkflowTypeName(),
+                        "version", execution.getWorkflowTypeVersion()))
+                .attr("initiatedEventId", execution.getParentInitiatedEventId())
+                .attr("startedEventId", execution.getParentInitiatedEventId());
+        if (SwfConstants.CLOSE_STATUS_COMPLETED.equals(execution.getCloseStatus())) {
+            event.attr("result", lastEventAttribute(execution, "WorkflowExecutionCompleted", "result"));
+        } else if (SwfConstants.CLOSE_STATUS_FAILED.equals(execution.getCloseStatus())) {
+            event.attr("reason", lastEventAttribute(execution, "WorkflowExecutionFailed", "reason"));
+            event.attr("details", lastEventAttribute(execution, "WorkflowExecutionFailed", "details"));
+        } else if (SwfConstants.CLOSE_STATUS_TIMED_OUT.equals(execution.getCloseStatus())) {
+            event.attr("timeoutType", "START_TO_CLOSE");
+        }
+
+        scheduleDecisionTaskIfIdle(parent);
+        executionStore.put(parentKey, parent);
+    }
+
+    private Object lastEventAttribute(SwfWorkflowExecution execution, String eventType, String attribute) {
+        for (int i = execution.getEvents().size() - 1; i >= 0; i--) {
+            SwfHistoryEvent event = execution.getEvents().get(i);
+            if (eventType.equals(event.getEventType())) {
+                return event.getAttributes().get(attribute);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Applies the closing execution's childPolicy to its still-open children:
+     * TERMINATE ends them, REQUEST_CANCEL asks their deciders to wind down, and
+     * ABANDON leaves them running.
+     */
+    private void applyChildPolicy(SwfWorkflowExecution execution) {
+        if (execution.getChildExecutions().isEmpty()
+                || SwfConstants.CHILD_POLICY_ABANDON.equals(execution.getChildPolicy())) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : execution.getChildExecutions().entrySet()) {
+            String childKey = executionKey(execution.getDomain(), entry.getKey(), entry.getValue());
+            SwfWorkflowExecution child = executionStore.get(childKey).orElse(null);
+            if (child == null || !child.isOpen()) {
+                continue;
+            }
+            if (SwfConstants.CHILD_POLICY_TERMINATE.equals(execution.getChildPolicy())) {
+                terminate(child, null, null, child.getChildPolicy(), "CHILD_POLICY_APPLIED");
+            } else {
+                deliverCancelRequest(child, null, null, "CHILD_POLICY_APPLIED");
+            }
+        }
+    }
+
+    /**
+     * True when the execution still has activities, timers, or children the decider must
+     * resolve before it may close the execution. SWF rejects a closing decision in that
+     * state with UNHANDLED_DECISION.
+     */
+    private boolean hasOpenWork(SwfWorkflowExecution execution) {
+        if (execution.getActivities().values().stream().anyMatch(SwfActivityTask::isOpen)) {
+            return true;
+        }
+        if (!execution.getTimers().isEmpty()) {
+            return true;
+        }
+        return execution.getChildExecutions().entrySet().stream().anyMatch(entry -> executionStore
+                .get(executionKey(execution.getDomain(), entry.getKey(), entry.getValue()))
+                .filter(SwfWorkflowExecution::isOpen)
+                .isPresent());
+    }
+
+    /**
+     * True when nothing is pending, so the decider gets another decision task rather than
+     * an execution stalled with no outstanding work and no scheduled decision.
+     */
+    private boolean hasNothingPending(SwfWorkflowExecution execution) {
+        return !hasOpenWork(execution);
+    }
+
+    public int openActivityCount(SwfWorkflowExecution execution) {
+        return (int) execution.getActivities().values().stream().filter(SwfActivityTask::isOpen).count();
+    }
+
+    public int openTimerCount(SwfWorkflowExecution execution) {
+        return execution.getTimers().size();
+    }
+
+    public int openDecisionTaskCount(SwfWorkflowExecution execution) {
+        return execution.getDecisionTask() != null ? 1 : 0;
+    }
+
+    public int openChildCount(SwfWorkflowExecution execution) {
+        return (int) execution.getChildExecutions().entrySet().stream()
+                .filter(entry -> executionStore
+                        .get(executionKey(execution.getDomain(), entry.getKey(), entry.getValue()))
+                        .filter(SwfWorkflowExecution::isOpen)
+                        .isPresent())
+                .count();
+    }
+
+    // ──────────────────────────────── Helpers ───────────────────────────────
+
+    private SwfWorkflowExecution resolveTarget(String domainName, String workflowId, String runId) {
+        if (workflowId == null || workflowId.isEmpty()) {
+            return null;
+        }
+        if (runId != null && !runId.isEmpty()) {
+            return executionStore.get(executionKey(domainName, workflowId, runId)).orElse(null);
+        }
+        return findOpenExecution(domainName, workflowId).orElse(null);
+    }
+
+    private Object executionLock(String key) {
+        return executionLocks.computeIfAbsent(key, k -> new Object());
+    }
+
+    private double now() {
+        return clock.millis() / 1000.0;
+    }
+
+    /** SWF task tokens are opaque; a random base64 blob matches how SDKs treat them. */
+    private String newTaskToken() {
+        byte[] raw = (UUID.randomUUID() + ":" + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8);
+        return Base64.getEncoder().encodeToString(raw);
+    }
+
+    /** SWF runIds are base64-ish opaque strings ending in '='. */
+    private String newRunId() {
+        String raw = Base64.getEncoder().withoutPadding()
+                .encodeToString(UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
+        return raw.substring(0, Math.min(raw.length(), 48)) + "=";
+    }
+
+    private String domainArn(String name, String region) {
+        return "arn:aws:swf:" + region + ":" + regionResolver.getAccountId() + ":/domain/" + name;
+    }
+
+    public String domainArnFor(SwfDomain domain, String region) {
+        return domain.getArn() != null ? domain.getArn() : domainArn(domain.getName(), region);
+    }
+
+    private static String typeKey(String domain, String name, String version) {
+        return domain + "/" + name + "/" + version;
+    }
+
+    private static String executionKey(SwfWorkflowExecution execution) {
+        return executionKey(execution.getDomain(), execution.getWorkflowId(), execution.getRunId());
+    }
+
+    private static String executionKey(String domain, String workflowId, String runId) {
+        return domain + "/" + workflowId + "/" + runId;
+    }
+
+    private static void requireName(String value, String field) {
+        if (value == null || value.isEmpty()) {
+            throw SwfFaults.missingRequired(field);
+        }
+    }
+
+    private static String requireRegistrationStatus(String status) {
+        if (status == null || status.isEmpty()) {
+            throw SwfFaults.missingRequired("registrationStatus");
+        }
+        if (!SwfConstants.STATUS_REGISTERED.equals(status) && !SwfConstants.STATUS_DEPRECATED.equals(status)) {
+            throw SwfFaults.validationConstraint(status, "registrationStatus",
+                    "Member must satisfy enum value set: [REGISTERED, DEPRECATED]");
+        }
+        return status;
+    }
+
+    private static String validateChildPolicy(String childPolicy) {
+        if (childPolicy == null) {
+            return null;
+        }
+        if (!SwfConstants.CHILD_POLICY_TERMINATE.equals(childPolicy)
+                && !SwfConstants.CHILD_POLICY_REQUEST_CANCEL.equals(childPolicy)
+                && !SwfConstants.CHILD_POLICY_ABANDON.equals(childPolicy)) {
+            throw SwfFaults.validationConstraint(childPolicy, "childPolicy",
+                    "Member must satisfy enum value set: [TERMINATE, REQUEST_CANCEL, ABANDON]");
+        }
+        return childPolicy;
+    }
+
+    private static void validateRetentionPeriod(String retentionDays) {
+        if (SwfConstants.TIMEOUT_NONE.equals(retentionDays)) {
+            return;
+        }
+        try {
+            long days = Long.parseLong(retentionDays);
+            if (days < 0 || days > 90) {
+                throw SwfFaults.validationConstraint(retentionDays,
+                        "workflowExecutionRetentionPeriodInDays",
+                        "Member must be between 0 and 90 days, or NONE");
+            }
+        } catch (NumberFormatException e) {
+            throw SwfFaults.validationConstraint(retentionDays, "workflowExecutionRetentionPeriodInDays",
+                    "Member must be a number of days or NONE");
+        }
+    }
+
+    /**
+     * Timeout fields are strings holding seconds, or the literal "NONE" for no timeout.
+     * Returns null when no timeout applies.
+     */
+    private static Double timeoutSeconds(String value) {
+        if (value == null || value.isEmpty() || SwfConstants.TIMEOUT_NONE.equals(value)) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring unparseable SWF timeout value {0}", value);
+            return null;
+        }
+    }
+
+    private static double parseSeconds(String value, double fallback) {
+        Double parsed = timeoutSeconds(value);
+        return parsed != null ? parsed : fallback;
+    }
+
+    private static String firstNonEmpty(String preferred, String fallback) {
+        if (preferred != null && !preferred.isEmpty()) {
+            return preferred;
+        }
+        return fallback != null && !fallback.isEmpty() ? fallback : null;
+    }
+
+    private static String nullToEmpty(String value) {
+        return value != null ? value : "";
+    }
+
+    /** Fields StartWorkflowExecution accepts, before type defaults are resolved. */
+    public record StartWorkflowExecutionRequest(
+            String domain,
+            String workflowId,
+            String typeName,
+            String typeVersion,
+            String taskList,
+            String taskPriority,
+            String input,
+            String executionStartToCloseTimeout,
+            String taskStartToCloseTimeout,
+            String childPolicy,
+            List<String> tagList,
+            String lambdaRole) {
+    }
+
+    /**
+     * One decision from RespondDecisionTaskCompleted, already unwrapped from its
+     * {@code <type>DecisionAttributes} envelope so the service reads plain fields.
+     */
+    public record Decision(String type, Map<String, Object> attributes) {
+
+        public String string(String field) {
+            Object value = attributes.get(field);
+            return value instanceof String s && !s.isEmpty() ? s : null;
+        }
+
+        @SuppressWarnings("unchecked")
+        public String nested(String field, String key) {
+            Object value = attributes.get(field);
+            if (value instanceof Map<?, ?> map) {
+                Object nested = ((Map<String, Object>) map).get(key);
+                return nested instanceof String s && !s.isEmpty() ? s : null;
+            }
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        public List<String> stringList(String field) {
+            Object value = attributes.get(field);
+            if (value instanceof List<?> list && !list.isEmpty()) {
+                return new ArrayList<>((List<String>) list);
+            }
+            return null;
+        }
+    }
+
+    /** Composable predicate over executions, built from the API's filter members. */
+    public interface ExecutionFilter extends Predicate<SwfWorkflowExecution> {
+
+        static ExecutionFilter all() {
+            return execution -> true;
+        }
+
+        default ExecutionFilter and(ExecutionFilter other) {
+            return execution -> test(execution) && other.test(execution);
+        }
+
+        @Override
+        default Predicate<SwfWorkflowExecution> negate() {
+            return execution -> !test(execution);
+        }
+    }
+}
