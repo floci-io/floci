@@ -51,11 +51,13 @@ import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import io.github.hectorvent.floci.services.ec2.model.PrefixList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -112,6 +114,7 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, NatGateway> natGateways;
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
+    private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -141,6 +144,7 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
                 storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 storageFactory.create("ec2", "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
+                storageFactory.create("ec2", "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -166,6 +170,7 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, NatGateway> natGateways,
                StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
                StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -191,6 +196,7 @@ public class Ec2Service implements ContainerTeardown {
         this.natGateways = natGateways;
         this.spotInstanceRequests = spotInstanceRequests;
         this.networkAcls = networkAcls;
+        this.managedPrefixLists = managedPrefixLists;
         this.tags = tags;
     }
 
@@ -534,20 +540,227 @@ public class Ec2Service implements ContainerTeardown {
     // AWS-managed prefix lists for the gateway-endpoint services (S3, DynamoDB). These are
     // not user-created, so they're returned as static managed data per region. Querying any
     // other service name (e.g. an interface endpoint) correctly yields no match.
+    //
+    // The legacy DescribePrefixLists surface projects the same objects that
+    // DescribeManagedPrefixLists serves, so the two APIs cannot report different CIDRs for the
+    // same list.
     public List<PrefixList> describePrefixLists(String region, List<String> ids, Map<String, List<String>> filters) {
-        List<PrefixList> managed = new ArrayList<>();
-        managed.add(new PrefixList("pl-63a5400a", "com.amazonaws." + region + ".s3",
-                new ArrayList<>(List.of("52.216.0.0/15", "54.231.0.0/16"))));
-        managed.add(new PrefixList("pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
-                new ArrayList<>(List.of("3.218.182.0/24", "52.94.0.0/22"))));
-
         List<String> names = filters.getOrDefault("prefix-list-name", List.of());
         List<String> filterIds = filters.getOrDefault("prefix-list-id", List.of());
-        return managed.stream()
+        return awsManagedPrefixLists(region).stream()
                 .filter(pl -> ids.isEmpty() || ids.contains(pl.getPrefixListId()))
                 .filter(pl -> filterIds.isEmpty() || filterIds.contains(pl.getPrefixListId()))
                 .filter(pl -> names.isEmpty() || names.contains(pl.getPrefixListName()))
+                .map(pl -> new PrefixList(pl.getPrefixListId(), pl.getPrefixListName(),
+                        pl.currentEntries().stream()
+                                .map(PrefixListEntry::getCidr)
+                                .collect(Collectors.toCollection(ArrayList::new))))
                 .collect(Collectors.toList());
+    }
+
+    // =========================================================================
+    // Managed prefix lists
+    // =========================================================================
+
+    private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
+        return List.of(
+                awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
+                        List.of("52.216.0.0/15", "54.231.0.0/16")),
+                awsManagedPrefixList(region, "pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
+                        List.of("3.218.182.0/24", "52.94.0.0/22")));
+    }
+
+    private ManagedPrefixList awsManagedPrefixList(String region, String id, String name, List<String> cidrs) {
+        ManagedPrefixList list = new ManagedPrefixList();
+        list.setPrefixListId(id);
+        list.setPrefixListName(name);
+        // AWS-managed lists are owned by AWS itself, not by the calling account.
+        list.setOwnerId("AWS");
+        list.setPrefixListArn(AwsArnUtils.Arn.of("ec2", region, "aws", "prefix-list/" + id).toString());
+        list.setAddressFamily("IPv4");
+        list.setState("create-complete");
+        list.setMaxEntries(cidrs.size());
+        list.setVersion(1);
+        list.setRegion(region);
+        list.setAwsManaged(true);
+        list.getEntriesByVersion().put("1", cidrs.stream()
+                .map(cidr -> new PrefixListEntry(cidr, null))
+                .collect(Collectors.toList()));
+        return list;
+    }
+
+    public ManagedPrefixList createManagedPrefixList(String region, String prefixListName, String addressFamily,
+                                                     Integer maxEntries, List<PrefixListEntry> entries,
+                                                     List<Tag> prefixListTags) {
+        if (prefixListName == null || prefixListName.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter PrefixListName.", 400);
+        }
+        if (!"IPv4".equals(addressFamily) && !"IPv6".equals(addressFamily)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + addressFamily + "' for addressFamily. Valid values are IPv4 and IPv6.", 400);
+        }
+        if (maxEntries == null || maxEntries < 1) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value for maxEntries. It must be greater than 0.", 400);
+        }
+        List<PrefixListEntry> initial = entries == null ? List.of() : entries;
+        if (initial.size() > maxEntries) {
+            throw new AwsException("InvalidParameterValue",
+                    "The number of entries exceeds the maximum of " + maxEntries + ".", 400);
+        }
+        initial.forEach(entry -> validatePrefixListEntry(entry, addressFamily));
+
+        ManagedPrefixList list = new ManagedPrefixList();
+        String prefixListId = "pl-" + randomHex(17);
+        list.setPrefixListId(prefixListId);
+        list.setPrefixListName(prefixListName);
+        list.setPrefixListArn(AwsArnUtils.Arn.of("ec2", region, accountId, "prefix-list/" + prefixListId).toString());
+        list.setAddressFamily(addressFamily);
+        list.setMaxEntries(maxEntries);
+        list.setOwnerId(accountId);
+        list.setRegion(region);
+        // AWS creates asynchronously (create-in-progress then create-complete). Nothing here is
+        // slow, so the list is complete by the time the caller sees it.
+        list.setState("create-complete");
+        list.setVersion(1);
+        list.getEntriesByVersion().put("1", new ArrayList<>(initial));
+        if (prefixListTags != null && !prefixListTags.isEmpty()) {
+            list.setTags(new ArrayList<>(prefixListTags));
+            tags.put(prefixListId, new ArrayList<>(prefixListTags));
+        }
+        managedPrefixLists.put(key(region, prefixListId), list);
+        return list;
+    }
+
+    public List<ManagedPrefixList> describeManagedPrefixLists(String region, List<String> prefixListIds,
+                                                              Map<String, List<String>> filters) {
+        List<ManagedPrefixList> all = new ArrayList<>(awsManagedPrefixLists(region));
+        managedPrefixLists.scan(k -> true).stream()
+                .filter(list -> region.equals(list.getRegion()))
+                .forEach(all::add);
+
+        if (!prefixListIds.isEmpty()) {
+            for (String prefixListId : prefixListIds) {
+                if (all.stream().noneMatch(list -> list.getPrefixListId().equals(prefixListId))) {
+                    throw new AwsException("InvalidPrefixListID.NotFound",
+                            "The prefix list ID '" + prefixListId + "' does not exist.", 400);
+                }
+            }
+        }
+        return all.stream()
+                .filter(list -> prefixListIds.isEmpty() || prefixListIds.contains(list.getPrefixListId()))
+                .filter(list -> matchesFilters(list, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public List<PrefixListEntry> getManagedPrefixListEntries(String region, String prefixListId, Long targetVersion) {
+        ManagedPrefixList list = getRequiredManagedPrefixList(region, prefixListId);
+        long version = targetVersion != null ? targetVersion : list.getVersion();
+        List<PrefixListEntry> entries = list.getEntriesByVersion().get(String.valueOf(version));
+        if (entries == null) {
+            throw new AwsException("InvalidParameterValue",
+                    "Version " + version + " does not exist for prefix list " + prefixListId + ".", 400);
+        }
+        return entries;
+    }
+
+    /**
+     * Applies removals before additions, matching AWS, so a single call can replace an entry's
+     * description by removing and re-adding the same CIDR. Only an entry change produces a new
+     * version — renaming the list leaves the version untouched.
+     */
+    public ManagedPrefixList modifyManagedPrefixList(String region, String prefixListId, Long currentVersion,
+                                                     String prefixListName, Integer maxEntries,
+                                                     List<PrefixListEntry> addEntries, List<String> removeCidrs) {
+        synchronized (lockFor(key(region, prefixListId))) {
+            ManagedPrefixList list = getRequiredManagedPrefixList(region, prefixListId);
+            requireCustomerManaged(list, "modified");
+            if (currentVersion != null && currentVersion != list.getVersion()) {
+                throw new AwsException("PrefixListVersionMismatch",
+                        "The prefix list has the incorrect version number.", 400);
+            }
+
+            List<PrefixListEntry> updated = new ArrayList<>(list.currentEntries());
+            if (removeCidrs != null && !removeCidrs.isEmpty()) {
+                updated.removeIf(entry -> removeCidrs.contains(entry.getCidr()));
+            }
+            if (addEntries != null) {
+                for (PrefixListEntry entry : addEntries) {
+                    validatePrefixListEntry(entry, list.getAddressFamily());
+                    updated.removeIf(existing -> existing.getCidr().equals(entry.getCidr()));
+                    updated.add(entry);
+                }
+            }
+
+            int effectiveMax = maxEntries != null ? maxEntries : list.getMaxEntries();
+            if (effectiveMax < 1) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid value for maxEntries. It must be greater than 0.", 400);
+            }
+            if (updated.size() > effectiveMax) {
+                throw new AwsException("InvalidParameterValue",
+                        "The number of entries exceeds the maximum of " + effectiveMax + ".", 400);
+            }
+            if (maxEntries != null) {
+                list.setMaxEntries(maxEntries);
+            }
+            if (prefixListName != null && !prefixListName.isBlank()) {
+                list.setPrefixListName(prefixListName);
+            }
+
+            boolean entriesChanged = (addEntries != null && !addEntries.isEmpty())
+                    || (removeCidrs != null && !removeCidrs.isEmpty());
+            if (entriesChanged) {
+                long nextVersion = list.getVersion() + 1;
+                list.getEntriesByVersion().put(String.valueOf(nextVersion), updated);
+                list.setVersion(nextVersion);
+            }
+            list.setState("modify-complete");
+            managedPrefixLists.put(key(region, prefixListId), list);
+            return list;
+        }
+    }
+
+    public ManagedPrefixList deleteManagedPrefixList(String region, String prefixListId) {
+        synchronized (lockFor(key(region, prefixListId))) {
+            ManagedPrefixList list = getRequiredManagedPrefixList(region, prefixListId);
+            requireCustomerManaged(list, "deleted");
+            managedPrefixLists.delete(key(region, prefixListId));
+            tags.delete(prefixListId);
+            // AWS reports delete-complete on the returned object even though it is now gone.
+            list.setState("delete-complete");
+            return list;
+        }
+    }
+
+    private ManagedPrefixList getRequiredManagedPrefixList(String region, String prefixListId) {
+        if (prefixListId == null || prefixListId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter PrefixListId.", 400);
+        }
+        return describeManagedPrefixLists(region, List.of(prefixListId), Map.of()).stream()
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidPrefixListID.NotFound",
+                        "The prefix list ID '" + prefixListId + "' does not exist.", 400));
+    }
+
+    private void requireCustomerManaged(ManagedPrefixList list, String verb) {
+        if (list.isAwsManaged()) {
+            throw new AwsException("UnsupportedOperation",
+                    "The prefix list " + list.getPrefixListId()
+                            + " is an AWS-managed prefix list and cannot be " + verb + ".", 400);
+        }
+    }
+
+    private void validatePrefixListEntry(PrefixListEntry entry, String addressFamily) {
+        if (entry.getCidr() == null || entry.getCidr().isBlank()) {
+            throw new AwsException("MissingParameter", "Every prefix list entry must specify a Cidr.", 400);
+        }
+        boolean ipv6 = entry.getCidr().contains(":");
+        if (ipv6 != "IPv6".equals(addressFamily)) {
+            throw new AwsException("InvalidParameterValue",
+                    "The CIDR '" + entry.getCidr() + "' does not match the address family " + addressFamily + ".", 400);
+        }
     }
 
     private String key(String region, String id) {
@@ -2218,7 +2431,12 @@ public class Ec2Service implements ContainerTeardown {
         NetworkAcl networkAcl = networkAcls.get(storeKey).orElse(null);
         if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); return; }
         Address address = addresses.get(storeKey).orElse(null);
-        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); }
+        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); return; }
+        ManagedPrefixList prefixList = managedPrefixLists.get(storeKey).orElse(null);
+        if (prefixList != null) {
+            prefixList.setTags(new ArrayList<>(tagList));
+            managedPrefixLists.put(storeKey, prefixList);
+        }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -2268,6 +2486,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resourceId.startsWith("lt-")) return "launch-template";
         if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
         if (resourceId.startsWith("nat-")) return "natgateway";
+        if (resourceId.startsWith("pl-")) return "prefix-list";
         return "unknown";
     }
 
@@ -2413,6 +2632,41 @@ public class Ec2Service implements ContainerTeardown {
             Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
             route.setNatGatewayId(natGatewayId);
             next.add(route);
+            current.setRoutes(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
+    }
+
+    public void replaceRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
+        if (destinationCidrBlock == null || destinationCidrBlock.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must include DestinationCidrBlock; routes are matched on their IPv4 destination.", 400);
+        }
+        // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
+        // emulator cannot model (transit gateway, network interface, peering connection, ...) from
+        // silently clearing the route and reporting success.
+        boolean hasGateway = gatewayId != null && !gatewayId.isBlank();
+        boolean hasNatGateway = natGatewayId != null && !natGatewayId.isBlank();
+        if (hasGateway == hasNatGateway) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ReplaceRoute takes exactly one target, and only GatewayId or NatGatewayId is supported.", 400);
+        }
+
+        ensureDefaultResources(region);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<Route> next = new ArrayList<>(current.getRoutes());
+            Route existing = next.stream()
+                    .filter(r -> destinationCidrBlock.equals(r.getDestinationCidrBlock()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("InvalidRoute.NotFound",
+                            "The route identified by " + destinationCidrBlock + " does not exist", 400));
+
+            // The target the request does not name is cleared rather than carried over from the
+            // route being replaced.
+            Route replacement = new Route(destinationCidrBlock, hasGateway ? gatewayId : null, existing.getOrigin());
+            replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
+            next.set(next.indexOf(existing), replacement);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
         }
@@ -2734,6 +2988,14 @@ public class Ec2Service implements ContainerTeardown {
                 default -> true;
             };
         }
+        if (resource instanceof ManagedPrefixList prefixList) {
+            return switch (filterName) {
+                case "prefix-list-id" -> matchesValue(values, prefixList.getPrefixListId());
+                case "prefix-list-name" -> matchesValue(values, prefixList.getPrefixListName());
+                case "owner-id" -> matchesValue(values, prefixList.getOwnerId());
+                default -> true;
+            };
+        }
         if (resource instanceof SecurityGroup sg) {
             return switch (filterName) {
                 case "group-id" -> matchesValue(values, sg.getGroupId());
@@ -2859,6 +3121,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
         if (resource instanceof NetworkInterface ni) return ni.getTagSet();
+        if (resource instanceof ManagedPrefixList prefixList) return prefixList.getTags();
         if (resource instanceof LaunchTemplate lt) return lt.getTags();
         if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
         if (resource instanceof NatGateway natGateway) return natGateway.getTags();

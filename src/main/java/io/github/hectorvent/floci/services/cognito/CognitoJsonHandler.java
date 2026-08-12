@@ -67,6 +67,7 @@ public class CognitoJsonHandler {
             case "AdminUserGlobalSignOut" -> handleAdminUserGlobalSignOut(request);
             case "AdminEnableUser" -> handleAdminEnableUser(request);
             case "AdminDisableUser" -> handleAdminDisableUser(request);
+            case "AdminLinkProviderForUser" -> handleAdminLinkProviderForUser(request);
             case "ListUsers" -> handleListUsers(request);
             case "InitiateAuth" -> handleInitiateAuth(request);
             case "AdminInitiateAuth" -> handleAdminInitiateAuth(request);
@@ -433,6 +434,16 @@ public class CognitoJsonHandler {
 
     private Response handleAdminDisableUser(JsonNode request) {
         service.adminDisableUser(request.path("UserPoolId").asText(), request.path("Username").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleAdminLinkProviderForUser(JsonNode request) {
+        JsonNode sourceUser = request.path("SourceUser");
+        service.adminLinkProviderForUser(
+                request.path("UserPoolId").asText(),
+                request.path("DestinationUser").path("ProviderAttributeValue").asText(),
+                sourceUser.path("ProviderName").asText(),
+                sourceUser.path("ProviderAttributeValue").asText());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

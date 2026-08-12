@@ -20,6 +20,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -46,6 +48,49 @@ class ContainerLifecycleManagerVolumeTest {
     @BeforeEach
     void setUp() {
         manager = new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator);
+    }
+
+    @Test
+    void stopAndRemoveStopsContainerBeforeClosingItsLogStream() {
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        List<String> operations = new ArrayList<>();
+        doAnswer(invocation -> {
+            operations.add("stop");
+            return null;
+        }).when(stop).exec();
+        doAnswer(invocation -> {
+            operations.add("remove");
+            return null;
+        }).when(remove).exec();
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+
+        manager.stopAndRemove("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("stop", "remove", "logs"), operations);
+    }
+
+    @Test
+    void stopAndRemoveForceRemovesAndFinalizesLogStreamWhenContainerStopFails() {
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        List<String> operations = new ArrayList<>();
+        doThrow(new RuntimeException("Docker daemon unavailable")).when(stop).exec();
+        doAnswer(invocation -> {
+            operations.add("remove");
+            return null;
+        }).when(remove).exec();
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+
+        manager.stopAndRemove("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("remove", "logs"), operations);
     }
 
     @Test

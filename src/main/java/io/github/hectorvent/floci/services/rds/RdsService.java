@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -61,6 +62,26 @@ public class RdsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
+            managedDefault("aurora-mysql5.7"),
+            managedDefault("aurora-mysql8.0"),
+            managedDefault("aurora-mysql8.4"),
+            managedDefault("aurora-postgresql11"),
+            managedDefault("aurora-postgresql12"),
+            managedDefault("aurora-postgresql13"),
+            managedDefault("aurora-postgresql14"),
+            managedDefault("aurora-postgresql15"),
+            managedDefault("aurora-postgresql16"),
+            managedDefault("aurora-postgresql17"),
+            managedDefault("aurora-postgresql18"),
+            managedDefault("mysql8.0"),
+            managedDefault("mysql8.4"),
+            managedDefault("postgres13"),
+            managedDefault("postgres14"),
+            managedDefault("postgres15"),
+            managedDefault("postgres16"),
+            managedDefault("postgres17"),
+            managedDefault("postgres18"));
 
     private final StorageBackend<String, DbInstance> instances;
     private final StorageBackend<String, DbCluster> clusters;
@@ -76,6 +97,7 @@ public class RdsService implements Resettable {
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
     private final DockerHostResolver dockerHostResolver;
+    private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
@@ -96,7 +118,8 @@ public class RdsService implements Resettable {
                       EmulatorConfig config,
                       StorageFactory storageFactory,
                       SecretsManagerService secretsManagerService,
-                      DockerHostResolver dockerHostResolver) {
+                      DockerHostResolver dockerHostResolver,
+                      CurrentContainerNetworkResolver currentContainerNetworkResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -104,6 +127,7 @@ public class RdsService implements Resettable {
         this.config = config;
         this.secretsManagerService = secretsManagerService;
         this.dockerHostResolver = dockerHostResolver;
+        this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -132,7 +156,7 @@ public class RdsService implements Resettable {
                StorageBackend<String, DbSubnetGroup> subnetGroups) {
         this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
-                null, null);
+                null, null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -149,7 +173,26 @@ public class RdsService implements Resettable {
                DockerHostResolver dockerHostResolver) {
         this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
-                secretsManagerService, dockerHostResolver,
+                secretsManagerService, dockerHostResolver, null,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+    }
+
+    RdsService(RdsContainerManager containerManager,
+               RdsProxyManager proxyManager,
+               Ec2Service ec2Service,
+               RegionResolver regionResolver,
+               EmulatorConfig config,
+               StorageBackend<String, DbInstance> instances,
+               StorageBackend<String, DbCluster> clusters,
+               StorageBackend<String, DbParameterGroup> parameterGroups,
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups,
+               SecretsManagerService secretsManagerService,
+               DockerHostResolver dockerHostResolver,
+               CurrentContainerNetworkResolver currentContainerNetworkResolver) {
+        this(containerManager, proxyManager, ec2Service, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
+                secretsManagerService, dockerHostResolver, currentContainerNetworkResolver,
                 new InMemoryStorage<>(), new InMemoryStorage<>());
     }
 
@@ -168,6 +211,26 @@ public class RdsService implements Resettable {
                DockerHostResolver dockerHostResolver,
                StorageBackend<String, DbProxy> proxies,
                StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups) {
+        this(containerManager, proxyManager, ec2Service, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
+                secretsManagerService, dockerHostResolver, null, proxies, proxyTargetGroups);
+    }
+
+    RdsService(RdsContainerManager containerManager,
+               RdsProxyManager proxyManager,
+               Ec2Service ec2Service,
+               RegionResolver regionResolver,
+               EmulatorConfig config,
+               StorageBackend<String, DbInstance> instances,
+               StorageBackend<String, DbCluster> clusters,
+               StorageBackend<String, DbParameterGroup> parameterGroups,
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups,
+               SecretsManagerService secretsManagerService,
+               DockerHostResolver dockerHostResolver,
+               CurrentContainerNetworkResolver currentContainerNetworkResolver,
+               StorageBackend<String, DbProxy> proxies,
+               StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -175,6 +238,7 @@ public class RdsService implements Resettable {
         this.config = config;
         this.secretsManagerService = secretsManagerService;
         this.dockerHostResolver = dockerHostResolver;
+        this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.instances = instances;
         this.clusters = clusters;
         this.parameterGroups = parameterGroups;
@@ -387,7 +451,7 @@ public class RdsService implements Resettable {
             }
         }
 
-        DbEndpoint endpoint = new DbEndpoint(mock ? "localhost" : proxyEndpointHost(), proxyPort);
+        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
@@ -433,7 +497,8 @@ public class RdsService implements Resettable {
         }
 
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
-        LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
+        LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
+                id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
     }
 
@@ -631,8 +696,11 @@ public class RdsService implements Resettable {
         String effectiveRegion = effectiveRegion(region);
         Map<String, DbInstance> unique = new LinkedHashMap<>();
         for (DbInstance instance : instances.scan(k -> true)) {
-            if ((filterId == null || filterId.isBlank()
-                    || instance.getDbInstanceIdentifier().equalsIgnoreCase(filterId))
+            boolean matchesFilter = filterId == null || filterId.isBlank()
+                    || (filterId.startsWith("arn:")
+                    ? filterId.equalsIgnoreCase(instance.getDbInstanceArn())
+                    : instance.getDbInstanceIdentifier().equalsIgnoreCase(filterId));
+            if (matchesFilter
                     && hasRdsResourceIdentity(
                     instance.getDbInstanceArn(), accountId, effectiveRegion, "db",
                     instance.getDbInstanceIdentifier())) {
@@ -644,6 +712,20 @@ public class RdsService implements Resettable {
             }
         }
         return unique.values();
+    }
+
+    public Collection<DbInstance> listDbInstancesByDbiResourceIds(Collection<String> resourceIds) {
+        return listDbInstancesByDbiResourceIds(resourceIds, regionResolver.getDefaultRegion());
+    }
+
+    public Collection<DbInstance> listDbInstancesByDbiResourceIds(
+            Collection<String> resourceIds, String region) {
+        if (resourceIds == null || resourceIds.isEmpty()) {
+            return listDbInstances(null, region);
+        }
+        return listDbInstances(null, region).stream()
+                .filter(instance -> resourceIds.contains(instance.getDbiResourceId()))
+                .toList();
     }
 
     public DbInstance modifyDbInstance(String id, String newPassword, Boolean iamEnabled,
@@ -869,7 +951,7 @@ public class RdsService implements Resettable {
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = allocateProxyPort();
-        DbEndpoint endpoint = new DbEndpoint(mock ? "localhost" : proxyEndpointHost(), proxyPort);
+        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
@@ -911,8 +993,8 @@ public class RdsService implements Resettable {
         }
 
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
-        LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint=localhost:{3}",
-                id, String.valueOf(mock), engine, String.valueOf(proxyPort));
+        LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
+                id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
         return cluster;
     }
 
@@ -937,8 +1019,11 @@ public class RdsService implements Resettable {
         String effectiveRegion = effectiveRegion(region);
         Map<String, DbCluster> unique = new LinkedHashMap<>();
         for (DbCluster cluster : clusters.scan(k -> true)) {
-            if ((filterId == null || filterId.isBlank()
-                    || cluster.getDbClusterIdentifier().equalsIgnoreCase(filterId))
+            boolean matchesFilter = filterId == null || filterId.isBlank()
+                    || (filterId.startsWith("arn:")
+                    ? filterId.equalsIgnoreCase(cluster.getDbClusterArn())
+                    : cluster.getDbClusterIdentifier().equalsIgnoreCase(filterId));
+            if (matchesFilter
                     && hasRdsResourceIdentity(
                     cluster.getDbClusterArn(), accountId, effectiveRegion, "cluster",
                     cluster.getDbClusterIdentifier())) {
@@ -1991,7 +2076,8 @@ public class RdsService implements Resettable {
     public DbClusterParameterGroup createDbClusterParameterGroup(
             String name, String family, String description, String region) {
         String effectiveRegion = effectiveRegion(region);
-        if (findClusterParameterGroupForRegion(name, effectiveRegion) != null
+        if (managedClusterParameterGroup(name) != null
+                || findClusterParameterGroupForRegion(name, effectiveRegion) != null
                 || scopedKeyExists(clusterParameterGroups, currentAccountId(),
                 dbResourceKey(effectiveRegion, name))) {
             throw new AwsException("DBParameterGroupAlreadyExists",
@@ -2011,6 +2097,12 @@ public class RdsService implements Resettable {
         DbClusterParameterGroup group = findClusterParameterGroupForRegion(
                 name, effectiveRegion(region));
         if (group == null) {
+            ManagedClusterParameterGroup managed = managedClusterParameterGroup(name);
+            if (managed != null) {
+                group = managed.toModel(effectiveRegion(region));
+            }
+        }
+        if (group == null) {
             throw new AwsException("DBClusterParameterGroupNotFound",
                     "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
         }
@@ -2025,11 +2117,21 @@ public class RdsService implements Resettable {
             String filterName, String region) {
         String effectiveRegion = effectiveRegion(region);
         if (filterName != null && !filterName.isBlank()) {
-            DbClusterParameterGroup group = findClusterParameterGroupForRegion(
-                    filterName, effectiveRegion);
-            return group != null ? List.of(group) : List.of();
+            try {
+                return List.of(getDbClusterParameterGroup(filterName, effectiveRegion));
+            } catch (AwsException e) {
+                if ("DBClusterParameterGroupNotFound".equals(e.getErrorCode())) {
+                    throw new AwsException("DBParameterGroupNotFound",
+                            "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404);
+                }
+                throw e;
+            }
         }
         Map<String, DbClusterParameterGroup> unique = new LinkedHashMap<>();
+        for (ManagedClusterParameterGroup managed : MANAGED_CLUSTER_PARAMETER_GROUPS) {
+            DbClusterParameterGroup group = managed.toModel(effectiveRegion);
+            unique.put(group.getDbClusterParameterGroupName(), group);
+        }
         List<DbClusterParameterGroup> storedGroups;
         if (clusterParameterGroups
                 instanceof AccountAwareStorageBackend<DbClusterParameterGroup> aware) {
@@ -2041,16 +2143,40 @@ public class RdsService implements Resettable {
         } else {
             storedGroups = clusterParameterGroups.scan(k -> true);
         }
-        for (DbClusterParameterGroup group : storedGroups) {
-            if (clusterParameterGroupBelongsToRegion(group, effectiveRegion)) {
-                DbClusterParameterGroup canonical = findClusterParameterGroupForRegion(
-                        group.getDbClusterParameterGroupName(), effectiveRegion);
-                if (canonical != null) {
-                    unique.put(canonical.getDbClusterParameterGroupName(), canonical);
-                }
+        storedGroups.stream()
+                .sorted(Comparator.comparing(
+                        DbClusterParameterGroup::getDbClusterParameterGroupName,
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .filter(group -> clusterParameterGroupBelongsToRegion(group, effectiveRegion))
+                .map(group -> findClusterParameterGroupForRegion(
+                        group.getDbClusterParameterGroupName(), effectiveRegion))
+                .filter(Objects::nonNull)
+                .forEach(group -> unique.put(group.getDbClusterParameterGroupName(), group));
+        return unique.values();
+    }
+
+    private static ManagedClusterParameterGroup managedClusterParameterGroup(String name) {
+        for (ManagedClusterParameterGroup group : MANAGED_CLUSTER_PARAMETER_GROUPS) {
+            if (group.name().equals(name)) {
+                return group;
             }
         }
-        return unique.values();
+        return null;
+    }
+
+    private static ManagedClusterParameterGroup managedDefault(String family) {
+        return new ManagedClusterParameterGroup(
+                "default." + family,
+                family,
+                "Default cluster parameter group");
+    }
+
+    private record ManagedClusterParameterGroup(String name, String family, String description) {
+        private DbClusterParameterGroup toModel(String region) {
+            DbClusterParameterGroup group = new DbClusterParameterGroup(name, family, description);
+            group.setRegion(region);
+            return group;
+        }
     }
 
     public void deleteDbClusterParameterGroup(String name) {
@@ -2059,6 +2185,10 @@ public class RdsService implements Resettable {
 
     public void deleteDbClusterParameterGroup(String name, String region) {
         String effectiveRegion = effectiveRegion(region);
+        if (managedClusterParameterGroup(name) != null) {
+            throw new AwsException("InvalidDBParameterGroupState",
+                    "The default DB cluster parameter group cannot be deleted.", 400);
+        }
         if (findClusterParameterGroupForRegion(name, effectiveRegion) == null) {
             throw new AwsException("DBClusterParameterGroupNotFound",
                     "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
@@ -2075,6 +2205,10 @@ public class RdsService implements Resettable {
     public DbClusterParameterGroup modifyDbClusterParameterGroup(
             String name, java.util.Map<String, String> parameters, String region) {
         String effectiveRegion = effectiveRegion(region);
+        if (managedClusterParameterGroup(name) != null) {
+            throw new AwsException("InvalidDBParameterGroupState",
+                    "The default DB cluster parameter group cannot be modified.", 400);
+        }
         DbClusterParameterGroup group = getDbClusterParameterGroup(name, effectiveRegion);
         if (parameters != null) {
             group.getParameters().putAll(parameters);
@@ -2159,7 +2293,41 @@ public class RdsService implements Resettable {
             return;
         }
         DbClusterParameterGroup group = getDbClusterParameterGroup(paramGroupName, region);
-        validateParameterGroupFamily(paramGroupName, group.getDbParameterGroupFamily(), engineParam, engineVersion);
+        String family = group.getDbParameterGroupFamily();
+        String expectedFamily = expectedClusterParameterGroupFamily(engineParam, engineVersion);
+        if (family == null || !family.equalsIgnoreCase(expectedFamily)) {
+            throw new AwsException("InvalidParameterCombination", invalidParameterCombinationMessage(), 400);
+        }
+    }
+
+    private String expectedClusterParameterGroupFamily(String engineParam, String engineVersion) {
+        String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
+        String effectiveVersion = engineVersion;
+        if (effectiveVersion == null || effectiveVersion.isBlank()) {
+            effectiveVersion = switch (normalizedEngine) {
+                case "postgres", "aurora-postgresql" -> "16.3";
+                case "mysql", "aurora", "aurora-mysql" -> "8.0.36";
+                case "mariadb" -> "11.2";
+                default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+            };
+        }
+
+        Matcher matcher = IMAGE_TAG_VERSION_PATTERN.matcher(effectiveVersion.trim());
+        if (!matcher.matches()) {
+            throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        }
+        String[] versionParts = matcher.group(1).split("\\.");
+        String familyVersion = switch (normalizedEngine) {
+            case "postgres", "aurora-postgresql" -> versionParts[0];
+            case "mysql", "aurora", "aurora-mysql", "mariadb" -> {
+                if (versionParts.length < 2) {
+                    throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+                }
+                yield versionParts[0] + "." + versionParts[1];
+            }
+            default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        };
+        return expectedFamilyPrefix(normalizedEngine) + familyVersion;
     }
 
     private void validateParameterGroupFamily(String groupName, String family, String engineParam, String engineVersion) {
@@ -2239,6 +2407,19 @@ public class RdsService implements Resettable {
 
     private void releaseProxyPort(int port) {
         usedPorts.remove(port);
+    }
+
+    private DbEndpoint proxyEndpoint(int proxyPort) {
+        Optional<String> endpointHost = config.services().rds().endpointHost()
+                .filter(host -> !host.isBlank());
+        if (endpointHost.isEmpty()) {
+            return new DbEndpoint(proxyEndpointHost(), proxyPort);
+        }
+
+        int endpointPort = currentContainerNetworkResolver == null
+                ? proxyPort
+                : currentContainerNetworkResolver.resolvePublishedPort(proxyPort).orElse(proxyPort);
+        return new DbEndpoint(endpointHost.get(), endpointPort);
     }
 
     private String proxyEndpointHost() {
@@ -2924,8 +3105,9 @@ public class RdsService implements Resettable {
                             cluster.getDbClusterIdentifier(), cluster);
                     continue;
                 }
-                cluster.setEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
-                cluster.setReaderEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
+                DbEndpoint endpoint = proxyEndpoint(proxyPort);
+                cluster.setEndpoint(endpoint);
+                cluster.setReaderEndpoint(endpoint);
                 String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
                 restoredHandle = containerManager.start(
                         cluster.getDbClusterArn(), cluster.getDbClusterIdentifier(),
@@ -3022,7 +3204,7 @@ public class RdsService implements Resettable {
                             instance.getDbInstanceIdentifier(), instance);
                     continue;
                 }
-                instance.setEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
+                instance.setEndpoint(proxyEndpoint(proxyPort));
                 String backendHost;
                 int backendPort;
                 if (clusterId != null && !clusterId.isBlank()) {
