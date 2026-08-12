@@ -511,6 +511,19 @@ class IamServiceTest {
         assertEquals("111122223333", service.resolveAccountId(accessKey.getAccessKeyId()).orElseThrow());
     }
 
+    @Test
+    void resolveAccountIdIgnoresInactiveLongTermAccessKey() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAINACTIVEEXAMPLE", "secret", "worker");
+        accessKey.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.resolveAccountId(accessKey.getAccessKeyId()).isEmpty());
+    }
+
     private static final class CountingAccountAwareSessionStorage
             extends AccountAwareStorageBackend<SessionCredential> {
 

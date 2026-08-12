@@ -118,6 +118,16 @@ class AccountContextFilterTest {
     }
 
     @Test
+    void resolvesIamAccessKeyFromPresignedCredential() {
+        sessionAccounts.put("AKIAPRESIGNEDACCESSKEY", "444455556666");
+        ContainerRequestContext ctx = mockContext(null,
+            "AKIAPRESIGNEDACCESSKEY/20260617/eu-central-1/s3/aws4_request");
+        filter.filter(ctx);
+        assertEquals("444455556666", requestContext.getAccountId());
+        assertEquals("eu-central-1", requestContext.getRegion());
+    }
+
+    @Test
     void twelveDigitAkidWinsOverSessionLookup() {
         sessionAccounts.put("000000000001", "999999999999");
         ContainerRequestContext ctx = mockContext(
