@@ -160,10 +160,14 @@ class TlsConfigSourceCertificateGenerationTest {
         
         assertTrue(sans.contains("host.docker.internal"),
             "Certificate SANs should include default 'host.docker.internal'");
+        assertTrue(sans.contains("*.execute-api.localhost.floci.io"),
+            "Certificate SANs should include API Gateway execution hosts");
+        assertTrue(sans.contains("*.execute-api.localhost.localstack.cloud"),
+            "Certificate SANs should include LocalStack-compatible API Gateway execution hosts");
 
         // Should not contain any custom hostnames
-        assertEquals(7, sans.size(),
-            "Certificate SANs should contain exactly 7 default entries (localhost, 127.0.0.1, 0.0.0.0, *.localhost, localhost.floci.io, *.localhost.floci.io, host.docker.internal)");
+        assertEquals(9, sans.size(),
+            "Certificate SANs should contain exactly 9 default entries, including API Gateway execution hosts");
     }
 
     /**

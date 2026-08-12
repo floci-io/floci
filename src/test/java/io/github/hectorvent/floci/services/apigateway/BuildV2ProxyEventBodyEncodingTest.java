@@ -50,7 +50,7 @@ class BuildV2ProxyEventBodyEncodingTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null,
                 regionResolver, objectMapper, null,
-                null, null, null, null
+                null, null, null, null, new ApiGatewayExecuteRouteContext()
         );
     }
 
@@ -66,7 +66,7 @@ class BuildV2ProxyEventBodyEncodingTest {
 
         String json = controller.buildV2ProxyEvent(
                 "POST", "/echo", "POST /echo",
-                "abc123", "$default", headers, uriInfo, requestBody, "req-1");
+                "abc123", "us-east-1", "$default", headers, uriInfo, requestBody, "req-1");
 
         JsonNode event = objectMapper.readTree(json);
         if (expectedBody == null) {
