@@ -453,7 +453,7 @@ public class LambdaService {
         fn.setRevisionId(UUID.randomUUID().toString());
 
         // Drain warm containers — they have stale code mounted
-        warmPool.drainFunction(functionName);
+        warmPool.drainEnvironment(fn);
 
         functionStore.save(region, fn);
         LOG.infov("Updated code for function: {0}", functionName);
@@ -590,7 +590,7 @@ public class LambdaService {
         fn.setRevisionId(UUID.randomUUID().toString());
 
         // Drain warm containers so the next invocation picks up the new configuration
-        warmPool.drainFunction(functionName);
+        warmPool.drainEnvironment(fn);
 
         functionStore.save(region, fn);
         LOG.infov("Updated configuration for function: {0}", functionName);

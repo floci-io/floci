@@ -50,7 +50,7 @@ public class WarmPool implements ContainerTeardown {
 
     private static final class PoolState {
         private final Map<String, ArrayDeque<ContainerHandle>> idleByEnvironment = new HashMap<>();
-        private long epoch;
+        private final Map<String, Long> epochByEnvironment = new HashMap<>();
     }
 
     private record Lease(PoolState poolState, long epoch, String environmentKey) {
@@ -122,7 +122,7 @@ public class WarmPool implements ContainerTeardown {
         if (!ephemeral) {
             poolState = poolStates.computeIfAbsent(fn.getFunctionName(), ignored -> new PoolState());
             synchronized (poolState) {
-                leaseEpoch = poolState.epoch;
+                leaseEpoch = poolState.epochByEnvironment.computeIfAbsent(environmentKey, ignored -> 0L);
             }
             // Skip pooled handles whose container died out-of-band — otherwise the
             // caller would wait the full Lambda function timeout.
@@ -203,7 +203,8 @@ public class WarmPool implements ContainerTeardown {
         boolean stale;
         boolean returned;
         synchronized (lease.poolState()) {
-            stale = lease.epoch() != lease.poolState().epoch;
+            stale = lease.epoch() != lease.poolState().epochByEnvironment
+                    .getOrDefault(lease.environmentKey(), 0L);
             returned = !stale && idleSize(lease.poolState()) < maxPoolSizePerFunction;
             if (returned) {
                 handle.setState(ContainerState.WARM);
@@ -232,7 +233,7 @@ public class WarmPool implements ContainerTeardown {
     public void pushCodeUpdate(LambdaFunction fn) {
         LOG.infov("Reactive S3 Sync: invalidating warm pool for function {0} to pick up new code",
                 fn.getFunctionName());
-        drainFunction(fn.getFunctionName());
+        drainEnvironment(fn);
     }
 
     /**
@@ -248,14 +249,33 @@ public class WarmPool implements ContainerTeardown {
     }
 
     /**
-     * Stops and removes all warm containers for the given function.
-     * Called on function delete or code update.
+     * Stops and removes warm containers for one immutable execution environment, such as
+     * {@code $LATEST}. Published versions keep their independently keyed warm containers.
+     */
+    public void drainEnvironment(LambdaFunction fn) {
+        String functionName = fn.getFunctionName();
+        String environmentKey = executionEnvironmentKey(fn);
+        PoolState poolState = poolStates.computeIfAbsent(functionName, ignored -> new PoolState());
+        List<ContainerHandle> toStop;
+        synchronized (poolState) {
+            poolState.epochByEnvironment.merge(environmentKey, 1L, Long::sum);
+            ArrayDeque<ContainerHandle> idle = poolState.idleByEnvironment.remove(environmentKey);
+            toStop = idle == null ? List.of() : new ArrayList<>(idle);
+        }
+        LOG.infov("Draining {0} container(s) for Lambda environment: {1}",
+                toStop.size(), environmentKey);
+        stopInParallel(toStop);
+    }
+
+    /**
+     * Stops and removes all warm containers for every environment of the given function.
+     * Called on function deletion and emulator shutdown.
      */
     public void drainFunction(String functionName) {
         PoolState poolState = poolStates.computeIfAbsent(functionName, ignored -> new PoolState());
         List<ContainerHandle> toStop;
         synchronized (poolState) {
-            poolState.epoch++;
+            poolState.epochByEnvironment.replaceAll((ignored, epoch) -> epoch + 1);
             toStop = new ArrayList<>();
             poolState.idleByEnvironment.values().forEach(toStop::addAll);
             poolState.idleByEnvironment.clear();
