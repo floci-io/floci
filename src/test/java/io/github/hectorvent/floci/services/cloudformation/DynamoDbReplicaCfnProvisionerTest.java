@@ -34,7 +34,7 @@ class DynamoDbReplicaCfnProvisionerTest {
         provisioner = new CloudFormationResourceProvisioner(
                 null, null, null, dynamoDbService, null, null, null, null, null, null,
                 null, null, null, null, null, null, mapper, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, null,
                 new CloudFormationResourceRegistry(List.of()));
     }
 

@@ -132,6 +132,22 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void repeatedReplicaCreateAndDeleteAreIdempotent() {
+        createUsersTable("us-east-1");
+
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+
+        assertEquals(List.of("eu-west-1"),
+                service.describeTable("Users", "us-east-1").getReplicaRegions());
+
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+
+        assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
+    }
+
+    @Test
     void invalidReplicaUpdateLeavesExistingReplicasUnchanged() {
         createUsersTable("us-east-1");
         service.applyReplicaUpdates(

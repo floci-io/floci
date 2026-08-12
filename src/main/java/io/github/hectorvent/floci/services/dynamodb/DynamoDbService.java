@@ -1318,8 +1318,9 @@ public class DynamoDbService {
      * legacy {@code dynamodb.Table.replicationRegions} replica custom resource). This single-process
      * emulator serves every region from the same table, so a replica is tracked as metadata and
      * surfaced by DescribeTable as an ACTIVE Replica; no cross-region copy is performed. Regions are
-     * de-duplicated and adding an existing / removing an absent one is a no-op, keeping repeated
-     * applies idempotent.
+     * de-duplicated and adding an existing / removing an absent one is a no-op, keeping
+     * CloudFormation re-applies and cleanup idempotent. Update remains strict because it represents
+     * a settings change and has no target when the replica is absent.
      */
     public TableDefinition applyReplicaUpdates(String tableName, List<String> addRegions,
                                                List<String> removeRegions, String region) {
