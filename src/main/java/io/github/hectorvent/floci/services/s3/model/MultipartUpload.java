@@ -23,6 +23,7 @@ public class MultipartUpload {
     private String acl;
     private String checksumAlgorithm;
     private Map<String, String> metadata;
+    private Map<String, String> tagging;
     private Instant initiated;
     private final Map<Integer, Part> parts = new ConcurrentHashMap<>();
 
@@ -76,6 +77,9 @@ public class MultipartUpload {
 
     public Map<String, String> getMetadata() { return metadata; }
     public void setMetadata(Map<String, String> metadata) { this.metadata = metadata; }
+
+    public Map<String, String> getTagging() { return tagging; }
+    public void setTagging(Map<String, String> tagging) { this.tagging = tagging; }
 
     public Instant getInitiated() { return initiated; }
     public void setInitiated(Instant initiated) { this.initiated = initiated; }

@@ -6,7 +6,10 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.AccountResolver;
+import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.WebIdentityToken;
+import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -17,8 +20,11 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.security.interfaces.RSAPublicKey;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -32,24 +38,34 @@ public class StsQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(StsQueryHandler.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    private static final String STS_AUDIENCE = "sts.amazonaws.com";
 
     private final IamService iamService;
     private final AccountResolver accountResolver;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final AssumeRolePolicyEvaluator trustPolicyEvaluator;
+    private final WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator;
+    private final WebIdentityTokenVerifier tokenVerifier;
+    private final OidcIssuerKeyLookup oidcIssuerKeys;
 
     @Context
     HttpHeaders headers;
 
     @Inject
     public StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
-                           EmulatorConfig config, AssumeRolePolicyEvaluator trustPolicyEvaluator) {
+                           EmulatorConfig config, AssumeRolePolicyEvaluator trustPolicyEvaluator,
+                           WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
+                           WebIdentityTokenVerifier tokenVerifier,
+                           OidcIssuerKeyLookup oidcIssuerKeys) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
         this.config = config;
         this.trustPolicyEvaluator = trustPolicyEvaluator;
+        this.webIdentityTrustEvaluator = webIdentityTrustEvaluator;
+        this.tokenVerifier = tokenVerifier;
+        this.oidcIssuerKeys = oidcIssuerKeys;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -174,19 +190,34 @@ public class StsQueryHandler {
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
         String providerId = getParam(params, "ProviderId");
+        String webIdentityToken = getParam(params, "WebIdentityToken");
         int durationSeconds = getIntParam(params, "DurationSeconds", 3600);
+
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
+        String callerAccountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
+
+        // Only tokens naming an issuer Floci itself hosts (an EKS cluster's IRSA OIDC provider) are
+        // verifiable, so only those are enforced. An opaque or third-party token keeps the historical
+        // permissive behaviour rather than failing a workflow Floci cannot adjudicate.
+        WebIdentityOutcome outcome = verifyWebIdentityToken(webIdentityToken, roleName, accountId, roleArn);
+        if (outcome.denial() != null) {
+            return outcome.denial();
+        }
+        VerifiedWebIdentity verified = outcome.verified();
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
-        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String callerAccountId = regionResolver.getAccountId();
-        String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
-        String provider = providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com";
+
+        String provider = verified != null ? verified.issuer()
+                : (providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com");
+        String audience = verified != null ? verified.audience() : "sts.amazonaws.com";
+        String subject = verified != null ? verified.subject() : "web-identity-subject";
 
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy, callerAccountId);
@@ -199,10 +230,96 @@ public class StsQueryHandler {
                 .end("AssumedRoleUser")
                 .elem("PackedPolicySize", "0")
                 .elem("Provider", provider)
-                .elem("Audience", "sts.amazonaws.com")
-                .elem("SubjectFromWebIdentityToken", "web-identity-subject")
+                .elem("Audience", audience)
+                .elem("SubjectFromWebIdentityToken", subject)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRoleWithWebIdentity", AwsNamespaces.STS, result)).build();
+    }
+
+    /** The claims of a token Floci issued and verified, used to fill the response accurately. */
+    private record VerifiedWebIdentity(String issuer, String subject, String audience) {}
+
+    /**
+     * The result of inspecting a web identity token: at most one field is non-null. Both null means
+     * the issuer is unknown to Floci, so the token is treated as opaque and accepted.
+     */
+    private record WebIdentityOutcome(VerifiedWebIdentity verified, Response denial) {
+
+        static WebIdentityOutcome unverifiable() {
+            return new WebIdentityOutcome(null, null);
+        }
+
+        static WebIdentityOutcome allow(VerifiedWebIdentity verified) {
+            return new WebIdentityOutcome(verified, null);
+        }
+
+        static WebIdentityOutcome deny(Response denial) {
+            return new WebIdentityOutcome(null, denial);
+        }
+    }
+
+    /**
+     * Inspects {@code token} and decides whether it may assume {@code roleArn}. Returns an outcome
+     * carrying the verified claims, a denial response, or neither when the token's issuer is not one
+     * Floci hosts (preserving the historical permissive behaviour for third-party providers).
+     */
+    private WebIdentityOutcome verifyWebIdentityToken(String token, String roleName, String roleAccountId,
+                                                      String roleArn) {
+        Optional<String> issuer = tokenVerifier.peekIssuer(token);
+        if (issuer.isEmpty()) {
+            return WebIdentityOutcome.unverifiable();
+        }
+        Optional<RSAPublicKey> key = oidcIssuerKeys.findVerificationKey(issuer.get());
+        if (key.isEmpty()) {
+            return WebIdentityOutcome.unverifiable();
+        }
+
+        WebIdentityToken claims;
+        try {
+            claims = tokenVerifier.verify(token, key.get(), issuer.get(), STS_AUDIENCE);
+        } catch (WebIdentityTokenVerifier.InvalidTokenException e) {
+            LOG.debugv("Rejecting web identity token for role {0}: {1}", roleArn, e.getMessage());
+            return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                    e.getMessage(), AwsNamespaces.STS, 400));
+        }
+
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        if (role.isEmpty()) {
+            return WebIdentityOutcome.deny(accessDenied(roleArn));
+        }
+
+        String issuerKeyPrefix = stripScheme(issuer.get());
+        String oidcProviderArn = AwsArnUtils.Arn.of("iam", "", roleAccountId,
+                "oidc-provider/" + issuerKeyPrefix).toString();
+        Map<String, List<String>> conditionClaims = Map.of(
+                "sub", List.of(claims.subject()),
+                "aud", claims.audiences());
+
+        if (!webIdentityTrustEvaluator.allows(role.get().getAssumeRolePolicyDocument(),
+                oidcProviderArn, issuerKeyPrefix, conditionClaims)) {
+            LOG.debugv("Trust policy on role {0} denies web identity subject {1}",
+                    roleArn, claims.subject());
+            return WebIdentityOutcome.deny(accessDenied(roleArn));
+        }
+
+        // verify() already required the audience list to contain STS_AUDIENCE.
+        return WebIdentityOutcome.allow(
+                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE));
+    }
+
+    private Response accessDenied(String roleArn) {
+        return AwsQueryResponse.error("AccessDenied",
+                "Not authorized to perform sts:AssumeRoleWithWebIdentity on resource: " + roleArn,
+                AwsNamespaces.STS, 403);
+    }
+
+    /**
+     * Strips the URL scheme from an issuer. IAM renders an OIDC provider ARN and its condition keys
+     * from the host-and-path form ({@code oidc.eks.<region>.amazonaws.com/id/<id>}), not the full URL.
+     */
+    private static String stripScheme(String issuer) {
+        int schemeEnd = issuer.indexOf("://");
+        return schemeEnd < 0 ? issuer : issuer.substring(schemeEnd + 3);
     }
 
     private Response handleAssumeRoleWithSAML(MultivaluedMap<String, String> params) {

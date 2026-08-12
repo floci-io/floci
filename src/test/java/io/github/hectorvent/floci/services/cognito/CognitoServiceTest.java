@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
@@ -33,6 +36,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CognitoServiceTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private CognitoService service;
     private InMemoryStorage<String, CognitoUser> userStore;
@@ -942,6 +947,124 @@ class CognitoServiceTest {
     }
 
     // =========================================================================
+    // Issue #1563 — AdminLinkProviderForUser
+    // =========================================================================
+
+    @Test
+    void adminLinkProviderForUserAppendsIdentity() {
+        UserPool pool = createPoolAndUser();
+
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        JsonNode identities = identitiesOf(pool, "alice");
+        assertEquals(1, identities.size());
+        JsonNode identity = identities.get(0);
+        assertEquals("google-sub-123", identity.get("userId").asText());
+        assertEquals("Google", identity.get("providerName").asText());
+        assertEquals("Google", identity.get("providerType").asText());
+        assertTrue(identity.get("issuer").isNull());
+        assertFalse(identity.get("primary").asBoolean());
+        assertTrue(identity.get("dateCreated").isNumber(),
+                "dateCreated must be a JSON number, not a string");
+        assertTrue(identity.get("dateCreated").asLong() > 1_600_000_000_000L,
+                "dateCreated must be epoch milliseconds, not seconds");
+    }
+
+    @Test
+    void adminLinkProviderForUserRejectsMissingSourceFields() {
+        UserPool pool = createPoolAndUser();
+
+        AwsException noProvider = assertThrows(AwsException.class,
+                () -> service.adminLinkProviderForUser(pool.getId(), "alice", "", "google-sub-123"));
+        assertEquals("InvalidParameterException", noProvider.getErrorCode());
+
+        AwsException noUserId = assertThrows(AwsException.class,
+                () -> service.adminLinkProviderForUser(pool.getId(), "alice", "Google", ""));
+        assertEquals("InvalidParameterException", noUserId.getErrorCode());
+
+        AwsException noDestination = assertThrows(AwsException.class,
+                () -> service.adminLinkProviderForUser(pool.getId(), "", "Google", "google-sub-123"));
+        assertEquals("InvalidParameterException", noDestination.getErrorCode());
+
+        assertNull(service.adminGetUser(pool.getId(), "alice").getAttributes().get("identities"));
+    }
+
+    @Test
+    void adminLinkProviderForUserReplacesMalformedIdentities() {
+        UserPool pool = createPoolAndUser();
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("identities", "not-json-at-all"));
+
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        JsonNode identities = identitiesOf(pool, "alice");
+        assertEquals(1, identities.size());
+        assertEquals("google-sub-123", identities.get(0).get("userId").asText());
+    }
+
+    @Test
+    void adminLinkProviderForUserSecondProviderAppends() {
+        UserPool pool = createPoolAndUser();
+
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+        service.adminLinkProviderForUser(pool.getId(), "alice", "MyOIDCProvider", "oidc-sub-456");
+
+        JsonNode identities = identitiesOf(pool, "alice");
+        assertEquals(2, identities.size());
+        assertEquals("Google", identities.get(0).get("providerName").asText());
+        assertEquals("MyOIDCProvider", identities.get(1).get("providerName").asText());
+        assertTrue(identities.get(1).get("providerType").isNull(),
+                "providerType is unknowable without a registered IdP");
+    }
+
+    @Test
+    void adminLinkProviderForUserDuplicateIdentityThrows() {
+        UserPool pool = createPoolAndUser();
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123"));
+        assertEquals("AliasExistsException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminLinkProviderForUserRelinkToDifferentUserThrows() {
+        UserPool pool = createPoolAndUser();
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), "TempPass1!");
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser(pool.getId(), "bob", "Google", "google-sub-123"));
+        assertEquals("AliasExistsException", ex.getErrorCode());
+        assertEquals(1, identitiesOf(pool, "alice").size(), "the existing link must survive");
+    }
+
+    @Test
+    void adminLinkProviderForUserUnknownUserThrows() {
+        UserPool pool = createPoolAndUser();
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser(pool.getId(), "ghost", "Google", "google-sub-123"));
+        assertEquals("UserNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminLinkProviderForUserUnknownPoolThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminLinkProviderForUser("us-east-1_missing", "alice", "Google", "google-sub-123"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    private JsonNode identitiesOf(UserPool pool, String username) {
+        String raw = service.adminGetUser(pool.getId(), username).getAttributes().get("identities");
+        assertNotNull(raw, "identities attribute should be set");
+        try {
+            return MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new AssertionError("identities is not valid JSON: " + raw, e);
+        }
+    }
+
+    // =========================================================================
     // JWT groups claim
     // =========================================================================
 
@@ -1616,6 +1739,13 @@ class CognitoServiceTest {
         assertTrue(result.isEmpty());
     }
 
+    /** Signs a hand-crafted {@code poolId|username|clientId|issuedAt|nonce} payload the same way buildRefreshToken does. */
+    private static String signRawRefreshToken(UserPool pool, String raw) {
+        String signature = CognitoService.hmacSha256(CognitoService.refreshTokenSecretBytes(pool), raw);
+        return Base64.getEncoder().withoutPadding()
+                .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
+    }
+
     // =========================================================================
     // Issue #234 — GetTokensFromRefreshToken
     // =========================================================================
@@ -1633,14 +1763,15 @@ class CognitoServiceTest {
         String refreshToken = (String) auth.get("RefreshToken");
 
         assertNotNull(refreshToken);
-        // Should be parseable as base64 structured token
+        // Should be parseable as base64 structured token: 5 payload fields + trailing HMAC signature
         String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
-        String[] parts = decoded.split("\\|", 5);
-        assertEquals(5, parts.length, "Refresh token should encode 5 pipe-separated fields");
+        String[] parts = decoded.split("\\|", 6);
+        assertEquals(6, parts.length, "Refresh token should encode 5 pipe-separated fields plus a signature");
         assertEquals(pool.getId(), parts[0]);
         assertEquals("alice", parts[1]);
         assertEquals(client.getClientId(), parts[2]);
         assertFalse(parts[3].isBlank(), "Refresh token should encode its issued-at timestamp");
+        assertFalse(parts[5].isBlank(), "Refresh token should encode a signature");
     }
 
     @Test
@@ -1704,7 +1835,7 @@ class CognitoServiceTest {
 
         long issuedAt = (System.currentTimeMillis() / 1000L) - 5;
         String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAt + "|" + java.util.UUID.randomUUID();
-        String expiredRefreshToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+        String expiredRefreshToken = signRawRefreshToken(pool, raw);
 
         AwsException exception = assertThrows(AwsException.class, () ->
                 service.getTokensFromRefreshToken(client.getClientId(), expiredRefreshToken));
@@ -1729,6 +1860,99 @@ class CognitoServiceTest {
 
         assertNotNull(refreshed.get("AccessToken"));
         assertNotNull(refreshed.get("IdToken"));
+    }
+
+    // =========================================================================
+    // Issue #2137 — Refresh tokens must be unforgeable (HMAC-signed)
+    // =========================================================================
+
+    @Test
+    void getTokensFromRefreshTokenRejectsUnsignedForgedToken() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // Attacker who knows the pool id, client id, and a valid username, but not the pool's secret.
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|"
+                + System.currentTimeMillis() + "|" + java.util.UUID.randomUUID();
+        String forgedToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), forgedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenRejectsTamperedUsername() {
+        UserPool pool = createPoolAndUser();
+        service.adminCreateUser(pool.getId(), "mallory", Map.of("email", "mallory@example.com"), "TempPass1!");
+        service.adminSetUserPassword(pool.getId(), "mallory", "Perm1234!", true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "mallory", "PASSWORD", "Perm1234!"));
+        String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
+
+        // Swap the username in the decoded payload post-signing; the HMAC no longer matches.
+        String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
+        String tampered = decoded.replaceFirst("\\|mallory\\|", "|alice|");
+        String tamperedToken = Base64.getEncoder().withoutPadding().encodeToString(tampered.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), tamperedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenRejectsSwappedPoolId() {
+        UserPool poolA = createPoolAndUser();
+        UserPool poolB = service.createUserPool(Map.of("PoolName", "OtherPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(poolA.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
+
+        // Swap the embedded pool id for a different real pool; the signature was computed over poolA's id.
+        String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
+        String tampered = decoded.replaceFirst("^" + poolA.getId() + "\\|", poolB.getId() + "|");
+        String tamperedToken = Base64.getEncoder().withoutPadding().encodeToString(tampered.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), tamperedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    void refreshTokenAuthRejectsForgedTokenInsteadOfIssuingUnknownUserTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // A garbage/forged REFRESH_TOKEN must not fall through to minting real, signed
+        // tokens for a hardcoded "unknown" user via InitiateAuth REFRESH_TOKEN_AUTH.
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", "not-a-valid-refresh-token")));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    void refreshTokenAuthRejectsNonNumericIssuedAt() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // Validly signed, but with a non-numeric issued-at field, must not throw an
+        // uncaught NumberFormatException — it should be rejected as an invalid token.
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|not-a-number|" + java.util.UUID.randomUUID();
+        String malformedToken = signRawRefreshToken(pool, raw);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", malformedToken)));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
     }
 
     // =========================================================================

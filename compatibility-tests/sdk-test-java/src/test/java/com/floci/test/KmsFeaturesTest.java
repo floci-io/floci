@@ -1,12 +1,17 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.CreateKeyResponse;
+import software.amazon.awssdk.services.kms.model.DisabledException;
 import software.amazon.awssdk.services.kms.model.EncryptionAlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.GetKeyPolicyResponse;
+import software.amazon.awssdk.services.kms.model.IncorrectKeyException;
+import software.amazon.awssdk.services.kms.model.KmsInvalidStateException;
 import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
@@ -17,8 +22,10 @@ import static org.assertj.core.api.Assertions.*;
  *   #258 — GetKeyPolicy returns the stored policy
  *   #259 — PutKeyPolicy updates the key policy
  *   #DescribeKey — Returns proper EncryptionAlgorithms, SigningAlgorithms, and MacAlgorithms
+ *   #1844 — Decrypt enforces KeyId against the wrapping CMK (IncorrectKeyException)
+ *   #1844 — ReEncrypt enforces SourceKeyId against the wrapping CMK (IncorrectKeyException)
  */
-@DisplayName("KMS features (#258 #259 #269)")
+@DisplayName("KMS features (#258 #259 #269 #1844)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class KmsFeaturesTest {
 
@@ -200,5 +207,181 @@ class KmsFeaturesTest {
         assertThat(resp.keyMetadata().encryptionAlgorithms()).isEmpty();
 
         kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+    }
+
+    // ── Issue #1844: Decrypt enforces KeyId against the wrapping key ────────
+    @Test
+    @Order(50)
+    void decryptWithMatchingKeyIdReturnsPlaintext() {
+        String keyId = kms.createKey(b -> b.description("issue-1844-match")).keyMetadata().keyId();
+
+        try {
+            SdkBytes ciphertext = kms.encrypt(b -> b
+                    .keyId(keyId)
+                    .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+                    .ciphertextBlob();
+
+            SdkBytes plaintext = kms.decrypt(b -> b
+                    .ciphertextBlob(ciphertext)
+                    .keyId(keyId))
+                    .plaintext();
+
+            assertThat(plaintext.asUtf8String()).isEqualTo("secret data");
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(51)
+    void decryptWithMismatchedKeyIdRaisesIncorrectKeyException() {
+        String keyIdA = kms.createKey(b -> b.description("issue-1844-a")).keyMetadata().keyId();
+        String keyIdB = kms.createKey(b -> b.description("issue-1844-b")).keyMetadata().keyId();
+
+        try {
+            SdkBytes ciphertext = kms.encrypt(b -> b
+                    .keyId(keyIdA)
+                    .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+                    .ciphertextBlob();
+
+            assertThatThrownBy(() -> kms.decrypt(b -> b
+                    .ciphertextBlob(ciphertext)
+                    .keyId(keyIdB)))
+                    .isInstanceOf(IncorrectKeyException.class);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyIdA).pendingWindowInDays(7));
+            kms.scheduleKeyDeletion(b -> b.keyId(keyIdB).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(52)
+    void reEncryptWithMatchingSourceKeyIdReturnsNewCiphertext() {
+        String keyIdA = kms.createKey(b -> b.description("reencrypt-match-a")).keyMetadata().keyId();
+        String keyIdB = kms.createKey(b -> b.description("reencrypt-match-b")).keyMetadata().keyId();
+
+        try {
+            SdkBytes ciphertext = kms.encrypt(b -> b
+                    .keyId(keyIdA)
+                    .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+                    .ciphertextBlob();
+
+            SdkBytes reEncrypted = kms.reEncrypt(b -> b
+                    .ciphertextBlob(ciphertext)
+                    .sourceKeyId(keyIdA)
+                    .destinationKeyId(keyIdB))
+                    .ciphertextBlob();
+
+            SdkBytes plaintext = kms.decrypt(b -> b.ciphertextBlob(reEncrypted)).plaintext();
+            assertThat(plaintext.asUtf8String()).isEqualTo("secret data");
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyIdA).pendingWindowInDays(7));
+            kms.scheduleKeyDeletion(b -> b.keyId(keyIdB).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(53)
+    void reEncryptWithMismatchedSourceKeyIdRaisesIncorrectKeyException() {
+        String keyIdA = kms.createKey(b -> b.description("reencrypt-mismatch-a")).keyMetadata().keyId();
+        String keyIdB = kms.createKey(b -> b.description("reencrypt-mismatch-b")).keyMetadata().keyId();
+
+        try {
+            SdkBytes ciphertext = kms.encrypt(b -> b
+                    .keyId(keyIdA)
+                    .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+                    .ciphertextBlob();
+
+            assertThatThrownBy(() -> kms.reEncrypt(b -> b
+                    .ciphertextBlob(ciphertext)
+                    .sourceKeyId(keyIdB)
+                    .destinationKeyId(keyIdA)))
+                    .isInstanceOf(IncorrectKeyException.class);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyIdA).pendingWindowInDays(7));
+            kms.scheduleKeyDeletion(b -> b.keyId(keyIdB).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(60)
+    void encryptWithDisabledKeyRaisesDisabledException() {
+        String keyId = kms.createKey(b -> b.description("disabled-encrypt")).keyMetadata().keyId();
+
+        try {
+            kms.disableKey(b -> b.keyId(keyId));
+
+            assertThatThrownBy(
+                    () -> kms.encrypt(b -> b
+                            .keyId(keyId)
+                            .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+            ).isInstanceOf(DisabledException.class);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(61)
+    void decryptWithDisabledKeyRaisesDisabledException() {
+        String keyId = kms.createKey(b -> b.description("disabled-decrypt")).keyMetadata().keyId();
+
+        try {
+            SdkBytes ciphertext = kms.encrypt(b -> b
+                            .keyId(keyId)
+                            .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+                    .ciphertextBlob();
+
+            kms.disableKey(b -> b.keyId(keyId));
+
+            assertThatThrownBy(
+                    () -> kms.decrypt(b -> b
+                            .ciphertextBlob(ciphertext)
+                            .keyId(keyId))
+            ).isInstanceOf(DisabledException.class);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(62)
+    void encryptWithPendingDeletionKeyRaisesKmsInvalidStateException() {
+        String keyId = kms.createKey(b -> b.description("pending-encrypt")).keyMetadata().keyId();
+
+        try {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+
+            assertThatThrownBy(
+                    () -> kms.encrypt(b -> b
+                            .keyId(keyId)
+                            .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+            ).isInstanceOf(KmsInvalidStateException.class);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(63)
+    void decryptWithPendingDeletionKeyRaisesKmsInvalidStateException() {
+        String keyId = kms.createKey(b -> b.description("pending-decrypt")).keyMetadata().keyId();
+
+        try {
+            SdkBytes ciphertext = kms.encrypt(b -> b
+                            .keyId(keyId)
+                            .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+                    .ciphertextBlob();
+
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+
+            assertThatThrownBy(
+                    () -> kms.decrypt(b -> b
+                            .ciphertextBlob(ciphertext)
+                            .keyId(keyId))
+            ).isInstanceOf(KmsInvalidStateException.class);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
     }
 }
