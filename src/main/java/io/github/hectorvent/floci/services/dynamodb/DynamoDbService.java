@@ -52,6 +52,10 @@ import java.util.zip.GZIPOutputStream;
 @ApplicationScoped
 public class DynamoDbService {
 
+    private static final String LOCAL_REPLICA_UPDATE_ERROR =
+            "Cannot add, delete, or update the local region through ReplicaUpdates. "
+                    + "Use CreateTable, DeleteTable, or UpdateTable as required.";
+
     private static final Logger LOG = Logger.getLogger(DynamoDbService.class);
 
     private final StorageBackend<String, TableDefinition> tableStore;
@@ -1352,9 +1356,9 @@ public class DynamoDbService {
     private TableDefinition validateReplicaUpdatesAndGetTable(
             String tableName, List<String> addRegions, List<String> removeRegions,
             List<String> updateRegions, String region) {
-        validateReplicaRegions(addRegions);
-        validateReplicaRegions(removeRegions);
-        validateReplicaRegions(updateRegions);
+        validateReplicaRegions(addRegions, region);
+        validateReplicaRegions(removeRegions, region);
+        validateReplicaRegions(updateRegions, region);
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -1370,13 +1374,16 @@ public class DynamoDbService {
         return table;
     }
 
-    private static void validateReplicaRegions(List<String> replicaRegions) {
+    private static void validateReplicaRegions(List<String> replicaRegions, String localRegion) {
         if (replicaRegions == null) {
             return;
         }
         for (String replicaRegion : replicaRegions) {
             if (replicaRegion == null || replicaRegion.isBlank()) {
                 throw new AwsException("ValidationException", "Replica RegionName must not be empty", 400);
+            }
+            if (replicaRegion.equals(localRegion)) {
+                throw new AwsException("ValidationException", LOCAL_REPLICA_UPDATE_ERROR, 400);
             }
         }
     }

@@ -133,6 +133,9 @@ public class CloudFormationResourceProvisioner {
     private static final String LOG_GROUP_NAME_MODE_ATTR = "FlociLogGroupNameMode";
     private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
     private static final String SECRET_TARGET_OWNER_ATTR = "__FlociSecretTargetOwner";
+    private static final String DDB_REPLICA_TABLE_NAME_ATTR = "TableName";
+    private static final String DDB_REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
+    private static final String DDB_REPLICA_SKIP_DELETION_ATTR = "__FlociDynamoDbReplicaSkipDeletion";
     private static final List<String> SECRET_TARGET_CONNECTION_KEYS = List.of(
             "engine", "host", "port", "dbname", "dbInstanceIdentifier", "dbClusterIdentifier");
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
@@ -4303,7 +4306,8 @@ public class CloudFormationResourceProvisioner {
      * Provisions a {@code Custom::DynamoDBReplica} — the custom resource the CDK legacy global-table
      * (dynamodb.Table.replicationRegions) emits per replica region. Its provider Lambda simply calls
      * DynamoDB UpdateTable with a ReplicaUpdates Create, so apply that directly rather than running
-     * the async CDK Provider framework. {@code Ref} (PhysicalResourceId) is the replica region.
+     * the async CDK Provider framework. {@code Ref} (PhysicalResourceId) follows CDK's
+     * {@code <tableName>-<region>} format.
      */
     private void provisionDynamoDbReplica(StackResource r, JsonNode props,
                                           CloudFormationTemplateEngine engine, String region) {
@@ -4317,7 +4321,12 @@ public class CloudFormationResourceProvisioner {
             throw new AwsException("ValidationError",
                     "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing Region", 400);
         }
-        String priorRegion = r.getPhysicalId();
+        String priorTableName = r.getAttributes().get(DDB_REPLICA_TABLE_NAME_ATTR);
+        String priorRegion = r.getAttributes().get(DDB_REPLICA_REGION_ATTR);
+        if (priorRegion == null || priorRegion.isBlank()) {
+            priorRegion = replicaRegionFromPhysicalId(
+                    r.getPhysicalId(), priorTableName != null ? priorTableName : tableName);
+        }
         List<String> removeRegions = priorRegion != null
                 && !priorRegion.isBlank()
                 && !priorRegion.equals(replicaRegion)
@@ -4327,13 +4336,24 @@ public class CloudFormationResourceProvisioner {
         // cannot leave the new replica applied while the resource still points at the old region.
         dynamoDbService.applyReplicaUpdates(
                 tableName, List.of(replicaRegion), removeRegions, region);
-        r.setPhysicalId(replicaRegion);
-        r.getAttributes().put("TableName", tableName);
+        r.setPhysicalId(tableName + "-" + replicaRegion);
+        r.getAttributes().put(DDB_REPLICA_TABLE_NAME_ATTR, tableName);
+        r.getAttributes().put(DDB_REPLICA_REGION_ATTR, replicaRegion);
+        r.getAttributes().put(DDB_REPLICA_SKIP_DELETION_ATTR,
+                Boolean.toString(Boolean.TRUE.equals(
+                        parseBooleanOrNull(resolveOptional(props, "SkipReplicaDeletion", engine)))));
     }
 
     private void deleteDynamoDbReplicaSafe(StackResource r, String region) {
-        String tableName = r.getAttributes().get("TableName");
-        String replicaRegion = r.getPhysicalId();
+        if (Boolean.parseBoolean(r.getAttributes().get(DDB_REPLICA_SKIP_DELETION_ATTR))) {
+            LOG.debugv("Keeping replica for retained Custom::DynamoDBReplica {0}", r.getLogicalId());
+            return;
+        }
+        String tableName = r.getAttributes().get(DDB_REPLICA_TABLE_NAME_ATTR);
+        String replicaRegion = r.getAttributes().get(DDB_REPLICA_REGION_ATTR);
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            replicaRegion = replicaRegionFromPhysicalId(r.getPhysicalId(), tableName);
+        }
         if (tableName == null || tableName.isBlank() || replicaRegion == null || replicaRegion.isBlank()) {
             return;
         }
@@ -4343,6 +4363,16 @@ public class CloudFormationResourceProvisioner {
             LOG.debugv("Could not remove replica {0} from table {1}: {2}",
                     replicaRegion, tableName, e.getMessage());
         }
+    }
+
+    private static String replicaRegionFromPhysicalId(String physicalId, String tableName) {
+        if (physicalId == null || physicalId.isBlank()) {
+            return null;
+        }
+        String prefix = tableName + "-";
+        return tableName != null && !tableName.isBlank() && physicalId.startsWith(prefix)
+                ? physicalId.substring(prefix.length())
+                : physicalId;
     }
 
     // Reads the ResourceProperties stashed at the last create/update (CR_PROPERTIES_ATTR).

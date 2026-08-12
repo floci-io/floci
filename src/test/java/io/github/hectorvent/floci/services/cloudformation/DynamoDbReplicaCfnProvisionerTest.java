@@ -59,14 +59,50 @@ class DynamoDbReplicaCfnProvisionerTest {
                 mapper.readTree("""
                         {"TableName":"global-table","Region":"eu-west-1"}
                         """),
-                engine(), "us-east-1", "000000000000", "my-stack", "us-west-2", Map.of());
+                engine(), "us-east-1", "000000000000", "my-stack", "global-table-us-west-2",
+                Map.of("TableName", "global-table", "__FlociDynamoDbReplicaRegion", "us-west-2"));
 
         assertEquals("CREATE_FAILED", resource.getStatus());
         assertEquals("simulated removal failure", resource.getStatusReason());
-        assertEquals("us-west-2", resource.getPhysicalId());
+        assertEquals("global-table-us-west-2", resource.getPhysicalId());
         assertEquals(Set.of("us-west-2"), replicas);
         verify(dynamoDbService).applyReplicaUpdates(
                 "global-table", List.of("eu-west-1"), List.of("us-west-2"), "us-east-1");
+        verifyNoMoreInteractions(dynamoDbService);
+    }
+
+    @Test
+    void usesCdkPhysicalIdAndPersistsReplicaDeleteProperties() throws Exception {
+        StackResource resource = provisioner.provision(
+                "Replica", "Custom::DynamoDBReplica",
+                mapper.readTree("""
+                        {"TableName":"global-table","Region":"us-west-2","SkipReplicaDeletion":false}
+                        """),
+                engine(), "us-east-1", "000000000000", "my-stack");
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        assertEquals("global-table-us-west-2", resource.getPhysicalId());
+        assertEquals("global-table", resource.getAttributes().get("TableName"));
+        assertEquals("us-west-2", resource.getAttributes().get("__FlociDynamoDbReplicaRegion"));
+        assertEquals("false", resource.getAttributes().get("__FlociDynamoDbReplicaSkipDeletion"));
+        verify(dynamoDbService).applyReplicaUpdates(
+                "global-table", List.of("us-west-2"), List.of(), "us-east-1");
+        verifyNoMoreInteractions(dynamoDbService);
+    }
+
+    @Test
+    void deleteKeepsReplicaWhenSkipReplicaDeletionIsTrue() throws Exception {
+        StackResource resource = provisioner.provision(
+                "Replica", "Custom::DynamoDBReplica",
+                mapper.readTree("""
+                        {"TableName":"global-table","Region":"us-west-2","SkipReplicaDeletion":true}
+                        """),
+                engine(), "us-east-1", "000000000000", "my-stack");
+
+        provisioner.delete(resource, "us-east-1");
+
+        verify(dynamoDbService).applyReplicaUpdates(
+                "global-table", List.of("us-west-2"), List.of(), "us-east-1");
         verifyNoMoreInteractions(dynamoDbService);
     }
 

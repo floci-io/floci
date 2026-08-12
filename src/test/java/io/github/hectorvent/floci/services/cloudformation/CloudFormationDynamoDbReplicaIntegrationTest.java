@@ -11,6 +11,7 @@ import java.time.Duration;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -131,6 +132,31 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
                     + "\"ReplicaUpdates\":[{\"" + action + "\":{\"RegionName\":\"\"}}]}")
         .when().post("/").then().statusCode(400)
             .body("__type", containsString("ValidationException"));
+
+        String table = ddb("DescribeTable", "{\"TableName\":\"" + tableName + "\"}");
+        assertTrue(table.contains("\"DeletionProtectionEnabled\":false"),
+                "rejected update must not partially mutate the table: " + table);
+        assertFalse(table.contains("\"Replicas\""),
+                "rejected update must not add replicas: " + table);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Create", "Delete", "Update"})
+    void updateTableRejectsLocalRegionBeforeApplyingOtherChanges(String action) {
+        String tableName = "gt-local-region-" + Long.toString(System.nanoTime(), 36);
+        createTable(tableName);
+
+        given()
+            .contentType(DDB_CONTENT_TYPE)
+            .header("Authorization", DDB_AUTH)
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .body("{\"TableName\":\"" + tableName + "\","
+                    + "\"DeletionProtectionEnabled\":true,"
+                    + "\"ReplicaUpdates\":[{\"" + action + "\":{\"RegionName\":\"us-east-1\"}}]}")
+        .when().post("/").then().statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Cannot add, delete, or update the local region through ReplicaUpdates. "
+                    + "Use CreateTable, DeleteTable, or UpdateTable as required."));
 
         String table = ddb("DescribeTable", "{\"TableName\":\"" + tableName + "\"}");
         assertTrue(table.contains("\"DeletionProtectionEnabled\":false"),
