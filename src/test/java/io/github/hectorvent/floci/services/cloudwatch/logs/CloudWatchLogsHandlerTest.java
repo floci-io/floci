@@ -208,6 +208,56 @@ class CloudWatchLogsHandlerTest {
         JsonNode events = ((ObjectNode) response.getEntity()).path("events");
         assertEquals(1, events.size());
         assertThat(events.get(0).path("message").asText(), containsString("ERROR"));
+        assertEquals(STREAM, events.get(0).path("logStreamName").asText());
+    }
+
+    @Test
+    void filterLogEventsAttributesEachMatchToItsStream() {
+        // FilterLogEvents spans streams, so a caller can only attribute a hit if the response
+        // says which stream emitted it.
+        String otherStream = "postgresql.log.2026-06-05";
+        service.createLogStream(GROUP, otherStream, REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents(GROUP, STREAM, java.util.List.of(
+                java.util.Map.of("timestamp", now, "message", "ERROR: from first")
+        ), REGION);
+        service.putLogEvents(GROUP, otherStream, java.util.List.of(
+                java.util.Map.of("timestamp", now + 1, "message", "ERROR: from second")
+        ), REGION);
+
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", GROUP);
+        request.put("filterPattern", "ERROR");
+
+        Response response = handler.handle("FilterLogEvents", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        JsonNode events = ((ObjectNode) response.getEntity()).path("events");
+        assertEquals(2, events.size());
+        assertEquals(STREAM, events.get(0).path("logStreamName").asText());
+        assertEquals(otherStream, events.get(1).path("logStreamName").asText());
+    }
+
+    @Test
+    void getLogEventsOmitsLogStreamName() {
+        // OutputLogEvent has no logStreamName in real AWS: the caller named the stream in the
+        // request, so echoing it back would be a shape floci invents.
+        long now = System.currentTimeMillis();
+        service.putLogEvents(GROUP, STREAM, java.util.List.of(
+                java.util.Map.of("timestamp", now, "message", "only one stream here")
+        ), REGION);
+
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", GROUP);
+        request.put("logStreamName", STREAM);
+
+        Response response = handler.handle("GetLogEvents", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        JsonNode events = ((ObjectNode) response.getEntity()).path("events");
+        assertEquals(1, events.size());
+        assertTrue(events.get(0).path("logStreamName").isMissingNode());
     }
 
     @Test

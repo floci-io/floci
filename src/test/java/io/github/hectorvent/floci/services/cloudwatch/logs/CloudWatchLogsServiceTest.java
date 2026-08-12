@@ -217,7 +217,7 @@ class CloudWatchLogsServiceTest {
 
         assertEquals(10, result.events().size());
         for (int i = 0; i < 10; i++) {
-            assertEquals("SEQLINE-" + i, result.events().get(i).getMessage(),
+            assertEquals("SEQLINE-" + i, result.events().get(i).event().getMessage(),
                     "event at index " + i + " out of ingestion order");
         }
     }
@@ -254,7 +254,87 @@ class CloudWatchLogsServiceTest {
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
                 "/app/logs", null, null, null, "ERROR", 100, REGION);
         assertEquals(2, result.events().size());
-        assertTrue(result.events().stream().allMatch(e -> e.getMessage().contains("ERROR")));
+        assertTrue(result.events().stream().allMatch(f -> f.event().getMessage().contains("ERROR")));
+    }
+
+    @Test
+    void filterLogEventsCarriesEmittingStreamPerEvent() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "ERROR: from one")), REGION);
+        service.putLogEvents("/app/logs", "stream-2",
+                List.of(Map.of("timestamp", now + 1, "message", "ERROR: from two")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, "ERROR", 100, REGION);
+
+        assertEquals(2, result.events().size());
+        assertEquals("stream-1", result.events().get(0).logStreamName());
+        assertEquals("stream-2", result.events().get(1).logStreamName());
+    }
+
+    @Test
+    void filterLogEventsRestrictedToNamedStreamsSkipsTheRest() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "keep me")), REGION);
+        service.putLogEvents("/app/logs", "stream-2",
+                List.of(Map.of("timestamp", now + 1, "message", "drop me")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", List.of("stream-2"), null, null, null, 100, REGION);
+
+        assertEquals(1, result.events().size());
+        assertEquals("stream-2", result.events().getFirst().logStreamName());
+        assertEquals("drop me", result.events().getFirst().event().getMessage());
+    }
+
+    @Test
+    void filterLogEventsDoesNotLeakEventsFromAPrefixSiblingGroup() {
+        // "/app/logs" must not sweep up "/app/logs-archive": the key layout separates the group
+        // from the stream with "::", so the group prefix has to be matched with it.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogGroup("/app/logs-archive", null, null, REGION);
+        service.createLogStream("/app/logs-archive", "stream-1", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "live")), REGION);
+        service.putLogEvents("/app/logs-archive", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "archived")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 100, REGION);
+
+        assertEquals(1, result.events().size());
+        assertEquals("live", result.events().getFirst().event().getMessage());
+    }
+
+    @Test
+    void filterLogEventsRecoversStreamNamesHoldingAColon() {
+        // AWS forbids ':' in a stream name but floci does not enforce that, so the stream a match
+        // is attributed to must not depend on the name being AWS-legal.
+        String awkward = "app:worker:1";
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", awkward, REGION);
+
+        service.putLogEvents("/app/logs", awkward,
+                List.of(Map.of("timestamp", System.currentTimeMillis(), "message", "hello")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 100, REGION);
+
+        assertEquals(1, result.events().size());
+        assertEquals(awkward, result.events().getFirst().logStreamName());
     }
 
     @Test
