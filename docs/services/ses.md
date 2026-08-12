@@ -205,6 +205,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/account` | `GetAccount` |
 | `PUT` | `/v2/email/account/sending` | `PutAccountSendingAttributes` |
 | `PUT` | `/v2/email/account/suppression` | `PutAccountSuppressionAttributes` |
+| `PUT` | `/v2/email/account/vdm` | `PutAccountVdmAttributes` |
 | `POST` | `/v2/email/templates` | `CreateEmailTemplate` |
 | `GET` | `/v2/email/templates` | `ListEmailTemplates` |
 | `GET` | `/v2/email/templates/{templateName}` | `GetEmailTemplate` |
@@ -268,6 +269,8 @@ Floci recognises the AWS [mailbox simulator addresses](https://docs.aws.amazon.c
 | `suppressionlist@simulator.amazonses.com` | `Reject` |
 
 A successful send without a simulator-address recipient emits only the `Send` event.
+
+Account-level VDM (Virtual Deliverability Manager) attributes are stored per region and returned by `GetAccount` under `VdmAttributes`; `PutAccountVdmAttributes` sets `VdmEnabled`, `DashboardAttributes.EngagementMetrics`, and `GuardianAttributes.OptimizedSharedDelivery` (each `ENABLED`/`DISABLED`). VDM is opt-in, so each flag defaults to `DISABLED`. Floci stores and round-trips the settings but does not run the VDM analytics/dashboard behavior.
 
 Suppression list entries are stored per region with `Reason` ∈ {`BOUNCE`, `COMPLAINT`}. At send time, a recipient is suppressed when it appears on the suppression list AND its stored `Reason` is contained in the **effective** `SuppressedReasons` for the send. The effective list is the configuration set's `SuppressionOptions.SuppressedReasons` (set via `PutConfigurationSetSuppressionOptions`) when present — an **empty list is preserved as an explicit "no suppression filtering for this configuration set"** — otherwise it falls back to the account-level `AccountSuppressionAttributes.SuppressedReasons` (set via `PutAccountSuppressionAttributes`, default `[BOUNCE, COMPLAINT]`). Following the AWS V2 contract, there is no dedicated `GetConfigurationSetSuppressionOptions` action; once set, the block is read back through `GetConfigurationSet`'s response (the field is omitted when the configuration set has no override).
 

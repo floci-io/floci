@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -89,6 +90,7 @@ public class SesService {
     private final StorageBackend<String, ConfigurationSet> configSetStore;
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
+    private final StorageBackend<String, AccountVdmAttributes> accountVdmStore;
     private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
     private final StorageBackend<String, ContactList> contactListStore;
     private final StorageBackend<String, Contact> contactStore;
@@ -142,6 +144,8 @@ public class SesService {
                 new TypeReference<Map<String, SuppressedDestination>>() {});
         this.accountSuppressionStore = storageFactory.create("ses", "ses-account-suppression.json",
                 new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
+        this.accountVdmStore = storageFactory.create("ses", "ses-account-vdm.json",
+                new TypeReference<Map<String, AccountVdmAttributes>>() {});
         this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
                 new TypeReference<Map<String, DedicatedIpPool>>() {});
         this.contactListStore = storageFactory.create("ses", "ses-contact-lists.json",
@@ -170,6 +174,7 @@ public class SesService {
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               StorageBackend<String, AccountVdmAttributes> accountVdmStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                StorageBackend<String, ContactList> contactListStore,
                StorageBackend<String, Contact> contactStore,
@@ -180,8 +185,8 @@ public class SesService {
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, emailStore, accountSettingsStore, templateStore, configSetStore, suppressionStore,
-                accountSuppressionStore, dedicatedIpPoolStore, contactListStore, contactStore, policyStore,
-                receiptRuleSetStore, cvetStore, smtpRelay, objectMapper, null, clock);
+                accountSuppressionStore, accountVdmStore, dedicatedIpPoolStore, contactListStore, contactStore,
+                policyStore, receiptRuleSetStore, cvetStore, smtpRelay, objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -191,6 +196,7 @@ public class SesService {
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               StorageBackend<String, AccountVdmAttributes> accountVdmStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                StorageBackend<String, ContactList> contactListStore,
                StorageBackend<String, Contact> contactStore,
@@ -208,6 +214,7 @@ public class SesService {
         this.configSetStore = configSetStore;
         this.suppressionStore = suppressionStore;
         this.accountSuppressionStore = accountSuppressionStore;
+        this.accountVdmStore = accountVdmStore;
         this.dedicatedIpPoolStore = dedicatedIpPoolStore;
         this.contactListStore = contactListStore;
         this.contactStore = contactStore;
@@ -1007,6 +1014,23 @@ public class SesService {
     public void setAccountSendingEnabled(String region, boolean enabled) {
         accountSettingsStore.put("sending::" + region, enabled);
         LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);
+    }
+
+    // VDM (Virtual Deliverability Manager) is opt-in, so each flag defaults to DISABLED (false)
+    // until PutAccountVdmAttributes turns it on. The whole tuple is stored under one region key so
+    // GetAccount never observes a partially updated state.
+    public AccountVdmAttributes getAccountVdmAttributes(String region) {
+        return accountVdmStore.get(accountVdmKey(region))
+                .orElseGet(() -> new AccountVdmAttributes(false, false, false));
+    }
+
+    public void putAccountVdmAttributes(String region, AccountVdmAttributes vdm) {
+        accountVdmStore.put(accountVdmKey(region), vdm);
+        LOG.infov("Updated account VDM attributes for region {0}: enabled={1}", region, vdm.vdmEnabled());
+    }
+
+    private static String accountVdmKey(String region) {
+        return "account-vdm::" + region;
     }
 
     public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {

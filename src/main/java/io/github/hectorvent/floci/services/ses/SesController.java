@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.DashboardOptions;
 import io.github.hectorvent.floci.services.ses.model.GuardianOptions;
@@ -1811,7 +1812,78 @@ public class SesController {
             reasons.add(r);
         }
 
+        AccountVdmAttributes vdm = sesService.getAccountVdmAttributes(region);
+        ObjectNode vdmAttrs = result.putObject("VdmAttributes");
+        vdmAttrs.put("VdmEnabled", featureStatus(vdm.vdmEnabled()));
+        vdmAttrs.putObject("DashboardAttributes")
+                .put("EngagementMetrics", featureStatus(vdm.engagementMetrics()));
+        vdmAttrs.putObject("GuardianAttributes")
+                .put("OptimizedSharedDelivery", featureStatus(vdm.optimizedSharedDelivery()));
+
         return Response.ok(result).build();
+    }
+
+    private static String featureStatus(boolean enabled) {
+        return enabled ? "ENABLED" : "DISABLED";
+    }
+
+    @PUT
+    @Path("/account/vdm")
+    public Response putAccountVdmAttributes(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            JsonNode vdm = request.path("VdmAttributes");
+            if (!vdm.isObject()) {
+                throw new AwsException("BadRequestException", "VdmAttributes is required.", 400);
+            }
+            boolean vdmEnabled = parseFeatureStatus(vdm, "VdmEnabled",
+                    "vdmAttributes.vdmEnabled", true);
+            boolean engagement = parseFeatureStatus(
+                    requireObjectOrAbsent(vdm, "DashboardAttributes"), "EngagementMetrics",
+                    "vdmAttributes.dashboardAttributes.engagementMetrics", false);
+            boolean osd = parseFeatureStatus(
+                    requireObjectOrAbsent(vdm, "GuardianAttributes"), "OptimizedSharedDelivery",
+                    "vdmAttributes.guardianAttributes.optimizedSharedDelivery", false);
+            sesService.putAccountVdmAttributes(region,
+                    new AccountVdmAttributes(vdmEnabled, engagement, osd));
+            LOG.infov("SES V2 PutAccountVdmAttributes: enabled={0}, engagement={1}, osd={2}",
+                    vdmEnabled, engagement, osd);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    // Parse an AWS FeatureStatus (ENABLED/DISABLED) field. A required member that is absent, or any
+    // value outside the enum, is a Smithy BadRequestException the way AWS returns it; an absent
+    // optional member defaults to DISABLED (false).
+    private static boolean parseFeatureStatus(JsonNode parent, String field, String path, boolean required) {
+        JsonNode node = parent.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            if (required) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value null at '" + path
+                                + "' failed to satisfy constraint: Member must not be null", 400);
+            }
+            return false;
+        }
+        String value = node.asText();
+        if ("ENABLED".equals(value)) {
+            return true;
+        }
+        if ("DISABLED".equals(value)) {
+            return false;
+        }
+        throw new AwsException("BadRequestException",
+                "1 validation error detected: Value at '" + path
+                        + "' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]",
+                400);
     }
 
     @PUT
