@@ -44,6 +44,16 @@ final class SwfFaults {
         return fault(SwfConstants.UNKNOWN_RESOURCE, "Unknown or expired task token");
     }
 
+    /**
+     * Raised when an activity task token resolves but the task is no longer open (completed,
+     * failed, canceled, or timed out). The live service names the scheduled event rather
+     * than reporting a bad token, since the token itself was valid.
+     */
+    static AwsException unknownActivity(long scheduledEventId) {
+        return fault(SwfConstants.UNKNOWN_RESOURCE,
+                "Unknown activity, scheduledEventId = " + scheduledEventId);
+    }
+
     static AwsException domainAlreadyExists(String domain) {
         return fault(SwfConstants.DOMAIN_ALREADY_EXISTS, domain);
     }

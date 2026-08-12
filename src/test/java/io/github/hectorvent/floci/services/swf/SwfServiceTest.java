@@ -417,6 +417,27 @@ class SwfServiceTest {
     }
 
     @Test
+    void activityTokenOnAClosedTask_reportsUnknownActivityWithItsScheduledEventId() {
+        start("wf-stale-activity");
+        scheduleActivity("wf-stale-activity", "act-stale");
+        SwfActivityTask task = service.pollForActivityTask(DOMAIN, "act-tl", "w").orElseThrow();
+        service.respondActivityTaskCompleted(task.getTaskToken(), "done");
+
+        // The token is genuine, so the live service names the scheduled event rather than
+        // calling the token unknown — a worker that heartbeats after closing sees this.
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.recordActivityTaskHeartbeat(task.getTaskToken(), "late"));
+        assertEquals("UnknownResourceFault", thrown.getErrorCode());
+        assertEquals("Unknown activity, scheduledEventId = " + task.getScheduledEventId(),
+                thrown.getMessage());
+
+        // A token that never existed still reports the bad token instead.
+        assertEquals("Unknown or expired task token",
+                assertThrows(AwsException.class,
+                        () -> service.recordActivityTaskHeartbeat("bogus", null)).getMessage());
+    }
+
+    @Test
     void heartbeatReportsCancelRequested_afterTheDeciderAsksToCancelAStartedTask() {
         start("wf-cancel-started");
         scheduleActivity("wf-cancel-started", "act-running");

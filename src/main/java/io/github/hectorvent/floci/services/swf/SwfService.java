@@ -1149,7 +1149,7 @@ public class SwfService implements Resettable {
                     .attr("result", result)
                     .attr("scheduledEventId", task.getScheduledEventId())
                     .attr("startedEventId", task.getStartedEventId());
-            closeActivity(execution, task, taskToken);
+            closeActivity(execution, task);
             return null;
         });
     }
@@ -1161,7 +1161,7 @@ public class SwfService implements Resettable {
                     .attr("details", details)
                     .attr("scheduledEventId", task.getScheduledEventId())
                     .attr("startedEventId", task.getStartedEventId());
-            closeActivity(execution, task, taskToken);
+            closeActivity(execution, task);
             return null;
         });
     }
@@ -1173,14 +1173,16 @@ public class SwfService implements Resettable {
                     .attr("scheduledEventId", task.getScheduledEventId())
                     .attr("startedEventId", task.getStartedEventId())
                     .attr("latestCancelRequestedEventId", task.getLatestCancelRequestedEventId());
-            closeActivity(execution, task, taskToken);
+            closeActivity(execution, task);
             return null;
         });
     }
 
-    private void closeActivity(SwfWorkflowExecution execution, SwfActivityTask task, String taskToken) {
+    private void closeActivity(SwfWorkflowExecution execution, SwfActivityTask task) {
         task.setState(SwfActivityTask.STATE_CLOSED);
-        activityTokens.remove(taskToken);
+        // The token mapping is deliberately retained: withActivityToken needs it to tell a
+        // genuine token whose task has closed (Unknown activity, scheduledEventId = N) from
+        // a token that never existed. Reuse is still refused by the isOpen() check there.
         scheduleDecisionTaskIfIdle(execution);
         executionStore.put(executionKey(execution), execution);
     }
@@ -1201,8 +1203,13 @@ public class SwfService implements Resettable {
             SwfWorkflowExecution execution = executionStore.get(executionKey)
                     .orElseThrow(SwfFaults::unknownTaskToken);
             SwfActivityTask task = execution.getActivities().get(activityId);
-            if (task == null || !taskToken.equals(task.getTaskToken()) || !task.isOpen()) {
+            if (task == null || !taskToken.equals(task.getTaskToken())) {
                 throw SwfFaults.unknownTaskToken();
+            }
+            if (!task.isOpen()) {
+                // The token is genuine but the task already closed, so the live service
+                // names the scheduled event instead of calling the token unknown.
+                throw SwfFaults.unknownActivity(task.getScheduledEventId());
             }
             return action.apply(execution, task);
         }

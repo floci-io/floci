@@ -195,7 +195,7 @@ Faults use the AWS codes and messages, so SDK error handling works unchanged:
 
 | Fault | Raised by |
 |-------|-----------|
-| `UnknownResourceFault` | Unknown domain, type, execution, or task token |
+| `UnknownResourceFault` | Unknown domain, type, execution, or task token; also an activity task token whose task has already closed, reported as `Unknown activity, scheduledEventId = N` |
 | `DomainAlreadyExistsFault` | `RegisterDomain` for an existing domain; `UndeprecateDomain` on a registered domain |
 | `DomainDeprecatedFault` | Registering into, or starting an execution in, a deprecated domain |
 | `TypeAlreadyExistsFault` | Registering an existing type; undeprecating a registered type |
