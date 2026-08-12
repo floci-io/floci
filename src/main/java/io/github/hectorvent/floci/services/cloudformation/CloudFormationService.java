@@ -409,6 +409,7 @@ public class CloudFormationService {
                                  boolean isCreate, String region, String accountId) {
         StackUpdateSnapshot previousState = snapshotForUpdate(stack);
         boolean updateCommitted = false;
+        Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
             JsonNode template = parseTemplate(templateBody);
 
@@ -479,6 +480,7 @@ public class CloudFormationService {
                             type,
                             inProgressStatus,
                             null);
+                    attemptedResourceIds.add(logicalId);
                     if ("AWS::CloudFormation::Stack".equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
@@ -532,7 +534,8 @@ public class CloudFormationService {
             // corrected re-deploy starts from a clean slate (acceptance criterion #9).
             if (failedResource != null) {
                 rollbackFailedExecution(
-                        stack, region, isCreate, failedResource, previousState);
+                        stack, region, isCreate, failedResource, previousState,
+                        attemptedResourceIds);
                 return;
             }
 
@@ -630,7 +633,7 @@ public class CloudFormationService {
                 persistStack(stack);
             } else {
                 rollbackFailedUpdate(
-                        stack, region, previousState, e.getMessage());
+                        stack, region, previousState, attemptedResourceIds, e.getMessage());
             }
         }
     }
@@ -646,7 +649,8 @@ public class CloudFormationService {
             String region,
             boolean isCreate,
             StackResource failedResource,
-            StackUpdateSnapshot previousState) {
+            StackUpdateSnapshot previousState,
+            Set<String> attemptedResourceIds) {
         String failStatus = isCreate ? "CREATE_FAILED" : "UPDATE_FAILED";
         stack.setStatus(failStatus);
         stack.setStatusReason(failedResource.getStatusReason());
@@ -677,7 +681,8 @@ public class CloudFormationService {
             }
         } else {
             rollbackFailedUpdate(
-                    stack, region, previousState, failedResource.getStatusReason());
+                    stack, region, previousState, attemptedResourceIds,
+                    failedResource.getStatusReason());
             return;
         }
         persistStack(stack);
@@ -767,6 +772,7 @@ public class CloudFormationService {
             Stack stack,
             String region,
             StackUpdateSnapshot previousState,
+            Set<String> attemptedResourceIds,
             String failureReason) {
         stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
         stack.setStatusReason(failureReason);
@@ -774,7 +780,7 @@ public class CloudFormationService {
                 "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", failureReason);
 
         List<String> rollbackFailures = rollbackUpdatedResources(
-                stack, previousState.resources(), region);
+                stack, previousState.resources(), attemptedResourceIds, region);
         if (rollbackFailures.isEmpty()) {
             stack.setTemplateBody(previousState.templateBody());
         }
@@ -808,12 +814,16 @@ public class CloudFormationService {
     private List<String> rollbackUpdatedResources(
             Stack stack,
             Map<String, StackResource> previousResources,
+            Set<String> attemptedResourceIds,
             String region) {
         List<StackResource> resources = new ArrayList<>(stack.getResources().values());
         Collections.reverse(resources);
         List<String> failures = new ArrayList<>();
         List<String> removedResources = new ArrayList<>();
         for (StackResource resource : resources) {
+            if (!attemptedResourceIds.contains(resource.getLogicalId())) {
+                continue;
+            }
             try {
                 StackResource previous = previousResources.get(resource.getLogicalId());
                 if (previous == null) {
