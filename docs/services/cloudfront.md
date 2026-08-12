@@ -116,6 +116,9 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current `ETag`. A missing or incorrect `ETag` returns `InvalidIfMatchVersion` (400).
 - All `GET` and `POST` (create) responses include an `ETag` response header.
 - All list-type sub-elements in XML follow CloudFront's `<Quantity>N</Quantity><Items>...</Items>` wrapper pattern.
+- Responses are rooted at the operation's payload structure — `DistributionList`, `OriginAccessControlList`, `Tags` and so on — with no `List*Result` envelope, matching the API model.
+- A distribution config is echoed back as submitted: origin SSL protocols, read and keepalive timeouts, custom headers, cached methods, TTLs, forwarded values, trusted signers and key groups, geo restrictions, logging and custom error responses all round-trip. `OriginGroups` is always returned empty — origin groups are not stored.
+- Tags passed to `CreateDistributionWithTags` are stored under the distribution ARN and readable through `ListTagsForResource`, alongside `TagResource`/`UntagResource`.
 - OAI `CallerReference` uniqueness is enforced — duplicate `CallerReference` values return `CloudFrontOriginAccessIdentityAlreadyExists` (409).
 - `AssociateAlias` attaches a CNAME alias to the target distribution's config.
 
@@ -220,6 +223,7 @@ aws cloudfront delete-distribution --id E1Z2X3C4V5B6N7 --if-match "$ETAG"
 - Public keys and key groups (`CreatePublicKey`, `CreateKeyGroup`, etc.)
 - `TestFunction` execution (function is stored, not executed)
 - Streaming distributions (RTMP — deprecated by AWS)
+- Origin groups (`OriginGroups` is accepted and returned empty)
 - VPC origins, Anycast IP lists, key value stores
 - Monitoring subscriptions
 - Actual CDN content delivery and caching

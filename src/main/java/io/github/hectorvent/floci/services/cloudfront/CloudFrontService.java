@@ -112,7 +112,10 @@ public class CloudFrontService {
         dist.setEtag(UUID.randomUUID().toString());
         if (tags != null && !tags.isEmpty()) {
             dist.setTags(tags);
-            tagStore.put("distribution/" + id, tags);
+            // The tag store is keyed by resource ARN — TagResource, UntagResource and
+            // ListTagsForResource all identify the resource by its ARN, so tags attached at
+            // create must land under the same key or they are invisible afterwards.
+            tagStore.put(dist.getArn(), tags);
         }
         distStore.put(id, dist);
         return dist;
@@ -152,7 +155,7 @@ public class CloudFrontService {
         }
         distStore.delete(id);
         invalidationStore.delete(id);
-        tagStore.delete("distribution/" + id);
+        tagStore.delete(existing.getArn());
     }
 
     public List<Distribution> listDistributions(String marker, int maxItems) {

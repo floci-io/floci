@@ -4,12 +4,15 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
@@ -19,8 +22,10 @@ class CloudFrontServiceTest {
 
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        // One backend per call, as the real factory hands out: sharing a single map across the
+        // distribution, tag and invalidation stores would let one store's keys mask another's.
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenAnswer(invocation -> new InMemoryStorage<>());
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -52,6 +57,39 @@ class CloudFrontServiceTest {
 
         assertTrue(dist.getDomainName().endsWith(".cloudfront.local"),
                 "Expected configured suffix, got: " + dist.getDomainName());
+    }
+
+    @Test
+    void createDistributionStoresTagsUnderTheResourceArn() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        Distribution dist = service.createDistribution(new Distribution(), Map.of("estate", "probe"));
+
+        assertEquals(Map.of("estate", "probe"), service.listTagsForResource(dist.getArn()),
+                "ListTagsForResource looks tags up by ARN, so create must store them under it");
+    }
+
+    @Test
+    void createdDistributionIsVisibleToListDistributions() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        Distribution dist = service.createDistribution(new Distribution(), Map.of());
+
+        assertEquals(List.of(dist.getId()),
+                service.listDistributions(null, 100).stream().map(Distribution::getId).toList());
+    }
+
+    @Test
+    void deleteDistributionDropsItsTags() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        Distribution dist = new Distribution();
+        dist.setConfig(new DistributionConfig());
+        dist = service.createDistribution(dist, Map.of("estate", "probe"));
+
+        service.deleteDistribution(dist.getId(), dist.getEtag());
+
+        assertTrue(service.listTagsForResource(dist.getArn()).isEmpty(),
+                "tags must not outlive the distribution they were attached to");
     }
 
     @Test
