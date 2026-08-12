@@ -98,3 +98,26 @@ aws events put-events \
   --entries '[{"Source":"myapp","DetailType":"test","Detail":"{}"}]' \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+## Event Bus Targets
+
+A rule can target another event bus by ARN: the event is republished there, and that bus's own rules evaluate it and fan out normally. `Source`, `DetailType`, `Resources` and the originating `account`/`region` carry over, and each hop gets a new event id.
+
+```bash
+aws events put-targets \
+  --rule order-placed-rule \
+  --event-bus-name my-bus \
+  --targets '[{
+    "Id": "forward-to-domain-bus",
+    "Arn": "arn:aws:events:us-east-1:000000000000:event-bus/domain-bus"
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+## Current Behavior
+
+- `PutEvents` reports success once the source bus accepts an event, so target delivery failures surface only as a `WARN` in the Floci logs.
+- A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
+- A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
+- Onward delivery from that bus follows each target type: SQS resolves cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
+- An event is forwarded between buses only once, matching AWS: a bus that received an event from another bus does not forward it on to a third. The second hop is dropped with only a `WARN` rather than reported to the caller.

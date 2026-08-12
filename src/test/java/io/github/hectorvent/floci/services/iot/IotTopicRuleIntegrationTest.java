@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -287,6 +288,124 @@ class IotTopicRuleIntegrationTest {
     }
 
     @Test
+    void topicRuleMatchesOnlyPublishesInItsOwnRegion() throws Exception {
+        createEuWest1RepublishRule("regionalMatchRule", "devices/regional/match", "devices/regional/match-republished");
+
+        given()
+            .header("Authorization", auth("eu-west-1", "iotdata"))
+            .contentType("text/plain")
+            .body("eu-west-1-payload")
+        .when()
+            .post("/topics/devices/regional/match")
+        .then()
+            .statusCode(200);
+
+        awaitPublishedEvent("devices/regional/match-republished", "eu-west-1-payload".getBytes(StandardCharsets.UTF_8));
+
+        given()
+            .header("Authorization", auth("us-east-1", "iotdata"))
+            .contentType("text/plain")
+            .body("us-east-1-payload")
+        .when()
+            .post("/topics/devices/regional/match")
+        .then()
+            .statusCode(200);
+
+        assertFalse(eventRecorder.recentEvents().stream()
+                .anyMatch(event -> "devices/regional/match-republished".equals(event.topic())
+                        && Arrays.equals("us-east-1-payload".getBytes(StandardCharsets.UTF_8), event.payload())));
+    }
+
+    @Test
+    void unsignedPublishEvaluatesRulesInEveryRegion() throws Exception {
+        createEuWest1RepublishRule("regionalUnsignedRule", "devices/regional/unsigned", "devices/regional/unsigned-republished");
+
+        given()
+            .contentType("text/plain")
+            .body("unsigned-payload")
+        .when()
+            .post("/topics/devices/regional/unsigned")
+        .then()
+            .statusCode(200);
+
+        awaitPublishedEvent("devices/regional/unsigned-republished", "unsigned-payload".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void regionlessPublishFiresEveryMatchingRegionsRule() throws Exception {
+        createRepublishRule("eu-west-1", "fanoutRuleEu", "devices/regional/fanout", "devices/regional/fanout-eu");
+        createRepublishRule("ap-south-1", "fanoutRuleAp", "devices/regional/fanout", "devices/regional/fanout-ap");
+
+        given()
+            .contentType("text/plain")
+            .body("fanout-payload")
+        .when()
+            .post("/topics/devices/regional/fanout")
+        .then()
+            .statusCode(200);
+
+        awaitPublishedEvent("devices/regional/fanout-eu", "fanout-payload".getBytes(StandardCharsets.UTF_8));
+        awaitPublishedEvent("devices/regional/fanout-ap", "fanout-payload".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void nonSigV4AuthorizationPublishEvaluatesRulesInEveryRegion() throws Exception {
+        createRepublishRule("eu-west-1", "bearerRule", "devices/regional/bearer", "devices/regional/bearer-republished");
+
+        given()
+            .header("Authorization", "Bearer not-sigv4")
+            .contentType("text/plain")
+            .body("bearer-payload")
+        .when()
+            .post("/topics/devices/regional/bearer")
+        .then()
+            .statusCode(200);
+
+        awaitPublishedEvent("devices/regional/bearer-republished", "bearer-payload".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void topicRuleActionTargetsTheRuleRegion() {
+        String queueUrl = createQueue("regional-iot-rule-queue", "eu-west-1");
+        createQueue("regional-iot-rule-queue", "us-east-1");
+
+        given()
+            .header("Authorization", auth("eu-west-1", "iot"))
+            .contentType("application/json")
+            .body("""
+                {
+                  "topicRulePayload": {
+                    "sql": "SELECT * FROM 'devices/regional/sqs'",
+                    "actions": [
+                      {
+                        "sqs": {
+                          "roleArn": "arn:aws:iam::000000000000:role/iot-rule-role",
+                          "queueUrl": "%s"
+                        }
+                      }
+                    ]
+                  }
+                }
+                """.formatted(queueUrl))
+        .when()
+            .put("/rules/regionalSqsRule")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", auth("eu-west-1", "iotdata"))
+            .contentType("text/plain")
+            .body("regional-sqs-payload")
+        .when()
+            .post("/topics/devices/regional/sqs")
+        .then()
+            .statusCode(200);
+
+        receiveMessage(queueUrl, "eu-west-1").body(containsString("regional-sqs-payload"));
+        receiveMessage(queueUrl, "us-east-1").body(not(containsString("regional-sqs-payload")));
+    }
+
+    @Test
     void topicRuleConflictReplaceDeleteAndTagsMatchMvpLifecycle() {
         given()
             .contentType("application/json")
@@ -379,6 +498,67 @@ class IotTopicRuleIntegrationTest {
         .then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static String auth(String region, String service) {
+        return "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region + "/" + service
+                + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
+    private void createEuWest1RepublishRule(String ruleName, String sourceTopic, String targetTopic) {
+        createRepublishRule("eu-west-1", ruleName, sourceTopic, targetTopic);
+    }
+
+    private void createRepublishRule(String region, String ruleName, String sourceTopic, String targetTopic) {
+        given()
+            .header("Authorization", auth(region, "iot"))
+            .contentType("application/json")
+            .body("""
+                {
+                  "topicRulePayload": {
+                    "sql": "SELECT * FROM '%s'",
+                    "actions": [
+                      {
+                        "republish": {
+                          "roleArn": "arn:aws:iam::000000000000:role/iot-rule-role",
+                          "topic": "%s"
+                        }
+                      }
+                    ]
+                  }
+                }
+                """.formatted(sourceTopic, targetTopic))
+        .when()
+            .put("/rules/" + ruleName)
+        .then()
+            .statusCode(200)
+            .body("ruleArn", equalTo("arn:aws:iot:" + region + ":000000000000:rule/" + ruleName));
+    }
+
+    private String createQueue(String queueName, String region) {
+        return given()
+            .header("Authorization", auth(region, "sqs"))
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
+
+    private ValidatableResponse receiveMessage(String queueUrl, String region) {
+        return given()
+            .header("Authorization", auth(region, "sqs"))
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     private void awaitPublishedEvent(String topic, byte[] payload) throws InterruptedException {

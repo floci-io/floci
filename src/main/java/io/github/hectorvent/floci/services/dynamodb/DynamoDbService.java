@@ -659,21 +659,25 @@ public class DynamoDbService {
         // Resolve key names: use GSI or table keys
         String pkName;
         String skName;
+        List<String> sortKeyNames;
         if (indexName != null) {
             var gsi = table.findGsi(indexName);
             if (gsi.isPresent()) {
                 pkName = gsi.get().getPartitionKeyName();
                 skName = gsi.get().getSortKeyName();
+                sortKeyNames = gsi.get().getSortKeyNames();
             } else {
                 var lsi = table.findLsi(indexName)
                         .orElseThrow(() -> new AwsException("ValidationException",
                                 "The table does not have the specified index: " + indexName, 400));
                 pkName = lsi.getPartitionKeyName();
                 skName = lsi.getSortKeyName();
+                sortKeyNames = lsi.getSortKeyNames();
             }
         } else {
             pkName = table.getPartitionKeyName();
             skName = table.getSortKeyName();
+            sortKeyNames = table.getSortKeyNames();
         }
 
         List<JsonNode> results = new ArrayList<>();
@@ -716,17 +720,25 @@ public class DynamoDbService {
         // Filter out TTL-expired items
         results = results.stream().filter(item -> !isExpired(item, table)).toList();
 
-        // Sort by sort key if present
-        if (skName != null) {
-            String finalSkName = skName;
+        // Sort by the full (possibly composite) sort key, comparing each attribute in key-schema
+        // order. Using only the first sort-key attribute would ignore the remaining components
+        // (e.g. a "requestStateQuery RANGE, createdAt RANGE" index would never order by createdAt),
+        // which in turn breaks ScanIndexForward=false. See floci-io/floci#1675.
+        if (!sortKeyNames.isEmpty()) {
+            List<String> finalSortKeyNames = sortKeyNames;
             results = new ArrayList<>(results);
             results.sort((a, b) -> {
-                JsonNode aAttr = a.get(finalSkName);
-                JsonNode bAttr = b.get(finalSkName);
-                if (aAttr == null && bAttr == null) return 0;
-                if (aAttr == null) return -1;
-                if (bAttr == null) return 1;
-                return ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                for (String name : finalSortKeyNames) {
+                    JsonNode aAttr = a.get(name);
+                    JsonNode bAttr = b.get(name);
+                    int cmp;
+                    if (aAttr == null && bAttr == null) cmp = 0;
+                    else if (aAttr == null) cmp = -1;
+                    else if (bAttr == null) cmp = 1;
+                    else cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                    if (cmp != 0) return cmp;
+                }
+                return 0;
             });
             if (Boolean.FALSE.equals(scanIndexForward)) {
                 Collections.reverse(results);
@@ -741,13 +753,13 @@ public class DynamoDbService {
 
             String startItemKey = hasTableKeys
                     ? buildItemKeyFromNode(exclusiveStartKey, tablePkName, tableSkName)
-                    : buildItemKeyFromNode(exclusiveStartKey, pkName, skName);
+                    : buildItemKeyFromNode(exclusiveStartKey, pkName, sortKeyNames);
 
             int startIdx = -1;
             for (int i = 0; i < results.size(); i++) {
                 String thisKey = hasTableKeys
                         ? buildItemKeyFromNode(results.get(i), tablePkName, tableSkName)
-                        : buildItemKeyFromNode(results.get(i), pkName, skName);
+                        : buildItemKeyFromNode(results.get(i), pkName, sortKeyNames);
                 if (thisKey.equals(startItemKey)) {
                     startIdx = i;
                     break;
@@ -764,7 +776,7 @@ public class DynamoDbService {
         // Apply Limit (stops at N items)
         if (limit != null && limit > 0 && evaluatedItems.size() > limit) {
             JsonNode lastItem = evaluatedItems.get(limit - 1);
-            lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, skName, indexName != null);
+            lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, sortKeyNames, indexName != null);
             evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, limit));
         }
 
@@ -775,7 +787,7 @@ public class DynamoDbService {
             for (int i = 0; i < evaluatedItems.size(); i++) {
                 int sz = DynamoDbItemSize.calculateItemSize(evaluatedItems.get(i));
                 if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
-                    lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(i - 1), pkName, skName, indexName != null);
+                    lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(i - 1), pkName, sortKeyNames, indexName != null);
                     evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, i));
                     break;
                 }
@@ -2349,16 +2361,25 @@ public class DynamoDbService {
     }
 
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {
+        return buildItemKeyFromNode(item, pkName, skName == null ? List.of() : List.of(skName));
+    }
+
+    // Builds a cursor-matching string from the partition key plus every sort-key component in
+    // key-schema order. A composite (multi-RANGE) index cursor must incorporate all components,
+    // otherwise rows sharing the first RANGE value collapse to the same key and pagination can
+    // skip or duplicate items. See floci-io/floci#1675.
+    private String buildItemKeyFromNode(JsonNode item, String pkName, List<String> skNames) {
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr == null) return "";
         String pk = extractScalarValue(pkAttr);
-        if (skName != null) {
+        StringBuilder key = new StringBuilder(pk != null ? pk : "");
+        for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
-                return pk + "#" + extractScalarValue(skAttr);
+                key.append("#").append(extractScalarValue(skAttr));
             }
         }
-        return pk != null ? pk : "";
+        return key.toString();
     }
 
     JsonNode buildKeyNode(TableDefinition table, JsonNode item, String pkName, String skName) {
@@ -2367,13 +2388,23 @@ public class DynamoDbService {
 
     JsonNode buildKeyNode(TableDefinition table, JsonNode item,
                           String pkName, String skName, boolean isIndexQuery) {
+        return buildKeyNode(table, item, pkName,
+                skName == null ? List.of() : List.of(skName), isIndexQuery);
+    }
+
+    // Emits a LastEvaluatedKey carrying the partition key plus every sort-key component in
+    // key-schema order (a composite index has more than one), and, for index queries, the base
+    // table key so the cursor uniquely identifies a row. Emitting only the first RANGE attribute
+    // loses composite key identity. See floci-io/floci#1675.
+    JsonNode buildKeyNode(TableDefinition table, JsonNode item,
+                          String pkName, List<String> skNames, boolean isIndexQuery) {
         com.fasterxml.jackson.databind.node.ObjectNode keyNode =
                 com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr != null) {
             keyNode.set(pkName, pkAttr);
         }
-        if (skName != null) {
+        for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
                 keyNode.set(skName, skAttr);
@@ -2385,7 +2416,7 @@ public class DynamoDbService {
             if (!tablePk.equals(pkName) && item.get(tablePk) != null) {
                 keyNode.set(tablePk, item.get(tablePk));
             }
-            if (tableSk != null && !tableSk.equals(skName) && item.get(tableSk) != null) {
+            if (tableSk != null && !skNames.contains(tableSk) && item.get(tableSk) != null) {
                 keyNode.set(tableSk, item.get(tableSk));
             }
         }
@@ -2430,14 +2461,18 @@ public class DynamoDbService {
 
         return switch (op) {
             case "EQ" -> {
-                if (attrValue == null) yield false;
-                yield ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr != null ? compareAttr : attrValue) == 0
-                        && actual != null && actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield false;
+                }
+                // Deep equality, so set/list/map values compare by content rather than
+                // collapsing to an empty scalar and matching everything.
+                yield attributeValuesEqual(attrValue, compareAttr);
             }
             case "NE" -> {
-                if (attrValue == null) yield true;
-                if (actual == null || compareValue == null) yield true;
-                yield !actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield true;
+                }
+                yield !attributeValuesEqual(attrValue, compareAttr);
             }
             case "NULL" -> attrValue == null;
             case "NOT_NULL" -> attrValue != null;

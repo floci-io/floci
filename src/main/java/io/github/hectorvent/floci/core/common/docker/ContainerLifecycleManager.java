@@ -164,33 +164,45 @@ public class ContainerLifecycleManager {
     public void stopAndRemove(String containerId, Closeable logStream) {
         LOG.infov("Stopping container {0}", containerId);
 
-        // Close log stream first
-        if (logStream != null) {
-            try {
-                logStream.close();
-            } catch (Exception e) {
-                LOG.debugv("Error closing log stream: {0}", e.getMessage());
-            }
-        }
-
-        // Stop container
+        boolean stoppedOrMissing = false;
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+            stoppedOrMissing = true;
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
-            return;
+            stoppedOrMissing = true;
         } catch (Exception e) {
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
         }
 
-        // Remove container
+        // Force removal is the recovery path when Docker could not stop the container cleanly. It also
+        // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
+        boolean removedOrMissing = false;
         try {
             dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            removedOrMissing = true;
             LOG.debugv("Removed container {0}", containerId);
         } catch (NotFoundException e) {
             // Already gone
+            removedOrMissing = true;
         } catch (Exception e) {
             LOG.warnv("Error removing container {0}: {1}", containerId, e.getMessage());
+        }
+
+        if (logStream != null && (stoppedOrMissing || removedOrMissing)) {
+            closeLogStreamAfterContainerStop(logStream);
+        }
+    }
+
+    /**
+     * Releases lifecycle ownership of a log stream after its container has stopped. Docker's terminal
+     * callback normally flushes the final tail; a bounded fallback handles a broken transport.
+     */
+    public void closeLogStreamAfterContainerStop(Closeable logStream) {
+        try {
+            logStream.close();
+        } catch (Exception e) {
+            LOG.debugv("Error closing log stream: {0}", e.getMessage());
         }
     }
 
@@ -312,15 +324,23 @@ public class ContainerLifecycleManager {
 
     /**
      * Removes a named Docker volume, ignoring errors if it does not exist or is still in use.
+     * Returns whether the volume is confirmed gone: true if it was removed or was already absent,
+     * false if Docker refused (e.g. still in use by a container) or the attempt failed for some
+     * other reason (e.g. a transient daemon error). Callers that need to retry a removal should
+     * treat false as "unconfirmed, try again later" rather than "definitely still there" - a single
+     * boolean here can't always distinguish those two cases from the daemon's response alone.
      */
-    public void removeVolume(String volumeName) {
+    public boolean removeVolume(String volumeName) {
         try {
             dockerClient.removeVolumeCmd(volumeName).exec();
             LOG.debugv("Removed volume {0}", volumeName);
+            return true;
         } catch (NotFoundException e) {
-            // Already gone — nothing to do
+            // Already gone, which satisfies the caller's goal just as much as removing it would.
+            return true;
         } catch (Exception e) {
             LOG.warnv("Error removing volume {0}: {1}", volumeName, e.getMessage());
+            return false;
         }
     }
 

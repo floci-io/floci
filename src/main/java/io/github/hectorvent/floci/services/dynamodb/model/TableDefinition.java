@@ -211,6 +211,17 @@ public class TableDefinition {
                 .orElse(null);
     }
 
+    /**
+     * Returns all sort key attribute names in key-schema order. For a composite sort key this
+     * contains more than one element; ordering must consider all of them, not just the first.
+     */
+    public List<String> getSortKeyNames() {
+        return keySchema.stream()
+                .filter(k -> "RANGE".equals(k.getKeyType()))
+                .map(KeySchemaElement::getAttributeName)
+                .toList();
+    }
+
     public Optional<GlobalSecondaryIndex> findGsi(String indexName) {
         if (globalSecondaryIndexes == null) {
             return Optional.empty();
