@@ -2994,6 +2994,13 @@ public class CloudFormationResourceProvisioner {
             throw unsupportedEventBusMutableUpdate();
         }
 
+        // Stacks persisted by the older EventBus provisioner have no managed-key metadata. There
+        // is no reliable way to distinguish their CloudFormation tags from tags added out of band,
+        // so allow this one-time adoption and start tracking the requested keys afterwards.
+        if (!resource.getAttributes().containsKey(EVENT_BUS_MANAGED_TAG_KEYS_ATTR)) {
+            return;
+        }
+
         Map<String, String> currentManagedTags = new LinkedHashMap<>();
         for (String key : eventBusManagedTagKeys(resource)) {
             if (bus.getTags().containsKey(key)) {

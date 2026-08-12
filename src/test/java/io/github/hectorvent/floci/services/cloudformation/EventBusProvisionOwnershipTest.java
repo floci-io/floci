@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
@@ -37,6 +38,7 @@ class EventBusProvisionOwnershipTest {
     private static final String REGION = "us-east-1";
     private static final String BUS = "orders-bus";
     private static final String CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
+    private static final String MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
     private static final String ROLLBACK_OWNED_ATTR = "__FlociRollbackOwned";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -75,6 +77,25 @@ class EventBusProvisionOwnershipTest {
         assertEquals(BUS, r.getPhysicalId());
         // and it starts tracking ownership from here on
         assertEquals("2026-01-01T00:00:00Z", r.getAttributes().get(CREATED_TIME_ATTR));
+    }
+
+    @Test
+    void updateOfTaggedBusProvisionedBeforeTagTrackingAdoptsItInsteadOfFailing() {
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+                .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
+        EventBus existingBus = bus(Instant.parse("2026-01-01T00:00:00Z"));
+        existingBus.setTags(Map.of("environment", "test"));
+        when(eventBridgeService.describeEventBus(BUS, REGION)).thenReturn(existingBus);
+        JsonNode properties = props(false);
+        ((ObjectNode) properties).putArray("Tags")
+                .addObject()
+                .put("Key", "environment")
+                .put("Value", "test");
+
+        StackResource r = provisionExisting(Map.of(), properties);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        assertEquals("[\"environment\"]", r.getAttributes().get(MANAGED_TAG_KEYS_ATTR));
     }
 
     @Test
@@ -127,7 +148,12 @@ class EventBusProvisionOwnershipTest {
     }
 
     private StackResource provisionExisting(Map<String, String> existingAttributes) {
-        return provisioner.provision("OrdersBus", "AWS::Events::EventBus", props(false),
+        return provisionExisting(existingAttributes, props(false));
+    }
+
+    private StackResource provisionExisting(Map<String, String> existingAttributes,
+                                            JsonNode properties) {
+        return provisioner.provision("OrdersBus", "AWS::Events::EventBus", properties,
                 engine(), REGION, "000000000000", "my-stack", BUS, existingAttributes);
     }
 
