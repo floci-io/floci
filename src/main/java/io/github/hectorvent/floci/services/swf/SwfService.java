@@ -77,9 +77,11 @@ public class SwfService implements Resettable {
 
     private final RegionResolver regionResolver;
     private final Clock clock;
+    private final LambdaInvoker lambdaInvoker;
 
     @Inject
-    public SwfService(StorageFactory storageFactory, RegionResolver regionResolver, Clock clock) {
+    public SwfService(StorageFactory storageFactory, RegionResolver regionResolver, Clock clock,
+                      LambdaInvoker lambdaInvoker) {
         this.domainStore = storageFactory.create("swf", "swf-domains.json",
                 new TypeReference<Map<String, SwfDomain>>() {});
         this.workflowTypeStore = storageFactory.create("swf", "swf-workflow-types.json",
@@ -90,6 +92,7 @@ public class SwfService implements Resettable {
                 new TypeReference<Map<String, SwfWorkflowExecution>>() {});
         this.regionResolver = regionResolver;
         this.clock = clock;
+        this.lambdaInvoker = lambdaInvoker;
     }
 
     @Override
@@ -1082,17 +1085,102 @@ public class SwfService implements Resettable {
     }
 
     /**
-     * Lambda-backed activities are recorded but not invoked. Emitting Scheduled followed by
-     * ScheduleLambdaFunctionFailed keeps a decider that uses them unblocked with a cause it
-     * models, instead of stalling on an event that never arrives.
+     * Invokes the Lambda function the decider asked for, through Floci's own Lambda service,
+     * and records the outcome as the live service does.
+     *
+     * <p>Verified against the live service: a successful call appends Scheduled, Started, then
+     * Completed with the function's response as {@code result}; a function that cannot be
+     * resolved still gets Scheduled and Started, then Failed with the SDK's error code as
+     * {@code reason}; and an execution with no {@code lambdaRole} never reaches Started at all,
+     * appending StartLambdaFunctionFailed with cause ASSUME_ROLE_FAILED instead. Reusing an
+     * {@code id} is accepted — SWF does not report ID_ALREADY_IN_USE for Lambda invocations the
+     * way it does for activity ids.
+     *
+     * <p>The invocation is synchronous here rather than dispatched to the sweeper: floci's
+     * Lambda service runs the function in a container it manages and returns the payload, so
+     * the natural place to record Completed/Failed is the same decision that scheduled it.
      */
     private void scheduleLambdaFunction(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
-        appendEvent(execution, "ScheduleLambdaFunctionFailed")
-                .attr("id", nullToEmpty(decision.string("id")))
-                .attr("name", nullToEmpty(decision.string("name")))
-                .attr("cause", "LAMBDA_SERVICE_NOT_AVAILABLE_IN_REGION")
+        String id = nullToEmpty(decision.string("id"));
+        String name = decision.string("name");
+
+        SwfHistoryEvent scheduled = appendEvent(execution, "LambdaFunctionScheduled");
+        scheduled.attr("id", id)
+                .attr("name", nullToEmpty(name))
+                .attr("control", decision.string("control"))
+                .attr("input", decision.string("input"))
+                .attr("startToCloseTimeout", decision.string("startToCloseTimeout"))
                 .attr("decisionTaskCompletedEventId", decisionEventId);
+
+        // No role means SWF cannot assume anything to invoke with, so the function is never
+        // started. This is the one path that skips LambdaFunctionStarted entirely.
+        if (execution.getLambdaRole() == null || execution.getLambdaRole().isEmpty()) {
+            appendEvent(execution, "StartLambdaFunctionFailed")
+                    .attr("scheduledEventId", scheduled.getEventId())
+                    .attr("cause", "ASSUME_ROLE_FAILED")
+                    .attr("message", "No IAM role is attached to the current workflow execution.");
+            execution.setDecisionNeeded(true);
+            return;
+        }
+
+        SwfHistoryEvent started = appendEvent(execution, "LambdaFunctionStarted");
+        started.attr("scheduledEventId", scheduled.getEventId());
+
+        // An empty input is delivered to the handler as {}, matching the live service.
+        String input = decision.string("input");
+        byte[] payload = (input == null || input.isEmpty() ? "{}" : input)
+                .getBytes(StandardCharsets.UTF_8);
+
+        try {
+            LambdaInvocationResult result = lambdaInvoker.invoke(
+                    lambdaRegion(execution), name, payload);
+            if (result.functionError() != null && !result.functionError().isEmpty()) {
+                appendEvent(execution, "LambdaFunctionFailed")
+                        .attr("scheduledEventId", scheduled.getEventId())
+                        .attr("startedEventId", started.getEventId())
+                        .attr("reason", result.functionError())
+                        .attr("details", result.payload());
+            } else {
+                appendEvent(execution, "LambdaFunctionCompleted")
+                        .attr("scheduledEventId", scheduled.getEventId())
+                        .attr("startedEventId", started.getEventId())
+                        .attr("result", result.payload());
+            }
+        } catch (AwsException e) {
+            // The live service surfaces the Lambda SDK's own error code and message here, so a
+            // decider sees ResourceNotFoundException for a function that does not exist.
+            appendEvent(execution, "LambdaFunctionFailed")
+                    .attr("scheduledEventId", scheduled.getEventId())
+                    .attr("startedEventId", started.getEventId())
+                    .attr("reason", e.getErrorCode())
+                    .attr("details", e.getMessage());
+        } catch (RuntimeException e) {
+            LOG.warnv("SWF Lambda invocation {0} ({1}) failed: {2}", id, name, e.getMessage());
+            appendEvent(execution, "LambdaFunctionFailed")
+                    .attr("scheduledEventId", scheduled.getEventId())
+                    .attr("startedEventId", started.getEventId())
+                    .attr("reason", e.getClass().getSimpleName())
+                    .attr("details", nullToEmpty(e.getMessage()));
+        }
         execution.setDecisionNeeded(true);
+    }
+
+    /**
+     * The region to invoke Lambda in: taken from the execution's domain ARN, which was built
+     * from the region the domain was registered in, so a Lambda scheduled by a workflow in
+     * one region is not invoked in another. Falls back to the configured default when the ARN
+     * is not in the expected shape.
+     */
+    private String lambdaRegion(SwfWorkflowExecution execution) {
+        SwfDomain domain = domainStore.get(execution.getDomain()).orElse(null);
+        if (domain != null && domain.getArn() != null) {
+            // arn:aws:swf:<region>:<account>:/domain/<name>
+            String[] parts = domain.getArn().split(":", 5);
+            if (parts.length >= 4 && !parts[3].isEmpty()) {
+                return parts[3];
+            }
+        }
+        return regionResolver.getDefaultRegion();
     }
 
     // ────────────────────────────── Activity tasks ───────────────────────────

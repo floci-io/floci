@@ -71,7 +71,7 @@ All 39 modeled operations are implemented.
 | `SignalExternalWorkflowExecution` | Delivers a signal to another execution in the same domain |
 | `RequestCancelExternalWorkflowExecution` | Requests cancellation of another execution |
 | `StartChildWorkflowExecution` | Starts a child execution and reports its outcome back to the parent |
-| `ScheduleLambdaFunction` | Recorded as `ScheduleLambdaFunctionFailed` with cause `LAMBDA_SERVICE_NOT_AVAILABLE_IN_REGION` (see [Limitations](#limitations)) |
+| `ScheduleLambdaFunction` | Invokes the function through Floci's Lambda service and records its result (see [Lambda functions](#lambda-functions)) |
 
 A decision that cannot be applied appends its `*Failed` event with the AWS cause
 (`ACTIVITY_TYPE_DOES_NOT_EXIST`, `ACTIVITY_ID_ALREADY_IN_USE`, `TIMER_ID_UNKNOWN`,
@@ -101,6 +101,28 @@ Any timeout other than the workflow's own schedules a new decision task. The lit
 When an execution closes, its `childPolicy` is applied to still-open children:
 `TERMINATE` terminates them with cause `CHILD_POLICY_APPLIED`, `REQUEST_CANCEL` requests
 cancellation, and `ABANDON` leaves them running.
+
+## Lambda functions
+
+`ScheduleLambdaFunction` runs a real function: Floci invokes it through its own Lambda
+service, which executes it in a container exactly as an `Invoke` API call would, and records
+the outcome in history. Deploy the function with the Lambda API first — SWF resolves it by
+name in the region its domain was registered in.
+
+The execution needs a `lambdaRole`, taken from `StartWorkflowExecution`'s `lambdaRole` or,
+when absent, the workflow type's `defaultLambdaRole`. The role is not evaluated as a policy;
+its presence is what SWF requires in order to invoke.
+
+| Outcome | History |
+|---|---|
+| Success | `LambdaFunctionScheduled` → `LambdaFunctionStarted` → `LambdaFunctionCompleted` with the response as `result` |
+| Handler raised | `…Scheduled` → `…Started` → `LambdaFunctionFailed` with `reason` `Handled`/`Unhandled` and the error payload as `details` |
+| Function not found | `…Scheduled` → `…Started` → `LambdaFunctionFailed` with `reason` `ResourceNotFoundException` |
+| No `lambdaRole` | `…Scheduled` → `StartLambdaFunctionFailed` with cause `ASSUME_ROLE_FAILED`; the function is never started |
+
+A decision with no `input` delivers `{}` to the handler, and reusing an `id` is accepted —
+SWF does not report `ID_ALREADY_IN_USE` for Lambda invocations the way it does for activity
+ids. Every outcome schedules a fresh decision task so the decider can react.
 
 ## Configuration
 
@@ -211,9 +233,6 @@ Faults use the AWS codes and messages, so SDK error handling works unchanged:
 - **Long polling.** `PollForDecisionTask` and `PollForActivityTask` return immediately
   instead of holding the connection for up to 60 seconds. Workers that loop on an empty
   poll behave the same; workers that rely on the call blocking will spin.
-- **`ScheduleLambdaFunction`.** Lambda-backed activities are recorded as
-  `ScheduleLambdaFunctionFailed` rather than invoking a function, so a decider that uses
-  them keeps making progress instead of waiting for an event that never arrives.
 - **Task tokens are in-memory.** Tokens do not survive a restart even under persistent
   storage modes, matching the fact that SWF tokens are not durable handles.
 - **Retention.** `workflowExecutionRetentionPeriodInDays` is stored and returned but

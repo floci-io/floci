@@ -18,8 +18,10 @@ import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -52,16 +54,38 @@ class SwfServiceTest {
 
     private MutableClock clock;
     private SwfService service;
+    private List<String> lambdaInvocations;
+    private LambdaInvocationResult lambdaResponse;
+    private RuntimeException lambdaFailure;
 
     @BeforeEach
     void setUp() {
         clock = new MutableClock();
+        lambdaInvocations = new ArrayList<>();
+        lambdaResponse = new LambdaInvocationResult("{\"ok\":true}", null);
+        lambdaFailure = null;
         service = new SwfService(new InMemoryStorageFactory(),
-                new RegionResolver("us-east-1", "000000000000"), clock);
+                new RegionResolver("us-east-1", "000000000000"), clock, recordingLambdaInvoker());
 
         service.registerDomain(DOMAIN, "unit test domain", "7", Map.of(), "us-east-1");
         service.registerWorkflowType(DOMAIN, workflowType("W", "1"));
         service.registerActivityType(DOMAIN, activityType("A", "1"));
+    }
+
+    /**
+     * Stands in for the real Lambda service so these tests need no Docker daemon: records the
+     * region and function it was asked for, then returns {@link #lambdaResponse} or throws
+     * {@link #lambdaFailure}.
+     */
+    private LambdaInvoker recordingLambdaInvoker() {
+        return (region, functionName, payload) -> {
+            lambdaInvocations.add(region + "|" + functionName + "|"
+                    + new String(payload, StandardCharsets.UTF_8));
+            if (lambdaFailure != null) {
+                throw lambdaFailure;
+            }
+            return lambdaResponse;
+        };
     }
 
     @Test
@@ -433,6 +457,128 @@ class SwfServiceTest {
     }
 
     @Test
+    void scheduleLambdaFunction_invokesTheFunctionAndRecordsCompletion() {
+        // A lambdaRole is required for SWF to invoke at all.
+        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String runId = startLambdaWf("wf-lam", "LW");
+
+        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        lambdaResponse = new LambdaInvocationResult("{\"echoed\":{\"hello\":\"swf\"}}", null);
+        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                scheduleLambda("lam-1", "my-fn", "{\"hello\":\"swf\"}", "ctl", "30")), null);
+
+        assertEquals(1, lambdaInvocations.size(), "the function must actually be invoked");
+        assertEquals("us-east-1|my-fn|{\"hello\":\"swf\"}", lambdaInvocations.get(0));
+
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(DOMAIN, "wf-lam", runId, false);
+        SwfHistoryEvent scheduled = eventOfType(events, "LambdaFunctionScheduled");
+        SwfHistoryEvent started = eventOfType(events, "LambdaFunctionStarted");
+        SwfHistoryEvent completed = eventOfType(events, "LambdaFunctionCompleted");
+
+        assertEquals("lam-1", scheduled.getAttributes().get("id"));
+        assertEquals("my-fn", scheduled.getAttributes().get("name"));
+        assertEquals("ctl", scheduled.getAttributes().get("control"));
+        assertEquals("30", scheduled.getAttributes().get("startToCloseTimeout"));
+        assertEquals(scheduled.getEventId(), started.getAttributes().get("scheduledEventId"));
+        assertEquals(scheduled.getEventId(), completed.getAttributes().get("scheduledEventId"));
+        assertEquals(started.getEventId(), completed.getAttributes().get("startedEventId"));
+        assertEquals("{\"echoed\":{\"hello\":\"swf\"}}", completed.getAttributes().get("result"));
+
+        // The outcome gives the decider a fresh task to react to.
+        assertEquals("DecisionTaskScheduled", events.get(events.size() - 1).getEventType());
+    }
+
+    @Test
+    void scheduleLambdaFunction_withNoInput_passesAnEmptyJsonObject() {
+        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        startLambdaWf("wf-lam-empty", "LW");
+        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+
+        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                scheduleLambda("lam-1", "my-fn", null, null, null)), null);
+
+        assertEquals("us-east-1|my-fn|{}", lambdaInvocations.get(0));
+    }
+
+    @Test
+    void scheduleLambdaFunction_whenTheFunctionIsMissing_recordsFailedWithTheAwsErrorCode() {
+        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String runId = startLambdaWf("wf-lam-missing", "LW");
+        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+
+        lambdaFailure = new AwsException("ResourceNotFoundException",
+                "Function not found: arn:aws:lambda:us-east-1:000000000000:function:gone", 404);
+        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                scheduleLambda("lam-1", "gone", null, null, null)), null);
+
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(DOMAIN, "wf-lam-missing", runId, false);
+        // The live service still reports Started before Failed for an unresolvable function.
+        SwfHistoryEvent started = eventOfType(events, "LambdaFunctionStarted");
+        SwfHistoryEvent failed = eventOfType(events, "LambdaFunctionFailed");
+        assertEquals("ResourceNotFoundException", failed.getAttributes().get("reason"));
+        assertEquals(started.getEventId(), failed.getAttributes().get("startedEventId"));
+        assertEquals("DecisionTaskScheduled", events.get(events.size() - 1).getEventType());
+    }
+
+    @Test
+    void scheduleLambdaFunction_whenTheHandlerErrors_recordsFailedWithTheFunctionError() {
+        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String runId = startLambdaWf("wf-lam-err", "LW");
+        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+
+        lambdaResponse = new LambdaInvocationResult("{\"errorMessage\":\"boom\"}", "Unhandled");
+        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                scheduleLambda("lam-1", "my-fn", null, null, null)), null);
+
+        SwfHistoryEvent failed = eventOfType(
+                service.getWorkflowExecutionHistory(DOMAIN, "wf-lam-err", runId, false), "LambdaFunctionFailed");
+        assertEquals("Unhandled", failed.getAttributes().get("reason"));
+        assertEquals("{\"errorMessage\":\"boom\"}", failed.getAttributes().get("details"));
+    }
+
+    @Test
+    void scheduleLambdaFunction_withoutALambdaRole_neverStartsAndReportsAssumeRoleFailed() {
+        // The workflow type registered in setUp() has no defaultLambdaRole.
+        String runId = start("wf-lam-norole");
+        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+
+        service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                scheduleLambda("lam-1", "my-fn", null, null, null)), null);
+
+        assertTrue(lambdaInvocations.isEmpty(), "no role means the function is never invoked");
+
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(DOMAIN, "wf-lam-norole", runId, false);
+        SwfHistoryEvent scheduled = eventOfType(events, "LambdaFunctionScheduled");
+        SwfHistoryEvent failed = eventOfType(events, "StartLambdaFunctionFailed");
+        assertEquals("ASSUME_ROLE_FAILED", failed.getAttributes().get("cause"));
+        assertEquals("No IAM role is attached to the current workflow execution.",
+                failed.getAttributes().get("message"));
+        assertEquals(scheduled.getEventId(), failed.getAttributes().get("scheduledEventId"));
+        // This is the one Lambda path that skips Started entirely.
+        assertTrue(events.stream().noneMatch(e -> "LambdaFunctionStarted".equals(e.getEventType())));
+    }
+
+    @Test
+    void startWorkflowExecution_resolvesLambdaRoleFromTheTypeDefaultAndAcceptsAnOverride() {
+        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/type-default"));
+
+        String inherited = startLambdaWf("wf-inherit", "LW");
+        assertEquals("arn:aws:iam::000000000000:role/type-default",
+                service.describeWorkflowExecution(DOMAIN, "wf-inherit", inherited).getLambdaRole());
+
+        String overridden = service.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                DOMAIN, "wf-override", "LW", "1", null, null, null, null, null, null, null,
+                "arn:aws:iam::000000000000:role/per-execution"));
+        assertEquals("arn:aws:iam::000000000000:role/per-execution",
+                service.describeWorkflowExecution(DOMAIN, "wf-override", overridden).getLambdaRole());
+    }
+
+    @Test
     void listExecutions_separatesOpenFromClosed() {
         start("wf-open");
         String closedRunId = start("wf-done");
@@ -748,6 +894,43 @@ class SwfServiceTest {
         type.setDefaultTaskScheduleToCloseTimeout("NONE");
         type.setDefaultTaskHeartbeatTimeout("NONE");
         return type;
+    }
+
+    /** A workflow type carrying a {@code defaultLambdaRole}, which SWF requires to invoke Lambda. */
+    private static SwfWorkflowType lambdaWorkflowType(String name, String version, String role) {
+        SwfWorkflowType type = workflowType(name, version);
+        type.setDefaultLambdaRole(role);
+        return type;
+    }
+
+    private String startLambdaWf(String workflowId, String typeName) {
+        return service.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                DOMAIN, workflowId, typeName, "1", null, null, null, null, null, null, null, null));
+    }
+
+    private static Decision scheduleLambda(String id, String name, String input,
+                                           String control, String startToCloseTimeout) {
+        Map<String, Object> attrs = new LinkedHashMap<>();
+        attrs.put("id", id);
+        attrs.put("name", name);
+        if (input != null) {
+            attrs.put("input", input);
+        }
+        if (control != null) {
+            attrs.put("control", control);
+        }
+        if (startToCloseTimeout != null) {
+            attrs.put("startToCloseTimeout", startToCloseTimeout);
+        }
+        return new Decision("ScheduleLambdaFunction", attrs);
+    }
+
+    private static SwfHistoryEvent eventOfType(List<SwfHistoryEvent> events, String eventType) {
+        return events.stream()
+                .filter(e -> eventType.equals(e.getEventType()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no " + eventType + " in "
+                        + events.stream().map(SwfHistoryEvent::getEventType).toList()));
     }
 
     /**
