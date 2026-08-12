@@ -40,6 +40,13 @@ public class SwfWorkflowExecution {
     private String parentWorkflowId;
     private String parentRunId;
     private Long parentInitiatedEventId;
+    /**
+     * The parent's ChildWorkflowExecutionStarted event id. Distinct from
+     * {@link #parentInitiatedEventId}: the live service reports the initiated id on
+     * {@code initiatedEventId} and this one on {@code startedEventId} of every
+     * ChildWorkflowExecution* event, and deciders correlate on both.
+     */
+    private Long parentStartedEventId;
     private String continuedExecutionRunId;
 
     private long nextEventId = 1;
@@ -226,6 +233,14 @@ public class SwfWorkflowExecution {
 
     public void setParentInitiatedEventId(Long parentInitiatedEventId) {
         this.parentInitiatedEventId = parentInitiatedEventId;
+    }
+
+    public Long getParentStartedEventId() {
+        return parentStartedEventId;
+    }
+
+    public void setParentStartedEventId(Long parentStartedEventId) {
+        this.parentStartedEventId = parentStartedEventId;
     }
 
     public String getContinuedExecutionRunId() {

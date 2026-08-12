@@ -831,12 +831,17 @@ class SwfIntegrationTest {
                    }}]}
                 """.formatted(token)).then().statusCode(200);
 
-        call("GetWorkflowExecutionHistory", """
+        Response parentHistory = call("GetWorkflowExecutionHistory", """
                 {"domain": "%s", "execution": {"workflowId": "wf-parent", "runId": "%s"}}
-                """.formatted(domain, parentRunId))
-                .then()
+                """.formatted(domain, parentRunId));
+        parentHistory.then()
                 .body("events.eventType", hasItem("StartChildWorkflowExecutionInitiated"))
                 .body("events.eventType", hasItem("ChildWorkflowExecutionStarted"));
+
+        int initiatedEventId = parentHistory.path(
+                "events.find { it.eventType == 'StartChildWorkflowExecutionInitiated' }.eventId");
+        int childStartedEventId = parentHistory.path(
+                "events.find { it.eventType == 'ChildWorkflowExecutionStarted' }.eventId");
 
         // The child carries the parent link in its own start event.
         Response childHistory = call("GetWorkflowExecutionHistory", """
@@ -846,8 +851,12 @@ class SwfIntegrationTest {
                 .statusCode(200)
                 .body("events[0].workflowExecutionStartedEventAttributes.parentWorkflowExecution.workflowId",
                         equalTo("wf-parent"))
+                .body("events[0].workflowExecutionStartedEventAttributes.parentWorkflowExecution.runId",
+                        equalTo(parentRunId))
+                // The child's parentInitiatedEventId is the parent's
+                // StartChildWorkflowExecutionInitiated id, not its ChildWorkflowExecutionStarted id.
                 .body("events[0].workflowExecutionStartedEventAttributes.parentInitiatedEventId",
-                        greaterThan(0));
+                        equalTo(initiatedEventId));
 
         call("DescribeWorkflowExecution", """
                 {"domain": "%s", "execution": {"workflowId": "wf-parent", "runId": "%s"}}
@@ -870,7 +879,17 @@ class SwfIntegrationTest {
                 .then()
                 .body("events.eventType", hasItem("ChildWorkflowExecutionCompleted"))
                 .body("events.find { it.eventType == 'ChildWorkflowExecutionCompleted' }"
-                        + ".childWorkflowExecutionCompletedEventAttributes.result", equalTo("child-done"));
+                        + ".childWorkflowExecutionCompletedEventAttributes.result", equalTo("child-done"))
+                // initiatedEventId points at StartChildWorkflowExecutionInitiated and
+                // startedEventId at ChildWorkflowExecutionStarted — two different events.
+                // Reporting the initiated id for both mismatches any decider correlating
+                // on startedEventId.
+                .body("events.find { it.eventType == 'ChildWorkflowExecutionCompleted' }"
+                        + ".childWorkflowExecutionCompletedEventAttributes.initiatedEventId",
+                        equalTo(initiatedEventId))
+                .body("events.find { it.eventType == 'ChildWorkflowExecutionCompleted' }"
+                        + ".childWorkflowExecutionCompletedEventAttributes.startedEventId",
+                        equalTo(childStartedEventId));
     }
 
     // ───────────────────────────── Counting and tags ─────────────────────────

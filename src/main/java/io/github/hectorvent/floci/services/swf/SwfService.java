@@ -1006,14 +1006,18 @@ public class SwfService implements Resettable {
 
         appendWorkflowExecutionStarted(child, decision.string("input"), null);
         scheduleDecisionTask(child);
-        executionStore.put(executionKey(child), child);
         execution.getChildExecutions().put(childWorkflowId, child.getRunId());
 
-        appendEvent(execution, "ChildWorkflowExecutionStarted")
-                .attr("workflowExecution", Map.of("workflowId", child.getWorkflowId(),
+        SwfHistoryEvent childStarted = appendEvent(execution, "ChildWorkflowExecutionStarted");
+        childStarted.attr("workflowExecution", Map.of("workflowId", child.getWorkflowId(),
                         "runId", child.getRunId()))
                 .attr("workflowType", Map.of("name", typeName, "version", typeVersion))
                 .attr("initiatedEventId", initiated.getEventId());
+
+        // The child reports this id back on startedEventId of every
+        // ChildWorkflowExecution* event, so it has to be stored before the child is saved.
+        child.setParentStartedEventId(childStarted.getEventId());
+        executionStore.put(executionKey(child), child);
     }
 
     /** Maps a DefaultUndefinedFault message onto the matching child-start failure cause. */
@@ -1583,7 +1587,9 @@ public class SwfService implements Resettable {
                 .attr("workflowType", Map.of("name", execution.getWorkflowTypeName(),
                         "version", execution.getWorkflowTypeVersion()))
                 .attr("initiatedEventId", execution.getParentInitiatedEventId())
-                .attr("startedEventId", execution.getParentInitiatedEventId());
+                .attr("startedEventId", execution.getParentStartedEventId() != null
+                        ? execution.getParentStartedEventId()
+                        : execution.getParentInitiatedEventId());
         if (SwfConstants.CLOSE_STATUS_COMPLETED.equals(execution.getCloseStatus())) {
             event.attr("result", lastEventAttribute(execution, "WorkflowExecutionCompleted", "result"));
         } else if (SwfConstants.CLOSE_STATUS_FAILED.equals(execution.getCloseStatus())) {
