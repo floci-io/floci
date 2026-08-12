@@ -44,6 +44,9 @@ public class Cluster {
     @JsonProperty("certificateAuthority")
     private CertificateAuthority certificateAuthority;
 
+    @JsonProperty("identity")
+    private ClusterIdentity identity;
+
     @JsonProperty("platformVersion")
     private String platformVersion;
 
@@ -93,6 +96,9 @@ public class Cluster {
 
     public CertificateAuthority getCertificateAuthority() { return certificateAuthority; }
     public void setCertificateAuthority(CertificateAuthority certificateAuthority) { this.certificateAuthority = certificateAuthority; }
+
+    public ClusterIdentity getIdentity() { return identity; }
+    public void setIdentity(ClusterIdentity identity) { this.identity = identity; }
 
     public String getPlatformVersion() { return platformVersion; }
     public void setPlatformVersion(String platformVersion) { this.platformVersion = platformVersion; }

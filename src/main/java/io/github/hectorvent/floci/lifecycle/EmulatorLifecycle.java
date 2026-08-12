@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
+import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -75,6 +76,7 @@ public class EmulatorLifecycle {
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
+    private final FlinkContainerManager flinkContainerManager;
     private final RdsService rdsService;
     private final ElbV2Service elbV2Service;
     private final InitializationHooksRunner initializationHooksRunner;
@@ -104,6 +106,7 @@ public class EmulatorLifecycle {
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
+                             FlinkContainerManager flinkContainerManager,
                              RdsService rdsService,
                              ElbV2Service elbV2Service,
                              InitializationHooksRunner initializationHooksRunner,
@@ -132,6 +135,7 @@ public class EmulatorLifecycle {
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
+        this.flinkContainerManager = flinkContainerManager;
         this.rdsService = rdsService;
         this.elbV2Service = elbV2Service;
         this.initializationHooksRunner = initializationHooksRunner;
@@ -279,6 +283,7 @@ public class EmulatorLifecycle {
         docDbContainerManager.stopAll();
         neptuneContainerManager.stopAll();
         rabbitMqManager.stopAll();
+        flinkContainerManager.stopAll();
         ecrRegistryManager.shutdown();
         flociUiManager.shutdown();
         // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
