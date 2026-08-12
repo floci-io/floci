@@ -140,12 +140,28 @@ public class RdsQueryHandler {
     }
 
     private Response handleDescribeDbInstances(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBInstanceIdentifier");
+        String identifier = params.getFirst("DBInstanceIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractRdsFilterValue(params, "db-instance-id");
         }
         try {
-            Collection<DbInstance> result = service.listDbInstances(filterId);
+            Collection<DbInstance> result;
+            if (filterId != null && !filterId.isBlank()) {
+                result = service.listDbInstances(filterId);
+            } else {
+                List<String> resourceIds = extractRdsFilterValues(params, "dbi-resource-id");
+                result = resourceIds.isEmpty()
+                        ? service.listDbInstances(null)
+                        : service.listDbInstancesByDbiResourceIds(resourceIds);
+            }
+            // AWS parity: the DBInstanceIdentifier PARAMETER faults with
+            // DBInstanceNotFound when no instance matches, while the
+            // db-instance-id Filters form returns an empty list.
+            if (identifier != null && !identifier.isBlank() && result.isEmpty()) {
+                throw new AwsException("DBInstanceNotFound",
+                        "DBInstance " + identifier + " not found.", 404);
+            }
             XmlBuilder xml = new XmlBuilder().start("DBInstances");
             for (DbInstance i : result) {
                 xml.start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance");
@@ -359,12 +375,20 @@ public class RdsQueryHandler {
     }
 
     private Response handleDescribeDbClusters(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBClusterIdentifier");
+        String identifier = params.getFirst("DBClusterIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractRdsFilterValue(params, "db-cluster-id");
         }
         try {
             Collection<DbCluster> result = service.listDbClusters(filterId);
+            // AWS parity: the DBClusterIdentifier PARAMETER faults with
+            // DBClusterNotFoundFault when no cluster matches, while the
+            // db-cluster-id Filters form returns an empty list.
+            if (identifier != null && !identifier.isBlank() && result.isEmpty()) {
+                throw new AwsException("DBClusterNotFoundFault",
+                        "DBCluster " + identifier + " not found.", 404);
+            }
             XmlBuilder xml = new XmlBuilder().start("DBClusters");
             for (DbCluster c : result) {
                 xml.start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster");
@@ -982,16 +1006,35 @@ public class RdsQueryHandler {
      * Returns null if no matching filter is present.
      */
     private static String extractRdsFilterValue(MultivaluedMap<String, String> params, String filterName) {
+        List<String> values = extractRdsFilterValues(params, filterName);
+        return values.isEmpty() ? null : values.getFirst();
+    }
+
+    /**
+     * Extracts all values for a named RDS filter. Values within one filter use
+     * AWS OR semantics and are encoded as {@code Values.Value.N}.
+     */
+    private static List<String> extractRdsFilterValues(MultivaluedMap<String, String> params, String filterName) {
         for (int i = 1; ; i++) {
             String name = params.getFirst("Filters.Filter." + i + ".Name");
             if (name == null) {
                 break;
             }
             if (filterName.equals(name)) {
-                return params.getFirst("Filters.Filter." + i + ".Values.Value.1");
+                java.util.ArrayList<String> values = new java.util.ArrayList<>();
+                for (int valueIndex = 1; ; valueIndex++) {
+                    String value = params.getFirst("Filters.Filter." + i + ".Values.Value." + valueIndex);
+                    if (value == null) {
+                        break;
+                    }
+                    if (!value.isBlank()) {
+                        values.add(value);
+                    }
+                }
+                return List.copyOf(values);
             }
         }
-        return null;
+        return List.of();
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {

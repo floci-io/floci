@@ -128,6 +128,59 @@ class ApiGatewayProxyMatchTest {
         assertNull(ctrl.matchResource(List.of(authProxy), "/other/path"));
     }
 
+    @Test
+    void testMatchResourcesPrecedence() {
+        ApiGatewayResource widgets = resource("r1", "root", "widgets", "/widgets");
+        ApiGatewayResource rootProxy = resource("r2", "root", "{proxy+}", "/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(rootProxy, widgets);
+
+        List<ApiGatewayResource> matched = ctrl.matchResources(resources, "/widgets");
+        assertEquals(2, matched.size());
+        assertSame(widgets, matched.get(0));
+        assertSame(rootProxy, matched.get(1));
+    }
+
+    @Test
+    void testMatchResourcesMultipleProxies() {
+        ApiGatewayResource rootProxy = resource("r1", "root", "{proxy+}", "/{proxy+}");
+        ApiGatewayResource authProxy = resource("r2", "root", "{proxy+}", "/auth/{proxy+}");
+        ApiGatewayResource usersProxy = resource("r3", "root", "{proxy+}", "/auth/users/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(rootProxy, authProxy, usersProxy);
+
+        List<ApiGatewayResource> matched = ctrl.matchResources(resources, "/auth/users/details");
+        assertEquals(3, matched.size());
+        assertSame(usersProxy, matched.get(0));
+        assertSame(authProxy, matched.get(1));
+        assertSame(rootProxy, matched.get(2));
+    }
+
+    // ──────────────────────────── trailing-slash preservation (#1557) ────────────────────────────
+
+    @Test
+    void preservesTrailingSlashFromRawRequestPath() {
+        assertEquals("/thing/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/thing", "/restapis/abc/prod/_user_request_/thing/"));
+        assertEquals("/a/b/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/a/b", "/restapis/abc/prod/_user_request_/a/b/"));
+    }
+
+    @Test
+    void leavesPathUnchangedWhenRawRequestHasNoTrailingSlash() {
+        assertEquals("/thing", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/thing", "/restapis/abc/prod/_user_request_/thing"));
+    }
+
+    @Test
+    void doesNotDuplicateSlashOrAlterRootOrHandleNullRaw() {
+        // Root path is never turned into "//".
+        assertEquals("/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/", "/restapis/abc/prod/_user_request_/"));
+        // An already-normalized path that ends in "/" is not doubled.
+        assertEquals("/thing/", ApiGatewayExecuteController.preserveTrailingSlash("/thing/", "/x/thing/"));
+        // Null raw path is tolerated.
+        assertEquals("/thing", ApiGatewayExecuteController.preserveTrailingSlash("/thing", null));
+    }
+
     // ──────────────────────────── ELB_LISTENER_ARN ────────────────────────────
 
     @Test

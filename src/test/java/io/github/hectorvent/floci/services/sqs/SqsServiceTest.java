@@ -446,6 +446,26 @@ class SqsServiceTest {
     }
 
     @Test
+    void fifoDelayedMessageDoesNotBlockVisibleMessageInSameGroup() {
+        // Issue #2104: only in-flight messages lock a FIFO message group. A
+        // newly sent, still-delayed message must not make an already-visible
+        // message in the same group unreceivable.
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delay-group-lock.fifo",
+                Map.of("ContentBasedDeduplication", "true", "DelaySeconds", "1"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "A", 0, "group1", null, region);
+
+        try { Thread.sleep(1100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        sqsService.sendMessage(queue.getQueueUrl(), "B", 0, "group1", null, region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0, region);
+        assertEquals(1, received.size(),
+                "The already-visible message must be returned despite a delayed message in its group");
+        assertEquals("A", received.get(0).getBody());
+    }
+
+    @Test
     void fifoQueueIgnoresPerMessageDelaySeconds() {
         // AWS SQS FIFO queues only support queue-level DelaySeconds; any
         // per-message value is ignored. Here the queue default is 0 and the

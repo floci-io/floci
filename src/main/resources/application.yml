@@ -56,6 +56,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
+      - --initialize-at-run-time=graphql.util.IdGenerator
 
 
 floci:
@@ -136,6 +137,8 @@ floci:
         # mode: memory
       appsync:
         flush-interval-ms: 5000
+      rum:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -179,6 +182,7 @@ floci:
 
   protocols:
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
+    reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
   docker:
     log-max-size: "10m"
@@ -217,6 +221,7 @@ floci:
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
+      # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
       hot-reload:
         enabled: false
     apigateway:
@@ -237,6 +242,13 @@ floci:
       enabled: true
       mock: false
       default-image: "rabbitmq:3-management"
+    kinesis-analytics:
+      enabled: true
+      mock: false
+      # default-image: optional override; uncomment to pin every application to a single image
+      # (e.g. a private registry mirror). When unset, the image is chosen from the requested
+      # RuntimeEnvironment (KinesisAnalyticsRuntimes.imageFor, e.g. FLINK-1_19 -> apache/flink:1.19).
+      # default-image: "apache/flink:1.18"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -254,6 +266,7 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
@@ -362,6 +375,13 @@ floci:
       keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
+      backend: stub
+      proxy:
+        passthrough: false
+        # url: http://localhost:11434/v1
+        # api-key: sk-...
+        # default-model: llama3
+        # model-mapping: "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"
     eks:
       enabled: true
       mock: false
@@ -374,6 +394,19 @@ floci:
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
+      disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+    mwaa:
+      enabled: true
+      mock: false
+      default-postgres-image: "postgres:16-alpine"
+      supported-versions: "2.10.5,2.9.3,2.8.4"
+      default-version: "2.10.5"
+      proxy-base-port: 8700
+      proxy-max-port: 8799
+      data-path: ./data/mwaa
+      keep-running-on-shutdown: false
+      dag-sync-interval-seconds: 30
+      install-requirements: true
     elbv2:
       enabled: true
       mock: false
@@ -389,6 +422,8 @@ floci:
     codepipeline:
       enabled: true
     autoscaling:
+      enabled: true
+    applicationautoscaling:
       enabled: true
     elasticbeanstalk:
       enabled: true
@@ -436,4 +471,6 @@ floci:
         host: 0.0.0.0
         port: 1883
     iotdata:
+      enabled: true
+    rum:
       enabled: true

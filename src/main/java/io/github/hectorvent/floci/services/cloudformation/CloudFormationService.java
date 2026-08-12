@@ -9,12 +9,12 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ManagedContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -79,14 +79,10 @@ public class CloudFormationService {
         this.samTransformProcessor = new SamTransformProcessor(objectMapper);
         this.clock = clock;
         this.storageAccount = config.defaultAccountId();
-        this.stackBackend = asAccountAware(storageFactory.create(
-                "cloudformation", "cloudformation-stacks.json", new TypeReference<Map<String, Stack>>() {}));
-        this.exportBackend = asAccountAware(storageFactory.create(
-                "cloudformation", "cloudformation-exports.json", new TypeReference<Map<String, String>>() {}));
-    }
-
-    private static <V> AccountAwareStorageBackend<V> asAccountAware(StorageBackend<String, V> backend) {
-        return (AccountAwareStorageBackend<V>) backend;
+        this.stackBackend = storageFactory.create(
+                "cloudformation", "cloudformation-stacks.json", new TypeReference<Map<String, Stack>>() {});
+        this.exportBackend = storageFactory.create(
+                "cloudformation", "cloudformation-exports.json", new TypeReference<Map<String, String>>() {});
     }
 
     @PostConstruct
@@ -454,6 +450,7 @@ public class CloudFormationService {
                 for (String logicalId : sortedLogicalIds) {
                     JsonNode resDef = resources.get(logicalId);
                     String type = resDef.path("Type").asText();
+                    String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
                     JsonNode props = resDef.path("Properties");
 
                     CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
@@ -479,6 +476,9 @@ public class CloudFormationService {
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes());
                     }
+                    // Both branches return a fresh StackResource, so the policy is carried over here
+                    // rather than on the instance the loop started with.
+                    resource.setDeletionPolicy(deletionPolicy);
                     stack.getResources().put(logicalId, resource);
 
                     physicalIds.put(logicalId, resource.getPhysicalId());
@@ -588,13 +588,28 @@ public class CloudFormationService {
             stack.setStatus("ROLLBACK_IN_PROGRESS");
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "ROLLBACK_IN_PROGRESS", failedResource.getStatusReason());
-            rollbackCreatedResources(stack, region);
-            stack.setStatus("ROLLBACK_COMPLETE");
+            List<String> rollbackFailures = rollbackCreatedResources(stack, region);
             stack.setLastUpdatedTime(now());
-            addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE", null);
-            LOG.infov("Stack {0} rolled back to a clean slate (ROLLBACK_COMPLETE)", stack.getStackName());
+            if (rollbackFailures.isEmpty()) {
+                stack.setStatus("ROLLBACK_COMPLETE");
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE", null);
+                LOG.infov("Stack {0} rolled back to a clean slate (ROLLBACK_COMPLETE)", stack.getStackName());
+            } else {
+                String reason = "The following resource(s) failed to roll back: ["
+                        + String.join(", ", rollbackFailures) + "].";
+                stack.setStatus("ROLLBACK_FAILED");
+                stack.setStatusReason(reason);
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "ROLLBACK_FAILED", reason);
+                LOG.errorv("Stack {0} rollback failed: {1}", stack.getStackName(), reason);
+            }
         } else {
+            if ("true".equals(failedResource.getAttributes().remove(
+                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))) {
+                failedResource.setStatus("CREATE_COMPLETE");
+                failedResource.setStatusReason(null);
+            }
             stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
             stack.setLastUpdatedTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
@@ -604,20 +619,41 @@ public class CloudFormationService {
         persistStack(stack);
     }
 
-    /** Deletes every resource successfully created in this execution, in reverse order. */
-    private void rollbackCreatedResources(Stack stack, String region) {
+    /** Deletes every resource created in this execution, in reverse order. */
+    private List<String> rollbackCreatedResources(Stack stack, String region) {
         List<StackResource> resources = new ArrayList<>(stack.getResources().values());
         Collections.reverse(resources);
+        List<String> failedResources = new ArrayList<>();
         for (StackResource resource : resources) {
-            if (resource.getPhysicalId() != null && "CREATE_COMPLETE".equals(resource.getStatus())) {
-                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                        resource.getResourceType(), "DELETE_IN_PROGRESS", null);
-                provisioner.delete(resource.getResourceType(), resource.getPhysicalId(), region);
+            boolean completed = "CREATE_COMPLETE".equals(resource.getStatus());
+            boolean ownedFailedResource = "CREATE_FAILED".equals(resource.getStatus())
+                    && "true".equals(resource.getAttributes().get(
+                            CfnRollback.ROLLBACK_OWNED_ATTR));
+            if (resource.getPhysicalId() == null || (!completed && !ownedFailedResource)) {
+                continue;
+            }
+            if (skipRetainedResource(stack, resource, true)) {
+                continue;
+            }
+            addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                    resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+            try {
+                provisioner.delete(resource, region);
                 resource.setStatus("DELETE_COMPLETE");
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
+            } catch (Exception e) {
+                failedResources.add(resource.getLogicalId());
+                resource.setStatus("DELETE_FAILED");
+                resource.setStatusReason(e.getMessage());
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_FAILED", e.getMessage());
+                LOG.warnv("Failed to roll back {0} ({1}) in stack {2}: {3}",
+                        resource.getResourceType(), resource.getPhysicalId(),
+                        stack.getStackName(), e.getMessage());
             }
         }
+        return failedResources;
     }
 
     private void deleteStackResources(Stack stack, String region) {
@@ -632,6 +668,9 @@ public class CloudFormationService {
                 boolean deletable = "CREATE_COMPLETE".equals(resource.getStatus())
                         || "DELETE_FAILED".equals(resource.getStatus());
                 if (resource.getPhysicalId() == null || !deletable) {
+                    continue;
+                }
+                if (skipRetainedResource(stack, resource, false)) {
                     continue;
                 }
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
@@ -684,6 +723,29 @@ public class CloudFormationService {
             stack.setStatus("DELETE_FAILED");
             stack.setStatusReason(e.getMessage());
         }
+    }
+
+    /**
+     * Applies a resource's {@code DeletionPolicy}. {@code Retain} keeps the resource on every stack
+     * operation; {@code RetainExceptOnCreate} keeps it too, except when the create that made it is
+     * rolled back. Every other value — including {@code Snapshot}, which floci cannot snapshot —
+     * falls through to a normal delete, matching the default.
+     *
+     * @return {@code true} when the resource was kept and reported as {@code DELETE_SKIPPED}
+     */
+    private boolean skipRetainedResource(Stack stack, StackResource resource, boolean createRollback) {
+        String policy = resource.getDeletionPolicy();
+        boolean retained = "Retain".equals(policy)
+                || (!createRollback && "RetainExceptOnCreate".equals(policy));
+        if (!retained) {
+            return false;
+        }
+        resource.setStatus("DELETE_SKIPPED");
+        addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                resource.getResourceType(), "DELETE_SKIPPED", null);
+        LOG.infov("Retained {0} ({1}) in stack {2}: DeletionPolicy {3}",
+                resource.getResourceType(), resource.getPhysicalId(), stack.getStackName(), policy);
+        return true;
     }
 
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,

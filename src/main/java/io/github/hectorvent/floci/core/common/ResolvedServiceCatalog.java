@@ -9,16 +9,20 @@ import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeControll
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
+import io.github.hectorvent.floci.services.mwaa.MwaaController;
 import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsController;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaNetworkConnectorsController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
+import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -31,6 +35,18 @@ import java.util.Set;
 
 @ApplicationScoped
 public class ResolvedServiceCatalog {
+
+    /**
+     * Signing scopes that share another service's IAM namespace. S3 Express One Zone clients sign
+     * directory-bucket requests as {@code s3express} while the actions, ARNs and condition keys
+     * remain {@code s3}; the IoT Jobs Data Plane signs as {@code iot-jobs-data} while its actions
+     * are {@code iot:} ({@code iot:DescribeJobExecution} and peers in the Service Authorization
+     * Reference). Keep this minimal: every entry suppresses a distinct IAM namespace.
+     */
+    private static final java.util.Map<String, String> CREDENTIAL_SCOPE_ALIASES =
+            java.util.Map.of(
+                    "s3express", "s3",
+                    "iot-jobs-data", "iot");
 
     private final ServiceCatalog catalog;
 
@@ -51,7 +67,8 @@ public class ResolvedServiceCatalog {
                         "s3", storageMode(config.storage().services().s3().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.S3, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
-                        Set.of(), Set.of("s3"), Set.of(), Set.of()),
+                        // s3express: directory-bucket (S3 Express One Zone) clients sign with it
+                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of()),
                 descriptor("dynamodb", "dynamodb", config.services().dynamodb().enabled(), true,
                         "dynamodb", storageMode(config.storage().services().dynamodb().mode(), config.storage().mode()),
                         config.storage().services().dynamodb().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -67,7 +84,10 @@ public class ResolvedServiceCatalog {
                         "lambda", storageMode(config.storage().services().lambda().mode(), config.storage().mode()),
                         config.storage().services().lambda().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("lambda"), Set.of(), Set.of(LambdaController.class)),
+                        Set.of(), Set.of("lambda"), Set.of(),
+                        Set.of(LambdaController.class,
+                                LambdaMicrovmsController.class,
+                                LambdaNetworkConnectorsController.class)),
                 descriptor("apigateway", "apigateway", config.services().apigateway().enabled(), true,
                         "apigateway", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -163,6 +183,11 @@ public class ResolvedServiceCatalog {
                         "kinesis", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("Kinesis_20131202."), Set.of("kinesis"), Set.of(), Set.of()),
+                descriptor("kinesisanalytics", "kinesisanalytics",
+                        config.services().kinesisAnalytics().enabled(), true,
+                        "kinesisanalytics", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("KinesisAnalytics_20180523."), Set.of("kinesisanalytics"), Set.of(), Set.of()),
                 descriptor("kms", "kms", config.services().kms().enabled(), true,
                         "kms", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -250,6 +275,17 @@ public class ResolvedServiceCatalog {
                         "eks", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("eks"), Set.of(), Set.of(EksController.class)),
+                descriptor("mwaa", "mwaa", config.services().mwaa().enabled(), true,
+                        "mwaa", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(),
+                        // Register both the signing name and the endpoint id. botocore's service
+                        // model declares signingName=airflow for mwaa (endpointPrefix=airflow too);
+                        // register the "mwaa" config/external key as well as a safety net, same
+                        // double-registration technique as bedrock-runtime/bedrock above.
+                        Set.of("airflow", "mwaa"),
+                        Set.of(),
+                        Set.of(MwaaController.class)),
                 descriptor("pipes", "pipes", config.services().pipes().enabled(), true,
                         "pipes", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -304,6 +340,12 @@ public class ResolvedServiceCatalog {
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("autoscaling"), Set.of(), Set.of()),
+                descriptor("application-autoscaling", "applicationautoscaling",
+                        config.services().applicationautoscaling().enabled(), true,
+                        "applicationautoscaling", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AnyScaleFrontendService."), Set.of("application-autoscaling"),
+                        Set.of(), Set.of()),
                 descriptor("elasticbeanstalk", "elasticbeanstalk",
                         config.services().elasticbeanstalk().enabled(), true,
                         "elasticbeanstalk",
@@ -372,11 +414,20 @@ public class ResolvedServiceCatalog {
                 descriptor("iot", "iot", config.services().iot().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("iot", "execute-api"), Set.of(), Set.of(IotController.class)),
+                        // iot-jobs-data: the IoT Jobs Data Plane (GetPendingJobExecutions,
+                        // DescribeJobExecution, StartNextPendingJobExecution, UpdateJobExecution)
+                        // signs under its own name while IotController serves its /things/*/jobs routes
+                        Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
+                        Set.of(IotController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class))
+                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class)),
+                descriptor("rum", "rum", config.services().rum().enabled(), true,
+                        "rum", storageMode(config.storage().services().rum().mode(), config.storage().mode()),
+                        config.storage().services().rum().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("rum"), Set.of(), Set.of(RumController.class))
         ));
     }
 
@@ -398,6 +449,23 @@ public class ResolvedServiceCatalog {
 
     public Optional<ServiceDescriptor> byCredentialScope(String credentialScope) {
         return catalog.byCredentialScope(credentialScope);
+    }
+
+    /**
+     * Canonical IAM namespace for a credential scope. A service may answer requests signed
+     * under more than one scope (S3 also accepts {@code s3express}), but IAM action rules,
+     * resource ARNs and condition keys are all keyed by the canonical one — an alias left
+     * unnormalised resolves to no action, which the enforcement filter treats as ALLOW.
+     *
+     * <p>Deliberately an explicit table rather than something derived from the descriptor:
+     * a descriptor's external key is a routing key, not an IAM namespace. SES routes under
+     * {@code email} and Bedrock Runtime under {@code bedrock-runtime}, while their IAM
+     * namespaces are {@code ses:} and {@code bedrock:} — deriving from the external key would
+     * rewrite valid scopes onto prefixes AWS never issues, and silently skip enforcement for
+     * those services. Add an entry here only when two scopes genuinely share one namespace.
+     */
+    public String canonicalCredentialScope(String credentialScope) {
+        return CREDENTIAL_SCOPE_ALIASES.getOrDefault(credentialScope, credentialScope);
     }
 
     public Optional<ServiceDescriptor> byResourceClass(Class<?> resourceClass) {

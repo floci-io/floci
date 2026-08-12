@@ -15,8 +15,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
+import java.time.Clock;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -31,13 +31,16 @@ public class FirehoseService {
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
     private final S3Service s3Service;
     private final RegionResolver regionResolver;
+    private final Clock clock;
 
     @Inject
-    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, RegionResolver regionResolver) {
+    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, RegionResolver regionResolver,
+                           Clock clock) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.s3Service = s3Service;
         this.regionResolver = regionResolver;
+        this.clock = clock;
     }
 
     public String createDeliveryStream(String name, S3Destination s3Config) {
@@ -50,6 +53,16 @@ public class FirehoseService {
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
                                        String deliveryStreamType) {
+        if (name == null || name.isEmpty() || name.length() > 64 || !name.matches("[a-zA-Z0-9_.-]+")) {
+            throw new AwsException("InvalidArgumentException",
+                    "Delivery stream name must be between 1 and 64 characters and contain only letters, numbers, underscores, hyphens, or periods.", 400);
+        }
+
+        if (streamStore.get(name).isPresent()) {
+            throw new AwsException("ResourceInUseException",
+                    "Delivery stream " + name + " already exists.", 409);
+        }
+
         validateBufferingHints(s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
         DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config);
@@ -132,6 +145,7 @@ public class FirehoseService {
         if (update.getPrefix() != null) current.setPrefix(update.getPrefix());
         if (update.getErrorOutputPrefix() != null) current.setErrorOutputPrefix(update.getErrorOutputPrefix());
         if (update.getCompressionFormat() != null) current.setCompressionFormat(update.getCompressionFormat());
+        if (update.getCustomTimeZone() != null) current.setCustomTimeZone(update.getCustomTimeZone());
         if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
         if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
     }
@@ -248,8 +262,10 @@ public class FirehoseService {
 
         try {
             String bucket = resolveBucket(stream);
-            String prefix = resolvePrefix(stream);
-            String key = prefix + UUID.randomUUID() + ".json";
+            S3Destination s3 = stream.s3Destination();
+            ZoneId zone = S3ObjectKeyResolver.resolveZone(s3 != null ? s3.getCustomTimeZone() : null);
+            String key = S3ObjectKeyResolver.resolveKey(s3 != null ? s3.getPrefix() : null,
+                    stream.getDeliveryStreamName(), stream.getVersionId(), clock.instant(), zone);
 
             ensureBucket(bucket);
 
@@ -276,21 +292,6 @@ public class FirehoseService {
             return s3.bucketName();
         }
         return DEFAULT_BUCKET;
-    }
-
-    private String resolvePrefix(DeliveryStreamDescription stream) {
-        S3Destination s3 = stream.s3Destination();
-        String prefix = (s3 != null && s3.getPrefix() != null) ? s3.getPrefix() : stream.getDeliveryStreamName() + "/";
-
-        // Substitute time-based placeholders matching real Firehose
-        ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
-        prefix = prefix
-                .replace("{year}", String.format("%04d", now.getYear()))
-                .replace("{month}", String.format("%02d", now.getMonthValue()))
-                .replace("{day}", String.format("%02d", now.getDayOfMonth()))
-                .replace("{hour}", String.format("%02d", now.getHour()));
-
-        return prefix.endsWith("/") ? prefix : prefix + "/";
     }
 
     private void ensureBucket(String bucket) {

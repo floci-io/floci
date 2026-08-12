@@ -6504,6 +6504,293 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
+    private io.restassured.response.ValidatableResponse getAuthorizers(String apiId) {
+        return given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetAuthorizers")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{\"ApiId\": \"" + apiId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    // ── Issue #1758: AWS::ApiGatewayV2::Authorizer dropped by CloudFormation ──
+
+    @Test
+    void createStack_apiGatewayV2AuthorizerIsProvisionedAndWiredToRoute() {
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "cfn-apigwv2-authz-api", "ProtocolType": "HTTP" }
+                },
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "Name": "cfn-jwt-authorizer",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": ["$request.header.Authorization"],
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                },
+                "Integration": {
+                  "Type": "AWS::ApiGatewayV2::Integration",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "IntegrationType": "HTTP_PROXY",
+                    "IntegrationUri": "https://example.com",
+                    "PayloadFormatVersion": "1.0"
+                  }
+                },
+                "Route": {
+                  "Type": "AWS::ApiGatewayV2::Route",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "RouteKey": "GET /hello",
+                    "AuthorizationType": "JWT",
+                    "AuthorizerId": { "Ref": "Authorizer" },
+                    "Target": { "Fn::Join": ["/", ["integrations", { "Ref": "Integration" }]] }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "HttpApi" } },
+                "AuthorizerId": { "Value": { "Ref": "Authorizer" } },
+                "RouteId": { "Value": { "Ref": "Route" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-authorizer-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+        String authorizerId = apigwOutputValue(createXml, "AuthorizerId");
+        String routeId = apigwOutputValue(createXml, "RouteId");
+
+        // The authorizer is a real resource, not dropped by the default-case stub.
+        getAuthorizers(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId))
+                .body("Items[0].Name", equalTo("cfn-jwt-authorizer"))
+                .body("Items[0].AuthorizerType", equalTo("JWT"))
+                .body("Items[0].IdentitySource", hasItem("$request.header.Authorization"))
+                .body("Items[0].JwtConfiguration.Issuer",
+                        equalTo("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"));
+
+        // The route's Ref to the authorizer resolved to a real id and was persisted.
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].RouteId", equalTo(routeId))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId));
+    }
+
+    @Test
+    void createStack_apiGatewayV2AuthorizerAcceptsScalarIdentitySource() {
+        // IdentitySource is documented as Array of String, but ApiGatewayV2Service.createAuthorizer
+        // already accepts a bare scalar string too — the CFN provisioner must not be stricter than
+        // the service it calls, or a template written with the scalar form silently loses its
+        // identity source instead of erroring or working.
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "cfn-apigwv2-authz-scalar-api", "ProtocolType": "HTTP" }
+                },
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "Name": "cfn-jwt-authorizer-scalar",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": "$request.header.Authorization",
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "HttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-authorizer-scalar-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String apiId = apigwOutputValue(apigwv2DescribeStacks(stackName), "ApiId");
+
+        getAuthorizers(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].IdentitySource", hasItem("$request.header.Authorization"));
+    }
+
+    @Test
+    void createStack_apiGatewayV2RouteResolvesAuthorizerIdViaGetAtt() {
+        // Ref already resolved AuthorizerId via the physical id (covered above); Fn::GetAtt reads
+        // a separate attributes map that provisionApiGatewayV2Authorizer must also populate, or
+        // the route ends up wired to the literal placeholder string "Authorizer.AuthorizerId"
+        // instead of the real id.
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "cfn-apigwv2-authz-getatt-api", "ProtocolType": "HTTP" }
+                },
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "Name": "cfn-jwt-authorizer-getatt",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": ["$request.header.Authorization"],
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                },
+                "Integration": {
+                  "Type": "AWS::ApiGatewayV2::Integration",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "IntegrationType": "HTTP_PROXY",
+                    "IntegrationUri": "https://example.com",
+                    "PayloadFormatVersion": "1.0"
+                  }
+                },
+                "Route": {
+                  "Type": "AWS::ApiGatewayV2::Route",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "RouteKey": "GET /hello",
+                    "AuthorizationType": "JWT",
+                    "AuthorizerId": { "Fn::GetAtt": ["Authorizer", "AuthorizerId"] },
+                    "Target": { "Fn::Join": ["/", ["integrations", { "Ref": "Integration" }]] }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "HttpApi" } },
+                "AuthorizerId": { "Value": { "Ref": "Authorizer" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-authorizer-getatt-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+        String authorizerId = apigwOutputValue(createXml, "AuthorizerId");
+
+        // The route's GetAtt resolved to the real authorizer id, not the literal placeholder.
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId));
+    }
+
+    @Test
+    void deleteStack_apiGatewayV2AuthorizerOnNonStackOwnedApiIsRemoved() {
+        // The API is created out-of-band (not by this stack) and referenced by a plain literal
+        // id, the same shape as a template parameter — deliberately not { "Ref": ... } to an
+        // AWS::ApiGatewayV2::Api resource in this stack. This is the scenario the scoped delete
+        // path exists for: AWS::ApiGatewayV2::Api's own delete cascades to its authorizers, which
+        // would make a stack-owned-API test pass even with no delete case for the authorizer at
+        // all. Here the API survives stack deletion, so the authorizer's removal can only be
+        // attributed to the authorizer's own scoped delete case actually running.
+        String apiId = given()
+                .header("X-Amz-Target", "AmazonApiGatewayV2.CreateApi")
+                .contentType(APIGWV2_CONTENT_TYPE)
+                .body("{\"Name\": \"cfn-apigwv2-authz-delete-external-api\", \"ProtocolType\": \"HTTP\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(201)
+                .extract().path("ApiId");
+
+        String template = """
+            {
+              "Resources": {
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": "%s",
+                    "Name": "cfn-jwt-authorizer-delete",
+                    "AuthorizerType": "JWT",
+                    "IdentitySource": ["$request.header.Authorization"],
+                    "JwtConfiguration": {
+                      "Audience": ["my-client-id"],
+                      "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(apiId);
+
+        String stackName = "cfn-apigwv2-authorizer-delete-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        getAuthorizers(apiId).body("Items.size()", equalTo(1));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The API was never part of the stack, so it (and GetAuthorizers against it) still works
+        // — the authorizer itself must be gone.
+        getAuthorizers(apiId).body("Items.size()", equalTo(0));
+    }
+
     // ── SAM AWS::Serverless::Function PackageType: Image dropped by the transform ──
 
     @Test
@@ -6820,6 +7107,69 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void rollbackStack_customBusWithRule_rollsBackBusAndRule() {
+        // RbBus provisions first, RbRule (on that custom bus) second, then BadSecret fails
+        // (SecretString + GenerateSecretString is invalid), forcing a CREATE rollback. The rule
+        // and its custom bus must both be cleaned up, not leaked.
+        String failingTemplate = """
+            {
+              "Resources": {
+                "RbBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-rb-bus" }
+                },
+                "RbRule": {
+                  "Type": "AWS::Events::Rule",
+                  "DependsOn": "RbBus",
+                  "Properties": {
+                    "Name": "cfn-rb-rule",
+                    "EventBusName": { "Ref": "RbBus" },
+                    "EventPattern": { "source": ["rb.test"] }
+                  }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "RbRule",
+                  "Properties": {
+                    "Name": "cfn-rb-secret",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-rb-stack")
+            .formParam("TemplateBody", failingTemplate)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-rb-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+
+        // The rule created on the custom bus was rolled back...
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-rb-rule\",\"EventBusName\":\"cfn-rb-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+
+        // ...and so was the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-rb-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
     void createStack_resourceFailure_setsRollbackComplete_singleResource() {
         // A lone failing resource still moves the stack to ROLLBACK_COMPLETE (no orphaned state).
         String template = """
@@ -6921,6 +7271,340 @@ class CloudFormationIntegrationTest {
                 .body("name", equalTo("cfn-private-api"))
                 .body("endpointConfiguration.types", contains("PRIVATE"))
                 .body("endpointConfiguration.vpcEndpointIds", contains("vpce-12345678"));
+    }
+
+    @Test
+    void createStack_withEventBus_createsRealBusAndResolvesRefAndGetAtt() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": {
+                    "Name": "cfn-custom-bus",
+                    "Description": "Custom bus created via CloudFormation",
+                    "Tags": [ { "Key": "env", "Value": "test" } ]
+                  }
+                }
+              },
+              "Outputs": {
+                "BusRef":  { "Value": { "Ref": "MyBus" } },
+                "BusArn":  { "Value": { "Fn::GetAtt": ["MyBus", "Arn"] } },
+                "BusName": { "Value": { "Fn::GetAtt": ["MyBus", "Name"] } }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbus-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eventbus-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .body(containsString("<OutputKey>BusRef</OutputKey>"))
+            .body(containsString("<OutputValue>cfn-custom-bus</OutputValue>"))
+            .body(containsString("event-bus/cfn-custom-bus"));
+
+        // The bus really exists in EventBridge, not a stub.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-custom-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Name", equalTo("cfn-custom-bus"))
+            .body("Arn", containsString("event-bus/cfn-custom-bus"));
+    }
+
+    @Test
+    void deleteStack_withEventBus_removesBus() {
+        String template = """
+            { "Resources": { "MyBus": { "Type": "AWS::Events::EventBus",
+              "Properties": { "Name": "cfn-bus-to-delete" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbus-delete-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-eventbus-delete-stack")
+        .when().post("/").then().statusCode(200);
+
+        // The bus is gone.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-bus-to-delete\"}")
+        .when().post("/")
+        .then().body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deleteStack_customBusWithRule_removesBusAndRule() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-teardown-bus" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-teardown-rule",
+                    "EventBusName": { "Ref": "MyBus" },
+                    "EventPattern": { "source": ["teardown.test"] }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-teardown-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        // Sanity: the rule exists on the custom bus before teardown.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-teardown-rule\",\"EventBusName\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().statusCode(200).body("Name", equalTo("cfn-teardown-rule"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-teardown-stack")
+        .when().post("/").then().statusCode(200);
+
+        // The rule is gone from the custom bus...
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-teardown-rule\",\"EventBusName\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+
+        // ...and so is the bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-teardown-bus\"}")
+        .when().post("/").then().body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void createStack_customBusRuleDeliversEventToSqs() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-e2e-bus" }
+                },
+                "TargetQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": { "QueueName": "cfn-e2e-queue" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-e2e-rule",
+                    "EventBusName": { "Ref": "MyBus" },
+                    "EventPattern": { "source": ["my.e2e.app"] },
+                    "Targets": [
+                      { "Id": "Target0", "Arn": { "Fn::GetAtt": ["TargetQueue", "Arn"] } }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-e2e-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-e2e-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The rule is attached to the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-e2e-rule\",\"EventBusName\":\"cfn-e2e-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Targets[0].Arn", equalTo("arn:aws:sqs:us-east-1:000000000000:cfn-e2e-queue"));
+
+        // Send a matching event to the custom bus.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.PutEvents")
+            .body("""
+                {"Entries":[{"Source":"my.e2e.app","DetailType":"t",
+                 "Detail":"{\\"hello\\":\\"world\\"}","EventBusName":"cfn-e2e-bus"}]}
+                """)
+        .when().post("/")
+        .then().statusCode(200).body("FailedEntryCount", equalTo(0));
+
+        // Resolve the queue URL, then confirm the message was delivered.
+        String getUrlXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "cfn-e2e-queue")
+        .when().post("/")
+        .then().statusCode(200).extract().body().asString();
+        String queueUrl = getUrlXml.substring(
+                getUrlXml.indexOf("<QueueUrl>") + "<QueueUrl>".length(),
+                getUrlXml.indexOf("</QueueUrl>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("my.e2e.app"))
+            .body(containsString("hello"));
+    }
+
+    @Test
+    void createStack_withEventBusPolicyIndividualForm_writesStatement() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-policy-bus" }
+                },
+                "MyPolicy": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "AllowAcct",
+                    "Action": "events:PutEvents",
+                    "Principal": "111122223333"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbuspolicy-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eventbuspolicy-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-policy-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Policy", containsString("AllowAcct"))
+            .body("Policy", containsString("111122223333"));
+    }
+
+    @Test
+    void createStack_withEventBusPolicyStatementForm_mergesMultipleStatements() {
+        String template = """
+            {
+              "Resources": {
+                "MyBus": {
+                  "Type": "AWS::Events::EventBus",
+                  "Properties": { "Name": "cfn-stmt-bus" }
+                },
+                "PolicyA": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "StmtA",
+                    "Statement": {
+                      "Effect": "Allow",
+                      "Principal": { "AWS": "arn:aws:iam::111111111111:root" },
+                      "Action": "events:PutEvents",
+                      "Resource": { "Fn::GetAtt": ["MyBus", "Arn"] }
+                    }
+                  }
+                },
+                "PolicyB": {
+                  "Type": "AWS::Events::EventBusPolicy",
+                  "Properties": {
+                    "EventBusName": { "Ref": "MyBus" },
+                    "StatementId": "StmtB",
+                    "Statement": {
+                      "Effect": "Allow",
+                      "Principal": { "AWS": "arn:aws:iam::222222222222:root" },
+                      "Action": "events:PutEvents",
+                      "Resource": { "Fn::GetAtt": ["MyBus", "Arn"] }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-stmt-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-stmt-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // Both statements must be present — a naive whole-policy replace would keep only one.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"cfn-stmt-bus\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Policy", containsString("StmtA"))
+            .body("Policy", containsString("StmtB"))
+            .body("Policy", containsString("111111111111"))
+            .body("Policy", containsString("222222222222"));
     }
 
 }

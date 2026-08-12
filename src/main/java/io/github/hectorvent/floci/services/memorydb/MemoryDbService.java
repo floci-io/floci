@@ -65,6 +65,7 @@ public class MemoryDbService {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
+    private final Set<String> provisioningClusterNames = ConcurrentHashMap.newKeySet();
 
     @Inject
     public MemoryDbService(MemoryDbContainerManager containerManager,
@@ -97,40 +98,50 @@ public class MemoryDbService {
             throw new AwsException("ClusterAlreadyExistsFault",
                     "Cluster with specified name already exists.", 400);
         }
-
-        String aclName = spec.getAclName();
-        if (aclName == null || aclName.isBlank()) {
-            throw new AwsException("InvalidParameterValueException", "ACLName is required.", 400);
-        }
-        requireAclExists(aclName);
-        boolean authRequired = isAuthRequired(aclName);
-
-        Cluster cluster = new Cluster();
-        cluster.setName(name);
-        cluster.setDescription(spec.getDescription());
-        cluster.setStatus(ClusterStatus.AVAILABLE);
-        cluster.setNodeType(spec.getNodeType() != null ? spec.getNodeType() : "db.t4g.small");
-        cluster.setNumberOfShards(spec.getNumberOfShards() > 0 ? spec.getNumberOfShards() : 1);
-        cluster.setEngine(spec.getEngine() != null ? spec.getEngine() : DEFAULT_ENGINE);
-        cluster.setEngineVersion(spec.getEngineVersion() != null ? spec.getEngineVersion() : DEFAULT_ENGINE_VERSION);
-        cluster.setAclName(aclName);
-        cluster.setTlsEnabled(spec.isTlsEnabled());
-        cluster.setArn(buildArn(region, "cluster", name));
-        cluster.setCreatedAt(Instant.now());
-        cluster.setTags(spec.getTags());
-
-        if (config.services().memorydb().mock()) {
-            LOG.infov("Creating MemoryDB cluster {0} in mock mode (no container)", name);
-            cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), REDIS_PORT));
-        } else {
-            startBackend(cluster, authRequired);
+        // Claim the name for the whole provisioning attempt so a concurrent create can't race
+        // ahead and be stopped by this request's handle-less rollback fallback.
+        if (!provisioningClusterNames.add(name)) {
+            throw new AwsException("ClusterAlreadyExistsFault",
+                    "Cluster " + name + " is already being created.", 400);
         }
 
-        clusters.put(name, cluster);
-        LOG.infov("MemoryDB cluster {0} created (acl={1}, authRequired={2}), endpoint={3}:{4}",
-                name, aclName, String.valueOf(authRequired), cluster.getClusterEndpoint().address(),
-                String.valueOf(cluster.getClusterEndpoint().port()));
-        return cluster;
+        try {
+            String aclName = spec.getAclName();
+            if (aclName == null || aclName.isBlank()) {
+                throw new AwsException("InvalidParameterValueException", "ACLName is required.", 400);
+            }
+            requireAclExists(aclName);
+            boolean authRequired = isAuthRequired(aclName);
+
+            Cluster cluster = new Cluster();
+            cluster.setName(name);
+            cluster.setDescription(spec.getDescription());
+            cluster.setStatus(ClusterStatus.AVAILABLE);
+            cluster.setNodeType(spec.getNodeType() != null ? spec.getNodeType() : "db.t4g.small");
+            cluster.setNumberOfShards(spec.getNumberOfShards() > 0 ? spec.getNumberOfShards() : 1);
+            cluster.setEngine(spec.getEngine() != null ? spec.getEngine() : DEFAULT_ENGINE);
+            cluster.setEngineVersion(spec.getEngineVersion() != null ? spec.getEngineVersion() : DEFAULT_ENGINE_VERSION);
+            cluster.setAclName(aclName);
+            cluster.setTlsEnabled(spec.isTlsEnabled());
+            cluster.setArn(buildArn(region, "cluster", name));
+            cluster.setCreatedAt(Instant.now());
+            cluster.setTags(spec.getTags());
+
+            if (config.services().memorydb().mock()) {
+                LOG.infov("Creating MemoryDB cluster {0} in mock mode (no container)", name);
+                cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), REDIS_PORT));
+            } else {
+                startBackend(cluster, authRequired);
+            }
+
+            clusters.put(name, cluster);
+            LOG.infov("MemoryDB cluster {0} created (acl={1}, authRequired={2}), endpoint={3}:{4}",
+                    name, aclName, String.valueOf(authRequired), cluster.getClusterEndpoint().address(),
+                    String.valueOf(cluster.getClusterEndpoint().port()));
+            return cluster;
+        } finally {
+            provisioningClusterNames.remove(name);
+        }
     }
 
     public Cluster getCluster(String name) {
@@ -496,12 +507,33 @@ public class MemoryDbService {
 
     private void rollbackBackend(String name, MemoryDbContainerHandle handle, int proxyPort) {
         try {
-            proxyManager.stopProxy(name);
-            if (handle != null) {
-                containerManager.stop(handle);
+            try {
+                // The proxy only starts after the container is ready, so a null handle means it
+                // never started — nothing to stop.
+                if (handle != null) {
+                    proxyManager.stopProxy(name);
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping proxy for MemoryDB cluster {0}: {1}", name, e.getMessage());
             }
-        } catch (RuntimeException e) {
-            LOG.warnv("Error rolling back MemoryDB cluster {0}: {1}", name, e.getMessage());
+            try {
+                if (handle != null) {
+                    // We have the exact handle from this request's start() call, so stop by it
+                    // directly. Falling back to stopByClusterName here instead would look up
+                    // whatever is currently registered for name, which could be a different
+                    // container if an overlapping create for the same name raced ahead of this
+                    // rollback.
+                    containerManager.stop(handle);
+                } else {
+                    // No handle: a readiness timeout in containerManager.start() throws after the
+                    // container was created and registered but before the handle is returned, so
+                    // cleaning up by handle here isn't possible. stopByClusterName is idempotent,
+                    // so it's safe when the container never started.
+                    containerManager.stopByClusterName(name);
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping container for MemoryDB cluster {0}: {1}", name, e.getMessage());
+            }
         } finally {
             releaseProxyPort(proxyPort);
         }

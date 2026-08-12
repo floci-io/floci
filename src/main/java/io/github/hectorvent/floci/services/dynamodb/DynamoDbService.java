@@ -138,15 +138,23 @@ public class DynamoDbService {
 
     private void loadPersistedItems() {
         if (itemStore == null) return;
+        // No request scope at startup, so itemStore.keys() would only see the default account.
+        // scanAllAccountsRaw() returns every account's items already in the "accountId/
+        // region::tableName" key format itemsByTable expects.
+        if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
+            aware.scanAllAccountsRaw().forEach((rawKey, items) ->
+                itemsByTable.put(rawKey, new ConcurrentSkipListMap<>(items)));
+            return;
+        }
         for (String key : itemStore.keys()) {
             itemStore.get(key).ifPresent(items ->
-                itemsByTable.put(key, new ConcurrentSkipListMap<>(items)));
+                itemsByTable.put(scopedItemsKey(key), new ConcurrentSkipListMap<>(items)));
         }
     }
 
     private void persistItems(String storageKey) {
         if (itemStore == null) return;
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items != null) {
             itemStore.put(storageKey, new HashMap<>(items));
         } else {
@@ -309,7 +317,7 @@ public class DynamoDbService {
         }
 
         tableStore.put(storageKey, table);
-        itemsByTable.put(storageKey, new ConcurrentSkipListMap<>());
+        itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
     }
@@ -321,7 +329,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         // Update dynamic counts
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items != null) {
             table.setItemCount(items.size());
         }
@@ -340,8 +348,8 @@ public class DynamoDbService {
             throw resourceNotFoundException(canonicalTableName);
         }
         tableStore.delete(storageKey);
-        itemsByTable.remove(storageKey);
-        itemLocks.remove(storageKey);
+        itemsByTable.remove(scopedItemsKey(storageKey));
+        itemLocks.remove(scopedItemsKey(storageKey));
         if (itemStore != null) {
             itemStore.delete(storageKey);
         }
@@ -402,7 +410,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, normalizedItem);
 
         withItemLock(storageKey, itemKey, () -> {
-            var tableItems = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
+            var tableItems = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
 
             JsonNode existing = tableItems.get(itemKey);
 
@@ -432,7 +440,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key, true);
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) {
             LOG.tracev("Got item from {0}: key={1} item=<not found>", canonicalTableName, itemKey);
             return null;
@@ -462,7 +470,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsByTable.get(storageKey);
+            var items = itemsByTable.get(scopedItemsKey(storageKey));
             if (items == null) return null;
 
             if (conditionExpression != null) {
@@ -509,7 +517,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
+            var items = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
 
             // Get existing item or create new one from key
             JsonNode existing = items.get(itemKey);
@@ -653,27 +661,31 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new QueryResult(List.of(), 0, null);
 
         // Resolve key names: use GSI or table keys
         String pkName;
         String skName;
+        List<String> sortKeyNames;
         if (indexName != null) {
             var gsi = table.findGsi(indexName);
             if (gsi.isPresent()) {
                 pkName = gsi.get().getPartitionKeyName();
                 skName = gsi.get().getSortKeyName();
+                sortKeyNames = gsi.get().getSortKeyNames();
             } else {
                 var lsi = table.findLsi(indexName)
                         .orElseThrow(() -> new AwsException("ValidationException",
                                 "The table does not have the specified index: " + indexName, 400));
                 pkName = lsi.getPartitionKeyName();
                 skName = lsi.getSortKeyName();
+                sortKeyNames = lsi.getSortKeyNames();
             }
         } else {
             pkName = table.getPartitionKeyName();
             skName = table.getSortKeyName();
+            sortKeyNames = table.getSortKeyNames();
         }
 
         List<JsonNode> results = new ArrayList<>();
@@ -716,17 +728,25 @@ public class DynamoDbService {
         // Filter out TTL-expired items
         results = results.stream().filter(item -> !isExpired(item, table)).toList();
 
-        // Sort by sort key if present
-        if (skName != null) {
-            String finalSkName = skName;
+        // Sort by the full (possibly composite) sort key, comparing each attribute in key-schema
+        // order. Using only the first sort-key attribute would ignore the remaining components
+        // (e.g. a "requestStateQuery RANGE, createdAt RANGE" index would never order by createdAt),
+        // which in turn breaks ScanIndexForward=false. See floci-io/floci#1675.
+        if (!sortKeyNames.isEmpty()) {
+            List<String> finalSortKeyNames = sortKeyNames;
             results = new ArrayList<>(results);
             results.sort((a, b) -> {
-                JsonNode aAttr = a.get(finalSkName);
-                JsonNode bAttr = b.get(finalSkName);
-                if (aAttr == null && bAttr == null) return 0;
-                if (aAttr == null) return -1;
-                if (bAttr == null) return 1;
-                return ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                for (String name : finalSortKeyNames) {
+                    JsonNode aAttr = a.get(name);
+                    JsonNode bAttr = b.get(name);
+                    int cmp;
+                    if (aAttr == null && bAttr == null) cmp = 0;
+                    else if (aAttr == null) cmp = -1;
+                    else if (bAttr == null) cmp = 1;
+                    else cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                    if (cmp != 0) return cmp;
+                }
+                return 0;
             });
             if (Boolean.FALSE.equals(scanIndexForward)) {
                 Collections.reverse(results);
@@ -741,13 +761,13 @@ public class DynamoDbService {
 
             String startItemKey = hasTableKeys
                     ? buildItemKeyFromNode(exclusiveStartKey, tablePkName, tableSkName)
-                    : buildItemKeyFromNode(exclusiveStartKey, pkName, skName);
+                    : buildItemKeyFromNode(exclusiveStartKey, pkName, sortKeyNames);
 
             int startIdx = -1;
             for (int i = 0; i < results.size(); i++) {
                 String thisKey = hasTableKeys
                         ? buildItemKeyFromNode(results.get(i), tablePkName, tableSkName)
-                        : buildItemKeyFromNode(results.get(i), pkName, skName);
+                        : buildItemKeyFromNode(results.get(i), pkName, sortKeyNames);
                 if (thisKey.equals(startItemKey)) {
                     startIdx = i;
                     break;
@@ -764,7 +784,7 @@ public class DynamoDbService {
         // Apply Limit (stops at N items)
         if (limit != null && limit > 0 && evaluatedItems.size() > limit) {
             JsonNode lastItem = evaluatedItems.get(limit - 1);
-            lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, skName, indexName != null);
+            lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, sortKeyNames, indexName != null);
             evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, limit));
         }
 
@@ -775,7 +795,7 @@ public class DynamoDbService {
             for (int i = 0; i < evaluatedItems.size(); i++) {
                 int sz = DynamoDbItemSize.calculateItemSize(evaluatedItems.get(i));
                 if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
-                    lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(i - 1), pkName, skName, indexName != null);
+                    lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(i - 1), pkName, sortKeyNames, indexName != null);
                     evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, i));
                     break;
                 }
@@ -814,7 +834,7 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new ScanResult(List.of(), 0, null);
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
@@ -970,7 +990,7 @@ public class DynamoDbService {
         //   * Same token + different request body  → IdempotentParameterMismatchException.
         //   * No token, or expired token           → proceed normally.
         if (clientRequestToken != null && !clientRequestToken.isEmpty() && rawRequest != null) {
-            String cacheKey = region + "::" + clientRequestToken;
+            String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
             String requestHash = sha256(rawRequest.toString());
             long nowNanos = System.nanoTime();
 
@@ -1149,7 +1169,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key);
-        var tableItems = itemsByTable.get(storageKey);
+        var tableItems = itemsByTable.get(scopedItemsKey(storageKey));
         JsonNode existing = tableItems != null ? tableItems.get(itemKey) : null;
 
         try {
@@ -1328,20 +1348,22 @@ public class DynamoDbService {
 
     void deleteExpiredItems() {
         int totalDeleted = 0;
+        // Runs with no request scope and must sweep every account's tables, not just the
+        // default one — scanAllAccountsRaw()'s key matches itemsByTable's directly.
         Map<String, TableDefinition> allTables;
         if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
-            allTables = aware.scanAllAccountsAsMap();
+            allTables = aware.scanAllAccountsRaw();
         } else {
             allTables = new HashMap<>();
-            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(k, v)));
+            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(scopedItemsKey(k), v)));
         }
         for (Map.Entry<String, TableDefinition> entry : allTables.entrySet()) {
-            String storageKey = entry.getKey();
+            String rawKey = entry.getKey();
             TableDefinition table = entry.getValue();
             if (!table.isTtlEnabled() || table.getTtlAttributeName() == null) {
                 continue;
             }
-            var items = itemsByTable.get(storageKey);
+            var items = itemsByTable.get(rawKey);
             if (items == null) continue;
 
             List<String> expiredKeys = items.entrySet().stream()
@@ -1351,6 +1373,9 @@ public class DynamoDbService {
 
             if (expiredKeys.isEmpty()) continue;
 
+            int slash = rawKey.indexOf('/');
+            String accountId = slash >= 0 ? rawKey.substring(0, slash) : null;
+            String storageKey = slash >= 0 ? rawKey.substring(slash + 1) : rawKey;
             String region = storageKey.split("::", 2)[0];
             for (String itemKey : expiredKeys) {
                 JsonNode removed = items.remove(itemKey);
@@ -1363,11 +1388,21 @@ public class DynamoDbService {
                     }
                 }
             }
-            persistItems(storageKey);
+            persistItemsForAccount(accountId, storageKey, items);
             totalDeleted += expiredKeys.size();
         }
         if (totalDeleted > 0) {
             LOG.infov("TTL sweeper removed {0} expired items", totalDeleted);
+        }
+    }
+
+    /** Like {@link #persistItems}, but for callers with no ambient request account to rely on. */
+    private void persistItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items) {
+        if (itemStore == null) return;
+        if (accountId != null && itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
+            aware.putForAccount(accountId, storageKey, new HashMap<>(items));
+        } else {
+            itemStore.put(storageKey, new HashMap<>(items));
         }
     }
 
@@ -1439,8 +1474,14 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        DynamoDbReservedWords.check(expression, "UpdateExpression");
-        String remaining = expression.trim();
+        // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
+        // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
+        // comma-separated action parsing below work regardless of formatting. Normalize
+        // before the reserved-word check too: its function-call lookahead skips only
+        // literal spaces, so on a raw "if_not_exists\n(...)" it would read the function
+        // name as a bare identifier instead.
+        String remaining = expression.trim().replaceAll("\\s+", " ");
+        DynamoDbReservedWords.check(remaining, "UpdateExpression");
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -1716,15 +1757,15 @@ public class DynamoDbService {
             String[] parts = clause.split("\\s+", 3);
             if (parts.length < 2) break;
 
-            String attrName = resolveAttributeName(parts[0], exprAttrNames);
+            String attrPath = parts[0];
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
                 JsonNode addValue = exprAttrValues.get(valuePlaceholder);
                 if (addValue != null) {
-                    JsonNode existingValue = item.get(attrName);
+                    JsonNode existingValue = getValueAtPath(item, attrPath, exprAttrNames);
                     JsonNode newValue = applyAddOperation(existingValue, addValue);
-                    item.set(attrName, newValue);
+                    setValueAtPath(item, attrPath, newValue, exprAttrNames);
                 }
             }
 
@@ -1827,19 +1868,19 @@ public class DynamoDbService {
             String[] parts = clause.split("\\s+", 3);
             if (parts.length < 2) break;
 
-            String attrName = resolveAttributeName(parts[0], exprAttrNames);
+            String attrPath = parts[0];
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
                 JsonNode deleteValue = exprAttrValues.get(valuePlaceholder);
                 if (deleteValue != null) {
-                    JsonNode existingValue = item.get(attrName);
+                    JsonNode existingValue = getValueAtPath(item, attrPath, exprAttrNames);
                     if (existingValue != null) {
                         JsonNode newValue = applyDeleteOperation(existingValue, deleteValue);
                         if (newValue == null) {
-                            item.remove(attrName);
+                            removeValueAtPath(item, attrPath, exprAttrNames);
                         } else {
-                            item.set(attrName, newValue);
+                            setValueAtPath(item, attrPath, newValue, exprAttrNames);
                         }
                     }
                 }
@@ -2273,9 +2314,17 @@ public class DynamoDbService {
         return region + "::" + tableName;
     }
 
+    // itemsByTable/itemLocks are plain fields, unlike tableStore/itemStore, so they get no
+    // automatic account prefixing — without this, two accounts with a same-named table would
+    // share one item map. Matches scanAllAccountsRaw()'s key format, so a raw key from there
+    // can be used directly as an itemsByTable/itemLocks key.
+    private String scopedItemsKey(String storageKey) {
+        return regionResolver.getAccountId() + "/" + storageKey;
+    }
+
     private ReentrantLock lockFor(String storageKey, String itemKey) {
         return itemLocks
-                .computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(itemKey, k -> new ReentrantLock());
     }
 
@@ -2343,16 +2392,25 @@ public class DynamoDbService {
     }
 
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {
+        return buildItemKeyFromNode(item, pkName, skName == null ? List.of() : List.of(skName));
+    }
+
+    // Builds a cursor-matching string from the partition key plus every sort-key component in
+    // key-schema order. A composite (multi-RANGE) index cursor must incorporate all components,
+    // otherwise rows sharing the first RANGE value collapse to the same key and pagination can
+    // skip or duplicate items. See floci-io/floci#1675.
+    private String buildItemKeyFromNode(JsonNode item, String pkName, List<String> skNames) {
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr == null) return "";
         String pk = extractScalarValue(pkAttr);
-        if (skName != null) {
+        StringBuilder key = new StringBuilder(pk != null ? pk : "");
+        for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
-                return pk + "#" + extractScalarValue(skAttr);
+                key.append("#").append(extractScalarValue(skAttr));
             }
         }
-        return pk != null ? pk : "";
+        return key.toString();
     }
 
     JsonNode buildKeyNode(TableDefinition table, JsonNode item, String pkName, String skName) {
@@ -2361,13 +2419,23 @@ public class DynamoDbService {
 
     JsonNode buildKeyNode(TableDefinition table, JsonNode item,
                           String pkName, String skName, boolean isIndexQuery) {
+        return buildKeyNode(table, item, pkName,
+                skName == null ? List.of() : List.of(skName), isIndexQuery);
+    }
+
+    // Emits a LastEvaluatedKey carrying the partition key plus every sort-key component in
+    // key-schema order (a composite index has more than one), and, for index queries, the base
+    // table key so the cursor uniquely identifies a row. Emitting only the first RANGE attribute
+    // loses composite key identity. See floci-io/floci#1675.
+    JsonNode buildKeyNode(TableDefinition table, JsonNode item,
+                          String pkName, List<String> skNames, boolean isIndexQuery) {
         com.fasterxml.jackson.databind.node.ObjectNode keyNode =
                 com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr != null) {
             keyNode.set(pkName, pkAttr);
         }
-        if (skName != null) {
+        for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
                 keyNode.set(skName, skAttr);
@@ -2379,7 +2447,7 @@ public class DynamoDbService {
             if (!tablePk.equals(pkName) && item.get(tablePk) != null) {
                 keyNode.set(tablePk, item.get(tablePk));
             }
-            if (tableSk != null && !tableSk.equals(skName) && item.get(tableSk) != null) {
+            if (tableSk != null && !skNames.contains(tableSk) && item.get(tableSk) != null) {
                 keyNode.set(tableSk, item.get(tableSk));
             }
         }
@@ -2424,14 +2492,18 @@ public class DynamoDbService {
 
         return switch (op) {
             case "EQ" -> {
-                if (attrValue == null) yield false;
-                yield ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr != null ? compareAttr : attrValue) == 0
-                        && actual != null && actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield false;
+                }
+                // Deep equality, so set/list/map values compare by content rather than
+                // collapsing to an empty scalar and matching everything.
+                yield attributeValuesEqual(attrValue, compareAttr);
             }
             case "NE" -> {
-                if (attrValue == null) yield true;
-                if (actual == null || compareValue == null) yield true;
-                yield !actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield true;
+                }
+                yield !attributeValuesEqual(attrValue, compareAttr);
             }
             case "NULL" -> attrValue == null;
             case "NOT_NULL" -> attrValue != null;
@@ -2606,7 +2678,7 @@ public class DynamoDbService {
         }
 
         ExportDescription finalDesc = desc;
-        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(storageKey);
+        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(scopedItemsKey(storageKey));
         List<JsonNode> snapshot = tableItems != null
                 ? List.copyOf(tableItems.values())
                 : List.of();
