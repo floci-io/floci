@@ -771,9 +771,18 @@ public class CloudFormationResourceProvisioner {
         if (priorPhysicalId != null && priorPhysicalId.equals(name) && logsService.logGroupExists(name, region)) {
             reconcileLogGroup(name, retentionInDays, tags, region);
         } else {
-            logsService.createLogGroup(name, retentionInDays, tags, region);
-            if (priorPhysicalId != null && !priorPhysicalId.equals(name)
-                    && logsService.logGroupExists(priorPhysicalId, region)) {
+            boolean preservedPriorGroup = priorPhysicalId != null
+                    && !priorPhysicalId.equals(name)
+                    && logsService.logGroupExists(priorPhysicalId, region);
+            try {
+                logsService.createLogGroup(name, retentionInDays, tags, region);
+            } catch (RuntimeException failure) {
+                if (preservedPriorGroup) {
+                    r.getAttributes().put(UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+                }
+                throw failure;
+            }
+            if (preservedPriorGroup) {
                 logsService.deleteLogGroup(priorPhysicalId, region);
             }
         }
