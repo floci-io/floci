@@ -16,7 +16,7 @@ import java.util.Map;
  * Maps graphql-java {@link ExecutionResult} errors to AWS AppSync wire shapes
  * with top-level {@code errorType}/{@code errorInfo} (not extensions-only).
  *
- * @see <a href="https://docs.aws.amazon.com/appsync/latest/devguide/security-authz.html">AppSync DG error samples</a>
+ * @see <a href="https://docs.aws.amazon.com/appsync/latest/devguide/built-in-util-js.html">AppSync DG {@code $util.error} ({@code errorType}/{@code errorInfo})</a>
  * @see <a href="https://github.com/graphql/graphql-over-http/issues/81">AppSync HTTP behavior (AppSync team / @robzhu)</a>
  */
 @ApplicationScoped
