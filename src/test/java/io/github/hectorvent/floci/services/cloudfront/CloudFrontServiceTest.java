@@ -37,7 +37,7 @@ class CloudFrontServiceTest {
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
+                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
