@@ -273,6 +273,111 @@ class LambdaPermissionTagLayerIntegrationTest {
             .body("Tags.team", equalTo("platform"));
     }
 
+    // ── GetFunction Tags ──────────────────────────────────────────────────────
+
+    @Test
+    @Order(17)
+    void getFunction_returnsTopLevelTags() {
+        // https://github.com/lex00/floci/issues/26 — Tags is a member of the GetFunction
+        // response, so a client reads a function's tags back without calling ListTags.
+        // Only "team" survives the untag in the preceding test.
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + FN)
+        .then()
+            .statusCode(200)
+            .body("Configuration.FunctionName", equalTo(FN))
+            .body("Tags.team", equalTo("platform"))
+            .body("Tags.env", nullValue());
+    }
+
+    @Test
+    @Order(17)
+    void getFunction_omitsTagsForAnUntaggedFunction() {
+        String untagged = "untagged-get-fn";
+        String zipBase64;
+        try {
+            zipBase64 = java.util.Base64.getEncoder().encodeToString(minimalZip());
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Code": { "ZipFile": "%s" }
+                }
+                """.formatted(untagged, zipBase64))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(201);
+
+        try {
+            given()
+            .when()
+                .get("/2015-03-31/functions/" + untagged)
+            .then()
+                .statusCode(200)
+                .body("$", not(hasKey("Tags")));
+        } finally {
+            given().when().delete("/2015-03-31/functions/" + untagged).then().statusCode(204);
+        }
+    }
+
+    @Test
+    @Order(17)
+    void createFunctionWithTags_thenGetFunctionShowsThem() {
+        String taggedFn = "tagged-get-fn";
+        String zipBase64;
+        try {
+            zipBase64 = java.util.Base64.getEncoder().encodeToString(minimalZip());
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Code": { "ZipFile": "%s" },
+                    "Tags": { "tofu-estate": "probe1" }
+                }
+                """.formatted(taggedFn, zipBase64))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(201);
+
+        try {
+            given()
+            .when()
+                .get("/2015-03-31/functions/" + taggedFn)
+            .then()
+                .statusCode(200)
+                .body("Tags.'tofu-estate'", equalTo("probe1"));
+
+            // ListTags stays the separate read path it always was.
+            given()
+            .when()
+                .get("/2017-03-31/tags/arn:aws:lambda:us-east-1:000000000000:function:" + taggedFn)
+            .then()
+                .statusCode(200)
+                .body("Tags.'tofu-estate'", equalTo("probe1"));
+        } finally {
+            given().when().delete("/2015-03-31/functions/" + taggedFn).then().statusCode(204);
+        }
+    }
+
     // ── ListLayers / ListLayerVersions ────────────────────────────────────────
 
     @Test

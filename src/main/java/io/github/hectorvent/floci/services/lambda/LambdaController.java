@@ -104,6 +104,17 @@ public class LambdaController {
             code.put("RepositoryType", "S3");
         }
 
+        // Tags is a member of the GetFunction response in the Lambda API reference, so a
+        // client that reads a function back after creating it sees the tags it set. Only
+        // GetFunction carries them: ListFunctions and GetFunctionConfiguration return the
+        // FunctionConfiguration structure, which has no Tags member. The block is omitted
+        // entirely for an untagged function, matching AWS rather than emitting an empty map.
+        Map<String, String> tags = fn.getTags();
+        if (tags != null && !tags.isEmpty()) {
+            ObjectNode tagsNode = root.putObject("Tags");
+            tags.forEach(tagsNode::put);
+        }
+
         return Response.ok(root).build();
     }
 

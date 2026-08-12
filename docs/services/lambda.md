@@ -10,7 +10,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | Operation | Description |
 |---|---|
 | `CreateFunction` | Deploy a Lambda function |
-| `GetFunction` | Get function details and download URL |
+| `GetFunction` | Get function details, tags and download URL |
 | `GetFunctionConfiguration` | Get runtime configuration |
 | `ListFunctions` | List all functions |
 | `UpdateFunctionCode` | Upload new code |
