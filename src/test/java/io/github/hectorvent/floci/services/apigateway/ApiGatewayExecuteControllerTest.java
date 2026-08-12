@@ -308,7 +308,7 @@ class ApiGatewayExecuteControllerTest {
     }
 
     @Test
-    void projectsHttpApiV2CookiesAsRepeatedSetCookieHeaders() {
+    void projectsHttpApiV2CookiesAsRepeatedSetCookieHeadersAlongsideResponseHeaders() {
         ObjectMapper objectMapper = new ObjectMapper();
         ApiGatewayExecuteController controller = controller(objectMapper);
         InvokeResult result = new InvokeResult(
@@ -317,6 +317,9 @@ class ApiGatewayExecuteControllerTest {
                 """
                 {
                   "statusCode": 200,
+                  "headers": {
+                    "X-Trace": "cookie-projection"
+                  },
                   "cookies": [
                     "session=one; Path=/; HttpOnly",
                     "csrf=two; Path=/; Secure"
@@ -330,6 +333,7 @@ class ApiGatewayExecuteControllerTest {
             assertEquals(
                     List.of("session=one; Path=/; HttpOnly", "csrf=two; Path=/; Secure"),
                     response.getStringHeaders().get(HttpHeaders.SET_COOKIE));
+            assertEquals("cookie-projection", response.getHeaderString("X-Trace"));
         }
     }
 
@@ -343,14 +347,26 @@ class ApiGatewayExecuteControllerTest {
                 """
                 {
                   "statusCode": 200,
-                  "cookies": ["session=one; Path=/; HttpOnly"]
+                  "headers": {
+                    "X-Trace": "rest-v1"
+                  },
+                  "multiValueHeaders": {
+                    "Set-Cookie": [
+                      "legacy=one; Path=/; HttpOnly",
+                      "legacy=two; Path=/; Secure"
+                    ]
+                  },
+                  "cookies": ["http-api-v2=ignored; Path=/"]
                 }
                 """.getBytes(StandardCharsets.UTF_8),
                 null,
                 "request-id");
 
         try (Response response = controller.buildProxyResponse(result, false)) {
-            assertTrue(response.getStringHeaders().getOrDefault(HttpHeaders.SET_COOKIE, List.of()).isEmpty());
+            assertEquals(
+                    List.of("legacy=one; Path=/; HttpOnly", "legacy=two; Path=/; Secure"),
+                    response.getStringHeaders().get(HttpHeaders.SET_COOKIE));
+            assertEquals("rest-v1", response.getHeaderString("X-Trace"));
         }
     }
 }
