@@ -8,16 +8,10 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
 /**
- * Verifies that S3 object bytes are isolated between accounts, mirroring
- * {@link io.github.hectorvent.floci.core.common.AccountIsolationIntegrationTest}'s
- * SQS coverage.
- *
- * <p>Bucket metadata is already account-scoped via {@code AccountAwareStorageBackend}
- * (two accounts may each own a bucket with the same name — real S3 disallows this since
- * bucket names are globally unique, but that's a separate concern from what's tested
- * here), but object bytes ({@code S3Service.memoryDataStore} / on-disk files under
- * {@code dataRoot}) were keyed only by {@code bucketName + "/" + key}, with no account
- * component, so two accounts with a same-named bucket shared the same underlying bytes.
+ * Verifies S3 object bytes are isolated between accounts, mirroring
+ * {@link io.github.hectorvent.floci.core.common.AccountIsolationIntegrationTest}'s SQS coverage.
+ * Two accounts may own a same-named bucket in Floci (bucket names are only unique per account
+ * here, unlike real S3); object bytes must not collide when they do.
  */
 @QuarkusTest
 class S3AccountIsolationIntegrationTest {
@@ -34,10 +28,8 @@ class S3AccountIsolationIntegrationTest {
         createBucket(AUTH_ACCOUNT_1, bucket);
         createBucket(AUTH_ACCOUNT_2, bucket);
 
-        // Both accounts write to the same key in their own (same-named) bucket. Object
-        // metadata (per-account) would mask the leak if account 2 never wrote the key at
-        // all, so this must exercise the actual byte-storage collision: account 2's write
-        // must not overwrite what account 1 reads back, and vice versa.
+        // Both write the same key in their own bucket — exercises the byte-storage
+        // collision directly, not just metadata isolation.
         given()
             .header("Authorization", AUTH_ACCOUNT_1)
             .body("account-1-data")

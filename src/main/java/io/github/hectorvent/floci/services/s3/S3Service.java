@@ -72,12 +72,9 @@ public class S3Service implements Resettable {
     private final Path dataRoot;
     private final boolean inMemory;
     private final ConcurrentHashMap<String, byte[]> memoryDataStore = new ConcurrentHashMap<>();
-    // Guards disk-mode object files against a legacy-layout migration racing a write/delete to
-    // the same account-scoped path — see copyLegacyFileIfPresent(). A fixed-size stripe array
-    // (rather than one lock per Path in a growing map) keeps memory bounded regardless of how
-    // many distinct objects/versions a long-running instance ever writes or deletes — entries in
-    // a Path-keyed map would never be safe to remove without a full reference-counting scheme,
-    // since a lock in active use could otherwise be evicted out from under a waiting thread.
+    // Guards disk writes/deletes against a racing legacy migration for the same path (see
+    // copyLegacyFileIfPresent()). Fixed-size stripes keep memory bounded, unlike a per-path
+    // map that would need reference counting to ever shrink safely.
     private static final int DISK_FILE_LOCK_STRIPES = 256;
     private final ReentrantLock[] diskFileLocks = newLockStripes(DISK_FILE_LOCK_STRIPES);
 
@@ -201,10 +198,8 @@ public class S3Service implements Resettable {
 
     public Bucket createBucket(String bucketName, String region) {
         if (ACCOUNT_STORAGE_ROOT.equals(bucketName)) {
-            // Real S3 already rejects this name outright (bucket names must begin with a
-            // letter or number), but Floci doesn't otherwise validate bucket name format —
-            // this one name specifically must stay unavailable, since account-scoped disk
-            // storage for every account lives under this exact path segment.
+            // Floci doesn't otherwise validate bucket name format, but this name must stay
+            // unavailable — it's the root every account's disk storage lives under.
             throw new AwsException("InvalidBucketName",
                     "The specified bucket is not valid.", 400);
         }
@@ -2589,23 +2584,13 @@ public class S3Service implements Resettable {
 
     private static final String DATA_SUFFIX = ".s3data";
 
-    // The account-scoped disk layout is dataRoot/ACCOUNT_STORAGE_ROOT/<accountId>/<bucket>/...
-    // rather than dataRoot/<accountId>/<bucket>/..., because a bucket name and an account ID
-    // share the same string shape (a 12-digit numeric bucket name is valid on S3), so
-    // "dataRoot/<accountId>/..." is not disjoint from the legacy layout "dataRoot/<bucket>/...":
-    // a legacy bucket literally named e.g. "000000000000" with key "orders/report.csv" resolves
-    // to the exact same path as account "000000000000"'s new-layout bucket "orders", key
-    // "report.csv". A leading "." makes this namespace unreachable by any bucket name real S3
-    // accepts (bucket names must begin with a letter or number) — createBucket() additionally
-    // rejects the one bucket name that would otherwise collide with the root of this namespace
-    // itself, since Floci (unlike real S3) doesn't otherwise validate bucket name format at all.
+    // A 12-digit bucket name is valid on S3 and would otherwise collide with an account ID,
+    // making dataRoot/<accountId>/... indistinguishable from the legacy dataRoot/<bucket>/...
+    // layout. A leading "." keeps this namespace unreachable by any real bucket name.
     private static final String ACCOUNT_STORAGE_ROOT = ".accounts";
 
-    // Byte storage (memoryDataStore / on-disk files) is a plain field, not a StorageBackend,
-    // so unlike bucketStore/objectStore it gets no automatic account prefixing from
-    // AccountAwareStorageBackend. bucketStore only enforces bucket-name uniqueness within an
-    // account, so two accounts can each own a bucket named e.g. "orders" — without scoping
-    // the physical key/path by account here too, their object bytes would collide.
+    // Unlike bucketStore/objectStore, object bytes get no automatic account prefixing — two
+    // accounts can own a bucket named "orders" and would collide here without this scoping.
     private String physicalKey(String bucketName, String key) {
         return ownerId() + "/" + objectKey(bucketName, key);
     }
@@ -2638,16 +2623,11 @@ public class S3Service implements Resettable {
     }
 
     /**
-     * Resolves the account-scoped object path for a read, first copying in a file found at the
-     * pre-account-scoping legacy path (no account segment). Must only ever be used for reads:
-     * the legacy file predates any account concept, so it isn't actually known to belong to the
-     * current account — and two different accounts can legitimately own a same-named bucket in
-     * Floci (bucket-name uniqueness is only enforced per account here, unlike real S3). A write
-     * or delete resolving through this path could let one account's operation destroy another
-     * account's not-yet-migrated data; {@link #resolveObjectPath} is used there instead, with no
-     * legacy fallback at all. Copying rather than moving leaves the ambiguous source untouched,
-     * so every account that reads it independently gets its own copy, at the cost of the legacy
-     * file persisting on disk indefinitely once read.
+     * Resolves the path for a read, copying in a legacy-layout file if present. Reads only —
+     * a write/delete ({@link #resolveObjectPath}) must never touch legacy data, since it isn't
+     * known to belong to any one account and two accounts can share a bucket name. Copying
+     * (not moving) leaves the ambiguous source in place so every account that reads it gets
+     * its own copy.
      */
     private Path resolveObjectPathForRead(String bucketName, String key) {
         Path resolved = resolveObjectPath(bucketName, key);
@@ -2687,20 +2667,14 @@ public class S3Service implements Resettable {
     }
 
     private ReentrantLock diskFileLock(Path path) {
-        // Two unrelated paths landing on the same stripe just serialize unnecessarily — safe,
-        // if occasionally less parallel, unlike a growing per-path map that never shrinks.
+        // A stripe collision just serializes unrelated paths — safe, unlike a map entry.
         return diskFileLocks[Math.floorMod(path.hashCode(), diskFileLocks.length)];
     }
 
     /**
-     * Copies in a legacy-layout file for {@code newPath}, guarded by the same per-path lock
-     * {@link #writeFile}/{@link #deleteFile} (and their versioned counterparts) hold while
-     * touching {@code newPath}. Without that shared lock, a read could copy stale legacy bytes
-     * into place, a concurrent write could land its real content first, and the read's own copy
-     * — checked for existence before either operation started — would still go on to clobber
-     * that write with the stale data. The lock makes "does newPath already exist" and "install
-     * the legacy copy" a single atomic step with respect to any write/delete of the same path,
-     * so a legacy copy can never install itself after a real write has already claimed the path.
+     * Copies in a legacy file for {@code newPath}, under the same lock {@link #writeFile}/
+     * {@link #deleteFile} hold for that path — otherwise a concurrent write could land its
+     * real content and then be silently clobbered by a racing legacy copy.
      */
     private void copyLegacyFileIfPresent(Path legacyPath, Path newPath) {
         if (!Files.exists(legacyPath)) {
@@ -2715,12 +2689,8 @@ public class S3Service implements Resettable {
             Files.createDirectories(newPath.getParent());
             Files.copy(legacyPath, newPath);
         } catch (IOException e) {
-            // Files.copy can throw partway through (disk full, transient I/O error), leaving
-            // newPath present with truncated content. Left in place, that file would satisfy
-            // the exists-check above on every later attempt, permanently shadowing the still
-            // intact legacy source instead of letting a retry migrate it correctly. Still
-            // holding the lock, so this can't race a concurrent writer that might otherwise
-            // have created newPath in the meantime.
+            // A failed copy can leave newPath truncated, which would wrongly look
+            // "already migrated" on a later retry — clean it up before rethrowing.
             deleteQuietly(newPath, "partially-copied legacy S3 object file, so a later read can retry migration");
             throw new UncheckedIOException("Failed to copy legacy S3 object file to account-scoped layout", e);
         } finally {

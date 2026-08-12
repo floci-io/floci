@@ -33,19 +33,10 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Before account-scoped object storage, every disk-mode S3 object lived at
- * {@code dataRoot/bucketName/key.s3data}, with no account segment. An existing Floci
- * installation upgrading past that change must not lose access to objects already on disk
- * in that legacy layout — object *metadata* (in {@code objectStore}) was already
- * account-scoped before this change and is unaffected by an upgrade, but the physical bytes
- * were not, so a naive account-scoped path resolver alone would 404 on every pre-existing
- * object.
- *
- * <p>Since a legacy file predates any account concept, it isn't actually known to belong to
- * the account that happens to touch it first — and Floci allows two different accounts to own
- * a same-named bucket, unlike real S3. Migration must therefore only ever happen on reads, and
- * by copying rather than moving: a write or delete must never be able to steal or destroy
- * another account's still-unmigrated legacy object just because it resolves to the same
- * bucket/key.
+ * {@code dataRoot/bucketName/key.s3data}, with no account segment. Upgrading past that change
+ * must not lose access to objects already on disk, and — since a legacy file isn't known to
+ * belong to any one account, and two accounts can share a bucket name — migrating it must never
+ * let one account's write/delete steal or destroy another account's still-unmigrated object.
  */
 class S3LegacyDiskLayoutIntegrationTest {
 
@@ -59,9 +50,7 @@ class S3LegacyDiskLayoutIntegrationTest {
 
         s3Service.createBucket("legacy-bucket", "us-east-1");
         byte[] data = "pre-upgrade-content".getBytes(StandardCharsets.UTF_8);
-        // Establishes correct objectStore metadata (unaffected by the account-scoping change)
-        // and writes bytes at the new, account-scoped path — then that file is relocated to
-        // simulate what an object written before this change actually looks like on disk.
+        // Write normally, then relocate to the legacy path to simulate pre-upgrade data.
         s3Service.putObject("legacy-bucket", "legacy-key.txt", data, "text/plain", null);
 
         Path newLayoutFile = dataRoot.resolve(".accounts").resolve("000000000000").resolve("legacy-bucket").resolve("legacy-key.txt.s3data");
@@ -78,11 +67,9 @@ class S3LegacyDiskLayoutIntegrationTest {
 
     @Test
     void bucketNamedLikeTheDefaultAccountIdDoesNotCollideWithAccountScopedStorage() throws Exception {
-        // A 12-digit bucket name is valid on S3. Without a reserved namespace, the account-
-        // scoped layout dataRoot/<accountId>/<bucket>/<key>.s3data is not disjoint from the
-        // legacy layout dataRoot/<bucket>/<key>.s3data: a legacy bucket literally named
-        // "000000000000" with key "orders/report.csv" would resolve to the exact same path as
-        // account "000000000000"'s new-layout bucket "orders", key "report.csv".
+        // A 12-digit bucket name is valid on S3 and shares its shape with an account ID: a
+        // legacy bucket "000000000000" with key "orders/report.csv" must not collide with
+        // account "000000000000"'s own "orders" bucket, key "report.csv".
         Path dataRoot = tempDir.resolve("s3");
         S3Service s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
 
@@ -91,8 +78,6 @@ class S3LegacyDiskLayoutIntegrationTest {
         byte[] legacyData = "legacy-bucket-named-like-an-account-id".getBytes(StandardCharsets.UTF_8);
         s3Service.putObject(accountIdShapedBucket, "orders/report.csv", legacyData, "text/plain", null);
 
-        // Relocates it to the pre-upgrade unscoped layout, exactly as
-        // existingObjectWrittenUnderTheLegacyUnscopedPathIsStillReadable does.
         Path newLayoutFile = dataRoot.resolve(".accounts").resolve("000000000000")
                 .resolve(accountIdShapedBucket).resolve("orders/report.csv.s3data");
         Path legacyLayoutFile = dataRoot.resolve(accountIdShapedBucket).resolve("orders/report.csv.s3data");
@@ -124,14 +109,10 @@ class S3LegacyDiskLayoutIntegrationTest {
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void migrationFailureIsNotPermanentAndDoesNotLeaveAFileBehind() throws Exception {
-        // This specific fault (permission denied on the source) happens to fail before
-        // Files.copy ever creates the destination, so it doesn't reproduce a genuinely
-        // *partial* write (e.g. disk-full mid-copy) — that scenario isn't reliably forceable
-        // through portable java.nio.file APIs for a file this small. What this does verify:
-        // copyLegacyFileIfPresent's catch-and-cleanup doesn't leave anything behind for this
-        // failure mode either, and — the property that actually matters to a caller — a
-        // transient failure is not permanent: once the underlying problem is resolved, a retry
-        // recovers the still-intact legacy content instead of being stuck.
+        // Note: permission-denied fails before Files.copy creates a destination on this JVM,
+        // so this doesn't reproduce a genuinely partial write (disk-full mid-copy isn't
+        // reliably forceable for a file this small) — it verifies the property that matters
+        // to a caller: a transient failure isn't permanent, and a retry recovers.
         Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
                 "root ignores file read permissions");
 
@@ -164,9 +145,8 @@ class S3LegacyDiskLayoutIntegrationTest {
     @Test
     void anotherAccountsWriteMustNotDestroyThisAccountsUnmigratedLegacyObject() throws Exception {
         Path dataRoot = tempDir.resolve("s3");
-        // Two different accounts, sharing the underlying stores exactly like production does —
-        // isolation comes only from AccountAwareStorageBackend's key prefixing, not from
-        // separate backing storage.
+        // Two accounts sharing the underlying stores, like production — isolation comes only
+        // from AccountAwareStorageBackend's key prefixing.
         InMemoryStorage<String, Bucket> sharedBucketStore = new InMemoryStorage<>();
         InMemoryStorage<String, S3Object> sharedObjectStore = new InMemoryStorage<>();
 
@@ -183,17 +163,14 @@ class S3LegacyDiskLayoutIntegrationTest {
         byte[] legacyData = "account-A-legacy-content".getBytes(StandardCharsets.UTF_8);
         s3ForA.putObject("shared-bucket", "shared-key.txt", legacyData, "text/plain", null);
 
-        // Relocates A's just-written bytes to the pre-upgrade unscoped layout, simulating an
-        // object that has existed since before per-account byte storage existed — A has never
-        // read it since upgrading, so it hasn't yet been copied to A's account-scoped path.
+        // A hasn't read it since upgrading, so it's still sitting at the legacy path.
         Path newLayoutFile = dataRoot.resolve(".accounts").resolve("111111111111").resolve("shared-bucket").resolve("shared-key.txt.s3data");
         Path legacyLayoutFile = dataRoot.resolve("shared-bucket").resolve("shared-key.txt.s3data");
         Files.createDirectories(legacyLayoutFile.getParent());
         Files.move(newLayoutFile, legacyLayoutFile, StandardCopyOption.REPLACE_EXISTING);
 
-        // Account B is unrelated to A and happens to use the same bucket name (bucket names are
-        // only unique per account in Floci) and the same key — pure coincidence, not shared
-        // history. B's own, unrelated write must not touch A's still-unmigrated legacy object.
+        // B is unrelated to A and just happens to reuse the same bucket/key names (bucket
+        // names are only unique per account in Floci) — pure coincidence, not shared history.
         s3ForB.createBucket("shared-bucket", "us-east-1");
         byte[] bData = "account-B-content".getBytes(StandardCharsets.UTF_8);
         s3ForB.putObject("shared-bucket", "shared-key.txt", bData, "text/plain", null);
@@ -205,12 +182,9 @@ class S3LegacyDiskLayoutIntegrationTest {
 
     @Test
     void concurrentOverwriteNeverLosesToARacingLegacyMigration() throws Exception {
-        // A read that resolves ambiguous legacy data and a write to the same account's same key
-        // can race: the write's real content must always be what a subsequent read sees, never
-        // stale legacy bytes reinstalled on top of it after the write already landed. Repeated
-        // across many independent keys, released together via a barrier, since a lock-based fix
-        // can't be forced into a specific interleaving from outside — only shown to hold under
-        // real concurrent scheduling across enough attempts.
+        // A racing legacy-migration read must never reinstall stale bytes on top of a write
+        // that already landed. Repeated across many keys, since a lock-based fix can only be
+        // shown to hold under real concurrent scheduling, not forced into one interleaving.
         int rounds = 50;
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
@@ -256,10 +230,8 @@ class S3LegacyDiskLayoutIntegrationTest {
         S3Service s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
         s3Service.createBucket("legacy-bucket", "us-east-1");
 
-        // Legacy migration now copies rather than moves, so unlike a move there's no "source
-        // vanished from under a concurrent reader" case to race — this exercises many concurrent
-        // reads of never-yet-migrated legacy files to confirm that holds regardless of
-        // scheduling, not to hunt for a specific race window.
+        // Migration copies rather than moves, so there's no "source vanished" case to race —
+        // this just confirms many concurrent first reads never fail, regardless of scheduling.
         int rounds = 50;
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
