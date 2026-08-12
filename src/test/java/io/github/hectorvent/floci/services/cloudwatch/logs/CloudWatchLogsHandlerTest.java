@@ -16,6 +16,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -99,14 +100,99 @@ class CloudWatchLogsHandlerTest {
     }
 
     @Test
-    void putLogGroupDeletionProtectionAcceptsTheDeleteLifecycleOperation() {
+    void createLogGroupWithDeletionProtectionIsReturnedByDescribeLogGroups() {
+        String protectedGroup = GROUP + "-created-protected";
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("logGroupName", protectedGroup);
+        create.put("deletionProtectionEnabled", true);
+
+        handler.handle("CreateLogGroup", create, REGION);
+
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("logGroupNamePrefix", protectedGroup);
+        JsonNode group = ((JsonNode) handler.handle("DescribeLogGroups", describe, REGION).getEntity())
+                .path("logGroups").get(0);
+        assertEquals(protectedGroup, group.path("logGroupName").asText());
+        assertTrue(group.path("deletionProtectionEnabled").asBoolean());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionPersistsByName() {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("logGroupIdentifier", GROUP);
-        request.put("deletionProtectionEnabled", false);
+        request.put("deletionProtectionEnabled", true);
 
         Response response = handler.handle("PutLogGroupDeletionProtection", request, REGION);
 
         assertEquals(200, response.getStatus());
+        assertTrue(service.describeLogGroups(GROUP, REGION).getFirst().isDeletionProtectionEnabled());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionAcceptsArnIdentifier() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", GROUP_ARN);
+        request.put("deletionProtectionEnabled", true);
+
+        handler.handle("PutLogGroupDeletionProtection", request, REGION);
+
+        assertTrue(service.describeLogGroups(GROUP, REGION).getFirst().isDeletionProtectionEnabled());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresIdentifier() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("deletionProtectionEnabled", true);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutLogGroupDeletionProtection", request, REGION));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresBoolean() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", GROUP);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutLogGroupDeletionProtection", request, REGION));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresExistingGroup() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", "/missing");
+        request.put("deletionProtectionEnabled", true);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutLogGroupDeletionProtection", request, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+    }
+
+    @Test
+    void protectedLogGroupCannotBeDeletedUntilProtectionIsDisabled() {
+        ObjectNode protection = MAPPER.createObjectNode();
+        protection.put("logGroupIdentifier", GROUP);
+        protection.put("deletionProtectionEnabled", true);
+        handler.handle("PutLogGroupDeletionProtection", protection, REGION);
+
+        ObjectNode deletion = MAPPER.createObjectNode();
+        deletion.put("logGroupName", GROUP);
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("DeleteLogGroup", deletion, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertThat(error.getMessage(), containsString("Disable deletion protection"));
+
+        protection.put("deletionProtectionEnabled", false);
+        handler.handle("PutLogGroupDeletionProtection", protection, REGION);
+        Response response = handler.handle("DeleteLogGroup", deletion, REGION);
+
+        assertEquals(200, response.getStatus());
+        assertFalse(service.logGroupExists(GROUP, REGION));
     }
 
     @Test

@@ -69,8 +69,9 @@ public class CloudWatchLogsHandler {
         String name = request.path("logGroupName").asText();
         Integer retentionInDays = request.has("retentionInDays")
                 ? request.path("retentionInDays").asInt() : null;
+        boolean deletionProtectionEnabled = request.path("deletionProtectionEnabled").asBoolean(false);
         Map<String, String> tags = extractTags(request.path("tags"));
-        logsService.createLogGroup(name, retentionInDays, tags, region);
+        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -80,17 +81,17 @@ public class CloudWatchLogsHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    /**
-     * Floci does not retain log-group deletion protection state, but the AWS
-     * control plane requires callers to disable it before deleting a group.
-     * Accepting the operation keeps that lifecycle sequence protocol-compatible.
-     */
     private Response handlePutLogGroupDeletionProtection(JsonNode request, String region) {
         String identifier = request.path("logGroupIdentifier").asText(null);
         if (identifier == null || identifier.isBlank()) {
-            throw new AwsException("InvalidParameterException", "logGroupIdentifier is required", 400);
+            throw new AwsException("InvalidParameterException", "logGroupIdentifier is required.", 400);
         }
-        resolveLogGroupName(request);
+        JsonNode enabled = request.get("deletionProtectionEnabled");
+        if (enabled == null || !enabled.isBoolean()) {
+            throw new AwsException("InvalidParameterException", "deletionProtectionEnabled is required.", 400);
+        }
+        String groupName = extractLogGroupNameFromArn(identifier);
+        logsService.putLogGroupDeletionProtection(groupName, enabled.booleanValue(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -108,6 +109,7 @@ public class CloudWatchLogsHandler {
             if (g.getRetentionInDays() != null) {
                 node.put("retentionInDays", g.getRetentionInDays());
             }
+            node.put("deletionProtectionEnabled", g.isDeletionProtectionEnabled());
             node.put("storedBytes", 0);
             node.put("metricFilterCount", 0);
             groupsArray.add(node);
