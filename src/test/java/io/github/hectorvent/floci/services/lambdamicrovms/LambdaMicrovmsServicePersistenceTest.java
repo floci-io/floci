@@ -165,12 +165,12 @@ class LambdaMicrovmsServicePersistenceTest {
 
         @Override
         @SuppressWarnings("unchecked")
-        public <V> StorageBackend<String, V> create(String serviceName,
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
                                                     String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
             // Wrap like the production factory does so the tests exercise the
             // account-prefixed key space, not a bare backend.
-            return (StorageBackend<String, V>) stores.computeIfAbsent(fileName, ignored -> {
+            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName, ignored -> {
                 PersistentStorage<String, V> inner =
                         new PersistentStorage<>(directory.resolve(fileName), typeReference);
                 inner.load();

@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.services.neptune;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerHandle;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
@@ -57,7 +57,7 @@ class NeptuneServiceTest {
         when(config.hostname()).thenReturn(Optional.of("localhost"));
 
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(inv -> new InMemoryStorage<>());
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         when(containerManager.start(anyString(), anyString(), any(NeptuneDbType.class)))
                 .thenReturn(new NeptuneContainerHandle("cid", "c", "localhost", 8182));
         doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());

@@ -455,7 +455,10 @@ public class CloudFormationQueryHandler {
     // ── ListStacks ────────────────────────────────────────────────────────────
 
     private Response listStacks(MultivaluedMap<String, String> params, String region) {
-        List<Stack> stacks = cfnService.listStacks(region);
+        List<String> statusFilter = extractList(params, "StackStatusFilter.member.");
+        List<Stack> stacks = cfnService.listStacks(region).stream()
+                .filter(stack -> statusFilter.isEmpty() || statusFilter.contains(stack.getStatus()))
+                .toList();
         XmlBuilder xml = new XmlBuilder()
                 .start("ListStacksResponse", CF_NS)
                 .start("ListStacksResult")
