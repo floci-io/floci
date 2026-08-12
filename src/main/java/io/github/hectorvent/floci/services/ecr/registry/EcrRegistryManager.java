@@ -58,6 +58,7 @@ public class EcrRegistryManager {
 
     private volatile boolean started;
     private volatile boolean reconciled;
+    private volatile boolean unavailableLogged;
     private volatile int hostPort;
     private volatile String containerId;
     private volatile Closeable logStream;
@@ -132,6 +133,36 @@ public class EcrRegistryManager {
      */
     public void setReconcileHook(java.util.function.Consumer<List<String>> hook) {
         this.reconcileHook = hook;
+    }
+
+    /**
+     * Attempts {@link #ensureStarted()} and reports whether the backing registry is
+     * usable, instead of propagating the failure. Callers that only need repository
+     * metadata (ARN, URI, tags) use this so ECR's control plane keeps working when
+     * Floci itself runs inside Docker without access to a Docker daemon; the registry
+     * is retried on the next call and starts as soon as a daemon becomes reachable.
+     *
+     * @return true when the registry container is running
+     */
+    public boolean tryEnsureStarted() {
+        if (started) {
+            return true;
+        }
+        try {
+            ensureStarted();
+        } catch (RuntimeException e) {
+            if (!unavailableLogged) {
+                unavailableLogged = true;
+                LOG.warnv("ECR backing registry is unavailable ({0}). Repository metadata operations "
+                        + "continue to work; image push, pull and image queries stay disabled until a "
+                        + "Docker daemon is reachable.", e.getMessage());
+            }
+            return false;
+        }
+        if (started) {
+            unavailableLogged = false;
+        }
+        return started;
     }
 
     /**

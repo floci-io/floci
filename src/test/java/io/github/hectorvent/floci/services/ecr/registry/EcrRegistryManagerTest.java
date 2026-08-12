@@ -102,6 +102,28 @@ class EcrRegistryManagerTest {
     }
 
     @Test
+    void tryEnsureStarted_reportsFailureInsteadOfThrowingWhenDockerIsUnreachable() {
+        // Floci running inside Docker without a mounted daemon socket. The control plane
+        // must keep working, so the failure is reported rather than propagated.
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("Cannot connect to the Docker daemon"));
+
+        for (int attempt = 0; attempt < 6; attempt++) {
+            assertFalse(manager.tryEnsureStarted(), "attempt " + attempt + " should report unavailable");
+        }
+        assertFalse(manager.isStarted());
+    }
+
+    @Test
+    void tryEnsureStarted_reportsSuccessOnceTheRegistryStarts() {
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef", Map.of()));
+
+        assertTrue(manager.tryEnsureStarted());
+        assertTrue(manager.isStarted());
+    }
+
+    @Test
     void httpClient_usesRegistryContainerDnsWhenRunningInsideDocker() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
 
