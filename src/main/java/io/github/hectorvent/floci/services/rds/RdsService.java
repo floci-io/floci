@@ -429,7 +429,11 @@ public class RdsService implements Resettable {
 
         String sqlDump = "";
         if (!config.services().rds().mock()) {
-            sqlDump = containerManager.createPostgresSnapshot(instance.getContainerId(), instance.getMasterUsername());
+            try {
+                sqlDump = containerManager.createPostgresSnapshot(instance.getContainerId(), instance.getMasterUsername());
+            } catch (Exception e) {
+                throw new AwsException("InvalidDBInstanceState", "Failed to create snapshot: " + e.getMessage(), 400);
+            }
         }
         snapshotData.put(snapshotId, sqlDump);
         snapshots.put(snapshotId, snapshot);

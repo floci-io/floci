@@ -1160,6 +1160,20 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbSnapshotThrowsOnDumpFailure() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenThrow(new RuntimeException("dump failed"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSnapshot("mysnap", "mydb"));
+
+        assertEquals("InvalidDBInstanceState", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Failed to create snapshot: dump failed"));
+    }
+
+    @Test
     void restoreDbInstanceFromDbSnapshotRestoresData() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
