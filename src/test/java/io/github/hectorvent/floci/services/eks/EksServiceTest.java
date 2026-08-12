@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.AmiImageResolver;
 import io.github.hectorvent.floci.services.ec2.Ec2ContainerManager;
@@ -51,9 +52,9 @@ class EksServiceTest {
     void setUp() {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
 
@@ -131,9 +132,9 @@ class EksServiceTest {
 
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
 
@@ -287,9 +288,13 @@ class EksServiceTest {
     private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {
         return new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return (StorageBackend<String, V>) backend;
+                if (backend instanceof AccountAwareStorageBackend<?> aware) {
+                    return (AccountAwareStorageBackend<V>) aware;
+                }
+                return new AccountAwareStorageBackend<>(
+                        (StorageBackend<String, V>) backend, null, "000000000000");
             }
         };
     }
@@ -309,9 +314,9 @@ class EksServiceTest {
     void createClusterWithNonExistentSubnetFails() {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
@@ -336,9 +341,9 @@ class EksServiceTest {
     void createClusterWithExistingSubnetSucceeds() {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
@@ -369,9 +374,9 @@ class EksServiceTest {
         // resolved Subnet, which carries the vpcId; it was simply discarded.
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
@@ -398,9 +403,9 @@ class EksServiceTest {
         // the validation half.
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
@@ -437,9 +442,9 @@ class EksServiceTest {
         // behaviour.
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
         Ec2Service ec2Service = realEc2Service();
