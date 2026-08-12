@@ -41,6 +41,14 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         this.defaultAccountId = defaultAccountId;
     }
 
+    /**
+     * In-memory account-aware store with no request context (uses {@code defaultAccountId}).
+     * Useful for unit tests and for callers that need an explicit {@link AccountAwareStorageBackend}.
+     */
+    public static <V> AccountAwareStorageBackend<V> inMemory(String defaultAccountId) {
+        return new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccountId);
+    }
+
     @Override
     public void put(String key, V value) {
         delegate.put(prefixed(key), value);

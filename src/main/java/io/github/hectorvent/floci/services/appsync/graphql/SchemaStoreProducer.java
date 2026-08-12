@@ -21,7 +21,7 @@ public class SchemaStoreProducer {
 
     @Inject
     public SchemaStoreProducer(StorageFactory storageFactory) {
-        this.store = (AccountAwareStorageBackend<String>) storageFactory.create("appsync", "appsync-schemas.json",
+        this.store = storageFactory.create("appsync", "appsync-schemas.json",
                 new TypeReference<Map<String, String>>() {});
     }
 
