@@ -31,6 +31,7 @@ import java.util.stream.Collectors;
  */
 public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> {
 
+    /** A stored value together with its owning AWS account and account-relative key. */
     public record AccountEntry<T>(String accountId, String key, T value) {}
 
     private final StorageBackend<String, V> delegate;
@@ -132,18 +133,17 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     /**
-     * Returns entries across every account while preserving the account prefix that owns
-     * each logical key. Legacy unprefixed entries are attributed to the configured default
-     * account, matching the migration behavior of {@link #get}.
+     * Returns entries across every account while preserving the account that owns each logical key.
+     * The filter receives the account-relative key. Keys without a 12-digit ASCII account prefix,
+     * including legacy keys that contain slashes, are returned unchanged under the configured
+     * default account. Unlike {@link #get}, this scan does not migrate legacy entries.
      */
     public List<AccountEntry<V>> scanAllAccountEntries(Predicate<String> keyFilter) {
         List<AccountEntry<V>> result = new ArrayList<>();
         for (String rawKey : delegate.keys()) {
-            int slash = rawKey.indexOf('/');
-            boolean hasAccountPrefix = slash == 12
-                    && rawKey.substring(0, slash).chars().allMatch(Character::isDigit);
-            String accountId = hasAccountPrefix ? rawKey.substring(0, slash) : defaultAccountId;
-            String logicalKey = hasAccountPrefix ? rawKey.substring(slash + 1) : rawKey;
+            boolean hasAccountPrefix = hasAccountPrefix(rawKey);
+            String accountId = hasAccountPrefix ? rawKey.substring(0, 12) : defaultAccountId;
+            String logicalKey = hasAccountPrefix ? rawKey.substring(13) : rawKey;
             if (!keyFilter.test(logicalKey)) {
                 continue;
             }
@@ -348,5 +348,18 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     private String prefixed(String key) {
         return prefix() + "/" + key;
+    }
+
+    private static boolean hasAccountPrefix(String key) {
+        if (key.length() < 13 || key.charAt(12) != '/') {
+            return false;
+        }
+        for (int i = 0; i < 12; i++) {
+            char character = key.charAt(i);
+            if (character < '0' || character > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 }

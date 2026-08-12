@@ -5,8 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Function;
-import java.util.stream.Collectors;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -162,27 +161,45 @@ class AccountAwareStorageBackendTest {
     }
 
     @Test
-    void scanAllAccountEntriesPreservesOwnersAndLegacyKeys() {
+    void scanAllAccountEntriesPreservesOwnersAndTreatsNonAwsPrefixesAsLegacy() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
         raw.put("123456789012/us-east-1::api-a", "account-a");
         raw.put("210987654321/us-east-1::api-b", "account-b");
         raw.put("legacy/path", "legacy");
+        raw.put("12345678901/short", "short-prefix");
+        raw.put("1234567890123/long", "long-prefix");
+        raw.put("１２３４５６７８９０１２/unicode", "unicode-prefix");
 
         AccountAwareStorageBackend<String> storage =
                 new AccountAwareStorageBackend<>(raw, null, "000000000000");
 
-        Map<String, AccountAwareStorageBackend.AccountEntry<String>> entries = storage
-                .scanAllAccountEntries(key -> true)
-                .stream()
-                .collect(Collectors.toMap(
-                        AccountAwareStorageBackend.AccountEntry::value,
-                        Function.identity()));
+        List<AccountAwareStorageBackend.AccountEntry<String>> entries =
+                storage.scanAllAccountEntries(key -> true);
 
-        assertEquals("123456789012", entries.get("account-a").accountId());
-        assertEquals("us-east-1::api-a", entries.get("account-a").key());
-        assertEquals("210987654321", entries.get("account-b").accountId());
-        assertEquals("us-east-1::api-b", entries.get("account-b").key());
-        assertEquals("000000000000", entries.get("legacy").accountId());
-        assertEquals("legacy/path", entries.get("legacy").key());
+        assertEquals(Set.of(
+                new AccountAwareStorageBackend.AccountEntry<>("123456789012", "us-east-1::api-a", "account-a"),
+                new AccountAwareStorageBackend.AccountEntry<>("210987654321", "us-east-1::api-b", "account-b"),
+                new AccountAwareStorageBackend.AccountEntry<>("000000000000", "legacy/path", "legacy"),
+                new AccountAwareStorageBackend.AccountEntry<>("000000000000", "12345678901/short", "short-prefix"),
+                new AccountAwareStorageBackend.AccountEntry<>("000000000000", "1234567890123/long", "long-prefix"),
+                new AccountAwareStorageBackend.AccountEntry<>(
+                        "000000000000", "１２３４５６７８９０１２/unicode", "unicode-prefix")),
+                Set.copyOf(entries));
+    }
+
+    @Test
+    void scanAllAccountEntriesFiltersAccountRelativeKeys() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("123456789012/us-east-1::api-a", "account-a");
+        raw.put("210987654321/eu-west-1::api-b", "account-b");
+        raw.put("us-east-1::legacy", "legacy");
+
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        assertEquals(Set.of(
+                new AccountAwareStorageBackend.AccountEntry<>("123456789012", "us-east-1::api-a", "account-a"),
+                new AccountAwareStorageBackend.AccountEntry<>("000000000000", "us-east-1::legacy", "legacy")),
+                Set.copyOf(storage.scanAllAccountEntries(key -> key.startsWith("us-east-1::"))));
     }
 }
