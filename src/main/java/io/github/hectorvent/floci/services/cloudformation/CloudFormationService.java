@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -456,6 +457,7 @@ public class CloudFormationService {
                 for (String logicalId : sortedLogicalIds) {
                     JsonNode resDef = resources.get(logicalId);
                     String type = resDef.path("Type").asText();
+                    String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
                     JsonNode props = resDef.path("Properties");
 
                     CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
@@ -499,6 +501,9 @@ public class CloudFormationService {
                             resource.setStatus("UPDATE_FAILED");
                         }
                     }
+                    // Both branches return a fresh StackResource, so the policy is carried over here
+                    // rather than on the instance the loop started with.
+                    resource.setDeletionPolicy(deletionPolicy);
                     stack.getResources().put(logicalId, resource);
 
                     physicalIds.put(logicalId, resource.getPhysicalId());
@@ -805,7 +810,7 @@ public class CloudFormationService {
                 StackResource previous = previousResources.get(resource.getLogicalId());
                 if (previous == null) {
                     boolean rollbackOwned = "true".equals(resource.getAttributes().get(
-                            CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+                            CfnRollback.ROLLBACK_OWNED_ATTR));
                     if (resource.getPhysicalId() != null || rollbackOwned) {
                         addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                                 resource.getResourceType(), "DELETE_IN_PROGRESS",
@@ -942,8 +947,11 @@ public class CloudFormationService {
             boolean completed = "CREATE_COMPLETE".equals(resource.getStatus());
             boolean ownedFailedResource = "CREATE_FAILED".equals(resource.getStatus())
                     && "true".equals(resource.getAttributes().get(
-                            CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+                            CfnRollback.ROLLBACK_OWNED_ATTR));
             if (resource.getPhysicalId() == null || (!completed && !ownedFailedResource)) {
+                continue;
+            }
+            if (skipRetainedResource(stack, resource, true)) {
                 continue;
             }
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
@@ -979,6 +987,9 @@ public class CloudFormationService {
                 boolean deletable = "CREATE_COMPLETE".equals(resource.getStatus())
                         || "DELETE_FAILED".equals(resource.getStatus());
                 if (resource.getPhysicalId() == null || !deletable) {
+                    continue;
+                }
+                if (skipRetainedResource(stack, resource, false)) {
                     continue;
                 }
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
@@ -1031,6 +1042,29 @@ public class CloudFormationService {
             stack.setStatus("DELETE_FAILED");
             stack.setStatusReason(e.getMessage());
         }
+    }
+
+    /**
+     * Applies a resource's {@code DeletionPolicy}. {@code Retain} keeps the resource on every stack
+     * operation; {@code RetainExceptOnCreate} keeps it too, except when the create that made it is
+     * rolled back. Every other value — including {@code Snapshot}, which floci cannot snapshot —
+     * falls through to a normal delete, matching the default.
+     *
+     * @return {@code true} when the resource was kept and reported as {@code DELETE_SKIPPED}
+     */
+    private boolean skipRetainedResource(Stack stack, StackResource resource, boolean createRollback) {
+        String policy = resource.getDeletionPolicy();
+        boolean retained = "Retain".equals(policy)
+                || (!createRollback && "RetainExceptOnCreate".equals(policy));
+        if (!retained) {
+            return false;
+        }
+        resource.setStatus("DELETE_SKIPPED");
+        addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                resource.getResourceType(), "DELETE_SKIPPED", null);
+        LOG.infov("Retained {0} ({1}) in stack {2}: DeletionPolicy {3}",
+                resource.getResourceType(), resource.getPhysicalId(), stack.getStackName(), policy);
+        return true;
     }
 
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
