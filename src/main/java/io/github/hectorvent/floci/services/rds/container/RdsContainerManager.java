@@ -259,7 +259,8 @@ public class RdsContainerManager {
         String[] cmd = {
                 "pg_dumpall",
                 "-U", effectiveUser,
-                "--clean"
+                "--clean",
+                "--if-exists"
         };
         try {
             ContainerExecResult result = execInContainer(containerId, cmd, 120);
