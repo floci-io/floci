@@ -32,9 +32,9 @@ class EksOidcServiceTest {
     void setUp() {
         oidcService = new EksOidcService(new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         }, new ObjectMapper());
     }
@@ -83,9 +83,9 @@ class EksOidcServiceTest {
         EksOidcService service = new EksOidcService(new StorageFactory(null, null) {
             @Override
             @SuppressWarnings("unchecked")
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return (StorageBackend<String, V>) accountAware;
+                return (AccountAwareStorageBackend<V>) accountAware;
             }
         }, new ObjectMapper());
 

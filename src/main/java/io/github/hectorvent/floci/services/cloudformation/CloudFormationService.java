@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ManagedContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
@@ -80,14 +79,10 @@ public class CloudFormationService {
         this.samTransformProcessor = new SamTransformProcessor(objectMapper);
         this.clock = clock;
         this.storageAccount = config.defaultAccountId();
-        this.stackBackend = asAccountAware(storageFactory.create(
-                "cloudformation", "cloudformation-stacks.json", new TypeReference<Map<String, Stack>>() {}));
-        this.exportBackend = asAccountAware(storageFactory.create(
-                "cloudformation", "cloudformation-exports.json", new TypeReference<Map<String, String>>() {}));
-    }
-
-    private static <V> AccountAwareStorageBackend<V> asAccountAware(StorageBackend<String, V> backend) {
-        return (AccountAwareStorageBackend<V>) backend;
+        this.stackBackend = storageFactory.create(
+                "cloudformation", "cloudformation-stacks.json", new TypeReference<Map<String, Stack>>() {});
+        this.exportBackend = storageFactory.create(
+                "cloudformation", "cloudformation-exports.json", new TypeReference<Map<String, String>>() {});
     }
 
     @PostConstruct
