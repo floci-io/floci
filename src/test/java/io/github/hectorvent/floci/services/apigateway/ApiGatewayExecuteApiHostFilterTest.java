@@ -129,8 +129,8 @@ class ApiGatewayExecuteApiHostFilterTest {
                 .filter(request.context());
 
         assertNull(request.routedUri());
-        assertEquals(403, request.abortedResponse().getStatus());
-        assertEquals("{\"message\":\"Forbidden\"}", request.abortedResponse().getEntity());
+        assertEquals(404, request.abortedResponse().getStatus());
+        assertEquals("{\"message\":\"Not Found\"}", request.abortedResponse().getEntity());
     }
 
     @Test

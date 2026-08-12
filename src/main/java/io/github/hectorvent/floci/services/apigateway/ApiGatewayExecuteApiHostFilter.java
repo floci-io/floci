@@ -92,8 +92,8 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
                 return;
             }
             if (apiGatewayLookup.executeApiEndpointDisabled(region, apiId)) {
-                requestContext.abortWith(Response.status(Response.Status.FORBIDDEN)
-                        .entity("{\"message\":\"Forbidden\"}")
+                requestContext.abortWith(Response.status(Response.Status.NOT_FOUND)
+                        .entity("{\"message\":\"Not Found\"}")
                         .type(MediaType.APPLICATION_JSON)
                         .build());
                 return;

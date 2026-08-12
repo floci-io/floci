@@ -1275,12 +1275,13 @@ public class ApiGatewayExecuteController {
         // A missing API is not this method's error to report — findMatchingRoute below 404s.
         try {
             if (apiGatewayV2Service.getApi(region, apiId).isDisableExecuteApiEndpoint()) {
-                return Response.status(403)
-                        .entity(jsonMessage("Forbidden"))
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity(jsonMessage("Not Found"))
                         .type(MediaType.APPLICATION_JSON).build();
             }
-        } catch (AwsException ignored) {
-            // fall through
+        } catch (AwsException e) {
+            LOG.debugv(e, "HTTP API lookup failed before execute-api dispatch: apiId={0}, region={1}",
+                    apiId, region);
         }
 
         String path = "/" + (proxy == null ? "" : proxy);

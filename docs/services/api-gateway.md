@@ -215,7 +215,7 @@ curl http://{apiId}.execute-api.localhost.floci.io:4566/{path}
 ```
 
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
-this default hostname with `403 Forbidden`.
+this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
 ### Supported Operations
 

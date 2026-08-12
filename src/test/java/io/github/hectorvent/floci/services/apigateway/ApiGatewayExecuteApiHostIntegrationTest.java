@@ -240,7 +240,7 @@ class ApiGatewayExecuteApiHostIntegrationTest {
 
     @Test
     @Order(9)
-    void disabledExecuteApiEndpointReturnsForbiddenAndCanBeReenabled() {
+    void disabledExecuteApiEndpointReturnsNotFoundAndCanBeReenabled() {
         given()
                 .header("Authorization", AUTHORIZATION)
                 .contentType(ContentType.JSON)
@@ -256,8 +256,8 @@ class ApiGatewayExecuteApiHostIntegrationTest {
                 .header("Host", apiId + ".execute-api.localhost.floci.io")
                 .when().get("/accounts")
                 .then()
-                .statusCode(403)
-                .body("message", equalTo("Forbidden"));
+                .statusCode(404)
+                .body("message", equalTo("Not Found"));
 
         given()
                 .header("Authorization", AUTHORIZATION)
@@ -299,8 +299,8 @@ class ApiGatewayExecuteApiHostIntegrationTest {
         given()
                 .when().get("/execute-api/" + isolatedApiId + "/dev/accounts")
                 .then()
-                .statusCode(403)
-                .body("message", equalTo("Forbidden"));
+                .statusCode(404)
+                .body("message", equalTo("Not Found"));
     }
 
     private static void createStage(String stageName) {
