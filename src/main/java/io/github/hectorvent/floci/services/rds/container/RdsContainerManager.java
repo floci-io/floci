@@ -299,7 +299,7 @@ public class RdsContainerManager {
                     "psql",
                     "-v", "ON_ERROR_STOP=1",
                     "-U", effectiveUser,
-                    "-d", "postgres",
+                    "-d", "template1",
                     "-f", "/tmp/dump.sql"
             };
 

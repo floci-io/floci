@@ -1175,6 +1175,7 @@ class RdsServiceTest {
         assertEquals(DatabaseEngine.POSTGRES, restored.getEngine());
         assertEquals("admin", restored.getMasterUsername());
         assertEquals("us-east-1a", restored.getAvailabilityZone());
+        assertEquals("dbname", restored.getDbName());
         verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
     }
 

@@ -24,6 +24,7 @@ public class DbSnapshot {
     private int port;
     private boolean iamDatabaseAuthenticationEnabled;
     private String dbiResourceId;
+    private String dbName;
     private Map<String, String> tags = new LinkedHashMap<>();
 
     public DbSnapshot() {}
@@ -96,4 +97,7 @@ public class DbSnapshot {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public String getDbName() { return dbName; }
+    public void setDbName(String dbName) { this.dbName = dbName; }
 }
