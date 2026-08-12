@@ -1043,11 +1043,14 @@ class RuntimeApiServerTest {
                                 .GET().build(),
                         HttpResponse.BodyHandlers.ofString());
 
-                // Give the request just enough time to actually connect and park server-side
-                // (a few ms is plenty on localhost) before racing stop() against it — without
-                // this, stop() can close the listening socket before the connection is even
-                // established, which isn't the race we're testing.
-                Thread.sleep(5);
+                // Wait for the poll to actually park before racing stop() against it. A fixed
+                // sleep only *assumes* it parked: on a loaded machine the sleep expires first,
+                // stop() closes the listening socket while the request is still in flight, and
+                // the client sees the connection die (EOFException) rather than the SHUTDOWN
+                // this test is about. Same reasoning as
+                // extensionRegister_racedAgainstStop_eventuallyDeliversShutdown.
+                assertTrue(awaitExtensionParked(freshServer, extensionId, 5000),
+                        "extension never parked on /event/next; the stop() race was never set up");
                 freshServer.stop();
 
                 HttpResponse<String> response = asyncNext.get(5, TimeUnit.SECONDS);

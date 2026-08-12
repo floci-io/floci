@@ -164,6 +164,7 @@ floci:
       mock: false                             # true = clusters/instances created without Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # endpoint-host: localhost              # Hostname clients use; enables published-port translation in Docker
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"

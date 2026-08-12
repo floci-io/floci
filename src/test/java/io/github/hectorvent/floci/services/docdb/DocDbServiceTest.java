@@ -83,6 +83,33 @@ class DocDbServiceTest {
     }
 
     @Test
+    void listDbClustersMatchesByArnButNotForeignArn() {
+        DocDbCluster cluster = docDbService.createDbCluster(
+                "mock-cluster", null, "admin", "secret", false);
+
+        String arn = cluster.getDbClusterArn();
+        assertEquals(1, docDbService.listDbClusters(arn).size());
+        assertTrue(docDbService.listDbClusters(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(docDbService.listDbClusters(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbInstancesMatchesByArnButNotForeignArn() {
+        docDbService.createDbCluster("mock-cluster", null, "admin", "secret", false);
+        DocDbInstance instance = docDbService.createDbInstance(
+                "mock-instance", "mock-cluster", "db.r5.large", null, false);
+
+        String arn = instance.getDbInstanceArn();
+        assertEquals(1, docDbService.listDbInstances(arn).size());
+        assertTrue(docDbService.listDbInstances(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(docDbService.listDbInstances(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
+    }
+
+    @Test
     void deleteClusterInMockModeSkipsContainerStop() {
         docDbService.createDbCluster("mock-cluster", null, "admin", "secret", false);
 

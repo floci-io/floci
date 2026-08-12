@@ -3,11 +3,14 @@ package io.github.hectorvent.floci.services.apigateway;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -108,5 +111,86 @@ class ApiGatewayExecuteControllerTest {
         assertEquals(
                 objectMapper.valueToTree(List.of("first", "second", "third")),
                 event.path("multiValueHeaders").path("X-Dup"));
+    }
+
+    // ── Lambda proxy response Content-Type header matching ──────
+
+    private static InvokeResult proxyPayload(String payloadJson) {
+        return new InvokeResult(200, null, payloadJson.getBytes(StandardCharsets.UTF_8), null, "req-1");
+    }
+
+    @Test
+    void buildProxyResponseMatchesLowercaseContentType() {
+        // The AWS Lambda Web Adapter sidecar (and many handlers) emit lowercase header names.
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":404,"headers":{"content-type":"application/problem+json"},"body":"{}"}
+                """));
+        assertEquals("application/problem+json", response.getMediaType().toString());
+    }
+
+    @Test
+    void buildProxyResponseMatchesExactCaseContentType() {
+        // The pre-existing exact-case path must keep working — this is a regression guard,
+        // not a new behavior.
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,"headers":{"Content-Type":"text/plain"},"body":"hi"}
+                """));
+        assertEquals("text/plain", response.getMediaType().toString());
+    }
+
+    @Test
+    void buildProxyResponseMatchesMixedCaseContentType() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,"headers":{"CONTENT-TYPE":"application/xml"},"body":"<a/>"}
+                """));
+        assertEquals("application/xml", response.getMediaType().toString());
+    }
+
+    @Test
+    void buildProxyResponseDefaultsToJsonWhenNoContentTypeHeaderPresent() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,"headers":{"X-Other":"value"},"body":"{}"}
+                """));
+        assertEquals("application/json", response.getMediaType().toString());
+    }
+
+    @Test
+    void buildProxyResponseDefaultsToJsonWhenContentTypeIsJsonNull() {
+        // A JSON-null Content-Type must fall back to the default, the same as a missing header —
+        // not be coerced to the literal string "null" (an invalid media type).
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,"headers":{"content-type":null},"body":"{}"}
+                """));
+        assertEquals("application/json", response.getMediaType().toString());
+    }
+
+    @Test
+    void buildProxyResponseMatchesContentTypeInMultiValueHeaders() {
+        // multiValueHeaders is a fully valid way to return any header, including Content-Type —
+        // not just repeated ones — and must be scanned the same as headers.
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,"multiValueHeaders":{"content-type":["application/xml"]},"body":"<a/>"}
+                """));
+        assertEquals("application/xml", response.getMediaType().toString());
+    }
+
+    @Test
+    void buildProxyResponseMultiValueHeadersTakesPrecedenceOverHeaders() {
+        // API Gateway merges headers and multiValueHeaders, with multiValueHeaders winning
+        // on conflicts.
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        Response response = controller.buildProxyResponse(proxyPayload("""
+                {"statusCode":200,\
+                "headers":{"Content-Type":"text/plain"},\
+                "multiValueHeaders":{"Content-Type":["application/xml"]},\
+                "body":"<a/>"}
+                """));
+        assertEquals("application/xml", response.getMediaType().toString());
     }
 }

@@ -43,6 +43,26 @@ class RegionResolverTest {
     }
 
     @Test
+    void resolveRegionFromAuthOrNullReturnsCredentialRegion() {
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuthOrNull(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260215/eu-west-1/iotdata/aws4_request, " +
+                "SignedHeaders=host, Signature=abc123"));
+    }
+
+    @Test
+    void resolveRegionFromAuthOrNullIsNullWhereResolveReturnsDefault() {
+        assertNull(resolver.resolveRegionFromAuthOrNull("Bearer some-token"));
+        assertEquals("us-east-1", resolver.resolveRegionFromAuth("Bearer some-token"));
+    }
+
+    @Test
+    void resolveRegionFromAuthOrNullIsNullForAbsentOrBlank() {
+        assertNull(resolver.resolveRegionFromAuthOrNull(null));
+        assertNull(resolver.resolveRegionFromAuthOrNull(""));
+        assertNull(resolver.resolveRegionFromAuthOrNull(" "));
+    }
+
+    @Test
     void fallsBackToDefaultWhenEmptyAuthHeader() {
         HttpHeaders headers = stubHeaders("");
         assertEquals("us-east-1", resolver.resolveRegion(headers));
