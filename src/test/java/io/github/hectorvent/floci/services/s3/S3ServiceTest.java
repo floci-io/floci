@@ -192,7 +192,7 @@ class S3ServiceTest {
         byte[] data = "file content".getBytes(StandardCharsets.UTF_8);
         s3Service.putObject("test-bucket", "docs/readme.txt", data, "text/plain", null);
 
-        Path filePath = tempDir.resolve("s3/000000000000/test-bucket/docs/readme.txt.s3data");
+        Path filePath = tempDir.resolve("s3/.accounts/000000000000/test-bucket/docs/readme.txt.s3data");
         assertTrue(Files.exists(filePath));
         assertArrayEquals(data, assertDoesNotThrow(() -> Files.readAllBytes(filePath)));
     }
@@ -240,7 +240,7 @@ class S3ServiceTest {
         s3Service.createBucket("test-bucket", "us-east-1");
         s3Service.putObject("test-bucket", "file.txt", "data".getBytes(), null, null);
 
-        Path filePath = tempDir.resolve("s3/000000000000/test-bucket/file.txt.s3data");
+        Path filePath = tempDir.resolve("s3/.accounts/000000000000/test-bucket/file.txt.s3data");
         assertTrue(Files.exists(filePath));
 
         s3Service.deleteObject("test-bucket", "file.txt");
@@ -350,7 +350,7 @@ class S3ServiceTest {
         S3Object retrieved = s3Service.getObject("dest-bucket", "copy.txt");
         assertArrayEquals("content".getBytes(), retrieved.getData());
 
-        assertTrue(Files.exists(tempDir.resolve("s3/000000000000/dest-bucket/copy.txt.s3data")));
+        assertTrue(Files.exists(tempDir.resolve("s3/.accounts/000000000000/dest-bucket/copy.txt.s3data")));
     }
 
     @Test
@@ -435,7 +435,7 @@ class S3ServiceTest {
         S3Object marker = s3Service.getObject("test-bucket", "output.parquet");
         assertArrayEquals(markerData, marker.getData());
 
-        Path bucketDir = tempDir.resolve("s3/000000000000/test-bucket");
+        Path bucketDir = tempDir.resolve("s3/.accounts/000000000000/test-bucket");
         assertTrue(Files.isDirectory(bucketDir.resolve("output.parquet")));
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet.s3data")));
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet/part-0001.parquet.s3data")));
@@ -458,7 +458,7 @@ class S3ServiceTest {
         S3Object child = s3Service.getObject("test-bucket", "output.parquet/part-0001.parquet");
         assertArrayEquals(childData, child.getData());
 
-        Path bucketDir = tempDir.resolve("s3/000000000000/test-bucket");
+        Path bucketDir = tempDir.resolve("s3/.accounts/000000000000/test-bucket");
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet.s3data")));
         assertTrue(Files.isDirectory(bucketDir.resolve("output.parquet")));
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet/part-0001.parquet.s3data")));

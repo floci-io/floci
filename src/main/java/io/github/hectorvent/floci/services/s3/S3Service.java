@@ -200,6 +200,14 @@ public class S3Service implements Resettable {
     }
 
     public Bucket createBucket(String bucketName, String region) {
+        if (ACCOUNT_STORAGE_ROOT.equals(bucketName)) {
+            // Real S3 already rejects this name outright (bucket names must begin with a
+            // letter or number), but Floci doesn't otherwise validate bucket name format —
+            // this one name specifically must stay unavailable, since account-scoped disk
+            // storage for every account lives under this exact path segment.
+            throw new AwsException("InvalidBucketName",
+                    "The specified bucket is not valid.", 400);
+        }
         var existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
             Bucket bucket = existing.get();
@@ -237,7 +245,7 @@ public class S3Service implements Resettable {
             String prefix = ownerId() + "/" + bucketName + "/";
             memoryDataStore.keySet().removeIf(k -> k.startsWith(prefix));
         } else {
-            deleteDirectory(dataRoot.resolve(ownerId()).resolve(bucketName));
+            deleteDirectory(dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(bucketName));
         }
         LOG.infov("Deleted bucket: {0}", bucketName);
     }
@@ -2581,6 +2589,18 @@ public class S3Service implements Resettable {
 
     private static final String DATA_SUFFIX = ".s3data";
 
+    // The account-scoped disk layout is dataRoot/ACCOUNT_STORAGE_ROOT/<accountId>/<bucket>/...
+    // rather than dataRoot/<accountId>/<bucket>/..., because a bucket name and an account ID
+    // share the same string shape (a 12-digit numeric bucket name is valid on S3), so
+    // "dataRoot/<accountId>/..." is not disjoint from the legacy layout "dataRoot/<bucket>/...":
+    // a legacy bucket literally named e.g. "000000000000" with key "orders/report.csv" resolves
+    // to the exact same path as account "000000000000"'s new-layout bucket "orders", key
+    // "report.csv". A leading "." makes this namespace unreachable by any bucket name real S3
+    // accepts (bucket names must begin with a letter or number) — createBucket() additionally
+    // rejects the one bucket name that would otherwise collide with the root of this namespace
+    // itself, since Floci (unlike real S3) doesn't otherwise validate bucket name format at all.
+    private static final String ACCOUNT_STORAGE_ROOT = ".accounts";
+
     // Byte storage (memoryDataStore / on-disk files) is a plain field, not a StorageBackend,
     // so unlike bucketStore/objectStore it gets no automatic account prefixing from
     // AccountAwareStorageBackend. bucketStore only enforces bucket-name uniqueness within an
@@ -2595,7 +2615,7 @@ public class S3Service implements Resettable {
     }
 
     private Path resolveObjectPath(String bucketName, String key) {
-        Path bucketDir = dataRoot.resolve(ownerId()).resolve(bucketName).normalize();
+        Path bucketDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(bucketName).normalize();
 
         String safeKey = key;
         while (safeKey.startsWith("/")) {
@@ -2636,7 +2656,7 @@ public class S3Service implements Resettable {
     }
 
     private Path resolveVersionedPath(String bucketName, String key, String versionId) {
-        Path baseDir = dataRoot.resolve(ownerId()).resolve(".versions").resolve(bucketName).normalize();
+        Path baseDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(".versions").resolve(bucketName).normalize();
 
         String safeKey = key;
         while (safeKey.startsWith("/")) {

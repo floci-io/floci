@@ -64,7 +64,7 @@ class S3LegacyDiskLayoutIntegrationTest {
         // simulate what an object written before this change actually looks like on disk.
         s3Service.putObject("legacy-bucket", "legacy-key.txt", data, "text/plain", null);
 
-        Path newLayoutFile = dataRoot.resolve("000000000000").resolve("legacy-bucket").resolve("legacy-key.txt.s3data");
+        Path newLayoutFile = dataRoot.resolve(".accounts").resolve("000000000000").resolve("legacy-bucket").resolve("legacy-key.txt.s3data");
         Path legacyLayoutFile = dataRoot.resolve("legacy-bucket").resolve("legacy-key.txt.s3data");
         assertTrue(Files.exists(newLayoutFile), "test setup: object should initially be written at the new path");
 
@@ -74,6 +74,51 @@ class S3LegacyDiskLayoutIntegrationTest {
         S3Object retrieved = s3Service.getObject("legacy-bucket", "legacy-key.txt");
         assertArrayEquals(data, retrieved.getData(),
                 "an object physically stored under the pre-upgrade unscoped layout must still be readable");
+    }
+
+    @Test
+    void bucketNamedLikeTheDefaultAccountIdDoesNotCollideWithAccountScopedStorage() throws Exception {
+        // A 12-digit bucket name is valid on S3. Without a reserved namespace, the account-
+        // scoped layout dataRoot/<accountId>/<bucket>/<key>.s3data is not disjoint from the
+        // legacy layout dataRoot/<bucket>/<key>.s3data: a legacy bucket literally named
+        // "000000000000" with key "orders/report.csv" would resolve to the exact same path as
+        // account "000000000000"'s new-layout bucket "orders", key "report.csv".
+        Path dataRoot = tempDir.resolve("s3");
+        S3Service s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
+
+        String accountIdShapedBucket = "000000000000";
+        s3Service.createBucket(accountIdShapedBucket, "us-east-1");
+        byte[] legacyData = "legacy-bucket-named-like-an-account-id".getBytes(StandardCharsets.UTF_8);
+        s3Service.putObject(accountIdShapedBucket, "orders/report.csv", legacyData, "text/plain", null);
+
+        // Relocates it to the pre-upgrade unscoped layout, exactly as
+        // existingObjectWrittenUnderTheLegacyUnscopedPathIsStillReadable does.
+        Path newLayoutFile = dataRoot.resolve(".accounts").resolve("000000000000")
+                .resolve(accountIdShapedBucket).resolve("orders/report.csv.s3data");
+        Path legacyLayoutFile = dataRoot.resolve(accountIdShapedBucket).resolve("orders/report.csv.s3data");
+        Files.createDirectories(legacyLayoutFile.getParent());
+        Files.move(newLayoutFile, legacyLayoutFile, StandardCopyOption.REPLACE_EXISTING);
+
+        // The default account's own, unrelated "orders" bucket and "report.csv" key.
+        s3Service.createBucket("orders", "us-east-1");
+        byte[] newData = "unrelated-object-in-the-orders-bucket".getBytes(StandardCharsets.UTF_8);
+        s3Service.putObject("orders", "report.csv", newData, "text/plain", null);
+
+        assertArrayEquals(newData, s3Service.getObject("orders", "report.csv").getData(),
+                "the unrelated new-layout object must not be shadowed by the account-ID-shaped legacy bucket");
+        assertArrayEquals(legacyData, s3Service.getObject(accountIdShapedBucket, "orders/report.csv").getData(),
+                "the legacy bucket named like an account ID must still resolve to its own, distinct content");
+    }
+
+    @Test
+    void bucketNamedLikeTheReservedAccountStorageRootIsRejected() {
+        Path dataRoot = tempDir.resolve("s3");
+        S3Service s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
+
+        assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> s3Service.createBucket(".accounts", "us-east-1"),
+                "a bucket named exactly like the reserved account-storage root must be rejected, "
+                        + "since Floci doesn't otherwise validate bucket name format at all");
     }
 
     @Test
@@ -96,7 +141,7 @@ class S3LegacyDiskLayoutIntegrationTest {
         byte[] data = "pre-upgrade-content".getBytes(StandardCharsets.UTF_8);
         s3Service.putObject("legacy-bucket", "legacy-key.txt", data, "text/plain", null);
 
-        Path newLayoutFile = dataRoot.resolve("000000000000").resolve("legacy-bucket").resolve("legacy-key.txt.s3data");
+        Path newLayoutFile = dataRoot.resolve(".accounts").resolve("000000000000").resolve("legacy-bucket").resolve("legacy-key.txt.s3data");
         Path legacyLayoutFile = dataRoot.resolve("legacy-bucket").resolve("legacy-key.txt.s3data");
         Files.createDirectories(legacyLayoutFile.getParent());
         Files.move(newLayoutFile, legacyLayoutFile, StandardCopyOption.REPLACE_EXISTING);
@@ -141,7 +186,7 @@ class S3LegacyDiskLayoutIntegrationTest {
         // Relocates A's just-written bytes to the pre-upgrade unscoped layout, simulating an
         // object that has existed since before per-account byte storage existed — A has never
         // read it since upgrading, so it hasn't yet been copied to A's account-scoped path.
-        Path newLayoutFile = dataRoot.resolve("111111111111").resolve("shared-bucket").resolve("shared-key.txt.s3data");
+        Path newLayoutFile = dataRoot.resolve(".accounts").resolve("111111111111").resolve("shared-bucket").resolve("shared-key.txt.s3data");
         Path legacyLayoutFile = dataRoot.resolve("shared-bucket").resolve("shared-key.txt.s3data");
         Files.createDirectories(legacyLayoutFile.getParent());
         Files.move(newLayoutFile, legacyLayoutFile, StandardCopyOption.REPLACE_EXISTING);
@@ -178,7 +223,7 @@ class S3LegacyDiskLayoutIntegrationTest {
 
                 byte[] legacyData = "legacy-content".getBytes(StandardCharsets.UTF_8);
                 s3Service.putObject(bucket, key, legacyData, "text/plain", null);
-                Path newLayoutFile = dataRoot.resolve("000000000000").resolve(bucket).resolve(key + ".s3data");
+                Path newLayoutFile = dataRoot.resolve(".accounts").resolve("000000000000").resolve(bucket).resolve(key + ".s3data");
                 Path legacyLayoutFile = dataRoot.resolve(bucket).resolve(key + ".s3data");
                 Files.createDirectories(legacyLayoutFile.getParent());
                 Files.move(newLayoutFile, legacyLayoutFile, StandardCopyOption.REPLACE_EXISTING);
@@ -223,7 +268,7 @@ class S3LegacyDiskLayoutIntegrationTest {
                 byte[] data = ("pre-upgrade-content-" + i).getBytes(StandardCharsets.UTF_8);
                 s3Service.putObject("legacy-bucket", key, data, "text/plain", null);
 
-                Path newLayoutFile = dataRoot.resolve("000000000000").resolve("legacy-bucket").resolve(key + ".s3data");
+                Path newLayoutFile = dataRoot.resolve(".accounts").resolve("000000000000").resolve("legacy-bucket").resolve(key + ".s3data");
                 Path legacyLayoutFile = dataRoot.resolve("legacy-bucket").resolve(key + ".s3data");
                 Files.createDirectories(legacyLayoutFile.getParent());
                 Files.move(newLayoutFile, legacyLayoutFile, StandardCopyOption.REPLACE_EXISTING);
