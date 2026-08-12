@@ -4,6 +4,12 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.batch.BatchService;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
@@ -73,6 +79,8 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.Parameter;
+import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
@@ -102,6 +110,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -184,6 +193,7 @@ public class CloudFormationResourceProvisioner {
     private final AutoScalingService autoScalingService;
     private final FirehoseService firehoseService;
     private final DocDbService docDbService;
+    private final CloudFrontService cloudFrontService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
@@ -218,6 +228,7 @@ public class CloudFormationResourceProvisioner {
                                              AutoScalingService autoScalingService,
                                              FirehoseService firehoseService,
                                              DocDbService docDbService,
+                                             CloudFrontService cloudFrontService,
                                              CloudFormationResourceRegistry resourceRegistry) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
@@ -251,6 +262,7 @@ public class CloudFormationResourceProvisioner {
         this.autoScalingService = autoScalingService;
         this.firehoseService = firehoseService;
         this.docDbService = docDbService;
+        this.cloudFrontService = cloudFrontService;
         this.resourceRegistry = resourceRegistry;
     }
 
@@ -397,6 +409,8 @@ public class CloudFormationResourceProvisioner {
                         provisionLaunchConfiguration(resource, properties, engine, region, stackName);
                 case "AWS::AutoScaling::AutoScalingGroup" ->
                         provisionAutoScalingGroup(resource, properties, engine, region, stackName);
+                case "AWS::CloudFront::Distribution" ->
+                        provisionCloudFrontDistribution(resource, properties, engine);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -569,6 +583,7 @@ public class CloudFormationResourceProvisioner {
                     autoScalingService.deleteLaunchConfiguration(region, physicalId);
             case "AWS::AutoScaling::AutoScalingGroup" ->
                     autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
+            case "AWS::CloudFront::Distribution" -> cloudFrontService.removeDistribution(physicalId);
             default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
         }
     }
@@ -1214,8 +1229,8 @@ public class CloudFormationResourceProvisioner {
                 id,
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
-                resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
                 resolveOptional(props, "DBName", engine),
                 firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
                 parseIntProp(props, "AllocatedStorage", engine, 20),
@@ -1245,8 +1260,8 @@ public class CloudFormationResourceProvisioner {
                 id,
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
-                resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
                 resolveOptional(props, "DatabaseName", engine),
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                 resolveOptional(props, "DBClusterParameterGroupName", engine),
@@ -5545,11 +5560,356 @@ public class CloudFormationResourceProvisioner {
         return node != null && node.hasNonNull(field) ? node.path(field).asText() : null;
     }
 
+    // ── CloudFront ────────────────────────────────────────────────────────────
+
+    /**
+     * Provisions an {@code AWS::CloudFront::Distribution} by translating its {@code DistributionConfig}
+     * property tree into a {@link DistributionConfig} and creating or updating the distribution.
+     * {@code Ref} returns the distribution id; {@code Fn::GetAtt} exposes {@code Id} and
+     * {@code DomainName} (closes #1147, where {@code Fn::GetAtt DomainName} previously returned an
+     * unresolved token).
+     */
+    private void provisionCloudFrontDistribution(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine) {
+        JsonNode dc = props != null ? props.path("DistributionConfig") : null;
+        DistributionConfig config = new DistributionConfig();
+        if (dc != null && !dc.isMissingNode() && !dc.isNull()) {
+            config.setEnabled(cfnBool(dc, "Enabled", engine, true));
+            config.setComment(cfnText(dc, "Comment", engine));
+            config.setDefaultRootObject(cfnText(dc, "DefaultRootObject", engine));
+            config.setHttpVersion(cfnTextOrDefault(dc, "HttpVersion", engine, "http2"));
+            config.setPriceClass(cfnTextOrDefault(dc, "PriceClass", engine, "PriceClass_All"));
+            config.setAliases(cfnStringList(dc.path("Aliases"), engine));
+            config.setOrigins(cfnOrigins(dc, engine));
+            config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));
+            config.setCacheBehaviors(cfnCacheBehaviors(dc, engine));
+            config.setCustomErrorResponses(cfnCustomErrorResponses(dc, engine));
+        }
+
+        Distribution dist = new Distribution();
+        dist.setConfig(config);
+        if (r.getPhysicalId() == null || r.getPhysicalId().isBlank()) {
+            dist = cloudFrontService.createDistribution(dist, Map.of());
+        } else {
+            Distribution existing = cloudFrontService.getDistribution(r.getPhysicalId());
+            dist = cloudFrontService.updateDistribution(
+                    existing.getId(), existing.getEtag(), dist);
+        }
+
+        r.setPhysicalId(dist.getId());
+        r.getAttributes().put("Id", dist.getId());
+        r.getAttributes().put("DomainName", dist.getDomainName());
+        r.getAttributes().put("Arn", dist.getArn());
+    }
+
+    private List<Origin> cfnOrigins(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<Origin> origins = new ArrayList<>();
+        JsonNode items = dc.path("Origins");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                Origin origin = new Origin();
+                origin.setId(cfnText(node, "Id", engine));
+                origin.setDomainName(cfnText(node, "DomainName", engine));
+                String originPath = cfnText(node, "OriginPath", engine);
+                if (!originPath.isEmpty()) {
+                    origin.setOriginPath(originPath);
+                }
+                String originAccessControlId =
+                        cfnText(node, "OriginAccessControlId", engine);
+                if (!originAccessControlId.isEmpty()) {
+                    origin.setOriginAccessControlId(originAccessControlId);
+                }
+                JsonNode s3 = node.path("S3OriginConfig");
+                JsonNode custom = node.path("CustomOriginConfig");
+                if (!custom.isMissingNode() && !custom.isNull()) {
+                    Map<String, Object> coc = new LinkedHashMap<>();
+                    coc.put("HTTPPort", cfnTextOrDefault(custom, "HTTPPort", engine, "80"));
+                    coc.put("HTTPSPort", cfnTextOrDefault(custom, "HTTPSPort", engine, "443"));
+                    coc.put("OriginProtocolPolicy",
+                            cfnTextOrDefault(custom, "OriginProtocolPolicy", engine, "https-only"));
+                    origin.setCustomOriginConfig(coc);
+                } else {
+                    // No CustomOriginConfig => S3 origin (S3OriginConfig may be present or defaulted).
+                    Map<String, String> s3c = new LinkedHashMap<>();
+                    s3c.put("OriginAccessIdentity",
+                            s3.isMissingNode() || s3.isNull() ? "" : cfnText(s3, "OriginAccessIdentity", engine));
+                    origin.setS3OriginConfig(s3c);
+                }
+                origins.add(origin);
+            }
+        }
+        return origins;
+    }
+
+    private DefaultCacheBehavior cfnDefaultCacheBehavior(JsonNode node, CloudFormationTemplateEngine engine) {
+        DefaultCacheBehavior dcb = new DefaultCacheBehavior();
+        if (node != null && !node.isMissingNode() && !node.isNull()) {
+            dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
+            dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+        }
+        return dcb;
+    }
+
+    private List<CacheBehavior> cfnCacheBehaviors(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<CacheBehavior> behaviors = new ArrayList<>();
+        JsonNode items = dc.path("CacheBehaviors");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                CacheBehavior cb = new CacheBehavior();
+                cb.setPathPattern(cfnText(node, "PathPattern", engine));
+                cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
+                cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+                behaviors.add(cb);
+            }
+        }
+        return behaviors;
+    }
+
+    private List<Map<String, Object>> cfnCustomErrorResponses(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        JsonNode items = dc.path("CustomErrorResponses");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                Map<String, Object> cer = new LinkedHashMap<>();
+                cer.put("ErrorCode", cfnText(node, "ErrorCode", engine));
+                putIfPresent(cer, "ResponseCode", cfnText(node, "ResponseCode", engine));
+                putIfPresent(cer, "ResponsePagePath", cfnText(node, "ResponsePagePath", engine));
+                putIfPresent(cer, "ErrorCachingMinTTL", cfnText(node, "ErrorCachingMinTTL", engine));
+                result.add(cer);
+            }
+        }
+        return result;
+    }
+
+    private static void putIfPresent(Map<String, Object> map, String key, String value) {
+        if (value != null && !value.isEmpty()) {
+            map.put(key, value);
+        }
+    }
+
+    private List<String> cfnStringList(JsonNode arrayNode, CloudFormationTemplateEngine engine) {
+        List<String> result = new ArrayList<>();
+        if (arrayNode != null && arrayNode.isArray()) {
+            for (JsonNode item : arrayNode) {
+                String value = engine.resolve(item);
+                if (value != null && !value.isEmpty()) {
+                    result.add(value);
+                }
+            }
+        }
+        return result;
+    }
+
+    private String cfnText(JsonNode parent, String field, CloudFormationTemplateEngine engine) {
+        return parent == null ? "" : engine.resolve(parent.path(field));
+    }
+
+    private String cfnTextOrDefault(JsonNode parent, String field, CloudFormationTemplateEngine engine,
+                                    String dflt) {
+        String value = cfnText(parent, field, engine);
+        return value.isEmpty() ? dflt : value;
+    }
+
+    private boolean cfnBool(JsonNode parent, String field, CloudFormationTemplateEngine engine, boolean dflt) {
+        String value = cfnText(parent, field, engine);
+        return value.isEmpty() ? dflt : "true".equalsIgnoreCase(value);
+    }
+
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
         }
         return engine.resolve(props.get(name));
+    }
+
+    private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.*?)\\}\\}");
+    private static final Pattern SSM_DYNAMIC_REF_BODY =
+            Pattern.compile("([a-zA-Z0-9_.\\-/]+)(?::([0-9]+))?");
+
+    /**
+     * Resolves CloudFormation dynamic references embedded in a string. Supports
+     * {@code {{resolve:secretsmanager:<secret-id-or-arn>:SecretString:<json-key>:<stage>:<version>}}}
+     * and {@code {{resolve:ssm:<name>:<version>}}} / {@code {{resolve:ssm-secure:<name>:<version>}}},
+     * which CloudFormation substitutes with the live value at deploy time (e.g. an RDS
+     * MasterUserPassword sourced from a generated secret). Unsupported services are left verbatim.
+     */
+    private String resolveDynamicReferences(String value, String region, boolean allowSsmSecure) {
+        if (value == null || !value.contains("{{resolve:")) {
+            return value;
+        }
+        Matcher m = DYNAMIC_REF.matcher(value);
+        StringBuilder sb = new StringBuilder();
+        int previousEnd = 0;
+        while (m.find()) {
+            rejectUnclosedDynamicReference(value.substring(previousEnd, m.start()));
+            String replacement = resolveDynamicRef(m.group(1), m.group(2), region, allowSsmSecure);
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+            previousEnd = m.end();
+        }
+        rejectUnclosedDynamicReference(value.substring(previousEnd));
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String resolveDynamicRef(String service, String body, String region, boolean allowSsmSecure) {
+        if ("secretsmanager".equals(service)) {
+            // body = <secret-id-or-arn>:SecretString:<json-key>:<version-stage>:<version-id>. The
+            // secret id may be an ARN (which itself contains colons), so split on the ":SecretString"
+            // marker rather than on ":". AWS also accepts <secret-id-or-arn>:::: as shorthand for
+            // retrieving the whole current SecretString with the optional fields omitted.
+            String secretId;
+            String[] parts;
+            if (body.endsWith("::::")) {
+                secretId = body.substring(0, body.length() - 4);
+                parts = new String[0];
+            } else if (isValidSecretsManagerSecretId(body)) {
+                secretId = body;
+                parts = new String[0];
+            } else {
+                int marker = body.lastIndexOf(":SecretString");
+                if (marker < 0) {
+                    throw invalidSecretsManagerDynamicReference();
+                }
+                secretId = body.substring(0, marker);
+                String rest = body.substring(marker + ":SecretString".length());
+                if (!rest.isEmpty() && !rest.startsWith(":")) {
+                    throw invalidSecretsManagerDynamicReference();
+                }
+                parts = rest.startsWith(":")
+                        ? rest.substring(1).split(":", -1)
+                        : new String[0];
+            }
+            if (!isValidSecretsManagerSecretId(secretId) || parts.length > 3) {
+                throw invalidSecretsManagerDynamicReference();
+            }
+            String jsonKey = parts.length > 0 ? parts[0] : "";
+            String versionStage = parts.length > 1 && !parts[1].isBlank() ? parts[1] : null;
+            String versionId = parts.length > 2 && !parts[2].isBlank() ? parts[2] : null;
+            if (versionStage != null && versionId != null) {
+                throw new AwsException("ValidationError",
+                        "version-stage and version-id cannot both be specified", 400);
+            }
+            String secretRegion = AwsArnUtils.regionOrDefault(secretId, region);
+            String secretString = secretsManagerService
+                    .getSecretValue(secretId, versionId, versionStage, secretRegion).getSecretString();
+            if (secretString == null) {
+                // A binary-only secret has no SecretString to substitute, so resource creation fails.
+                throw new IllegalStateException(
+                        "secret " + secretId + " has no SecretString value to resolve");
+            }
+            if (jsonKey.isBlank()) {
+                return secretString;
+            }
+            JsonNode json;
+            try {
+                json = objectMapper.readTree(secretString);
+            } catch (Exception e) {
+                throw new AwsException("ValidationError",
+                        "secret " + secretId + " does not contain valid JSON", 400);
+            }
+            if (!json.has(jsonKey)) {
+                // A missing key would otherwise resolve to "" — silently provisioning e.g. a blank
+                // MasterUserPassword. Fail resource creation instead.
+                throw new IllegalStateException(
+                        "JSON key '" + jsonKey + "' not found in secret " + secretId);
+            }
+            return json.get(jsonKey).asText();
+        }
+        if ("ssm".equals(service) || "ssm-secure".equals(service)) {
+            if ("ssm-secure".equals(service) && !allowSsmSecure) {
+                throw new AwsException("ValidationError",
+                        "ssm-secure dynamic references are supported only for MasterUserPassword "
+                                + "on AWS::RDS::DBInstance and AWS::RDS::DBCluster", 400);
+            }
+            Matcher reference = SSM_DYNAMIC_REF_BODY.matcher(body);
+            if (!reference.matches()) {
+                throw invalidSsmDynamicReference();
+            }
+            String parameterName = reference.group(1);
+            String version = reference.group(2);
+            if (version != null) {
+                long wantedVersion;
+                try {
+                    wantedVersion = Long.parseLong(version);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                if (wantedVersion < 1) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                ParameterHistory parameter = ssmService.getParameterHistory(parameterName, region).stream()
+                        .filter(h -> h.getVersion() == wantedVersion)
+                        .findFirst()
+                        .orElseThrow(() -> new AwsException(
+                                "ParameterVersionNotFound",
+                                "Parameter version " + wantedVersion + " not found.", 400));
+                return validatedSsmParameterValue(
+                        service, parameterName, parameter.getType(), parameter.getValue());
+            }
+            Parameter parameter = ssmService.getParameter(parameterName, region);
+            return validatedSsmParameterValue(
+                    service, parameterName, parameter.getType(), parameter.getValue());
+        }
+        // Other dynamic-reference services are not resolved here; leave verbatim.
+        return "{{resolve:" + service + ":" + body + "}}";
+    }
+
+    private static boolean isValidSecretsManagerSecretId(String secretId) {
+        if (secretId == null || secretId.isBlank()) {
+            return false;
+        }
+        if (!secretId.contains(":")) {
+            return true;
+        }
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(secretId);
+            String resource = arn.resource();
+            return "secretsmanager".equals(arn.service())
+                    && !arn.region().isBlank()
+                    && !arn.accountId().isBlank()
+                    && resource.startsWith("secret:")
+                    && resource.length() > "secret:".length()
+                    && !resource.substring("secret:".length()).contains(":");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private static AwsException invalidSecretsManagerDynamicReference() {
+        return new AwsException("ValidationError",
+                "Invalid Secrets Manager dynamic reference", 400);
+    }
+
+    private static void rejectUnclosedDynamicReference(String value) {
+        if (value.contains("{{resolve:secretsmanager:")) {
+            throw invalidSecretsManagerDynamicReference();
+        }
+        if (value.contains("{{resolve:ssm:") || value.contains("{{resolve:ssm-secure:")) {
+            throw invalidSsmDynamicReference();
+        }
+    }
+
+    private static String validatedSsmParameterValue(
+            String service, String parameterName, String parameterType, String value) {
+        boolean validType = "ssm-secure".equals(service)
+                ? "SecureString".equals(parameterType)
+                : "String".equals(parameterType) || "StringList".equals(parameterType);
+        if (!validType) {
+            String expectedType = "ssm-secure".equals(service)
+                    ? "SecureString"
+                    : "String or StringList";
+            throw new AwsException("ValidationError",
+                    "SSM parameter " + parameterName + " must be type " + expectedType
+                            + " for an " + service + " dynamic reference", 400);
+        }
+        return value;
+    }
+
+    private static AwsException invalidSsmDynamicReference() {
+        return new AwsException("ValidationError",
+                "Invalid SSM dynamic reference", 400);
     }
 
     private String resolveOrDefault(JsonNode props, String name,
