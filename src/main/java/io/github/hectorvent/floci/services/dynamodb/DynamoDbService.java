@@ -138,9 +138,9 @@ public class DynamoDbService {
 
     private void loadPersistedItems() {
         if (itemStore == null) return;
-        // Startup runs outside request scope, so itemStore.keys() (account-aware) would only
-        // see the default account. scanAllAccountsRaw() preserves every account's items, with
-        // a key already in the "accountId/region::tableName" format itemsByTable expects.
+        // No request scope at startup, so itemStore.keys() would only see the default account.
+        // scanAllAccountsRaw() returns every account's items already in the "accountId/
+        // region::tableName" key format itemsByTable expects.
         if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
             aware.scanAllAccountsRaw().forEach((rawKey, items) ->
                 itemsByTable.put(rawKey, new ConcurrentSkipListMap<>(items)));
@@ -1348,9 +1348,8 @@ public class DynamoDbService {
 
     void deleteExpiredItems() {
         int totalDeleted = 0;
-        // Runs on a background scheduler thread (no request scope) and must sweep every
-        // account's tables, not just the default account — scanAllAccountsRaw() preserves
-        // the "accountId/region::tableName" key, which itemsByTable is keyed by directly.
+        // Runs with no request scope and must sweep every account's tables, not just the
+        // default one — scanAllAccountsRaw()'s key matches itemsByTable's directly.
         Map<String, TableDefinition> allTables;
         if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
             allTables = aware.scanAllAccountsRaw();
@@ -1397,11 +1396,7 @@ public class DynamoDbService {
         }
     }
 
-    /**
-     * Persists a table's items under an explicit account, for callers (e.g. the TTL sweeper)
-     * that run outside request scope and so cannot rely on persistItems()'s use of the
-     * ambient request account.
-     */
+    /** Like {@link #persistItems}, but for callers with no ambient request account to rely on. */
     private void persistItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items) {
         if (itemStore == null) return;
         if (accountId != null && itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
@@ -2319,12 +2314,10 @@ public class DynamoDbService {
         return region + "::" + tableName;
     }
 
-    // itemsByTable/itemLocks are plain fields (not StorageBackends), so unlike tableStore/
-    // itemStore they get no automatic account prefixing from AccountAwareStorageBackend.
-    // Without this, two accounts with a same-named table in the same region would share
-    // one in-memory item map. The resulting key format ("accountId/region::tableName")
-    // intentionally matches what AccountAwareStorageBackend.scanAllAccountsRaw() returns,
-    // so a raw key from there can be used directly as an itemsByTable/itemLocks key.
+    // itemsByTable/itemLocks are plain fields, unlike tableStore/itemStore, so they get no
+    // automatic account prefixing — without this, two accounts with a same-named table would
+    // share one item map. Matches scanAllAccountsRaw()'s key format, so a raw key from there
+    // can be used directly as an itemsByTable/itemLocks key.
     private String scopedItemsKey(String storageKey) {
         return regionResolver.getAccountId() + "/" + storageKey;
     }

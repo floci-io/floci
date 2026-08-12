@@ -9,15 +9,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
- * Verifies that DynamoDB item data is isolated between accounts, mirroring
- * {@link io.github.hectorvent.floci.core.common.AccountIsolationIntegrationTest}'s
- * {@code sqsQueuesWithSameNameInDifferentAccountsAreIndependent} coverage for SQS.
- *
- * <p>Table metadata is already account-scoped via {@code AccountAwareStorageBackend}
- * (two accounts can each create a table named identically), but item storage
- * ({@code DynamoDbService.itemsByTable}) is keyed only by {@code region::tableName}
- * with no account component, so two accounts with a same-named table share one
- * underlying item map.
+ * Verifies DynamoDB item data is isolated between accounts, mirroring
+ * {@link io.github.hectorvent.floci.core.common.AccountIsolationIntegrationTest}'s SQS coverage.
+ * Two accounts can each create a table with the same name; their items must not collide.
  */
 @QuarkusTest
 class DynamoDbAccountIsolationIntegrationTest {

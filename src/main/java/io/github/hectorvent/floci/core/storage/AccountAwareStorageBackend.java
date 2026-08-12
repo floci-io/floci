@@ -124,19 +124,15 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     /**
      * Returns all entries across every account, keyed by the raw {@code accountId/logicalKey}
-     * storage key. Unlike {@link #scanAllAccountsAsMap()}, the account segment is preserved
-     * rather than stripped, so entries that share a logical key across different accounts
-     * (e.g. two accounts each owning a resource named "orders") remain distinguishable.
+     * storage key rather than the stripped logical key {@link #scanAllAccountsAsMap()} returns,
+     * so entries sharing a logical key across accounts stay distinguishable.
      *
-     * <p>Entries with no account segment at all — persisted before multi-account support was
-     * added — are attributed to {@code defaultAccountId} rather than skipped, mirroring how
-     * {@link #get} treats them on a per-key lookup. Unlike {@code get()}'s per-key migration,
-     * this bulk scan has no single caller-supplied key to migrate on demand, so it migrates (or
-     * discards) every bare legacy key it finds immediately: already-prefixed keys are loaded
-     * first so a legacy key can never win a collision against one that's since been written
-     * under its proper prefix, and any bare key superseded that way is deleted outright rather
-     * than left to linger — otherwise it would still be sitting in storage to collide again,
-     * non-deterministically, on a later restart.
+     * <p>A key with no account segment (pre-multi-account data) is attributed to
+     * {@code defaultAccountId} rather than skipped, and migrated in place — unlike {@link #get}'s
+     * per-key migration, this bulk scan has no caller-supplied key to migrate later, so it acts
+     * immediately: already-prefixed keys load first so a legacy key can never win a collision
+     * against one already written under its proper prefix, and a superseded legacy key is
+     * deleted rather than left to collide again on a later restart.
      */
     public Map<String, V> scanAllAccountsRaw() {
         Map<String, V> result = new LinkedHashMap<>();

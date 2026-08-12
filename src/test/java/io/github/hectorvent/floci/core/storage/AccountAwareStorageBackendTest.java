@@ -46,10 +46,7 @@ class AccountAwareStorageBackendTest {
     @Test
     void scanAllAccountsRawPrefersAlreadyPrefixedEntryOverStaleLegacyKeyAndDeletesTheStaleOne() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
-        // A legacy key that was loaded once, then superseded by a real write under its proper
-        // prefix (e.g. after a restart, an item load, and a subsequent PutItem) — without this,
-        // the bare key would still be sitting in storage, ready to non-deterministically
-        // collide with the now-current prefixed entry on a later restart.
+        // A legacy key already superseded by a real write under its proper prefix.
         raw.put("us-east-1::Orders", "stale-legacy-value");
         raw.put("000000000000/us-east-1::Orders", "current-value");
 
