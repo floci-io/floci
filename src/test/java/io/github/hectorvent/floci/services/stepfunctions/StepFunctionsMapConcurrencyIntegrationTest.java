@@ -84,6 +84,30 @@ class StepFunctionsMapConcurrencyIntegrationTest {
     }
 
     @Test
+    void mapResolvesItemsPathFromEffectiveInputWithoutResultWriter() throws Exception {
+        String definition = """
+                {
+                  "StartAt": "M",
+                  "States": {
+                    "M": {
+                      "Type": "Map",
+                      "InputPath": "$.payload",
+                      "ItemsPath": "$.items",
+                      "ItemProcessor": {
+                        "StartAt": "P",
+                        "States": {"P": {"Type": "Pass", "End": true}}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """;
+        String input = "{\"items\":[{\"i\":99}],\"payload\":{\"items\":[{\"i\":0},{\"i\":1}]}}";
+
+        assertOrderedItems(run(definition, input), 2);
+    }
+
+    @Test
     void jsonataMapEvaluatesMaxConcurrencyExpression() throws Exception {
         String definition = """
                 {
