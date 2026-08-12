@@ -42,10 +42,18 @@ import java.util.function.Predicate;
  * after a restart would point at a decision the emulator can no longer honour.
  *
  * <p>Event ordering. Every state transition appends to the execution's history under the
- * execution's monotonic {@code nextEventId}. All mutation is serialized per execution via
- * {@link #executionLock(String)} because deciders and workers poll concurrently, and a
+ * execution's monotonic {@code nextEventId}. All mutation is serialized per domain via
+ * {@link #domainLock(String)} because deciders and workers poll concurrently, and a
  * torn history (two events sharing an id, or an activity closing twice) is
  * indistinguishable from corruption to an SDK-driven decider.
+ *
+ * <p>The lock is per domain rather than per execution because several invariants span
+ * more than one execution: StartWorkflowExecution must see any concurrently inserted run
+ * of the same workflowId to reject it, and a closing execution mutates its parent
+ * (ChildWorkflowExecution* events) and its children (childPolicy). A parent and a child
+ * always live in the same domain, so one lock covers a whole family and never has to be
+ * nested — nesting would deadlock, since a closing child takes its parent while a closing
+ * parent takes its children.
  *
  * <p>Timeouts are enforced by {@link SwfTimeoutSweeper} calling {@link #sweep()}, not by
  * per-task threads.
@@ -65,7 +73,7 @@ public class SwfService implements Resettable {
 
     private final Map<String, String> decisionTokens = new ConcurrentHashMap<>();
     private final Map<String, String> activityTokens = new ConcurrentHashMap<>();
-    private final Map<String, Object> executionLocks = new ConcurrentHashMap<>();
+    private final Map<String, Object> domainLocks = new ConcurrentHashMap<>();
 
     private final RegionResolver regionResolver;
     private final Clock clock;
@@ -88,7 +96,7 @@ public class SwfService implements Resettable {
     public void clear() {
         decisionTokens.clear();
         activityTokens.clear();
-        executionLocks.clear();
+        domainLocks.clear();
     }
 
     // ──────────────────────────────── Domains ────────────────────────────────
@@ -335,17 +343,23 @@ public class SwfService implements Resettable {
         if (type.isDeprecated()) {
             throw SwfFaults.workflowTypeDeprecated(type.getName(), type.getVersion());
         }
-        if (findOpenExecution(request.domain(), request.workflowId()).isPresent()) {
-            throw SwfFaults.executionAlreadyStarted();
-        }
 
-        SwfWorkflowExecution execution = buildExecution(request, type);
-        appendWorkflowExecutionStarted(execution, request.input(), null);
-        scheduleDecisionTask(execution);
-        executionStore.put(executionKey(execution), execution);
-        LOG.debugv("Started SWF execution {0}/{1} run {2}",
-                execution.getDomain(), execution.getWorkflowId(), execution.getRunId());
-        return execution.getRunId();
+        // The open-run check and the insert have to be one atomic step, or two concurrent
+        // starts for the same workflowId both scan clean and persist distinct run keys,
+        // leaving two open runs where SWF guarantees one.
+        synchronized (domainLock(request.domain())) {
+            if (findOpenExecution(request.domain(), request.workflowId()).isPresent()) {
+                throw SwfFaults.executionAlreadyStarted();
+            }
+
+            SwfWorkflowExecution execution = buildExecution(request, type);
+            appendWorkflowExecutionStarted(execution, request.input(), null);
+            scheduleDecisionTask(execution);
+            executionStore.put(executionKey(execution), execution);
+            LOG.debugv("Started SWF execution {0}/{1} run {2}",
+                    execution.getDomain(), execution.getWorkflowId(), execution.getRunId());
+            return execution.getRunId();
+        }
     }
 
     private SwfWorkflowExecution buildExecution(StartWorkflowExecutionRequest request, SwfWorkflowType type) {
@@ -497,7 +511,7 @@ public class SwfService implements Resettable {
     }
 
     private SwfDecisionTask tryClaimDecisionTask(SwfWorkflowExecution candidate, String taskList, String identity) {
-        synchronized (executionLock(executionKey(candidate))) {
+        synchronized (domainLock(candidate.getDomain())) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(candidate)).orElse(null);
             if (execution == null || !execution.isOpen()) {
                 return null;
@@ -545,7 +559,7 @@ public class SwfService implements Resettable {
      */
     public void respondDecisionTaskCompleted(String taskToken, List<Decision> decisions, String executionContext) {
         SwfWorkflowExecution located = executionForDecisionToken(taskToken);
-        synchronized (executionLock(executionKey(located))) {
+        synchronized (domainLock(located.getDomain())) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(SwfFaults::unknownTaskToken);
             SwfDecisionTask task = execution.getDecisionTask();
@@ -1099,7 +1113,7 @@ public class SwfService implements Resettable {
     }
 
     private SwfActivityTask tryClaimActivityTask(SwfWorkflowExecution candidate, String taskList, String identity) {
-        synchronized (executionLock(executionKey(candidate))) {
+        synchronized (domainLock(candidate.getDomain())) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(candidate)).orElse(null);
             if (execution == null || !execution.isOpen()) {
                 return null;
@@ -1199,7 +1213,7 @@ public class SwfService implements Resettable {
         String executionKey = pointer.substring(0, separator);
         String activityId = pointer.substring(separator + 1);
 
-        synchronized (executionLock(executionKey)) {
+        synchronized (domainLockForKey(executionKey)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey)
                     .orElseThrow(SwfFaults::unknownTaskToken);
             SwfActivityTask task = execution.getActivities().get(activityId);
@@ -1226,7 +1240,7 @@ public class SwfService implements Resettable {
         requireDomain(domainName);
         requireName(signalName, "signalName");
         SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
-        synchronized (executionLock(executionKey(located))) {
+        synchronized (domainLock(located.getDomain())) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
             if (!execution.isOpen()) {
@@ -1250,7 +1264,7 @@ public class SwfService implements Resettable {
     public void requestCancelWorkflowExecution(String domainName, String workflowId, String runId) {
         requireDomain(domainName);
         SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
-        synchronized (executionLock(executionKey(located))) {
+        synchronized (domainLock(located.getDomain())) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
             if (!execution.isOpen()) {
@@ -1275,7 +1289,7 @@ public class SwfService implements Resettable {
                                            String reason, String details, String childPolicy) {
         requireDomain(domainName);
         SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
-        synchronized (executionLock(executionKey(located))) {
+        synchronized (domainLock(located.getDomain())) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
             if (!execution.isOpen()) {
@@ -1351,7 +1365,7 @@ public class SwfService implements Resettable {
     public void sweep() {
         double nowSeconds = now();
         for (String key : executionStore.keys()) {
-            synchronized (executionLock(key)) {
+            synchronized (domainLockForKey(key)) {
                 SwfWorkflowExecution execution = executionStore.get(key).orElse(null);
                 if (execution == null || !execution.isOpen()) {
                     continue;
@@ -1722,8 +1736,18 @@ public class SwfService implements Resettable {
         return findOpenExecution(domainName, workflowId).orElse(null);
     }
 
-    private Object executionLock(String key) {
-        return executionLocks.computeIfAbsent(key, k -> new Object());
+    /**
+     * One lock per domain. See the class Javadoc: parent/child and multi-run invariants
+     * span executions, so the lock has to cover the whole family to stay non-nested.
+     */
+    private Object domainLock(String domain) {
+        return domainLocks.computeIfAbsent(domain, k -> new Object());
+    }
+
+    /** Locks the domain of an execution identified only by its storage key. */
+    private Object domainLockForKey(String executionKey) {
+        int separator = executionKey.indexOf('/');
+        return domainLock(separator < 0 ? executionKey : executionKey.substring(0, separator));
     }
 
     private double now() {

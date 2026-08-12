@@ -19,12 +19,23 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -320,6 +331,108 @@ class SwfServiceTest {
     }
 
     @Test
+    void concurrentStartsOfTheSameWorkflowId_produceExactlyOneOpenRun() throws Exception {
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch releaseAll = new CountDownLatch(1);
+        List<Future<String>> attempts = new ArrayList<>();
+        try {
+            for (int i = 0; i < threads; i++) {
+                attempts.add(pool.submit(() -> {
+                    releaseAll.await();
+                    return service.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                            DOMAIN, "wf-race", "W", "1", null, null, null, null, null, null, null, null));
+                }));
+            }
+            releaseAll.countDown();
+
+            int started = 0;
+            int rejected = 0;
+            for (Future<String> attempt : attempts) {
+                try {
+                    assertNotNull(attempt.get(10, TimeUnit.SECONDS));
+                    started++;
+                } catch (ExecutionException e) {
+                    assertInstanceOf(AwsException.class, e.getCause());
+                    assertEquals("WorkflowExecutionAlreadyStartedFault",
+                            ((AwsException) e.getCause()).getErrorCode());
+                    rejected++;
+                }
+            }
+
+            // SWF admits one open run per workflowId; the losers must see the fault rather
+            // than each persisting their own run key.
+            assertEquals(1, started, "exactly one start may succeed");
+            assertEquals(threads - 1, rejected);
+            assertEquals(1, service.listExecutions(DOMAIN, ExecutionFilter.all(), false).stream()
+                    .filter(e -> "wf-race".equals(e.getWorkflowId()))
+                    .count());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void closingAChildWhileTheParentIsMutated_keepsBothHistoriesIntact() throws Exception {
+        String parentRunId = start("wf-cc-parent");
+        SwfDecisionTask decision = pollFor("wf-cc-parent");
+        List<Decision> children = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            children.add(new Decision("StartChildWorkflowExecution", Map.of(
+                    "workflowId", "wf-cc-child-" + i,
+                    "workflowType", Map.of("name", "W", "version", "1"))));
+        }
+        service.respondDecisionTaskCompleted(decision.getTaskToken(), children, null);
+
+        // Children closing concurrently all append ChildWorkflowExecutionCompleted to the
+        // same parent. Unsynchronized event-id allocation loses or duplicates events.
+        ExecutorService pool = Executors.newFixedThreadPool(6);
+        CountDownLatch releaseAll = new CountDownLatch(1);
+        List<Future<?>> closes = new ArrayList<>();
+        try {
+            for (int i = 0; i < 6; i++) {
+                String childId = "wf-cc-child-" + i;
+                closes.add(pool.submit(() -> {
+                    releaseAll.await();
+                    SwfDecisionTask childTask = pollFor(childId);
+                    service.respondDecisionTaskCompleted(childTask.getTaskToken(),
+                            List.of(new Decision("CompleteWorkflowExecution",
+                                    Map.of("result", childId))), null);
+                    return null;
+                }));
+            }
+            releaseAll.countDown();
+            for (Future<?> close : closes) {
+                close.get(20, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        SwfWorkflowExecution parent = service.describeWorkflowExecution(DOMAIN, "wf-cc-parent", parentRunId);
+        List<SwfHistoryEvent> events = parent.getEvents();
+
+        // Event ids must stay a contiguous 1..n with no duplicates.
+        Set<Long> ids = new LinkedHashSet<>();
+        for (SwfHistoryEvent event : events) {
+            assertTrue(ids.add(event.getEventId()), "duplicate eventId " + event.getEventId());
+        }
+        for (int i = 0; i < events.size(); i++) {
+            assertEquals(i + 1L, events.get(i).getEventId(), "eventIds must be contiguous");
+        }
+
+        // Every child must be reported exactly once.
+        Map<String, Long> reported = events.stream()
+                .filter(e -> "ChildWorkflowExecutionCompleted".equals(e.getEventType()))
+                .collect(Collectors.groupingBy(
+                        e -> (String) ((Map<?, ?>) e.getAttributes().get("workflowExecution")).get("workflowId"),
+                        Collectors.counting()));
+        assertEquals(6, reported.size(), "each child reports to the parent");
+        reported.forEach((childId, count) ->
+                assertEquals(1L, count, childId + " reported " + count + " times"));
+    }
+
+    @Test
     void listExecutions_separatesOpenFromClosed() {
         start("wf-open");
         String closedRunId = start("wf-done");
@@ -578,18 +691,28 @@ class SwfServiceTest {
     /**
      * Claims decision tasks until one belongs to {@code workflowId}; sibling executions in
      * the same domain share the {@code tl} task list.
+     *
+     * <p>Tolerates a transient empty poll so the concurrency tests can call this from
+     * several threads: another thread may hold the task this caller wants at that instant.
      */
     private SwfDecisionTask pollFor(String workflowId) {
-        for (int attempt = 0; attempt < 20; attempt++) {
+        for (int attempt = 0; attempt < 200; attempt++) {
             Optional<SwfDecisionTask> claimed = service.pollForDecisionTask(DOMAIN, "tl", "d");
-            if (claimed.isEmpty()) {
+            if (claimed.isPresent()) {
+                SwfDecisionTask task = claimed.get();
+                if (workflowId.equals(task.getWorkflowId())) {
+                    return task;
+                }
+                // Release a sibling's task so its own poller can claim it.
+                service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(), null);
+                continue;
+            }
+            try {
+                Thread.sleep(5);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
                 break;
             }
-            SwfDecisionTask task = claimed.get();
-            if (workflowId.equals(task.getWorkflowId())) {
-                return task;
-            }
-            service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(), null);
         }
         throw new AssertionError("no decision task for " + workflowId);
     }
