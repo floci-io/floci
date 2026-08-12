@@ -30,8 +30,9 @@ import java.util.Set;
  * {@code @ptr}, or a dotted path into the JSON log message (e.g. {@code params.job_id}, {@code level}).
  *
  * <p>This is intentionally <em>not</em> a full Insights implementation: unsupported commands
- * (e.g. {@code stats}, {@code parse}) are ignored with a warning. Pipes ({@code |}) inside quoted
- * filter values are respected and do not split the query into stages.
+ * (e.g. {@code stats}, {@code parse}) and unsupported filter operators (e.g. {@code >=},
+ * {@code like}) are ignored with a warning. Pipes ({@code |}) inside quoted filter values are
+ * respected and do not split the query into stages.
  */
 final class LogsInsightsQuery {
 
@@ -154,6 +155,10 @@ final class LogsInsightsQuery {
                 }
             } else if (c == '\'' || c == '"') {
                 quote = c;
+            } else if (expr.startsWith(">=", i) || expr.startsWith("<=", i) || expr.startsWith("=~", i)) {
+                // The '=' in >=, <= and =~ would be read as equality below, mangling the field
+                // (>=, <=) or the value (=~) into a dead match; stop so they warn instead.
+                break;
             } else if (i > 0) {
                 String op = expr.startsWith("!=", i) ? "!="
                         : expr.startsWith("==", i) ? "=="

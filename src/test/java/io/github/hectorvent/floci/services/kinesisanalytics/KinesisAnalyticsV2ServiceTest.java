@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.services.kinesisanalytics;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.ApplicationStatus;
@@ -552,9 +552,10 @@ class KinesisAnalyticsV2ServiceTest {
         // intermediate state must still be persisted — not just the final RUNNING transition — since
         // pendingJars (a separate in-process-only cache) is already cleared by then; an emulator
         // restart before the next persist would otherwise leave the application permanently stuck.
-        InMemoryStorage<String, FlinkApplication> backing = Mockito.spy(new InMemoryStorage<>());
+        AccountAwareStorageBackend<FlinkApplication> store =
+                Mockito.spy(AccountAwareStorageBackend.inMemory("000000000000"));
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
-        Mockito.doReturn(backing).when(storageFactory)
+        Mockito.doReturn(store).when(storageFactory)
                 .create(Mockito.anyString(), Mockito.anyString(), Mockito.any());
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
@@ -580,7 +581,7 @@ class KinesisAnalyticsV2ServiceTest {
         realMode.createApplication("demo", "FLINK-1_18", ROLE, null, null, "bucket", "app.jar", null, 1);
         FlinkApplication app = realMode.describeApplication("demo");
         app.setApplicationStatus(ApplicationStatus.STARTING);
-        Mockito.clearInvocations(backing); // ignore createApplication's own put()
+        Mockito.clearInvocations(store); // ignore createApplication's own put()
 
         try {
             // @PostConstruct isn't wired by a plain `new` in this unit test; start the poller manually.
@@ -588,7 +589,8 @@ class KinesisAnalyticsV2ServiceTest {
             // The poller's first tick fires ~1s after scheduling; give it margin.
             Thread.sleep(1500);
 
-            Mockito.verify(backing, Mockito.atLeastOnce()).put(Mockito.eq("demo"), Mockito.any());
+            Mockito.verify(store, Mockito.atLeastOnce())
+                    .putForAccount(Mockito.eq("000000000000"), Mockito.eq("demo"), Mockito.any());
             assertEquals("job-1", realMode.describeApplication("demo").getFlinkJobId());
         } finally {
             realMode.shutdown();
@@ -609,7 +611,7 @@ class KinesisAnalyticsV2ServiceTest {
     private KinesisAnalyticsV2Service buildService(boolean mock, FlinkContainerManager manager) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);

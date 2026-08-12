@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.docdb;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
@@ -29,7 +29,7 @@ class DocDbServiceTest {
     void setUp() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> new InMemoryStorage<>());
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
