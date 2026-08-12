@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -93,6 +94,24 @@ class EventBusDeleteOwnershipTest {
         assertDoesNotThrow(() -> provisioner.delete(resource(null), REGION));
 
         verify(eventBridgeService, never()).deleteEventBus(BUS, REGION);
+    }
+
+    @Test
+    void unexpectedRuleDeletionFailureIsNotReportedAsSuccess() {
+        StackResource rule = new StackResource();
+        rule.setLogicalId("OrdersRule");
+        rule.setResourceType("AWS::Events::Rule");
+        rule.setPhysicalId("orders-rule");
+        rule.getAttributes().put("EventBusName", BUS);
+        when(eventBridgeService.listTargetsByRule("orders-rule", BUS, REGION))
+                .thenThrow(new IllegalStateException("storage unavailable"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> provisioner.delete(rule, REGION));
+
+        assertEquals("InternalFailure", error.getErrorCode());
+        assertTrue(error.getMessage().contains("storage unavailable"), error.getMessage());
+        verify(eventBridgeService, never()).deleteRule("orders-rule", BUS, REGION);
     }
 
     private StackResource resource(String createdTimeAttr) {

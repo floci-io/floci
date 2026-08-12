@@ -3,12 +3,14 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
  * The per-provision context every resource handler drew from: the template engine (for resolving
  * intrinsic functions in properties) plus the region/account/stack it is being created in. The
- * two helpers are lifted verbatim from {@code CloudFormationResourceProvisioner}'s private methods
+ * helpers are lifted verbatim from {@code CloudFormationResourceProvisioner}'s private methods
  * so extracted provisioners produce byte-identical physical ids and resolved values.
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
@@ -20,6 +22,20 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
             return null;
         }
         return engine.resolve(props.get(name));
+    }
+
+    /** Resolves an array property to its non-blank elements, or an empty list when absent. */
+    public List<String> resolveStringList(JsonNode props, String name) {
+        List<String> values = new ArrayList<>();
+        if (props != null && props.has(name) && props.get(name).isArray()) {
+            for (JsonNode element : props.get(name)) {
+                String resolved = engine.resolve(element);
+                if (resolved != null && !resolved.isBlank()) {
+                    values.add(resolved);
+                }
+            }
+        }
+        return values;
     }
 
     /** Generates a CloudFormation-style physical name: {@code <stack>-<logicalId>-<suffix>}. */

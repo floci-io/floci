@@ -570,6 +570,7 @@ public class DynamoDbJsonHandler {
     private void evaluateLegacyExpected(JsonNode existing, JsonNode expected, String conditionalOperator,
                                           String returnValuesOnConditionCheckFailure) {
         if (expected == null) return;
+        validateLegacyExpected(expected);
         boolean useOr = "OR".equals(conditionalOperator);
         boolean overall = !useOr;
         var fields = expected.fields();
@@ -579,10 +580,11 @@ public class DynamoDbJsonHandler {
             JsonNode condition = entry.getValue();
             JsonNode attrValue = existing != null ? existing.get(attrName) : null;
             boolean condResult;
-            if (condition.has("Exists")) {
-                boolean exists = condition.get("Exists").asBoolean();
-                condResult = exists ? attrValue != null : attrValue == null;
+            if (condition.has("Exists") && !condition.get("Exists").asBoolean()) {
+                condResult = attrValue == null;
             } else {
+                // Exists:true always carries a Value, so it evaluates as an attribute
+                // comparison exactly like a bare Value: must exist AND match.
                 condResult = dynamoDbService.matchesKeyConditionPublic(attrValue, normalizeLegacyCondition(condition));
             }
             if (useOr) overall = overall || condResult;
@@ -595,6 +597,55 @@ public class DynamoDbJsonHandler {
                 throw new ConditionalCheckFailedException(null);
             }
         }
+    }
+
+    /**
+     * Validates every entry of a legacy Expected map before any condition is evaluated.
+     * The rules and their precedence mirror ExpectedAttributeValue:
+     * <ul>
+     *   <li>{@code AttributeValueList} is only meaningful alongside a {@code ComparisonOperator}.</li>
+     *   <li>{@code Exists} cannot be combined with a {@code ComparisonOperator} — they are
+     *       alternative forms.</li>
+     *   <li>Without a {@code ComparisonOperator}, a {@code Value} is required unless
+     *       {@code Exists: false} asks for plain absence.</li>
+     *   <li>{@code Exists: false} forbids a {@code Value} — an attribute cannot be expected to
+     *       hold a value while also being expected to be absent.</li>
+     * </ul>
+     * DynamoDB reports only the first offending entry, so validation stops at the first error.
+     */
+    private void validateLegacyExpected(JsonNode expected) {
+        var fields = expected.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            String attrName = entry.getKey();
+            JsonNode condition = entry.getValue();
+            boolean hasComparisonOperator = condition.has("ComparisonOperator");
+            boolean hasExists = condition.has("Exists");
+            boolean hasValue = condition.has("Value");
+
+            if (condition.has("AttributeValueList") && !hasComparisonOperator) {
+                throw legacyExpectedValidationError(
+                        "AttributeValueList can only be used with a ComparisonOperator for Attribute: " + attrName);
+            }
+            if (hasExists && hasComparisonOperator) {
+                throw legacyExpectedValidationError(
+                        "Exists and ComparisonOperator cannot be used together for Attribute: " + attrName);
+            }
+            boolean expectsValue = !hasExists || condition.get("Exists").asBoolean();
+            if (!hasComparisonOperator && expectsValue && !hasValue) {
+                throw legacyExpectedValidationError("Value must be provided when Exists is "
+                        + (hasExists ? "true" : "null") + " for Attribute: " + attrName);
+            }
+            if (!expectsValue && hasValue) {
+                throw legacyExpectedValidationError(
+                        "Value cannot be used when Exists is false for Attribute: " + attrName);
+            }
+        }
+    }
+
+    private AwsException legacyExpectedValidationError(String detail) {
+        return new AwsException("ValidationException",
+                "1 validation error detected: One or more parameter values were invalid: " + detail, 400);
     }
 
     /**

@@ -526,10 +526,10 @@ public class IotService {
     }
 
     public void publish(String topic, byte[] payload) {
-        publish(topic, payload, false, 0);
+        publish(topic, payload, false, 0, null);
     }
 
-    public void publish(String topic, byte[] payload, boolean retain, int qos) {
+    public void publish(String topic, byte[] payload, boolean retain, int qos, String region) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         if (retain) {
             if (eventPayload.length == 0) {
@@ -543,7 +543,7 @@ public class IotService {
                 retainedMessageStore.put(retainedMessageKey(topic), retained);
             }
         }
-        handlePublish(topic, eventPayload, true);
+        handlePublish(topic, eventPayload, true, region);
     }
 
     public void deleteConnection(String clientId, boolean cleanSession) {
@@ -889,17 +889,27 @@ public class IotService {
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
     }
 
-    void handlePublish(String topic, byte[] payload, boolean evaluateRules) {
+    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         publishEventRecorder.record(topic, eventPayload);
         if (!evaluateRules) {
             return;
         }
-        for (IotTopicRule rule : listTopicRules(config.defaultRegion())) {
+        for (IotTopicRule rule : rulesForPublish(region)) {
             if (!rule.isRuleDisabled() && topicMatches(extractTopicPattern(rule.getSql()), topic)) {
                 executeTopicRule(rule, eventPayload);
             }
         }
+    }
+
+    private List<IotTopicRule> rulesForPublish(String region) {
+        if (region != null) {
+            return listTopicRules(region);
+        }
+        // MQTT and unsigned data-plane publishes carry no region, so every region's rules apply.
+        return topicRuleStore.scan(key -> true).stream()
+                .sorted(Comparator.comparing(IotTopicRule::getRuleName))
+                .toList();
     }
 
     void handleReservedMqttPublish(String topic, byte[] payload, BiConsumer<String, byte[]> publisher) {
@@ -990,6 +1000,7 @@ public class IotService {
     }
 
     private void executeTopicRule(IotTopicRule rule, byte[] payload) {
+        String ruleRegion = AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion());
         try {
             JsonNode actions = objectMapper.readTree(rule.getActionsJson());
             if (!actions.isArray()) {
@@ -1000,7 +1011,7 @@ public class IotService {
                 if (republish.isObject()) {
                     String targetTopic = republish.path("topic").asText(null);
                     if (targetTopic != null && !targetTopic.isBlank()) {
-                        handlePublish(targetTopic, payload, false);
+                        handlePublish(targetTopic, payload, false, ruleRegion);
                         mqttBrokerService.publish(targetTopic, payload);
                     }
                 }
@@ -1011,14 +1022,14 @@ public class IotService {
                         String body = sqs.path("useBase64").asBoolean(false)
                                 ? Base64.getEncoder().encodeToString(payload)
                                 : new String(payload, StandardCharsets.UTF_8);
-                        sqsService.sendMessage(queueUrl, body, 0, config.defaultRegion());
+                        sqsService.sendMessage(queueUrl, body, 0, ruleRegion);
                     }
                 }
                 JsonNode sns = action.path("sns");
                 if (sns.isObject()) {
                     String targetArn = sns.path("targetArn").asText(null);
                     if (targetArn != null && !targetArn.isBlank()) {
-                        snsService.publish(targetArn, null, new String(payload, StandardCharsets.UTF_8), null, config.defaultRegion());
+                        snsService.publish(targetArn, null, new String(payload, StandardCharsets.UTF_8), null, ruleRegion);
                     }
                 }
                 JsonNode s3 = action.path("s3");
@@ -1034,21 +1045,21 @@ public class IotService {
                     String streamName = kinesis.path("streamName").asText(null);
                     String partitionKey = kinesis.path("partitionKey").asText("floci-iot");
                     if (streamName != null && !streamName.isBlank()) {
-                        kinesisService.putRecord(streamName, payload, partitionKey, config.defaultRegion());
+                        kinesisService.putRecord(streamName, payload, partitionKey, ruleRegion);
                     }
                 }
                 JsonNode dynamoDBv2 = action.path("dynamoDBv2");
                 if (dynamoDBv2.isObject()) {
                     String tableName = dynamoDBv2.path("putItem").path("tableName").asText(null);
                     if (tableName != null && !tableName.isBlank()) {
-                        dynamoDbService.putItem(tableName, toDynamoDbItem(payload), config.defaultRegion());
+                        dynamoDbService.putItem(tableName, toDynamoDbItem(payload), ruleRegion);
                     }
                 }
                 JsonNode lambda = action.path("lambda");
                 if (lambda.isObject()) {
                     String functionArn = lambda.path("functionArn").asText(null);
                     if (functionArn != null && !functionArn.isBlank()) {
-                        lambdaService.invoke(config.defaultRegion(), functionArn, payload, InvocationType.Event);
+                        lambdaService.invoke(ruleRegion, functionArn, payload, InvocationType.Event);
                     }
                 }
             }

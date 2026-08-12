@@ -47,6 +47,10 @@ Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`.
 the backing service and sets a real physical ID plus the `Ref` / `Fn::GetAtt` attributes used by
 cross-resource references.
 
+> Adding a type? See [Adding a CloudFormation Resource Type](../../CONTRIBUTING.md#adding-a-cloudformation-resource-type).
+> Types live in per-service provisioners under `services/cloudformation/provisioners/`; keep this
+> table in step with them.
+
 | Service | Resource types |
 |---|---|
 | S3 | `Bucket`, `BucketPolicy` (accepted; policy not enforced) |
@@ -62,7 +66,7 @@ cross-resource references.
 | ECS | `Cluster`, `TaskDefinition`, `Service` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance`, `DBCluster`, `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup` (DBInstance/DBCluster start real containers) |
-| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance` |
+| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup` |
 | Route 53 | `HostedZone`, `RecordSet` |
@@ -71,7 +75,7 @@ cross-resource references.
 | Step Functions | `StateMachine` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool`, `UserPoolClient` |
-| EventBridge | `Events::Rule`, `Events::EventBus` |
+| EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
@@ -90,13 +94,13 @@ All other resource types are accepted without error and assigned a synthetic phy
 the bus name, and `Fn::GetAtt` supports `Arn` and `Name`. `Description` and `Tags` are applied when
 the bus is created. Rules that reference the bus are removed before stack deletion.
 
-The current implementation is limited to custom buses with the `Name`, `Description`, and `Tags`
-properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, `LogConfig`, and `Policy`
-are rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change
-as resource replacement; Floci currently rejects that update until generic replacement handling
-is available. Changing `Description` or `Tags` during `UpdateStack` is also rejected until
-transactional resource rollback is available; this prevents a failed stack update from leaving the
-live bus in the rejected configuration.
+The current implementation is limited to custom buses with the `Name`, `Description`, `Tags`, and
+`Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
+rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
+resource replacement; Floci currently rejects that update until generic replacement handling is
+available. Changing `Description` or `Tags` during `UpdateStack` is also rejected until transactional
+resource rollback is available; this prevents a failed stack update from leaving the live bus in the
+rejected configuration.
 
 ## Secrets Manager Target Attachments
 
@@ -131,6 +135,36 @@ data and attachment ownership.
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace
 (determined from the request's access key — see [Multi-Account Isolation](../configuration/multi-account.md)).
 Deleting the stack removes them from that same account.
+
+## Deletion Policies
+
+A resource's [`DeletionPolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)
+attribute is honored on `DeleteStack` and on the rollback of a failed `CreateStack`:
+
+| Value | `DeleteStack` | Rollback of the create that made the resource |
+|---|---|---|
+| `Delete` (default) | deleted | deleted |
+| `Retain` | kept | kept |
+| `RetainExceptOnCreate` | kept | deleted |
+
+A kept resource is reported as `DELETE_SKIPPED` in `DescribeStackEvents` and does not fail the
+deletion — the stack still reaches `DELETE_COMPLETE` while the resource keeps existing. This also
+lets a stack owning a non-empty S3 bucket be deleted, since the bucket is never touched.
+
+Deviations from AWS to be aware of:
+
+- `Snapshot` deletes the resource without taking a snapshot; floci has no snapshot support for the
+  types AWS allows it on.
+- Every resource defaults to `Delete`. AWS instead defaults `AWS::RDS::DBCluster`, and
+  `AWS::RDS::DBInstance` without a `DBClusterIdentifier`, to `Snapshot`.
+- Unrecognized values are treated as `Delete`.
+- An update that removes a resource from the template does not delete it (or consult its policy);
+  only the new template's resources are provisioned. AWS applies `DeletionPolicy` to update-time
+  removals as well.
+- After `DeleteStack` completes, a retained resource's `DELETE_SKIPPED` record is only visible
+  through `DescribeStackEvents` for the deleted stack, not `DescribeStackResources`.
+- `UpdateReplacePolicy`, and the `RetainExceptOnCreate` request parameter of `CreateStack` /
+  `UpdateStack`, are not implemented.
 
 ## StackSets
 

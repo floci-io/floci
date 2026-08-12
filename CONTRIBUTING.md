@@ -146,6 +146,40 @@ ln -s AGENTS.md COPILOT.md
 
 Always implement the **real AWS wire protocol** — never invent custom endpoints. The AWS SDK must work against Floci without modification.
 
+## Adding a CloudFormation Resource Type
+
+CloudFormation resource types live in **per-service provisioner classes**, not in
+`CloudFormationResourceProvisioner`. That class is a legacy monolith being dismantled — please do
+not add cases to it. If the service you need already has a `*CfnProvisioner`, add your type there;
+otherwise create one.
+
+1. Create `services/cloudformation/provisioners/<Service>CfnProvisioner.java`, annotate it
+   `@ApplicationScoped`, and inject **only** the service it wraps. Registration is automatic —
+   `CloudFormationResourceRegistry` discovers it via CDI. (Forgetting `@ApplicationScoped` compiles
+   and unit-tests green, but the type is never wired.)
+2. Implement `resourceTypes()` returning every `AWS::*` type the class serves, and `provision(...)`.
+   When you serve more than one type, switch on `resource.getResourceType()`.
+3. In `provision`, set **both**:
+   - `resource.setPhysicalId(...)` — this is what `Ref` resolves to
+   - `resource.getAttributes().put("Name", value)` for every `Fn::GetAtt` attribute — a *separate*
+     map. Forgetting it does not fail: `Fn::GetAtt` silently resolves to the literal string
+     `"LogicalId.Attr"`. Take the attribute names from the resource's registry schema under
+     `local/aws/cfn-resource-schemas/us-east-1/` (`readOnlyProperties`).
+4. **`provision` is also the update path.** On `UpdateStack` it is called again with the previous
+   physical id and attributes already set on the resource. Check for an existing physical id and
+   update in place rather than creating unconditionally, which would otherwise throw
+   `AlreadyExists` or orphan the old resource.
+5. Override `delete(...)` if the type has a backing delete. Deleting a resource that is already gone
+   should be tolerated.
+6. Add a focused unit test (mock only your service — see `SqsCfnProvisionerTest`) and an integration
+   test. Assert the **specific `Fn::GetAtt` attribute keys**, not just `CREATE_COMPLETE`: an
+   unmapped type is stubbed out as a successful no-op, so a status-only assertion passes even when
+   nothing was provisioned.
+7. Add the type to the table in `docs/services/cloudformation.md`.
+
+`SqsCfnProvisioner` is the smallest reference implementation; `Ec2LaunchTemplateCfnProvisioner`
+shows update-in-place and replacement handling.
+
 ## Pull Request Guidelines
 
 1. Branch off `main`: `git checkout -b feature/my-feature`
