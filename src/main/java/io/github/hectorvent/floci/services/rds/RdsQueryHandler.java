@@ -676,11 +676,19 @@ public class RdsQueryHandler {
     }
 
     private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params) {
-        // DB snapshots are not modeled; return the RDS Query API's wire-accurate empty
-        // result (empty <DBSnapshots> wrapper, no <Marker>) so SDK clients complete the
-        // read instead of failing with UnsupportedOperation.
-        String result = new XmlBuilder().start("DBSnapshots").end("DBSnapshots").build();
-        return Response.ok(AwsQueryResponse.envelope("DescribeDBSnapshots", AwsNamespaces.RDS, result)).build();
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        String instanceId = params.getFirst("DBInstanceIdentifier");
+        try {
+            Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> result = service.describeDbSnapshots(snapshotId, instanceId);
+            XmlBuilder xml = new XmlBuilder().start("DBSnapshots");
+            for (io.github.hectorvent.floci.services.rds.model.DbSnapshot s : result) {
+                xml.raw(dbSnapshotXml(s));
+            }
+            xml.end("DBSnapshots");
+            return Response.ok(AwsQueryResponse.envelope("DescribeDBSnapshots", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
     }
 
     private Response handleDescribeDbProxies(MultivaluedMap<String, String> params) {

@@ -744,6 +744,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void describeDbSnapshots_returnsEmptyListWith200() {
+        when(service.describeDbSnapshots(null, null)).thenReturn(List.of());
         Response response = handler.handle("DescribeDBSnapshots", params());
 
         String body = (String) response.getEntity();
@@ -751,6 +752,26 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DescribeDBSnapshotsResult>"));
         assertTrue(body.contains("<DBSnapshots></DBSnapshots>"));
         assertFalse(body.contains("<Marker>"));
+    }
+
+    @Test
+    void describeDbSnapshots_returnsSnapshotListWith200() {
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setDbInstanceIdentifier("mydb");
+        snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        when(service.describeDbSnapshots("mysnap", "mydb")).thenReturn(List.of(snapshot));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "mysnap");
+        p.add("DBInstanceIdentifier", "mydb");
+        Response response = handler.handle("DescribeDBSnapshots", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DescribeDBSnapshotsResult>"));
+        assertTrue(body.contains("<DBSnapshotIdentifier>mysnap</DBSnapshotIdentifier>"));
+        assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
     }
 
     @Test

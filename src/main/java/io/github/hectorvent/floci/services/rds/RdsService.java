@@ -418,7 +418,7 @@ public class RdsService implements Resettable {
                 .orElseThrow(() -> new AwsException("DBInstanceNotFound", "DBInstance " + instanceId + " not found.", 404));
 
         if (instance.getEngine() != DatabaseEngine.POSTGRES) {
-            throw new AwsException("UnsupportedOperation", "Operation CreateDBSnapshot is not supported for engine " + instance.getEngine() + ".", 400);
+            throw new AwsException("InvalidDBInstanceState", "Operation CreateDBSnapshot is not supported for engine " + instance.getEngine() + ".", 400);
         }
 
         DbSnapshot snapshot = new DbSnapshot(snapshotId, instanceId, Instant.now(), instance.getEngine(),
@@ -461,13 +461,36 @@ public class RdsService implements Resettable {
                 } catch (Exception cleanupError) {
                     e.addSuppressed(cleanupError);
                 }
-                AwsException awsEx = new AwsException("InvalidDBSnapshotStateFault", "Failed to restore snapshot: " + e.getMessage(), 400);
+                AwsException awsEx = new AwsException("InvalidDBSnapshotState", "Failed to restore snapshot: " + e.getMessage(), 400);
                 awsEx.initCause(e);
                 throw awsEx;
             }
         }
 
         return instance;
+    }
+
+    public Collection<DbSnapshot> describeDbSnapshots(String snapshotId, String instanceId) {
+        if (snapshotId != null && !snapshotId.isBlank()) {
+            DbSnapshot snapshot = snapshots.get(snapshotId)
+                    .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
+            if (instanceId != null && !instanceId.isBlank()) {
+                if (instanceId.equals(snapshot.getDbInstanceIdentifier())) {
+                    return List.of(snapshot);
+                } else {
+                    return List.of();
+                }
+            }
+            return List.of(snapshot);
+        }
+
+        List<DbSnapshot> allSnapshots = snapshots.scan(k -> true);
+        if (instanceId != null && !instanceId.isBlank()) {
+            return allSnapshots.stream()
+                    .filter(s -> instanceId.equals(s.getDbInstanceIdentifier()))
+                    .toList();
+        }
+        return allSnapshots;
     }
 
     public Map<String, String> listTagsForResource(String resourceName) {
