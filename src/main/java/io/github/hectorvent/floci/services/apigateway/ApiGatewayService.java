@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
@@ -469,7 +470,42 @@ public class ApiGatewayService {
         Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L);
         deploymentStore.put(deploymentKey(region, apiId, deployment.id()), deployment);
         LOG.infov("Created deployment {0} for API {1}", deployment.id(), apiId);
+
+        String stageName = (String) request.get("stageName");
+        if (stageName != null && !stageName.isBlank()) {
+            deployStage(region, apiId, stageName, deployment.id(), request);
+        }
         return deployment;
+    }
+
+    /**
+     * Points {@code stageName} at {@code deploymentId}, creating the stage if it doesn't exist.
+     *
+     * <p>The API does not document collision behavior. Repointing preserves existing stage
+     * settings and supports repeated deployments.
+     */
+    private void deployStage(String region, String apiId, String stageName, String deploymentId,
+                             Map<String, Object> request) {
+        String key = stageKey(region, apiId, stageName);
+        long now = System.currentTimeMillis() / 1000L;
+        Stage stage = stageStore.get(key).orElse(null);
+        if (stage == null) {
+            stage = new Stage();
+            stage.setStageName(stageName);
+            stage.setCreatedDate(now);
+            stage.setDescription((String) request.get("stageDescription"));
+        }
+        stage.setDeploymentId(deploymentId);
+        stage.setLastUpdatedDate(now);
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> variables = (Map<String, String>) request.get("variables");
+        if (variables != null) {
+            stage.setVariables(variables);
+        }
+
+        stageStore.put(key, stage);
+        LOG.infov("Deployed stage {0} of API {1} to deployment {2}", stageName, apiId, deploymentId);
     }
 
     public List<Deployment> getDeployments(String region, String apiId) {
@@ -671,12 +707,27 @@ public class ApiGatewayService {
 
     public ApiKey createApiKey(String region, Map<String, Object> request) {
         ApiKey apiKey = new ApiKey();
-        apiKey.setId(shortId(10));
         apiKey.setName((String) request.get("name"));
-        apiKey.setValue((String) request.getOrDefault("value", UUID.randomUUID().toString().replace("-", "")));
         apiKey.setEnabled(!Boolean.FALSE.equals(request.get("enabled")));
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
+        apiKey.setDescription((String) request.get("description"));
+
+        boolean generateDistinctId = Boolean.TRUE.equals(request.get("generateDistinctId"));
+        String suppliedValue = (String) request.get("value");
+
+        if (!generateDistinctId) {
+            String sharedValue = (suppliedValue != null && !suppliedValue.isBlank())
+                    ? suppliedValue
+                    : UUID.randomUUID().toString().replace("-", "");
+            apiKey.setId(sharedValue);
+            apiKey.setValue(sharedValue);
+        } else {
+            apiKey.setId(shortId(10));
+            apiKey.setValue((suppliedValue != null && !suppliedValue.isBlank())
+                    ? suppliedValue
+                    : UUID.randomUUID().toString().replace("-", ""));
+        }
 
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {
@@ -690,8 +741,16 @@ public class ApiGatewayService {
     }
 
     public ApiKey getApiKey(String region, String apiKeyId) {
-        return apiKeyStore.get(apiKeyGlobalKey(region, apiKeyId))
+        return findApiKey(region, apiKeyId)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API Key identifier specified", 404));
+    }
+
+    /**
+     * Non-throwing key lookup for callers on the data plane, which must treat a missing key as
+     * "not authenticated" rather than surface a management-plane 404.
+     */
+    public Optional<ApiKey> findApiKey(String region, String apiKeyId) {
+        return apiKeyStore.get(apiKeyGlobalKey(region, apiKeyId));
     }
 
     public List<ApiKey> getApiKeys(String region) {
@@ -699,18 +758,52 @@ public class ApiGatewayService {
         return apiKeyStore.scan(k -> k.startsWith(prefix));
     }
 
+    /**
+     * Deleting a key detaches it from every usage plan, matching AWS. Usage plan keys hold their own
+     * copy of the key value, so leaving the associations behind would keep a deleted key working as a
+     * credential on the data plane and keep it listed by GetUsagePlanKeys.
+     */
     public void deleteApiKey(String region, String apiKeyId) {
         getApiKey(region, apiKeyId);
+        for (UsagePlan plan : getUsagePlans(region)) {
+            usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+        }
         apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
+    }
+
+    public ApiKey updateApiKey(String region, String apiKeyId, List<Map<String, String>> patchOperations) {
+        ApiKey key = getApiKey(region, apiKeyId);
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (!"replace".equals(op.get("op"))) { continue; }
+                switch (op.getOrDefault("path", "")) {
+                    case "/name"        -> key.setName(op.get("value"));
+                    case "/description" -> key.setDescription(op.get("value"));
+                    case "/enabled"     -> key.setEnabled(Boolean.parseBoolean(op.get("value")));
+                }
+            }
+        }
+        key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
+        return key;
     }
 
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
+        Map<String, String> tags = new HashMap<>();
+        if (request.get("tags") instanceof Map<?, ?> rawTags) {
+            rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
+        }
+
+        String customId = ReservedTags.extractOverrideApiId(tags);
+        String planId = customId != null ? customId : shortId(10);
+
         UsagePlan plan = new UsagePlan();
-        plan.setId(shortId(10));
+        plan.setId(planId);
         plan.setName((String) request.get("name"));
         plan.setDescription((String) request.get("description"));
+        plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");

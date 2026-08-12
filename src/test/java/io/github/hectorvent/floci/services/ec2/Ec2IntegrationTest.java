@@ -2278,11 +2278,12 @@ class Ec2IntegrationTest {
     void describeNetworkInterfacesWithMaxResultsNoNextToken() {
         // When MaxResults exceeds the number of available ENIs,
         // all results are returned and nextToken is omitted.
-        // This test works regardless of how many instances exist
-        // (including zero, e.g. when run in isolation).
+        // Other tests in this class are not isolated and may leave ENIs
+        // behind, so this uses the maximum allowed MaxResults (1000) to
+        // guarantee a single page regardless of test execution order.
         String body = given()
             .formParam("Action", "DescribeNetworkInterfaces")
-            .formParam("MaxResults", "5")
+            .formParam("MaxResults", "1000")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2336,7 +2337,12 @@ class Ec2IntegrationTest {
     @Test
     @Order(92)
     void describeNetworkInterfacesMultipagePagination() {
-        // ── Launch 5 additional instances to have 6 total ENIs ──
+        // Other tests in this class are not isolated and may leave ENIs
+        // behind, so the baseline is measured immediately before adding
+        // ours rather than assumed to be zero.
+        int baselineCount = countAllNetworkInterfaces();
+
+        // ── Launch 5 additional instances ──
         List<String> batchIds = given()
             .formParam("Action", "RunInstances")
             .formParam("ImageId", "ami-0abcdef1234567890")
@@ -2355,38 +2361,43 @@ class Ec2IntegrationTest {
 
         assert batchIds.size() == 5 : "Expected 5 new instances, got " + batchIds.size();
 
-        // ── Page 1: MaxResults=5, expect 5 ENIs + nextToken ──
-        String nextToken = given()
-            .formParam("Action", "DescribeNetworkInterfaces")
-            .formParam("MaxResults", "5")
-            .header("Authorization", AUTH_HEADER)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(5))
-            .body("DescribeNetworkInterfacesResponse.nextToken", notNullValue())
-        .extract().path("DescribeNetworkInterfacesResponse.nextToken");
+        int expectedTotal = baselineCount + 5;
 
-        assert nextToken != null && !nextToken.isEmpty() : "Expected non-empty nextToken on truncated page";
+        // ── Walk every page with MaxResults=5, tracking whether a
+        //    nextToken was seen on each page along the way ──
+        int collected = 0;
+        int pageCount = 0;
+        String nextToken = null;
+        do {
+            io.restassured.specification.RequestSpecification req = given()
+                    .formParam("Action", "DescribeNetworkInterfaces")
+                    .formParam("MaxResults", "5")
+                    .header("Authorization", AUTH_HEADER);
+            if (nextToken != null) {
+                req = req.formParam("NextToken", nextToken);
+            }
+            io.restassured.response.Response resp = req.when().post("/");
+            resp.then().statusCode(200);
+            pageCount++;
 
-        // ── Page 2: use NextToken, expect remaining ENIs, no nextToken ──
-        String body = given()
-            .formParam("Action", "DescribeNetworkInterfaces")
-            .formParam("MaxResults", "5")
-            .formParam("NextToken", nextToken)
-            .header("Authorization", AUTH_HEADER)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()",
-                    org.hamcrest.Matchers.greaterThanOrEqualTo(1))
-        .extract().body().asString();
+            List<String> ids = resp.xmlPath().getList(
+                    "DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId",
+                    String.class);
+            collected += ids == null ? 0 : ids.size();
+            nextToken = resp.xmlPath().getString("DescribeNetworkInterfacesResponse.nextToken");
 
-        // Final page must NOT contain a nextToken element
-        org.hamcrest.MatcherAssert.assertThat(body,
-                not(containsString("<nextToken>")));
+            // Every page but the last must be a full page of 5.
+            if (nextToken != null && !nextToken.isEmpty()) {
+                org.hamcrest.MatcherAssert.assertThat(ids.size(), equalTo(5));
+            }
+        } while (nextToken != null && !nextToken.isEmpty());
+
+        org.hamcrest.MatcherAssert.assertThat(
+                "Expected " + expectedTotal + " ENIs across " + pageCount + " page(s)",
+                collected, equalTo(expectedTotal));
+        // With 5 new ENIs and MaxResults=5, at least one truncated page
+        // must have occurred (i.e. more than a single page was fetched).
+        org.hamcrest.MatcherAssert.assertThat(pageCount, greaterThanOrEqualTo(2));
 
         // ── Cleanup: terminate the 5 extra instances ──
         for (String id : batchIds) {
@@ -2399,6 +2410,34 @@ class Ec2IntegrationTest {
             .then()
                 .statusCode(200);
         }
+    }
+
+    /**
+     * Counts all ENIs currently visible via DescribeNetworkInterfaces by
+     * walking every page. Used so pagination tests can compute an accurate
+     * baseline instead of assuming a fixed starting count.
+     */
+    private static int countAllNetworkInterfaces() {
+        int total = 0;
+        String nextToken = null;
+        do {
+            io.restassured.specification.RequestSpecification req = given()
+                    .formParam("Action", "DescribeNetworkInterfaces")
+                    .formParam("MaxResults", "1000")
+                    .header("Authorization", AUTH_HEADER);
+            if (nextToken != null) {
+                req = req.formParam("NextToken", nextToken);
+            }
+            io.restassured.response.Response resp = req.when().post("/");
+            resp.then().statusCode(200);
+
+            List<String> ids = resp.xmlPath().getList(
+                    "DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId",
+                    String.class);
+            total += ids == null ? 0 : ids.size();
+            nextToken = resp.xmlPath().getString("DescribeNetworkInterfacesResponse.nextToken");
+        } while (nextToken != null && !nextToken.isEmpty());
+        return total;
     }
 
     // =========================================================================

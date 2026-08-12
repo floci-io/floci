@@ -78,6 +78,16 @@ setup() {
     assert_output --partial "floci-compat-events"
 }
 
+@test "OpenTofu: SES receipt rule set created and active" {
+    run aws_cmd ses describe-receipt-rule-set --rule-set-name floci-compat-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+
+    run aws_cmd ses describe-active-receipt-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+}
+
 @test "OpenTofu: DynamoDB table created" {
     run aws_cmd dynamodb describe-table --table-name floci-compat-items
     assert_success

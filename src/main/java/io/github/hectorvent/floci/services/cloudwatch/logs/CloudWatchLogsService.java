@@ -167,6 +167,10 @@ public class CloudWatchLogsService {
         LOG.infov("Deleted log group: {0}", name);
     }
 
+    public boolean logGroupExists(String name, String region) {
+        return groupStore.get(groupKey(region, name)).isPresent();
+    }
+
     public List<LogGroup> describeLogGroups(String prefix, String region) {
         String storagePrefix = groupKeyPrefix(region);
         List<LogGroup> result = groupStore.scan(k -> {
