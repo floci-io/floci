@@ -8,7 +8,7 @@ Floci is configured exclusively through environment variables. Every option belo
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL embedded in response fields (SQS `QueueUrl`, pre-signed URLs, etc.) |
+| `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL embedded in response fields (pre-signed URLs, SQS `QueueUrl` when `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY=path`, etc.) |
 | `FLOCI_HOSTNAME` | _(none)_ | Overrides only the hostname part of `FLOCI_BASE_URL`. Set to the Compose service name (e.g. `floci`) so other containers can reach Floci by DNS |
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | AWS region used in ARNs and API responses |
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Fallback account ID used in ARNs when the request's access key is not exactly 12 digits. When the access key IS 12 digits, it is used directly as the account ID — see [Multi-Account Isolation](./multi-account.md) |
@@ -158,6 +158,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT` | `30` | Default message visibility timeout in seconds |
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | Reset the deduplication cache when a FIFO queue is purged |
+| `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `standard` | Shape of the returned `QueueUrl`: `standard` for `https://sqs.<region>.amazonaws.com/<account>/<name>`, `path` for `<FLOCI_BASE_URL>/<account>/<name>`. Both forms are accepted as input |
 
 ### SNS
 

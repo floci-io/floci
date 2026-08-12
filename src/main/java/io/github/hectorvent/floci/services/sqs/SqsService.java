@@ -68,9 +68,15 @@ public class SqsService implements Resettable {
     private final int defaultVisibilityTimeout;
     private final int maxMessageSize;
     private final String baseUrl;
+    private final String endpointStrategy;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
+
+    /** Queue URLs use floci's own endpoint, {@code <base-url>/<account>/<name>}. */
+    static final String STRATEGY_PATH = "path";
+    /** Queue URLs use the canonical {@code https://sqs.<region>.amazonaws.com/<account>/<name>}. */
+    static final String STRATEGY_STANDARD = "standard";
 
     @Inject
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
@@ -90,7 +96,8 @@ public class SqsService implements Resettable {
                 config.effectiveBaseUrl(),
                 regionResolver,
                 config.services().sqs().clearFifoDeduplicationCacheOnPurge(),
-                snsService
+                snsService,
+                config.services().sqs().endpointStrategy()
         );
     }
 
@@ -116,6 +123,16 @@ public class SqsService implements Resettable {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService) {
+        this(queueStore, messageStore, dedupStore, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, STRATEGY_STANDARD);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, String endpointStrategy) {
+        this.endpointStrategy = endpointStrategy;
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -220,7 +237,7 @@ public class SqsService implements Resettable {
         }
 
         String accountId = regionResolver.getAccountId();
-        String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
+        String queueUrl = buildQueueUrl(region, accountId, queueName);
         String storageKey = regionKey(region, queueUrl);
 
         // If queue already exists with same name, check for attribute conflicts
@@ -241,7 +258,7 @@ public class SqsService implements Resettable {
                     }
                 }
             }
-            return existing;
+            return withCurrentQueueUrl(existing, region);
         }
 
         Queue queue = new Queue(queueName, queueUrl);
@@ -299,22 +316,26 @@ public class SqsService implements Resettable {
 
     public List<Queue> listQueues(String namePrefix, String region) {
         String prefix = region + "::";
+        List<Queue> queues;
         if (namePrefix == null || namePrefix.isEmpty()) {
-            return queueStore.scan(key -> key.startsWith(prefix));
+            queues = queueStore.scan(key -> key.startsWith(prefix));
+        } else {
+            queues = queueStore.scan(key -> {
+                if (!key.startsWith(prefix)) {
+                    return false;
+                }
+                String queueUrl = key.substring(prefix.length());
+                String name = queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
+                return name.startsWith(namePrefix);
+            });
         }
-        return queueStore.scan(key -> {
-            if (!key.startsWith(prefix)) {
-                return false;
-            }
-            String queueUrl = key.substring(prefix.length());
-            String name = queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
-            return name.startsWith(namePrefix);
-        });
+        queues.forEach(q -> withCurrentQueueUrl(q, region));
+        return queues;
     }
 
     public String getQueueUrl(String queueName, String region) {
         String accountId = regionResolver.getAccountId();
-        String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
+        String queueUrl = buildQueueUrl(region, accountId, queueName);
         String storageKey = regionKey(region, queueUrl);
         if (queueStore.get(storageKey).isEmpty()) {
             throw new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -807,7 +828,7 @@ public class SqsService implements Resettable {
         String prefix = region + "::";
         for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
             if (targetArn.equals(redriveDlqArn(q))) {
-                sourceQueues.add(q.getQueueUrl());
+                sourceQueues.add(withCurrentQueueUrl(q, region).getQueueUrl());
             }
         }
         return sourceQueues;
@@ -1247,6 +1268,38 @@ public class SqsService implements Resettable {
      * field; this mirrors that behavior so lookups succeed regardless of what
      * the caller supplied.
      */
+    /**
+     * Builds the QueueUrl handed back to clients.
+     * <p>
+     * The default {@code standard} strategy returns the canonical AWS form,
+     * {@code https://sqs.<region>.amazonaws.com/<account>/<name>}. Clients that treat the
+     * URL as opaque are unaffected — SDKs send the request to their configured endpoint
+     * and only the path is taken from the URL — while tooling that parses it (the
+     * Terraform/OpenTofu {@code aws_sqs_queue} importer, for one) accepts only this form.
+     * The {@code path} strategy keeps floci's own endpoint form for clients that dial the
+     * URL directly.
+     * <p>
+     * Both forms are accepted on input: queue lookups key off the URL path, not the host.
+     */
+    private String buildQueueUrl(String region, String accountId, String queueName) {
+        if (STRATEGY_PATH.equalsIgnoreCase(endpointStrategy)) {
+            return baseUrl + "/" + accountId + "/" + queueName;
+        }
+        String effectiveRegion = region != null && !region.isBlank() ? region : regionResolver.getDefaultRegion();
+        return "https://sqs." + effectiveRegion + ".amazonaws.com/" + accountId + "/" + queueName;
+    }
+
+    /**
+     * Rewrites a stored queue's URL into the form the current endpoint strategy produces,
+     * so queues persisted by an earlier run (or under a different strategy) list under the
+     * same URL a fresh CreateQueue would return.
+     */
+    private Queue withCurrentQueueUrl(Queue queue, String region) {
+        String accountId = queue.getAccountId() != null ? queue.getAccountId() : regionResolver.getAccountId();
+        queue.setQueueUrl(buildQueueUrl(region, accountId, queue.getQueueName()));
+        return queue;
+    }
+
     private String normalizeQueueUrl(String queueUrl) {
         if (queueUrl == null) {
             return null;

@@ -58,6 +58,71 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    @Order(1)
+    void createQueueReturnsTheCanonicalRegionalUrl() {
+        // https://github.com/lex00/floci/issues/34 — clients that parse the queue URL
+        // (the Terraform/OpenTofu aws_sqs_queue importer) accept only the AWS form.
+        // The region comes from the signed request, here eu-west-2.
+        String queueName = "json-canonical-url-queue";
+        String expectedUrl = "https://sqs.eu-west-2.amazonaws.com/" + ACCOUNT_ID + "/" + queueName;
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .header("Authorization", AUTH_SQS_EU_WEST_2)
+            .body("{\"QueueName\":\"" + queueName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueueUrl", equalTo(expectedUrl));
+
+        try {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueUrl")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueName\":\"" + queueName + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("QueueUrl", equalTo(expectedUrl));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ListQueues")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueNamePrefix\":\"" + queueName + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("QueueUrls", contains(expectedUrl));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueUrl\":\"" + expectedUrl + "\",\"AttributeNames\":[\"QueueArn\"]}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("Attributes.QueueArn",
+                        equalTo("arn:aws:sqs:eu-west-2:" + ACCOUNT_ID + ":" + queueName));
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueUrl\":\"" + expectedUrl + "\"}")
+            .when()
+                .post("/");
+        }
+    }
+
+    @Test
     @Order(2)
     void getQueueAttributesViaRootPath() {
         String body = "{\"QueueUrl\":\"" + queueUrl + "\",\"AttributeNames\":[\"All\"]}";

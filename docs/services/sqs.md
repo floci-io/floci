@@ -88,6 +88,7 @@ curl -X DELETE "http://localhost:4566/_aws/sqs/messages?QueueUrl=$QUEUE_URL"
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT` | `30` | Default message visibility timeout (seconds) |
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message size in bytes (1 MB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` also clears the FIFO deduplication cache for the queue and any SNS FIFO topics subscribed to it |
+| `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `standard` | Shape of the returned `QueueUrl` — see [Queue URL Format](#queue-url-format) |
 
 ## Examples
 
@@ -139,5 +140,15 @@ aws sqs set-queue-attributes \
 ## Queue URL Format
 
 ```
-http://localhost:4566/000000000000/<queue-name>
+https://sqs.<region>.amazonaws.com/000000000000/<queue-name>
 ```
+
+Floci hands back the canonical AWS queue URL. SDKs treat it as opaque — they send
+requests to the endpoint you configured and take only the path from the URL — while
+tooling that parses queue URLs, such as the Terraform/OpenTofu `aws_sqs_queue`
+importer, accepts nothing else.
+
+Set `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY=path` to get floci's own endpoint form
+instead, `http://localhost:4566/000000000000/<queue-name>`, for clients that dial the
+returned URL directly. Either form is accepted as input under either setting: queue
+lookups key off the URL path and ignore the host.

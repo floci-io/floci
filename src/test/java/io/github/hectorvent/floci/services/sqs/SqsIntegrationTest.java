@@ -254,6 +254,68 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void queueUrlsUseTheCanonicalRegionalForm() {
+        // https://github.com/lex00/floci/issues/34 — the Terraform/OpenTofu aws_sqs_queue
+        // importer parses queue URLs and accepts only the canonical AWS form, so that is
+        // what CreateQueue, GetQueueUrl and ListQueues hand back.
+        String queueName = "canonical-url-queue";
+        String expectedUrl = "https://sqs.us-east-1.amazonaws.com/000000000000/" + queueName;
+
+        String createdUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            org.junit.jupiter.api.Assertions.assertEquals(expectedUrl, createdUrl);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueUrl")
+                .formParam("QueueName", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("GetQueueUrlResponse.GetQueueUrlResult.QueueUrl", equalTo(expectedUrl));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ListQueues")
+                .formParam("QueueNamePrefix", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<QueueUrl>" + expectedUrl + "</QueueUrl>"));
+
+            // The URL that was handed back must be usable as input.
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueAttributes")
+                .formParam("QueueUrl", expectedUrl)
+                .formParam("AttributeName.1", "QueueArn")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("arn:aws:sqs:us-east-1:000000000000:" + queueName));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", expectedUrl)
+            .when()
+                .post("/");
+        }
+    }
+
+    @Test
     void createQueue_withTags_tagsReturnedByListQueueTags() {
         // Regression test for https://github.com/floci-io/floci/issues/699
         // Tags supplied at CreateQueue time must be visible via ListQueueTags.

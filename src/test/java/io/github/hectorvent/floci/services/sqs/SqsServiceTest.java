@@ -34,7 +34,10 @@ class SqsServiceTest {
     void createQueue() {
         Queue queue = sqsService.createQueue("test-queue", null, "eu-west-1");
         assertEquals("test-queue", queue.getQueueName());
-        assertEquals(BASE_URL + "/000000000000/test-queue", queue.getQueueUrl());
+        // Default endpoint strategy is "standard": the canonical AWS queue URL, which is
+        // the only form clients that parse queue URLs (e.g. the Terraform aws_sqs_queue
+        // importer) accept. The region comes from the request, not the emulator default.
+        assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/test-queue", queue.getQueueUrl());
         assertNotNull(queue.getCreatedTimestamp());
     }
 
@@ -101,7 +104,60 @@ class SqsServiceTest {
         String region = "eu-west-1";
         sqsService.createQueue("my-queue", null, region);
         String url = sqsService.getQueueUrl("my-queue", region);
-        assertEquals(BASE_URL + "/000000000000/my-queue", url);
+        assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/my-queue", url);
+    }
+
+    @Test
+    void listQueuesReturnsCanonicalUrls() {
+        String region = "us-west-2";
+        sqsService.createQueue("listed-queue", null, region);
+
+        List<Queue> queues = sqsService.listQueues(null, region);
+        assertEquals(1, queues.size());
+        assertEquals("https://sqs.us-west-2.amazonaws.com/000000000000/listed-queue",
+                queues.getFirst().getQueueUrl());
+    }
+
+    @Test
+    void canonicalQueueUrlIsAcceptedOnSubsequentCalls() {
+        String region = "eu-west-1";
+        String url = sqsService.createQueue("round-trip", null, region).getQueueUrl();
+
+        // The URL handed back must work as input — lookups key off the path, not the host.
+        assertEquals("arn:aws:sqs:eu-west-1:000000000000:round-trip",
+                sqsService.getQueueAttributes(url, List.of("QueueArn"), region).get("QueueArn"));
+        sqsService.sendMessage(url, "hello", 0, region);
+        assertEquals(1, sqsService.receiveMessage(url, 1, 30, 0, region).size());
+    }
+
+    @Test
+    void endpointStrategyPathKeepsTheEmulatorUrlForm() {
+        SqsService pathService = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), false, null,
+                "path");
+        String region = "eu-west-1";
+
+        Queue queue = pathService.createQueue("path-queue", null, region);
+        assertEquals(BASE_URL + "/000000000000/path-queue", queue.getQueueUrl());
+        assertEquals(BASE_URL + "/000000000000/path-queue", pathService.getQueueUrl("path-queue", region));
+        assertEquals(BASE_URL + "/000000000000/path-queue",
+                pathService.listQueues(null, region).getFirst().getQueueUrl());
+    }
+
+    @Test
+    void queuesStoredUnderTheOldUrlFormAreListedWithTheCurrentOne() {
+        String region = "eu-west-1";
+        InMemoryStorage<String, Queue> store = new InMemoryStorage<>();
+        Queue legacy = new Queue("legacy-queue", BASE_URL + "/000000000000/legacy-queue");
+        legacy.setAccountId("000000000000");
+        store.put(region + "::/000000000000/legacy-queue", legacy);
+        SqsService service = new SqsService(store, 30, 1048576, BASE_URL);
+
+        assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/legacy-queue",
+                service.listQueues(null, region).getFirst().getQueueUrl());
+        assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/legacy-queue",
+                service.getQueueUrl("legacy-queue", region));
     }
 
     @Test

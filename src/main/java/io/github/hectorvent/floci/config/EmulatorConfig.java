@@ -717,6 +717,20 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean clearFifoDeduplicationCacheOnPurge();
+
+        /**
+         * Shape of the QueueUrl returned by CreateQueue, GetQueueUrl and ListQueues.
+         * <ul>
+         *   <li>{@code standard} — the canonical AWS form,
+         *       {@code https://sqs.<region>.amazonaws.com/<account>/<name>}. Tooling that
+         *       parses queue URLs (the Terraform/OpenTofu aws_sqs_queue importer, for one)
+         *       only accepts this form.</li>
+         *   <li>{@code path} — floci's own endpoint form, {@code <base-url>/<account>/<name>}.</li>
+         * </ul>
+         * Either form is accepted on input: queue lookups ignore the host.
+         */
+        @WithDefault("standard")
+        String endpointStrategy();
     }
 
     interface S3ServiceConfig {

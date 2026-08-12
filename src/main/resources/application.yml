@@ -196,6 +196,9 @@ floci:
       default-visibility-timeout: 30
       max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
+      # standard -> https://sqs.<region>.amazonaws.com/<account>/<name>
+      # path     -> <base-url>/<account>/<name>
+      endpoint-strategy: standard
     s3:
       enabled: true
       enforce-auth: false
