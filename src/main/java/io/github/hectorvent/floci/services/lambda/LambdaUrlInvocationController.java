@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
@@ -49,13 +50,15 @@ public class LambdaUrlInvocationController {
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final RequestContext requestContext;
 
     @Inject
     public LambdaUrlInvocationController(LambdaService lambdaService, RegionResolver regionResolver,
-                                         ObjectMapper objectMapper) {
+                                         ObjectMapper objectMapper, RequestContext requestContext) {
         this.lambdaService = lambdaService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.requestContext = requestContext;
     }
 
     @GET
@@ -96,17 +99,28 @@ public class LambdaUrlInvocationController {
     private Response invoke(String method, String urlId, String proxy, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         Object target = lambdaService.getTargetByUrlId(urlId);
         String functionName;
+        String functionArn;
         String region;
+        String accountId;
 
         if (target instanceof LambdaAlias alias) {
             functionName = alias.getFunctionName();
-            region = AwsArnUtils.parse(alias.getAliasArn()).region();
+            functionArn = alias.getAliasArn();
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
+            region = arn.region();
+            accountId = arn.accountId();
         } else if (target instanceof LambdaFunction fn) {
             functionName = fn.getFunctionName();
-            region = AwsArnUtils.parse(fn.getFunctionArn()).region();
+            functionArn = fn.getFunctionArn();
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
+            region = arn.region();
+            accountId = fn.getAccountId() != null ? fn.getAccountId() : arn.accountId();
         } else {
             return Response.status(404).entity(jsonMessage("Function URL not found")).type(MediaType.APPLICATION_JSON).build();
         }
+
+        requestContext.setAccountId(accountId);
+        requestContext.setRegion(region);
 
         String requestId = UUID.randomUUID().toString();
         String event = buildEvent(method, urlId, proxy, headers, uriInfo, body, requestId, region);
@@ -114,7 +128,8 @@ public class LambdaUrlInvocationController {
         LOG.infov("Lambda URL invocation: {0} {1} -> {2} (region: {3})", method, urlId, functionName, region);
 
         try {
-            InvokeResult result = lambdaService.invoke(region, functionName, event.getBytes(), InvocationType.RequestResponse);
+            InvokeResult result = lambdaService.invokeArn(
+                    functionArn, event.getBytes(), InvocationType.RequestResponse);
             return buildResponse(result);
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus()).entity(e.getMessage()).build();

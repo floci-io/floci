@@ -669,7 +669,24 @@ public class LambdaService {
         enforceRegion(region, ref);
         String name = ref.name();
         String qualifier = ref.qualifier();
-        LambdaFunction fn = resolveInvokeTarget(region, name, qualifier);
+        LambdaFunction fn;
+        if (functionName.startsWith("arn:")) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
+            fn = resolveInvokeTargetForAccount(arn.accountId(), region, name, qualifier);
+        } else {
+            fn = resolveInvokeTarget(region, name, qualifier);
+        }
+        InvokeResult result = executorService.invoke(fn, payload, type);
+        result.setExecutedVersion(fn.getVersion());
+        return result;
+    }
+
+    /** Invokes a Lambda target ARN using the account encoded in that ARN. */
+    public InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
+        LambdaFunction fn = resolveInvokeTargetForAccount(
+                arn.accountId(), arn.region(), ref.name(), ref.qualifier());
         InvokeResult result = executorService.invoke(fn, payload, type);
         result.setExecutedVersion(fn.getVersion());
         return result;
@@ -693,6 +710,37 @@ public class LambdaService {
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
         }
         return functionStore.get(region, name, version)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Function version not found: " + name + ":" + version, 404));
+    }
+
+    private LambdaFunction resolveInvokeTargetForAccount(
+            String accountId, String region, String name, String qualifier) {
+        if (qualifier == null || qualifier.equals("$LATEST")) {
+            return functionStore.getForAccount(accountId, region, name)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Function not found: " + name, 404));
+        }
+        if (qualifier.chars().allMatch(Character::isDigit)) {
+            return functionStore.getForAccount(accountId, region, name, qualifier)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Function version not found: " + name + ":" + qualifier, 404));
+        }
+        LambdaAlias alias = aliasStore != null
+                ? aliasStore.getForAccount(accountId, region, name, qualifier)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Alias not found: " + qualifier, 404))
+                : null;
+        if (alias == null) {
+            throw new AwsException("ResourceNotFoundException", "Alias not found: " + qualifier, 404);
+        }
+        String version = pickAliasVersion(alias);
+        if (version == null || version.equals("$LATEST")) {
+            return functionStore.getForAccount(accountId, region, name)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Function not found: " + name, 404));
+        }
+        return functionStore.getForAccount(accountId, region, name, version)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Function version not found: " + name + ":" + version, 404));
     }
@@ -1240,7 +1288,12 @@ public class LambdaService {
             urlConfig.setInvokeMode((String) request.get("InvokeMode"));
         }
 
-        String urlId = UUID.nameUUIDFromBytes((region + functionName + (qualifier != null ? qualifier : "")).getBytes()).toString().replace("-", "").substring(0, 32);
+        String accountId = regionResolver.getAccountId();
+        String urlId = UUID.nameUUIDFromBytes(
+                        (accountId + region + functionName + (qualifier != null ? qualifier : "")).getBytes())
+                .toString()
+                .replace("-", "")
+                .substring(0, 32);
         String baseHost = config.effectiveBaseUrl().replaceFirst("https?://", "");
         String url = String.format("http://%s.lambda-url.%s.%s/", urlId, region, baseHost);
         urlConfig.setFunctionUrl(url);

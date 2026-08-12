@@ -89,9 +89,7 @@ public class EventBridgeInvoker {
         
         try {
             if (arn.contains(":lambda:") || arn.contains(":function:")) {
-                String fnName = arn.substring(arn.lastIndexOf(':') + 1);
-                String fnRegion = extractRegionFromArn(arn, region);
-                lambdaService.invoke(fnRegion, fnName, payload.getBytes(), InvocationType.Event);
+                lambdaService.invokeArn(arn, payload.getBytes(), InvocationType.Event);
                 LOG.debugv("EventBridge delivered to Lambda: {0}", arn);
             } else if (arn.contains(":sqs:")) {
                 String queueUrl = AwsArnUtils.arnToQueueUrl(arn, baseUrl);
