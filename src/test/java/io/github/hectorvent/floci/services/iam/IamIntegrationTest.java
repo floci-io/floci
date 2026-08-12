@@ -10,6 +10,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 /**
@@ -1053,5 +1054,216 @@ class IamIntegrationTest {
             .contentType(containsString("xml"))
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
             .body("ErrorResponse.Error.Message", not(containsString("null")));
+    }
+
+    // =========================================================================
+    // Tags on Get*/Create* responses
+    //
+    // The IAM API reference puts Tags on the Role, User and Policy structures, so
+    // GetRole/GetUser/GetPolicy and their Create* counterparts must carry them. The
+    // resource-listing operations document the opposite: "IAM resource-listing
+    // operations return a subset of the available attributes for the resource. ...
+    // this operation does not return tags."
+    // =========================================================================
+
+    private static final String AUTH_HEADER =
+            "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request";
+
+    @Test
+    @Order(80)
+    void createRoleAndGetRoleReturnTagsButListRolesDoesNot() {
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "TaggedRole")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .formParam("Tags.member.1.Key", "Project")
+            .formParam("Tags.member.1.Value", "choudoufu")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateRoleResponse.CreateRoleResult.Role.Tags.member.Key", equalTo("Project"))
+            .body("CreateRoleResponse.CreateRoleResult.Role.Tags.member.Value", equalTo("choudoufu"));
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "TaggedRole")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.Tags.member.Key", equalTo("Project"))
+            .body("GetRoleResponse.GetRoleResult.Role.Tags.member.Value", equalTo("choudoufu"));
+
+        String listRoles = given()
+            .formParam("Action", "ListRoles")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListRolesResponse.ListRolesResult.Roles.member.find { it.RoleName == 'TaggedRole' }.RoleName",
+                    equalTo("TaggedRole"))
+            .extract().asString();
+        assertThat(listRoles, not(containsString("<Tags>")));
+    }
+
+    @Test
+    @Order(81)
+    void getRoleReflectsTagsAddedAfterCreation() {
+        given()
+            .formParam("Action", "TagRole")
+            .formParam("RoleName", "TaggedRole")
+            .formParam("Tags.member.1.Key", "Owner")
+            .formParam("Tags.member.1.Value", "platform")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "TaggedRole")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.Tags.member.Key",
+                    containsInAnyOrder("Project", "Owner"));
+
+        given()
+            .formParam("Action", "UntagRole")
+            .formParam("TagKeys.member.1", "Owner")
+            .formParam("RoleName", "TaggedRole")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "TaggedRole")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.Tags.member.Key", equalTo("Project"));
+    }
+
+    @Test
+    @Order(82)
+    void getRoleOmitsTagsBlockForAnUntaggedRole() {
+        String created = given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "UntaggedRole")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(created, not(containsString("<Tags>")));
+
+        String fetched = given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "UntaggedRole")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.RoleName", equalTo("UntaggedRole"))
+            .extract().asString();
+        assertThat(fetched, not(containsString("<Tags>")));
+    }
+
+    @Test
+    @Order(83)
+    void createUserAndGetUserReturnTagsButListUsersDoesNot() {
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", "tagged-user")
+            .formParam("Tags.member.1.Key", "Project")
+            .formParam("Tags.member.1.Value", "choudoufu")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateUserResponse.CreateUserResult.User.Tags.member.Key", equalTo("Project"))
+            .body("CreateUserResponse.CreateUserResult.User.Tags.member.Value", equalTo("choudoufu"));
+
+        given()
+            .formParam("Action", "GetUser")
+            .formParam("UserName", "tagged-user")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetUserResponse.GetUserResult.User.Tags.member.Key", equalTo("Project"))
+            .body("GetUserResponse.GetUserResult.User.Tags.member.Value", equalTo("choudoufu"));
+
+        String listUsers = given()
+            .formParam("Action", "ListUsers")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListUsersResponse.ListUsersResult.Users.member.find { it.UserName == 'tagged-user' }.UserName",
+                    equalTo("tagged-user"))
+            .extract().asString();
+        assertThat(listUsers, not(containsString("<Tags>")));
+    }
+
+    @Test
+    @Order(84)
+    void createPolicyAndGetPolicyReturnTagsButListPoliciesDoesNot() {
+        String arn = given()
+            .formParam("Action", "CreatePolicy")
+            .formParam("PolicyName", "TaggedPolicy")
+            .formParam("PolicyDocument", POLICY_DOCUMENT)
+            .formParam("Tags.member.1.Key", "Project")
+            .formParam("Tags.member.1.Value", "choudoufu")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreatePolicyResponse.CreatePolicyResult.Policy.Tags.member.Key", equalTo("Project"))
+            .extract()
+            .path("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", arn)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Tags.member.Key", equalTo("Project"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Tags.member.Value", equalTo("choudoufu"));
+
+        String listPolicies = given()
+            .formParam("Action", "ListPolicies")
+            .formParam("Scope", "Local")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListPoliciesResponse.ListPoliciesResult.Policies.member.find { it.PolicyName == 'TaggedPolicy' }.PolicyName",
+                    equalTo("TaggedPolicy"))
+            .extract().asString();
+        assertThat(listPolicies, not(containsString("<Tags>")));
     }
 }

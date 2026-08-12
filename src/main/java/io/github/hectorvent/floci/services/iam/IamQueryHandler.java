@@ -178,7 +178,7 @@ public class IamQueryHandler {
         IamUser user = iamService.createUser(userName, path);
         if (!tags.isEmpty()) iamService.tagUser(userName, tags);
         user = iamService.getUser(userName);
-        String result = new XmlBuilder().start("User").raw(userXml(user)).end("User").build();
+        String result = new XmlBuilder().start("User").raw(userXml(user, true)).end("User").build();
         return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.IAM, result)).build();
     }
 
@@ -204,7 +204,7 @@ public class IamQueryHandler {
         // UserName is optional per the IAM model: it defaults to the user owning the
         // access key that signed the request.
         IamUser user = iamService.getUser(resolveUserName(params, authorization));
-        String result = new XmlBuilder().start("User").raw(userXml(user)).end("User").build();
+        String result = new XmlBuilder().start("User").raw(userXml(user, true)).end("User").build();
         return Response.ok(AwsQueryResponse.envelope("GetUser", AwsNamespaces.IAM, result)).build();
     }
 
@@ -219,7 +219,7 @@ public class IamQueryHandler {
         List<IamUser> userList = iamService.listUsers(pathPrefix);
         var xml = new XmlBuilder().start("Users");
         for (IamUser u : userList) {
-            xml.start("member").raw(userXml(u)).end("member");
+            xml.start("member").raw(userXml(u, false)).end("member");
         }
         xml.end("Users").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListUsers", AwsNamespaces.IAM, xml.build())).build();
@@ -330,7 +330,7 @@ public class IamQueryHandler {
                 .start("Group").raw(groupXml(group)).end("Group")
                 .start("Users");
         for (IamUser u : members) {
-            xml.start("member").raw(userXml(u)).end("member");
+            xml.start("member").raw(userXml(u, false)).end("member");
         }
         xml.end("Users").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("GetGroup", AwsNamespaces.IAM, xml.build())).build();
@@ -383,13 +383,13 @@ public class IamQueryHandler {
         int maxSession = getIntParam(params, "MaxSessionDuration", 3600);
         Map<String, String> tags = extractTags(params);
         IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags);
-        String result = new XmlBuilder().start("Role").raw(roleXml(role)).end("Role").build();
+        String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("CreateRole", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleGetRole(MultivaluedMap<String, String> params) {
         IamRole role = iamService.getRole(getParam(params, "RoleName"));
-        String result = new XmlBuilder().start("Role").raw(roleXml(role)).end("Role").build();
+        String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("GetRole", AwsNamespaces.IAM, result)).build();
     }
 
@@ -402,7 +402,7 @@ public class IamQueryHandler {
         List<IamRole> roleList = iamService.listRoles(getParam(params, "PathPrefix"));
         var xml = new XmlBuilder().start("Roles");
         for (IamRole r : roleList) {
-            xml.start("member").raw(roleXml(r)).end("member");
+            xml.start("member").raw(roleXml(r, false)).end("member");
         }
         xml.end("Roles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListRoles", AwsNamespaces.IAM, xml.build())).build();
@@ -449,13 +449,13 @@ public class IamQueryHandler {
         String document = getParam(params, "PolicyDocument");
         Map<String, String> tags = extractTags(params);
         IamPolicy policy = iamService.createPolicy(policyName, path, description, document, tags);
-        String result = new XmlBuilder().start("Policy").raw(policyXml(policy)).end("Policy").build();
+        String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("CreatePolicy", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleGetPolicy(MultivaluedMap<String, String> params) {
         IamPolicy policy = iamService.getPolicy(getParam(params, "PolicyArn"));
-        String result = new XmlBuilder().start("Policy").raw(policyXml(policy)).end("Policy").build();
+        String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("GetPolicy", AwsNamespaces.IAM, result)).build();
     }
 
@@ -469,7 +469,7 @@ public class IamQueryHandler {
                 getParam(params, "Scope"), getParam(params, "PathPrefix"));
         var xml = new XmlBuilder().start("Policies");
         for (IamPolicy p : policyList) {
-            xml.start("member").raw(policyXml(p)).end("member");
+            xml.start("member").raw(policyXml(p, false)).end("member");
         }
         xml.end("Policies").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListPolicies", AwsNamespaces.IAM, xml.build())).build();
@@ -851,14 +851,21 @@ public class IamQueryHandler {
     // XML serialization helpers
     // =========================================================================
 
-    private String userXml(IamUser u) {
-        return new XmlBuilder()
+    // Tags belong on the User/Role/Policy structures returned by the Get* and Create*
+    // operations. The resource-listing operations (ListUsers, ListRoles, ListPolicies,
+    // GetGroup) deliberately return a subset of the attributes and must not carry Tags —
+    // the IAM API reference documents that exclusion on each List* action.
+    private String userXml(IamUser u, boolean includeTags) {
+        var xml = new XmlBuilder()
                 .elem("Path", u.getPath())
                 .elem("UserName", u.getUserName())
                 .elem("UserId", u.getUserId())
                 .elem("Arn", u.getArn())
-                .elem("CreateDate", isoDate(u.getCreateDate()))
-                .build();
+                .elem("CreateDate", isoDate(u.getCreateDate()));
+        if (includeTags) {
+            appendTags(xml, u.getTags());
+        }
+        return xml.build();
     }
 
     private String groupXml(IamGroup g) {
@@ -871,8 +878,8 @@ public class IamQueryHandler {
                 .build();
     }
 
-    private String roleXml(IamRole r) {
-        return new XmlBuilder()
+    private String roleXml(IamRole r, boolean includeTags) {
+        var xml = new XmlBuilder()
                 .elem("Path", r.getPath())
                 .elem("RoleName", r.getRoleName())
                 .elem("RoleId", r.getRoleId())
@@ -880,12 +887,15 @@ public class IamQueryHandler {
                 .elem("CreateDate", isoDate(r.getCreateDate()))
                 .elem("MaxSessionDuration", (long) r.getMaxSessionDuration())
                 .elem("AssumeRolePolicyDocument", r.getAssumeRolePolicyDocument())
-                .elem("Description", r.getDescription())
-                .build();
+                .elem("Description", r.getDescription());
+        if (includeTags) {
+            appendTags(xml, r.getTags());
+        }
+        return xml.build();
     }
 
-    private String policyXml(IamPolicy p) {
-        return new XmlBuilder()
+    private String policyXml(IamPolicy p, boolean includeTags) {
+        var xml = new XmlBuilder()
                 .elem("PolicyName", p.getPolicyName())
                 .elem("PolicyId", p.getPolicyId())
                 .elem("Arn", p.getArn())
@@ -894,8 +904,11 @@ public class IamQueryHandler {
                 .elem("AttachmentCount", (long) p.getAttachmentCount())
                 .elem("IsAttachable", true)
                 .elem("CreateDate", isoDate(p.getCreateDate()))
-                .elem("UpdateDate", isoDate(p.getUpdateDate()))
-                .build();
+                .elem("UpdateDate", isoDate(p.getUpdateDate()));
+        if (includeTags) {
+            appendTags(xml, p.getTags());
+        }
+        return xml.build();
     }
 
     private String policyVersionXml(PolicyVersion v) {
@@ -929,7 +942,7 @@ public class IamQueryHandler {
         for (String roleName : p.getRoleNames()) {
             try {
                 IamRole role = iamService.getRole(roleName);
-                xml.start("member").raw(roleXml(role)).end("member");
+                xml.start("member").raw(roleXml(role, false)).end("member");
             } catch (AwsException ignored) {}
         }
         return xml.end("Roles").build();
@@ -952,6 +965,14 @@ public class IamQueryHandler {
             xml.elem("member", name);
         }
         return xml.end("PolicyNames").elem("IsTruncated", false).build();
+    }
+
+    /** Appends a {@code <Tags>} block, omitting it entirely when the resource has no tags. */
+    private void appendTags(XmlBuilder xml, Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return;
+        }
+        xml.start("Tags").raw(tagsXml(tags)).end("Tags");
     }
 
     private String tagsXml(Map<String, String> tags) {
