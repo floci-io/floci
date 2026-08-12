@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
@@ -34,7 +35,7 @@ class FirehoseServiceTest {
     void setUp() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
         s3Service = Mockito.mock(S3Service.class);
         firehoseService = new FirehoseService(storageFactory, s3Service,
                 new RegionResolver("us-east-1", "000000000000"), new MutableClock());
