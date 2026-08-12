@@ -18,6 +18,8 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -109,6 +111,17 @@ public class ContainerLauncher {
         this.awsEnv = awsEnv;
     }
 
+    @PostConstruct
+    void init() {
+        volumeCleanupScheduler.scheduleAtFixedRate(this::cleanupSupersededVolumes,
+                VOLUME_CLEANUP_GRACE_MS, VOLUME_CLEANUP_GRACE_MS, TimeUnit.MILLISECONDS);
+    }
+
+    @PreDestroy
+    void shutdown() {
+        volumeCleanupScheduler.shutdownNow();
+    }
+
     /**
      * Rewrites real-AWS-shaped ECR image URIs to point at Floci's loopback registry.
      * Stored ImageUri is preserved (so describe-function returns the original);
@@ -159,6 +172,10 @@ public class ContainerLauncher {
         // runtime-api port per failed attempt and eventually exhausts the pool, so launches keep
         // failing even after the daemon recovers.
         String containerId = null;
+        // Hoisted alongside containerId, for the same reason: the resolved volume name (if any)
+        // must be visible in the catch block below to release its in-flight reference on any
+        // failure path, not just the one where useCodeVolume's block itself throws.
+        String reservedCodeVolume = null;
         try {
 
         // Resolve image
@@ -250,8 +267,8 @@ public class ContainerLauncher {
                 // overlay I/O) and, run many-at-once, saturated the daemon so even `docker create`
                 // ballooned to ~80s. A pre-populated volume mounts in ~0.2s and is shared read-only
                 // by all containers of the function — matching AWS, where /var/task is read-only.
-                String codeVolume = ensureCodeVolume(fn, image);
-                specBuilder.withNamedVolume(codeVolume, TASK_DIR, true);
+                reservedCodeVolume = ensureCodeVolume(fn, image);
+                specBuilder.withNamedVolume(reservedCodeVolume, TASK_DIR, true);
             }
             // Small code takes the original per-container direct copy below (no volume): it's fast
             // enough that a shared volume's helper round-trip would only add cold-start latency.
@@ -287,6 +304,11 @@ public class ContainerLauncher {
         // /var/runtime/bootstrap on start, so code must be copied first.
         containerId = lifecycleManager.create(spec);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
+        // Docker now holds the real container-to-volume reference, which removeVolume's own in-use
+        // check protects from here on - release the in-flight marker that stood in for it before
+        // this point, and null it out so the catch block below doesn't release it a second time.
+        releaseCodeVolumeReference(reservedCodeVolume);
+        reservedCodeVolume = null;
 
         // Copy code into container via Docker API tar stream (works inside Docker too).
         // Hot-reload functions skip the tar-copy — the bind-mount already wires the host path.
@@ -387,6 +409,10 @@ public class ContainerLauncher {
             if (containerId != null) {
                 try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
             }
+            // No-op if create() already succeeded and released this above (reservedCodeVolume is
+            // null by then); otherwise the failure happened before Docker ever saw the volume, so
+            // its in-flight reference must be released here or cleanup would wait on it forever.
+            releaseCodeVolumeReference(reservedCodeVolume);
             try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
             throw e;
         }
@@ -439,11 +465,74 @@ public class ContainerLauncher {
 
     // Per-function-version code volumes: populated once, then mounted read-only into every
     // container so cold starts skip the ~95s node_modules copy. Tracks which volumes are already
-    // populated and a per-volume lock so a concurrent cold-start storm populates only once. The
-    // lock entry is dropped after a successful populate so this map only ever holds in-flight
-    // populates (see ensureCodeVolume) rather than growing across redeploys.
+    // populated and a per-volume lock so a concurrent cold-start storm populates only once - and so
+    // ensureCodeVolume's bookkeeping and cleanupSupersededVolumes' claim-and-delete for the same
+    // volume name can never interleave (see both call sites).
+    //
+    // This in-memory bookkeeping is a cache of Docker's actual state, not a source of truth: a
+    // volume manually removed mid-session (docker volume rm) or reclaimed by an out-of-band
+    // `docker volume prune` would otherwise still read as "populated" here even though Docker has
+    // nothing under that name, silently mounting an empty /var/task into the next container.
+    // ensureCodeVolume re-checks lifecycleManager.volumeExists() rather than trusting this alone.
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // Deliberately never pruned: removing an entry while a caller elsewhere still held a reference
+    // to its lock object let a third caller's computeIfAbsent create a replacement lock for the same
+    // volume name, so the waiter (once granted the old lock) and the new caller (holding the new
+    // one) could run their supposedly-exclusive sections concurrently - the exact race this map
+    // exists to prevent. Bounded in practice by the number of distinct function+code-version
+    // combinations ever launched, each entry a single Object; negligible next to the disk space the
+    // rest of this fix reclaims.
     private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Each function's current code volume, so a redeploy can queue the superseded one for cleanup. */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> functionCurrentVolume =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Serializes the functionCurrentVolume/volumesPendingCleanup transition below, keyed by function
+     * name rather than volume name. Two code versions of the same function resolve to two different
+     * volume names, so they hold two different codeVolumeLocks entries and can run that per-volume
+     * critical section concurrently - which is fine for the populate work, but not for this
+     * transition: without a shared lock, a rapid back-to-back redeploy (v2 then v3) can have v2's
+     * functionCurrentVolume.put land after v3's, leaving v3 - the actually-current volume - recorded
+     * as superseded and queued for cleanup while stale v2 is left marked current. Never pruned, for
+     * the same lock-identity reason as codeVolumeLocks, and bounded the same way (one entry per
+     * distinct function name ever launched).
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> functionVolumeTransitionLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Superseded code volumes queued for cleanup, mapped to the time they were superseded (millis
+     * since epoch). Deletion is deferred rather than immediate: Docker auto-creates an empty named
+     * volume for a container mount that doesn't reference an existing one rather than failing, so a
+     * launch that resolved the old volume name just before a redeploy, but hasn't created its
+     * container yet, could otherwise be handed an empty /var/task by an immediate delete. Waiting
+     * out a grace period comfortably longer than a single container launch takes crosses that
+     * window safely; removeVolume() also no-ops if the volume is still genuinely in use by then.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> volumesPendingCleanup =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Counts launches that hold a resolved volume name but haven't yet handed it to Docker via
+     * {@code create()} - i.e. no real container-to-volume reference exists yet for Docker's own
+     * in-use check to protect. The grace period in {@link #volumesPendingCleanup} assumes a launch
+     * completes create() well within it, but create() itself has no proven upper bound (observed
+     * up to ~80s under daemon load, longer than the default 60s grace period), so a slow launch can
+     * still be mid-flight when a sweep would otherwise delete its volume. cleanupSupersededVolumes
+     * re-queues rather than deletes while a volume's count here is nonzero, regardless of elapsed
+     * time. Entries are removed once their count returns to zero, so this stays bounded like the
+     * other per-volume maps.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> volumesInFlight =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Non-final and package-private, like {@link #CODE_VOLUME_MIN_BYTES}, so tests can shrink it
+     *  instead of waiting out a real 60s window (restore it in a finally). */
+    static long VOLUME_CLEANUP_GRACE_MS = 60_000L;
+    private final java.util.concurrent.ScheduledExecutorService volumeCleanupScheduler =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                    r -> { Thread t = new Thread(r, "floci-code-volume-cleanup"); t.setDaemon(true); return t; });
 
     /**
      * Returns the name of a read-only Docker volume holding this function's {@code /var/task} code,
@@ -453,33 +542,143 @@ public class ContainerLauncher {
      */
     private String ensureCodeVolume(LambdaFunction fn, String image) {
         String volName = codeVolumeName(fn);
-        if (populatedCodeVolumes.contains(volName)) {
-            return volName;
-        }
+        // Held for the whole resolve-and-reconcile, not just the populate branch: this is the same
+        // lock cleanupSupersededVolumes acquires before claiming a volume for deletion, so a launch
+        // that resolves a volume can never race a sweep that's about to delete that exact volume out
+        // from under it - whichever gets the lock first, the other reliably observes the result
+        // (rescued-from-cleanup, or actually-gone-and-needs-repopulating) rather than acting on
+        // stale state. Population itself is the only expensive part, and it happens at most once
+        // per code version regardless, so holding this for cheap map bookkeeping too costs nothing
+        // meaningful. codeVolumeLocks is never pruned (see the comment on that field): removing an
+        // entry while a waiter still held a reference to its lock object let a third caller create a
+        // replacement lock for the same name and run concurrently with the waiter once released,
+        // defeating this exclusion entirely.
         Object lock = codeVolumeLocks.computeIfAbsent(volName, k -> new Object());
         synchronized (lock) {
-            if (populatedCodeVolumes.contains(volName)) {
-                return volName;
+            if (!(populatedCodeVolumes.contains(volName) && lifecycleManager.volumeExists(volName))) {
+                // Either never populated, or the bookkeeping says populated but Docker disagrees
+                // (removed out of band). Repopulate rather than trust a stale flag.
+                long t0 = System.currentTimeMillis();
+                LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
+                        volName, fn.getFunctionName());
+                populateCodeVolume(volName, fn, image);
+                populatedCodeVolumes.add(volName);
+                LOG.infov("Populated code volume {0} in {1}ms; future cold starts mount it instead of copying",
+                        volName, System.currentTimeMillis() - t0);
             }
-            long t0 = System.currentTimeMillis();
-            LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
-                    volName, fn.getFunctionName());
-            populateCodeVolume(volName, fn, image);
-            populatedCodeVolumes.add(volName);
-            // Bound codeVolumeLocks: drop the lock now that the volume is populated, so the map only
-            // ever holds in-flight populates rather than growing across redeploys. Safe under the
-            // lock: a late thread that computeIfAbsent's a fresh lock object will still hit the
-            // populatedCodeVolumes.contains check inside its synchronized block and return without
-            // re-populating.
-            codeVolumeLocks.remove(volName);
-            LOG.infov("Populated code volume {0} in {1}ms; future cold starts mount it instead of copying",
-                    volName, System.currentTimeMillis() - t0);
+            // Reconcile bookkeeping for the resolved volume even when the check above already found
+            // it populated: a redeploy rolled back to an older code version resolves a volume name
+            // that's already populated but may have been queued as superseded by the deploy this
+            // just rolled back. Without pulling it back out of volumesPendingCleanup and marking it
+            // current again, the next sweep would delete the volume this function is actively using.
+            //
+            // Under the per-function lock too: this specific read-modify-write (put, then queue
+            // whatever was previously current) must be atomic across different code versions of the
+            // same function, or two concurrent resolves can interleave their put()/queue steps and
+            // leave the actually-current volume queued for cleanup instead of the stale one - see the
+            // comment on functionVolumeTransitionLocks.
+            Object functionLock = functionVolumeTransitionLocks.computeIfAbsent(
+                    fn.getFunctionName(), k -> new Object());
+            synchronized (functionLock) {
+                volumesPendingCleanup.remove(volName);
+                String previous = functionCurrentVolume.put(fn.getFunctionName(), volName);
+                if (previous != null && !previous.equals(volName)) {
+                    volumesPendingCleanup.put(previous, System.currentTimeMillis());
+                }
+            }
+            // Mark this volume as having an unconfirmed reference before releasing the lock: the
+            // caller now holds this name but hasn't handed it to Docker yet, so a sweep that acquires
+            // this same lock next must see the increment and skip deleting it. The caller releases
+            // this via releaseCodeVolumeReference once create() succeeds (or the launch fails).
+            volumesInFlight.computeIfAbsent(volName, k -> new java.util.concurrent.atomic.AtomicInteger())
+                    .incrementAndGet();
         }
-        // We do NOT eagerly delete a function's previous code-version volume here: a concurrent
-        // in-flight launch may have already resolved that name and be about to mount it, so deleting
-        // it would give that container an empty /var/task. Stale volumes are labeled floci=true (see
-        // ContainerLifecycleManager.ensureVolume) and reclaimed by `docker volume prune --filter label=floci`.
         return volName;
+    }
+
+    /**
+     * Releases the in-flight reference {@link #ensureCodeVolume} placed on {@code volName}. Safe to
+     * call with {@code null} (nothing was reserved) and idempotent bookkeeping-wise: the counter
+     * only ever reflects reservations actually made, since callers null out their local reference
+     * after releasing it (see {@link #launch}).
+     */
+    private void releaseCodeVolumeReference(String volName) {
+        if (volName == null) {
+            return;
+        }
+        volumesInFlight.computeIfPresent(volName, (k, count) -> count.decrementAndGet() > 0 ? count : null);
+    }
+
+    /**
+     * Removes superseded code volumes whose grace period has elapsed. Scheduled at the same
+     * interval as the grace period itself, so a volume is deleted within roughly one to two
+     * intervals of becoming superseded. Not a hard deadline, since this is best-effort cleanup,
+     * not a correctness requirement (a volume that outlives a few extra sweeps is still reclaimed by
+     * `docker volume prune --filter label=floci` same as before this existed).
+     */
+    void cleanupSupersededVolumes() {
+        long cutoff = System.currentTimeMillis() - VOLUME_CLEANUP_GRACE_MS;
+        for (String volName : new java.util.ArrayList<>(volumesPendingCleanup.keySet())) {
+            Long queuedAt = volumesPendingCleanup.get(volName);
+            if (queuedAt == null || queuedAt > cutoff) {
+                continue;
+            }
+            // Same lock ensureCodeVolume holds for this volume name: claiming and deleting it here
+            // must not interleave with a concurrent launch resolving (and possibly rescuing) it.
+            Object lock = codeVolumeLocks.computeIfAbsent(volName, k -> new Object());
+            synchronized (lock) {
+                // Re-check under the lock: a concurrent ensureCodeVolume may have rescued this
+                // volume (removed it from volumesPendingCleanup) or requeued it with a fresher
+                // timestamp between the check above and acquiring this lock.
+                Long stillQueuedAt = volumesPendingCleanup.get(volName);
+                if (stillQueuedAt == null || stillQueuedAt > cutoff) {
+                    continue;
+                }
+                java.util.concurrent.atomic.AtomicInteger inFlight = volumesInFlight.get(volName);
+                if (inFlight != null && inFlight.get() > 0) {
+                    // A launch has resolved this volume but hasn't handed it to Docker yet, so no
+                    // real container-to-volume reference exists for removeVolume's own in-use check
+                    // to catch. The grace period alone isn't a safe upper bound on that launch's
+                    // duration (create() has been observed taking ~80s under daemon load), so requeue
+                    // for a later sweep instead of trusting elapsed time here.
+                    volumesPendingCleanup.put(volName, System.currentTimeMillis());
+                    continue;
+                }
+                volumesPendingCleanup.remove(volName, stillQueuedAt);
+                if (lifecycleManager.removeVolume(volName)) {
+                    populatedCodeVolumes.remove(volName);
+                    LOG.debugv("Removed superseded code volume {0}", volName);
+                } else {
+                    // Not confirmed gone: still in use (e.g. a slow-draining in-flight container
+                    // outlived the grace period), or the removal attempt itself failed for some
+                    // other reason (e.g. a transient daemon error). Either way, without this the
+                    // entry would be lost with no later sweep ever retrying it. Leave
+                    // populatedCodeVolumes alone too, since for all we know it's still there and
+                    // still valid.
+                    volumesPendingCleanup.put(volName, System.currentTimeMillis());
+                }
+            }
+        }
+    }
+
+    /** Test-only: whether a per-volume lock object has ever been created for this volume name. */
+    boolean hasCodeVolumeLock(String volName) {
+        return codeVolumeLocks.containsKey(volName);
+    }
+
+    /**
+     * Test-only: the same lock object ensureCodeVolume synchronizes on for this function's
+     * current-volume transition, so a test can hold it directly to prove a concurrent launch blocks
+     * on it rather than racing past it.
+     */
+    Object functionVolumeTransitionLockFor(String functionName) {
+        return functionVolumeTransitionLocks.computeIfAbsent(functionName, k -> new Object());
+    }
+
+    /** Test-only: the current in-flight reference count for this volume name (0 if none). */
+    int inFlightCount(String volName) {
+        java.util.concurrent.atomic.AtomicInteger count = volumesInFlight.get(volName);
+        return count == null ? 0 : count.get();
     }
 
     private void populateCodeVolume(String volName, LambdaFunction fn, String image) {
