@@ -28,6 +28,9 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class EksServiceTest {
 
@@ -35,6 +38,10 @@ class EksServiceTest {
 
     @BeforeEach
     void setUp() {
+        eksService = newService(null, true);
+    }
+
+    private EksService newService(EksClusterManager clusterManager, boolean mock) {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> StorageBackend<String, V> create(String serviceName, String fileName,
@@ -43,16 +50,15 @@ class EksServiceTest {
             }
         };
 
-        EmulatorConfig config = testConfig();
-        EksClusterManager clusterManager = null;
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        eksService = new EksService(storageFactory, config, regionResolver, clusterManager);
+        return new EksService(storageFactory, testConfig(mock), regionResolver, clusterManager);
     }
 
-    private EmulatorConfig testConfig() {
+    private EmulatorConfig testConfig(boolean mock) {
         EmulatorConfig.EksServiceConfig eksConfig = proxy(EmulatorConfig.EksServiceConfig.class,
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "enabled", "mock" -> true;
+                    case "enabled" -> true;
+                    case "mock" -> mock;
                     case "apiServerBasePort" -> 6500;
                     default -> defaultValue(method);
                 });
@@ -130,6 +136,84 @@ class EksServiceTest {
         request.setSubnets(List.of("subnet-0e2907431c9988b72", "subnet-04ad87f71c6e5ab4d"));
         request.setSelectors(List.of(selector));
         return request;
+    }
+
+    // ------------------------------------------------------------
+    // No Docker daemon reachable (Floci inside Docker with no mounted socket)
+    // ------------------------------------------------------------
+
+    @Test
+    void createClusterReachesActiveMetadataWhenNoDockerDaemonIsReachable() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(false);
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("probe-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setTags(Map.of("tofu-estate", "probe1"));
+
+        Cluster cluster = service.createCluster(request);
+
+        assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
+        assertEquals("https://localhost:6500", cluster.getEndpoint());
+        assertEquals("probe1", cluster.getTags().get("tofu-estate"));
+        // No k3s API server exists — the empty CA is what says so.
+        assertEquals("", cluster.getCertificateAuthority().getData());
+        assertNull(cluster.getContainerId());
+    }
+
+    @Test
+    void clusterMetadataCrudWorksWhenNoDockerDaemonIsReachable() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(false);
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("probe-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setTags(Map.of("tofu-estate", "probe1"));
+        String arn = service.createCluster(request).getArn();
+
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("probe-eks").getStatus());
+        assertEquals(List.of("probe-eks"), service.listClusters());
+        assertEquals("probe1", service.listTagsForResource(arn).get("tofu-estate"));
+
+        service.tagResource(arn, Map.of("Name", "probe-eks"));
+        assertEquals("probe-eks", service.listTagsForResource(arn).get("Name"));
+
+        assertEquals(NodegroupStatus.ACTIVE,
+                service.createNodeGroup("probe-eks", nodeGroupRequest("ng-1")).getStatus());
+
+        service.deleteCluster("probe-eks");
+        assertThrows(AwsException.class, () -> service.describeCluster("probe-eks"));
+    }
+
+    @Test
+    void createClusterStillFailsOnAGenuineProvisioningErrorWithAReachableDaemon() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any()))
+                .thenThrow(new RuntimeException("no such image: rancher/k3s"));
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("broken-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+
+        assertEquals(ClusterStatus.FAILED, service.createCluster(request).getStatus());
+    }
+
+    @Test
+    void createClusterStaysCreatingWhileTheK3sContainerBoots() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(true);
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("real-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+
+        assertEquals(ClusterStatus.CREATING, service.createCluster(request).getStatus());
     }
 
     @Test

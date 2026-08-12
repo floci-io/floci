@@ -116,11 +116,15 @@ public class EksService implements TagHandler {
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
         if (config.services().eks().mock()) {
-            cluster.setStatus(ClusterStatus.ACTIVE);
-            cluster.setEndpoint("https://localhost:" + config.services().eks().apiServerBasePort());
+            markMetadataOnlyActive(cluster);
         } else {
             try {
-                clusterManager.startCluster(cluster);
+                if (!clusterManager.tryStartCluster(cluster)) {
+                    // No Docker daemon: the k3s control plane cannot run, but the cluster record is
+                    // metadata that stands on its own. FAILED is reserved for provisioning errors
+                    // AWS would also report, and would strand every IaC apply that polls for ACTIVE.
+                    markMetadataOnlyActive(cluster);
+                }
             } catch (Exception e) {
                 LOG.errorv("Failed to start k3s container for cluster {0}: {1}", name, e.getMessage());
                 cluster.setStatus(ClusterStatus.FAILED);
@@ -129,6 +133,17 @@ public class EksService implements TagHandler {
 
         storage.put(name, cluster);
         return cluster;
+    }
+
+    /**
+     * Marks a cluster ACTIVE with no Kubernetes API server behind it — the shape used by mock mode
+     * and by a Floci that cannot reach a Docker daemon. Every EKS API Floci implements is control
+     * plane (clusters, nodegroups, Fargate profiles, tags) and keeps working; the empty
+     * certificateAuthority is what tells a caller no real cluster is listening on the endpoint.
+     */
+    private void markMetadataOnlyActive(Cluster cluster) {
+        cluster.setStatus(ClusterStatus.ACTIVE);
+        cluster.setEndpoint("https://localhost:" + config.services().eks().apiServerBasePort());
     }
 
     public Cluster describeCluster(String name) {

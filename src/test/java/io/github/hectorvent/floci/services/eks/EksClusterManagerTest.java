@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.model.Cluster;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,6 +22,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -100,6 +102,64 @@ class EksClusterManagerTest {
         assertTrue(yaml.contains("\"111122223333.dkr.ecr.eu-central-1.localhost:5142\":"));
         assertTrue(yaml.contains("\"localhost:5142\":"));
         assertTrue(yaml.contains("- \"http://my-registry:5000\""));
+    }
+
+    /** Cluster startup when Floci cannot reach a Docker daemon at all. */
+    @Nested
+    class TryStartCluster {
+
+        private ContainerLifecycleManager lifecycleManager;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.EksServiceConfig eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            EmulatorConfig.DockerConfig docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
+            when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
+            when(config.services().eks()).thenReturn(eks);
+            when(config.docker()).thenReturn(docker);
+            when(docker.resourceNamespace()).thenReturn(java.util.Optional.empty());
+            when(eks.defaultImage()).thenReturn("rancher/k3s:v1.34.1-k3s1");
+
+            manager = new EksClusterManager(
+                    Mockito.mock(ContainerBuilder.class), lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    Mockito.mock(DockerHostResolver.class),
+                    Mockito.mock(EcrRegistryManager.class), config);
+        }
+
+        @Test
+        void reportsUnavailableInsteadOfThrowingWhenNoDockerDaemonIsReachable() {
+            RuntimeException socketFailure =
+                    new RuntimeException("java.net.SocketException: No such file or directory");
+            Mockito.doThrow(socketFailure).when(lifecycleManager).removeIfExists(anyString());
+            when(lifecycleManager.getDockerClient()).thenThrow(socketFailure);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("probe-eks");
+
+            assertFalse(manager.tryStartCluster(cluster));
+            assertFalse(manager.isDockerReachable());
+        }
+
+        @Test
+        void propagatesFailuresRaisedWhileTheDaemonIsReachable() {
+            // A reachable daemon that cannot start k3s is a genuine provisioning error, and the
+            // cluster should still end up FAILED rather than claiming to be ACTIVE.
+            Mockito.doThrow(new RuntimeException("no such image: rancher/k3s"))
+                    .when(lifecycleManager).removeIfExists(anyString());
+            when(lifecycleManager.getDockerClient())
+                    .thenReturn(Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("probe-eks");
+
+            RuntimeException failure = assertThrows(RuntimeException.class,
+                    () -> manager.tryStartCluster(cluster));
+            assertEquals("no such image: rancher/k3s", failure.getMessage());
+        }
     }
 
     /** Mirror-injection guard behavior, without a Docker daemon. */

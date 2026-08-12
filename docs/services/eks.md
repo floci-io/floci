@@ -37,6 +37,18 @@ Floci starts a **k3s** (`rancher/k3s`) container for each cluster. The k3s API s
 
 By default `describe-cluster` returns a **host-reachable** endpoint (`https://localhost:<hostPort>`); the k3s server certificate includes a `localhost` SAN, so it verifies against the CA in `cluster.certificateAuthority.data`. Set `endpoint-mode: network` to return the container DNS name (`https://floci-eks-<name>:6443`) instead — reachable from other containers on the Docker network (the pre-#1118 behaviour). In `network` mode the endpoint falls back to the host-reachable form when Floci runs natively, since there is no container DNS name a host client could use.
 
+#### Without a reachable Docker daemon
+
+When no Docker daemon is reachable — Floci running inside Docker with no socket mounted, or a
+stopped daemon on the host — k3s cannot start, and the cluster is created as metadata only: it goes
+straight to `ACTIVE`, and `DescribeCluster`, `ListClusters`, the tagging APIs, nodegroups, Fargate
+profiles and `DeleteCluster` all work. Floci logs a warning naming the missing daemon.
+
+Nothing listens on the endpoint that `describe-cluster` reports in that state, and
+`certificateAuthority.data` stays empty, so `kubectl` cannot connect. A daemon that *is* reachable
+but cannot start k3s still leaves the cluster `FAILED`, which is reserved for genuine provisioning
+errors.
+
 #### Connecting with `kubectl` (native AWS workflow)
 
 The standard AWS flow works end to end:
