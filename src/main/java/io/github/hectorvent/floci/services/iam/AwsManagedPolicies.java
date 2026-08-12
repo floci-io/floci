@@ -127,6 +127,10 @@ final class AwsManagedPolicies {
         new ManagedPolicyDef("CloudWatchLambdaApplicationSignalsExecutionRolePolicy", "/",
                 "Provides write access to X-Ray and CloudWatch Application Signals log group."),
 
+        // API Gateway execution role policy
+        new ManagedPolicyDef("AmazonAPIGatewayPushToCloudWatchLogs", "/service-role/",
+                "Allows API Gateway to push logs to CloudWatch Logs."),
+
         // Config execution role policy
         new ManagedPolicyDef("AWSConfigRulesExecutionRole", "/service-role/",
                 "Allows AWS Config Rules Lambda functions to call AWS services and read the configuration of AWS resources."),

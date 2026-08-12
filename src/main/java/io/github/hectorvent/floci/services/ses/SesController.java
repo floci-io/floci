@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TopicPreference;
@@ -18,6 +19,7 @@ import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
@@ -87,9 +89,27 @@ public class SesController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = objectMapper.readTree(body);
-            String emailIdentity = request.path("EmailIdentity").asText(null);
+            JsonNode emailIdentityNode = request.path("EmailIdentity");
+            if (!emailIdentityNode.isMissingNode() && !emailIdentityNode.isNull()
+                    && !emailIdentityNode.isTextual()) {
+                // A non-string EmailIdentity is rejected rather than coerced (asText would turn 123
+                // into "123"), the same as ConfigurationSetName below.
+                throw new AwsException("SerializationException", null, 400);
+            }
+            String emailIdentity = emailIdentityNode.asText(null);
             if (emailIdentity == null || emailIdentity.isBlank()) {
                 throw new AwsException("BadRequestException", "EmailIdentity is required.", 400);
+            }
+            // ConfigurationSetName must be a String; AWS rejects a non-string, so reject it here too
+            // rather than coercing via asText (which would turn 123 into "123"). Floci surfaces this
+            // as a 400 SerializationException, rendered as a JSON error body by AwsExceptionMapper.
+            JsonNode configSetNode = request.path("ConfigurationSetName");
+            String configurationSetName = null;
+            if (!configSetNode.isMissingNode() && !configSetNode.isNull()) {
+                if (!configSetNode.isTextual()) {
+                    throw new AwsException("SerializationException", null, 400);
+                }
+                configurationSetName = configSetNode.textValue();
             }
 
             if (sesService.getIdentityVerificationAttributes(emailIdentity, region) != null) {
@@ -97,11 +117,30 @@ public class SesController {
                         "Email identity " + emailIdentity + " already exist.", 400);
             }
 
+            // Parse Tags up front. parseTagsArray is pure (it only reads the node), so validating the
+            // shape before creating the identity keeps the call atomic — a malformed Tags value fails
+            // without leaving a half-created identity behind, matching AWS and the ConfigurationSetName
+            // pre-check below.
+            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
+
+            // Verified against AWS: a non-existent ConfigurationSetName fails the whole call
+            // (NotFoundException) without creating the identity, so validate it before creating.
+            // Only the empty string means "no default configuration set" (consistent with the
+            // PutEmailIdentityConfigurationSetAttributes path); a whitespace-only name flows through
+            // name validation and is rejected as invalid input, rather than being silently ignored.
+            boolean hasConfigSet = configurationSetName != null && !configurationSetName.isEmpty();
+            if (hasConfigSet) {
+                sesService.getConfigurationSet(configurationSetName, region);
+            }
+
             Identity identity = emailIdentity.contains("@")
                     ? sesService.verifyEmailIdentity(emailIdentity, region)
                     : sesService.verifyDomainIdentity(emailIdentity, region);
 
-            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
+            if (hasConfigSet) {
+                sesService.setEmailIdentityConfigurationSet(emailIdentity, configurationSetName, region);
+            }
+
             if (parsedTags != null) {
                 sesService.setIdentityTags(emailIdentity, region, parsedTags);
             }
@@ -416,6 +455,8 @@ public class SesController {
             List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
+            ListManagementOptions listManagement =
+                    parseListManagementOptions(request.path("ListManagementOptions"));
 
             JsonNode content = request.path("Content");
             String messageId;
@@ -431,7 +472,7 @@ public class SesController {
                             "At least one destination address is required.", 400);
                 }
                 messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
-                        configurationSetName, emailTags, region);
+                        configurationSetName, emailTags, listManagement, region);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -441,10 +482,11 @@ public class SesController {
                 String subject = simple.path("Subject").path("Data").asText("");
                 String bodyText = simple.path("Body").path("Text").path("Data").asText(null);
                 String bodyHtml = simple.path("Body").path("Html").path("Data").asText(null);
-                List<MessageHeader> additionalHeaders = parseHeadersArray(simple.path("Headers"));
+                List<MessageHeader> additionalHeaders =
+                        parseHeadersArray(simple.path("Headers"), "content.simple.headers");
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
                         bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
-                        configurationSetName, emailTags, additionalHeaders, region);
+                        configurationSetName, emailTags, additionalHeaders, listManagement, region);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     throw new AwsException("BadRequestException", "Source cannot be empty", 400);
@@ -466,14 +508,15 @@ public class SesController {
                             "Content.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
                 }
                 JsonNode templateData = parseTemplateData(template, "TemplateData");
-                List<MessageHeader> additionalHeaders = parseHeadersArray(template.path("Headers"));
+                List<MessageHeader> additionalHeaders =
+                        parseHeadersArray(template.path("Headers"), "content.template.headers");
                 if (hasName || hasArn) {
                     String resolvedName = hasName
                             ? templateName
                             : SesService.templateNameFromArn(templateArn);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
                             bccAddresses, replyToAddresses, resolvedName, templateData,
-                            configurationSetName, emailTags, additionalHeaders, region);
+                            configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
                     String subject = inline.path("Subject").asText(null);
@@ -482,7 +525,7 @@ public class SesController {
                     messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
                             ccAddresses, bccAddresses, replyToAddresses,
                             subject, text, html, templateData,
-                            configurationSetName, emailTags, additionalHeaders, region);
+                            configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 }
             } else {
                 throw new AwsException("BadRequestException",
@@ -563,7 +606,8 @@ public class SesController {
 
             JsonNode defaultTemplateData = parseTemplateData(template, "TemplateData");
             List<MessageTag> defaultEmailTags = parseEmailTagsArray(request.path("DefaultEmailTags"), "DefaultEmailTags");
-            List<MessageHeader> defaultHeaders = parseHeadersArray(template.path("Headers"));
+            List<MessageHeader> defaultHeaders =
+                    parseHeadersArray(template.path("Headers"), "defaultContent.template.headers");
 
             JsonNode bulkEntries = request.path("BulkEmailEntries");
             if (!bulkEntries.isArray() || bulkEntries.isEmpty()) {
@@ -572,6 +616,7 @@ public class SesController {
             }
 
             List<BulkEmailEntry> entries = new ArrayList<>();
+            int entryIndex = 1;
             for (JsonNode node : bulkEntries) {
                 if (!node.isObject()) {
                     throw new AwsException("BadRequestException",
@@ -585,8 +630,10 @@ public class SesController {
                 JsonNode replacementTemplate = requireObjectOrAbsent(replacementContent, "ReplacementTemplate");
                 JsonNode replacementData = parseTemplateData(replacementTemplate, "ReplacementTemplateData");
                 List<MessageTag> replacementTags = parseEmailTagsArray(node.path("ReplacementTags"), "ReplacementTags");
-                List<MessageHeader> entryReplacementHeaders = parseHeadersArray(node.path("ReplacementHeaders"));
+                List<MessageHeader> entryReplacementHeaders = parseHeadersArray(node.path("ReplacementHeaders"),
+                        "bulkEmailEntries." + entryIndex + ".replacementHeaders");
                 entries.add(new BulkEmailEntry(to, cc, bcc, replacementData, replacementTags, entryReplacementHeaders));
+                entryIndex++;
             }
 
             List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
@@ -619,6 +666,136 @@ public class SesController {
     }
 
     // ──────────────────────────── Templates ────────────────────────────
+
+    // ──────────────── Custom verification email templates ────────────────
+
+    @POST
+    @Path("/custom-verification-email-templates")
+    public Response createCustomVerificationEmailTemplate(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            CustomVerificationEmailTemplate t = parseCvet(objectMapper.readTree(body));
+            sesService.createCustomVerificationEmailTemplate(t, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/custom-verification-email-templates")
+    public Response listCustomVerificationEmailTemplates(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode items = result.putArray("CustomVerificationEmailTemplates");
+        for (CustomVerificationEmailTemplate t : sesService.listCustomVerificationEmailTemplates(region)) {
+            items.add(cvetJson(t, false));
+        }
+        return Response.ok(result).build();
+    }
+
+    @GET
+    @Path("/custom-verification-email-templates/{templateName}")
+    public Response getCustomVerificationEmailTemplate(@Context HttpHeaders headers,
+                                                       @PathParam("templateName") String templateName) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            return Response.ok(
+                    cvetJson(sesService.getCustomVerificationEmailTemplate(templateName, region), true)).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/custom-verification-email-templates/{templateName}")
+    public Response updateCustomVerificationEmailTemplate(@Context HttpHeaders headers,
+                                                          @PathParam("templateName") String templateName, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            CustomVerificationEmailTemplate t = parseCvet(objectMapper.readTree(body));
+            t.setTemplateName(templateName);
+            sesService.updateCustomVerificationEmailTemplate(t, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @DELETE
+    @Path("/custom-verification-email-templates/{templateName}")
+    public Response deleteCustomVerificationEmailTemplate(@Context HttpHeaders headers,
+                                                          @PathParam("templateName") String templateName) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            sesService.deleteCustomVerificationEmailTemplate(templateName, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @POST
+    @Path("/outbound-custom-verification-emails")
+    public Response sendCustomVerificationEmail(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        String templateName = null;
+        try {
+            if (!sesService.isAccountSendingEnabled(region)) {
+                throw new AwsException("SendingPausedException",
+                        "Account sending is disabled.", 400);
+            }
+            JsonNode request = objectMapper.readTree(body);
+            requireJsonObject(request);
+            templateName = request.path("TemplateName").asText(null);
+            String messageId = sesService.sendCustomVerificationEmail(
+                    request.path("EmailAddress").asText(null), templateName,
+                    request.path("ConfigurationSetName").asText(null), region);
+            ObjectNode result = objectMapper.createObjectNode();
+            result.put("MessageId", messageId);
+            return Response.ok(result).build();
+        } catch (AwsException e) {
+            // AWS returns a longer not-found message on v2 than the v1 send message ("Template <name>
+            // does not exist"); the service throws the v1-native form, so restate it in the v2 wording.
+            if ("CustomVerificationEmailTemplateDoesNotExist".equals(e.getErrorCode())) {
+                throw new AwsException("NotFoundException",
+                        "Custom verification email template <" + templateName + "> does not exist", 404);
+            }
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    private CustomVerificationEmailTemplate parseCvet(JsonNode request) {
+        requireJsonObject(request);
+        CustomVerificationEmailTemplate t = new CustomVerificationEmailTemplate();
+        t.setTemplateName(request.path("TemplateName").asText(null));
+        t.setFromEmailAddress(request.path("FromEmailAddress").asText(null));
+        t.setTemplateSubject(request.path("TemplateSubject").asText(null));
+        t.setTemplateContent(request.path("TemplateContent").asText(null));
+        t.setSuccessRedirectionURL(request.path("SuccessRedirectionURL").asText(null));
+        t.setFailureRedirectionURL(request.path("FailureRedirectionURL").asText(null));
+        return t;
+    }
+
+    // List omits TemplateContent (matches AWS); Get includes it.
+    private ObjectNode cvetJson(CustomVerificationEmailTemplate t, boolean includeContent) {
+        ObjectNode o = objectMapper.createObjectNode();
+        o.put("TemplateName", t.getTemplateName());
+        o.put("FromEmailAddress", t.getFromEmailAddress());
+        o.put("TemplateSubject", t.getTemplateSubject());
+        if (includeContent) {
+            o.put("TemplateContent", t.getTemplateContent());
+        }
+        o.put("SuccessRedirectionURL", t.getSuccessRedirectionURL());
+        o.put("FailureRedirectionURL", t.getFailureRedirectionURL());
+        return o;
+    }
 
     @POST
     @Path("/templates")
@@ -2134,9 +2311,12 @@ public class SesController {
     /**
      * Parse a V2 SES {@code Content.Simple.Headers} / {@code Content.Template.Headers} array
      * (additional message headers, elements use {@code Name}/{@code Value}). Returns an empty
-     * list when the node is absent so callers can pass it through unconditionally.
+     * list when the node is absent so callers can pass it through unconditionally. Both members
+     * are required: an entry that omits {@code Name} or {@code Value} is rejected the way AWS
+     * does, with a Smithy constraint message anchored at {@code location} (e.g.
+     * {@code content.simple.headers}) and the offending 1-based index.
      */
-    private List<MessageHeader> parseHeadersArray(JsonNode headersNode) {
+    private List<MessageHeader> parseHeadersArray(JsonNode headersNode, String location) {
         if (headersNode.isMissingNode() || headersNode.isNull()) {
             return List.of();
         }
@@ -2144,20 +2324,35 @@ public class SesController {
             throw new AwsException("BadRequestException", "Headers must be an array.", 400);
         }
         List<MessageHeader> out = new ArrayList<>();
+        int index = 1;
         for (JsonNode h : headersNode) {
             if (!h.isObject()) {
                 throw new AwsException("BadRequestException",
                         "Headers entries must be JSON objects.", 400);
             }
-            String name = h.path("Name").asText(null);
-            String value = h.path("Value").asText(null);
-            if (name == null || name.isBlank()) {
+            JsonNode nameNode = h.get("Name");
+            JsonNode valueNode = h.get("Value");
+            if (nameNode == null || nameNode.isNull()) {
+                throw missingHeaderMember(location, index, "name");
+            }
+            if (valueNode == null || valueNode.isNull()) {
+                throw missingHeaderMember(location, index, "value");
+            }
+            String name = nameNode.asText();
+            if (name.isBlank()) {
                 throw new AwsException("BadRequestException",
                         "The header name must be specified.", 400);
             }
-            out.add(new MessageHeader(name, value));
+            out.add(new MessageHeader(name, valueNode.asText()));
+            index++;
         }
         return out;
+    }
+
+    private AwsException missingHeaderMember(String location, int index, String member) {
+        return new AwsException("BadRequestException",
+                "1 validation error detected: Value at '" + location + "." + index + ".member." + member
+                        + "' failed to satisfy constraint: Member must not be null", 400);
     }
 
     /**
@@ -2170,6 +2365,30 @@ public class SesController {
      * The {@code fieldName} parameter is reported in the error message when the node is
      * present but not an array.
      */
+    private static ListManagementOptions parseListManagementOptions(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isObject()) {
+            throw new AwsException("BadRequestException", "ListManagementOptions must be an object.", 400);
+        }
+        JsonNode listNode = node.path("ContactListName");
+        if (!listNode.isTextual() || listNode.textValue().isBlank()) {
+            throw new AwsException("BadRequestException",
+                    "ListManagementOptions.ContactListName is required.", 400);
+        }
+        JsonNode topicNode = node.path("TopicName");
+        String topicName = null;
+        if (!topicNode.isMissingNode() && !topicNode.isNull()) {
+            if (!topicNode.isTextual()) {
+                throw new AwsException("BadRequestException",
+                        "ListManagementOptions.TopicName must be a string.", 400);
+            }
+            topicName = topicNode.textValue();
+        }
+        return new ListManagementOptions(listNode.textValue(), topicName);
+    }
+
     private List<MessageTag> parseEmailTagsArray(JsonNode tagsNode, String fieldName) {
         if (tagsNode.isMissingNode() || tagsNode.isNull()) {
             return List.of();
@@ -2199,9 +2418,11 @@ public class SesController {
             case "InvalidParameterValue", "InvalidTemplate", "ValidationError",
                  "InvalidRenderingParameter", "MissingRenderingAttribute" ->
                     new AwsException("BadRequestException", e.getMessage(), 400);
-            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist" ->
+            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist",
+                 "CustomVerificationEmailTemplateDoesNotExist", "FromEmailAddressNotVerified" ->
                     new AwsException("NotFoundException", e.getMessage(), 404);
-            case "AlreadyExists", "ConfigurationSetAlreadyExists" ->
+            case "AlreadyExists", "ConfigurationSetAlreadyExists",
+                 "CustomVerificationEmailTemplateAlreadyExists" ->
                     new AwsException("AlreadyExistsException", e.getMessage(), 400);
             case "ConfigurationSetSendingPausedException" ->
                     new AwsException("SendingPausedException", e.getMessage(), 400);

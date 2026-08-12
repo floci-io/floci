@@ -650,7 +650,15 @@ public class EventBridgeService {
         return putEvents(entries, region, null);
     }
 
-    private PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId) {
+    /**
+     * Publishes entries to a bus, optionally naming the account the bus lives in.
+     *
+     * @param accountId account owning the target bus, or {@code null} to resolve against the
+     *                  caller's request context. Only {@code null} carries the un-prefixed
+     *                  legacy-key fallback in {@link AccountAwareStorageBackend#get}, so pass
+     *                  {@code null} whenever the target is in the caller's own account.
+     */
+    public PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId) {
         int failed = 0;
         List<Map<String, String>> resultEntries = new ArrayList<>();
 

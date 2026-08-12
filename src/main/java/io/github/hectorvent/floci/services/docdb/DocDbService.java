@@ -116,6 +116,15 @@ public class DocDbService {
 
     public Collection<DocDbCluster> listDbClusters(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // The db-cluster-id filter accepts ARNs as well as identifiers. Match the
+            // full ARN against each cluster's stored ARN rather than reducing it to
+            // the bare identifier, so a cross-account or cross-region ARN does not
+            // resolve a same-named local cluster.
+            if (filterId.startsWith("arn:")) {
+                return clusters.scan(k -> true).stream()
+                        .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
+                        .toList();
+            }
             return clusters.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return clusters.scan(k -> true);
@@ -200,6 +209,13 @@ public class DocDbService {
 
     public Collection<DocDbInstance> listDbInstances(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // The db-instance-id filter accepts ARNs as well as identifiers; see
+            // listDbClusters for why the match is against the stored ARN.
+            if (filterId.startsWith("arn:")) {
+                return instances.scan(k -> true).stream()
+                        .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
+                        .toList();
+            }
             return instances.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return instances.scan(k -> true);
