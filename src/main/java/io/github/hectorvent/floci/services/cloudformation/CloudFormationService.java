@@ -1001,9 +1001,11 @@ public class CloudFormationService {
 
             List<String> failedResources = new ArrayList<>();
             for (StackResource resource : resources) {
-                // CREATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous delete left the
-                // resource behind (e.g. the bucket was non-empty); AWS re-attempts it on retry.
+                // CREATE_COMPLETE/UPDATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous
+                // delete left the resource behind (e.g. the bucket was non-empty); AWS re-attempts
+                // it on retry.
                 boolean deletable = "CREATE_COMPLETE".equals(resource.getStatus())
+                        || "UPDATE_COMPLETE".equals(resource.getStatus())
                         || "DELETE_FAILED".equals(resource.getStatus());
                 if (resource.getPhysicalId() == null || !deletable) {
                     continue;

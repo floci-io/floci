@@ -413,6 +413,17 @@ class CloudFormationEventBusIntegrationTest {
 
         deleteStack(stackName);
         awaitStackDeleted(stackName);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("ResourceNotFoundException"));
     }
 
     @Test
