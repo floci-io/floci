@@ -13,6 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -153,6 +154,67 @@ public class S3VectorsService {
         }
         return result;
     }
+
+    /**
+     * Lists the vectors stored in an index with cursor-based pagination, ordered by key.
+     */
+    public ListVectorsResult listVectors(String bucketName, String indexName, int maxResults, String nextToken, String region) {
+        VectorIndex index = getIndex(bucketName, indexName, region);
+        int limit = maxResults > 0 ? Math.min(maxResults, 1000) : 500;
+        String lastKey = decodeToken(nextToken);
+
+        List<VectorData> allVectors = index.getVectors().values().stream()
+                .sorted(Comparator.comparing(VectorData::getKey))
+                .collect(Collectors.toList());
+
+        int startIndex = 0;
+        if (lastKey != null) {
+            for (int i = 0; i < allVectors.size(); i++) {
+                if (allVectors.get(i).getKey().compareTo(lastKey) > 0) {
+                    startIndex = i;
+                    break;
+                }
+                if (i == allVectors.size() - 1) {
+                    startIndex = allVectors.size();
+                }
+            }
+        }
+
+        List<VectorData> page = allVectors.stream()
+                .skip(startIndex)
+                .limit(limit)
+                .collect(Collectors.toList());
+
+        String newNextToken = null;
+        if (startIndex + limit < allVectors.size() && !page.isEmpty()) {
+            newNextToken = encodeToken(page.get(page.size() - 1).getKey());
+        }
+
+        return new ListVectorsResult(page, newNextToken);
+    }
+
+    /**
+     * Encodes a pagination cursor as Base64 JSON, matching AcmService's listCertificates cursor.
+     */
+    private String encodeToken(String lastKey) {
+        if (lastKey == null) return null;
+        String json = "{\"lastKey\":\"" + lastKey + "\"}";
+        return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String decodeToken(String token) {
+        if (token == null || token.isEmpty()) return null;
+        try {
+            String json = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
+            int start = json.indexOf("\"lastKey\":\"") + 11;
+            int end = json.indexOf("\"", start);
+            return json.substring(start, end);
+        } catch (Exception e) {
+            throw new AwsException("InvalidNextTokenException", "Invalid pagination token", 400);
+        }
+    }
+
+    public record ListVectorsResult(List<VectorData> vectors, String nextToken) {}
 
     public void deleteVectors(String bucketName, String indexName, List<String> keys, String region) {
         VectorBucket bucket = getVectorBucket(bucketName, region);
