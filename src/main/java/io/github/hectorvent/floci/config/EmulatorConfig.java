@@ -877,6 +877,10 @@ public interface EmulatorConfig {
     }
 
     interface RdsServiceConfig {
+        String DEFAULT_POSTGRES_IMAGE = "postgres:16-alpine";
+        String DEFAULT_MYSQL_IMAGE = "mysql:8.0";
+        String DEFAULT_MARIADB_IMAGE = "mariadb:11";
+
         @WithDefault("true")
         boolean enabled();
 
@@ -892,14 +896,14 @@ public interface EmulatorConfig {
         @WithDefault("7099")
         int proxyMaxPort();
 
-        @WithDefault("postgres:16-alpine")
-        String defaultPostgresImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultPostgresImage();
 
-        @WithDefault("mysql:8.0")
-        String defaultMysqlImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultMysqlImage();
 
-        @WithDefault("mariadb:11")
-        String defaultMariadbImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultMariadbImage();
 
         /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
         Optional<String> endpointHost();

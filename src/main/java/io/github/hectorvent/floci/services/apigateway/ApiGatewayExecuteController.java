@@ -42,6 +42,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -1008,6 +1009,18 @@ public class ApiGatewayExecuteController {
         try {
             if (target.action() == null) {
                 MultivaluedMap<String, String> formParams = parseFormUrlEncoded(transformedBody);
+
+                if ("sqs".equals(target.service()) && target.path() != null) {
+                    formParams.computeIfAbsent("QueueUrl", (_) -> {
+                        String resourcePath = target.path();
+                        int indexOfLastSlash = resourcePath.lastIndexOf('/');
+                        String queueName = indexOfLastSlash >= 0 && indexOfLastSlash < resourcePath.length() - 1
+                                ? resourcePath.substring(indexOfLastSlash + 1) : resourcePath;
+
+                        return Collections.singletonList(queueName);
+                    });
+                }
+
                 serviceResponse = serviceRouter.invokeQuery(target.service(), formParams, region);
             } else {
                 JsonNode requestJson = objectMapper.readTree(transformedBody);

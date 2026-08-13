@@ -1158,9 +1158,27 @@ public class S3Service implements Resettable {
         return bucket.getVersioningStatus();
     }
 
-    public record ListVersionsResult(List<S3Object> versions, boolean isTruncated, String nextKeyMarker) {}
+    public record ListVersionsResult(List<S3Object> versions, List<String> commonPrefixes, boolean isTruncated,
+                                     String nextKeyMarker, String nextVersionIdMarker) {}
 
     public ListVersionsResult listObjectVersions(String bucketName, String prefix, int maxKeys, String keyMarker) {
+        return listObjectVersions(bucketName, prefix, null, maxKeys, keyMarker, null);
+    }
+
+    /**
+     * Lists every version and delete marker under {@code prefix}, optionally grouped by {@code delimiter}.
+     *
+     * <p>{@code maxKeys} bounds the number of entries in the response, where each {@code Version}, each
+     * {@code DeleteMarker} and each {@code CommonPrefixes} group counts as one entry, exactly as AWS counts
+     * them. A page may therefore end part-way through the versions of a single key, which is why a truncated
+     * response carries both {@code NextKeyMarker} and {@code NextVersionIdMarker}: the pair identifies the
+     * last entry returned, and the next request resumes at the entry immediately after it.
+     *
+     * @param versionIdMarker version id of the last entry of the previous page; only meaningful together with
+     *                        {@code keyMarker}, and ignored when the key it names holds no such version
+     */
+    public ListVersionsResult listObjectVersions(String bucketName, String prefix, String delimiter, int maxKeys,
+                                                 String keyMarker, String versionIdMarker) {
         ensureBucketExists(bucketName);
 
         String versionPrefix = bucketName + "/";
@@ -1179,6 +1197,27 @@ public class S3Service implements Resettable {
                 .filter(obj -> obj.getVersionId() == null)
                 .forEach(versions::add);
 
+        List<String> commonPrefixes = List.of();
+        if (delimiter != null && !delimiter.isEmpty()) {
+            Set<String> prefixSet = new LinkedHashSet<>();
+            List<S3Object> directVersions = new ArrayList<>();
+
+            for (S3Object obj : versions) {
+                String remainder = obj.getKey().substring(prefix != null ? prefix.length() : 0);
+                int delimIdx = remainder.indexOf(delimiter);
+                if (delimIdx >= 0) {
+                    String cp = (prefix != null ? prefix : "") + remainder.substring(0, delimIdx + delimiter.length());
+                    prefixSet.add(cp);
+                } else {
+                    directVersions.add(obj);
+                }
+            }
+
+            versions = directVersions;
+            commonPrefixes = new ArrayList<>(prefixSet);
+            Collections.sort(commonPrefixes);
+        }
+
         // Sort by key, then by lastModified descending
         versions.sort((a, b) -> {
             int keyCompare = a.getKey().compareTo(b.getKey());
@@ -1186,33 +1225,84 @@ public class S3Service implements Resettable {
             return b.getLastModified().compareTo(a.getLastModified());
         });
 
-        // Apply key-marker filter: skip objects whose key is <= keyMarker
+        // Apply the marker filter. Without a version-id-marker the marker is an exclusive lower bound on the
+        // key; with one, the previous page stopped inside keyMarker, so the versions of that key that follow
+        // the named version are still owed to the caller.
         if (keyMarker != null && !keyMarker.isEmpty()) {
             final String km = keyMarker;
-            versions = versions.stream()
-                    .filter(v -> v.getKey().compareTo(km) > 0)
+            commonPrefixes = commonPrefixes.stream()
+                    .filter(cp -> cp.compareTo(km) > 0)
                     .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+
+            if (versionIdMarker != null && !versionIdMarker.isEmpty()) {
+                List<S3Object> remaining = new ArrayList<>();
+                boolean afterMarker = false;
+                for (S3Object v : versions) {
+                    int keyCompare = v.getKey().compareTo(km);
+                    if (keyCompare < 0) {
+                        continue;
+                    }
+                    if (keyCompare > 0 || afterMarker) {
+                        remaining.add(v);
+                    } else if (versionIdMarker.equals(reportedVersionId(v))) {
+                        afterMarker = true;
+                    }
+                }
+                versions = remaining;
+            } else {
+                versions = versions.stream()
+                        .filter(v -> v.getKey().compareTo(km) > 0)
+                        .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+            }
         }
 
         boolean isTruncated = false;
         String nextKeyMarker = null;
-        if (maxKeys > 0 && versions.size() > maxKeys) {
-            // Extend the cutoff to avoid splitting versions of the same key across pages.
-            // All versions of the same key must appear on the same page.
-            int cutoff = maxKeys;
-            String lastKey = versions.get(maxKeys - 1).getKey();
-            while (cutoff < versions.size() && versions.get(cutoff).getKey().equals(lastKey)) {
-                cutoff++;
+        String nextVersionIdMarker = null;
+        if (maxKeys > 0) {
+            List<S3Object> pageVersions = new ArrayList<>();
+            List<String> pagePrefixes = new ArrayList<>();
+            int vIdx = 0;
+            int cpIdx = 0;
+
+            // Merge versions and common prefixes in key order, one response entry at a time, so that
+            // maxKeys bounds Version/DeleteMarker entries as well as CommonPrefixes groups.
+            while (pageVersions.size() + pagePrefixes.size() < maxKeys
+                    && (vIdx < versions.size() || cpIdx < commonPrefixes.size())) {
+                String vKey = vIdx < versions.size() ? versions.get(vIdx).getKey() : null;
+                String cpKey = cpIdx < commonPrefixes.size() ? commonPrefixes.get(cpIdx) : null;
+
+                if (vKey != null && (cpKey == null || vKey.compareTo(cpKey) <= 0)) {
+                    S3Object version = versions.get(vIdx++);
+                    pageVersions.add(version);
+                    nextKeyMarker = version.getKey();
+                    nextVersionIdMarker = reportedVersionId(version);
+                } else {
+                    String commonPrefix = commonPrefixes.get(cpIdx++);
+                    pagePrefixes.add(commonPrefix);
+                    nextKeyMarker = commonPrefix;
+                    nextVersionIdMarker = null;
+                }
             }
-            isTruncated = cutoff < versions.size();
-            if (isTruncated) {
-                // nextKeyMarker is used as an exclusive lower bound: next page gets key > nextKeyMarker.
-                // Set it to the last included key so the next page starts right after it.
-                nextKeyMarker = versions.get(cutoff - 1).getKey();
+
+            isTruncated = vIdx < versions.size() || cpIdx < commonPrefixes.size();
+            if (!isTruncated) {
+                nextKeyMarker = null;
+                nextVersionIdMarker = null;
             }
-            versions = new ArrayList<>(versions.subList(0, cutoff));
+            versions = pageVersions;
+            commonPrefixes = pagePrefixes;
         }
-        return new ListVersionsResult(versions, isTruncated, nextKeyMarker);
+        return new ListVersionsResult(versions, commonPrefixes, isTruncated, nextKeyMarker, nextVersionIdMarker);
+    }
+
+    /**
+     * Version id as it appears in a {@code ListObjectVersions} response: objects stored while versioning was
+     * off have no version id, and AWS reports those as the literal string {@code "null"}. Markers echoed back
+     * by a client therefore have to be compared against that same rendering.
+     */
+    private static String reportedVersionId(S3Object object) {
+        return object.getVersionId() != null ? object.getVersionId() : "null";
     }
 
     // --- Head Bucket / Bucket Location ---

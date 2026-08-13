@@ -25,8 +25,18 @@ import java.util.regex.Pattern;
 public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteApiHostFilter.class);
+    // Accepts both the region-bearing AWS shape and Floci's built-in DNS suffixes:
+    //   {apiId}.execute-api.{region}.localhost[:port]        (local, region-bearing)
+    //   {apiId}.execute-api.{region}.amazonaws.com           (real AWS shape)
+    //   {apiId}.execute-api.localhost.floci.io               (built-in suffix, regionless)
+    //   {apiId}.execute-api.localhost.localstack.cloud       (built-in suffix, regionless)
+    // AWS's invoke URL carries the region in the hostname, so the region-bearing form is the
+    // primary target; the regionless built-in suffixes are kept for local convenience (region is
+    // then recovered from the SigV4 scope or a cross-region apiId lookup). Group 1 = apiId.
     private static final Pattern EXECUTE_API_HOST = Pattern.compile(
-            "^([a-z0-9-]+)\\.execute-api\\.localhost\\.(?:floci\\.io|localstack\\.cloud)$",
+            "^([a-z0-9-]+)\\.execute-api\\."
+                    + "(?:[a-z]{2}-[a-z-]+-\\d+\\.(?:localhost|amazonaws\\.com)"
+                    + "|localhost\\.(?:floci\\.io|localstack\\.cloud))$",
             Pattern.CASE_INSENSITIVE);
 
     private final ApiGatewayLookup apiGatewayLookup;
@@ -84,11 +94,35 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         }
 
         String apiId = matcher.group(1).toLowerCase(Locale.ROOT);
-        String preferredRegion = regionResolver.resolveRegionFromAuth(
-                requestContext.getHeaderString("Authorization"));
+        // Region: the host label when it is a real AWS region (…execute-api.{region}.…), else the
+        // SigV4 credential scope. The cross-region apiId scan (resolveApiRegion) is the final
+        // fallback so an API created outside the default region still resolves — including on the
+        // regionless built-in suffixes, which carry no region label (issue #1871).
+        String hostRegion = regionResolver.resolveRegionFromHost(host);
+        String preferredRegion = hostRegion != null
+                ? hostRegion
+                : regionResolver.resolveRegionFromAuth(requestContext.getHeaderString("Authorization"));
         String region = apiGatewayLookup.resolveApiRegion(preferredRegion, apiId);
+
+        URI originalUri = requestContext.getUriInfo().getRequestUri();
+        String originalPath = originalUri.getRawPath();
+
+        // Host matching alone cannot tell whether this request was already rewritten: the Host
+        // header still names the execute-api subdomain afterwards. Rewriting twice would produce
+        // /execute-api/{apiId}/execute-api/{apiId}/... and a 404, so bail out if another
+        // execute-api filter got here first.
+        if (originalPath != null && originalPath.startsWith("/execute-api/")) {
+            return;
+        }
+
         try {
-            if (!"HTTP".equals(apiGatewayLookup.protocolType(region, apiId))) {
+            String protocolType = apiGatewayLookup.protocolType(region, apiId);
+            // HTTP APIs route all their invoke traffic through this filter. WEBSOCKET APIs route
+            // ONLY their @connections management calls (issue #1846) — the $connect upgrade itself
+            // is a Vert.x WebSocket handshake handled earlier by WebSocketHandler, never here.
+            boolean routable = "HTTP".equals(protocolType)
+                    || ("WEBSOCKET".equals(protocolType) && isConnectionsManagementPath(originalPath));
+            if (!routable) {
                 return;
             }
             if (apiGatewayLookup.executeApiEndpointDisabled(region, apiId)) {
@@ -99,19 +133,8 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
                 return;
             }
         } catch (AwsException e) {
-            LOG.debugv(e, "Execute API host did not resolve to an HTTP API: apiId={0}, region={1}",
+            LOG.debugv(e, "Execute API host did not resolve to a routable API: apiId={0}, region={1}",
                     apiId, region);
-            return;
-        }
-
-        URI originalUri = requestContext.getUriInfo().getRequestUri();
-        String originalPath = originalUri.getRawPath();
-
-        // Host matching alone cannot tell whether this request was already rewritten: the Host
-        // header still names the execute-api subdomain afterwards. Rewriting twice would produce
-        // /execute-api/{apiId}/execute-api/{apiId}/... and a 404, so bail out if another
-        // execute-api filter got here first.
-        if (originalPath != null && originalPath.startsWith("/execute-api/")) {
             return;
         }
 
@@ -159,6 +182,28 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         boolean executeApiEndpointDisabled(String region, String apiId);
 
         void requireStage(String region, String apiId, String stageName);
+    }
+
+    /**
+     * Extracts the {@code apiId} from an execute-api virtual host, or {@code null} when the host
+     * is not an execute-api host. Shared with the WebSocket {@code $connect} handler so the host
+     * grammar lives in exactly one place (this filter and the handler must agree on which hosts
+     * are execute-api hosts).
+     */
+    public static String extractApiId(String host) {
+        if (host == null) {
+            return null;
+        }
+        Matcher matcher = EXECUTE_API_HOST.matcher(stripPort(host));
+        return matcher.matches() ? matcher.group(1).toLowerCase(Locale.ROOT) : null;
+    }
+
+    /**
+     * True when the path is a WebSocket {@code @connections} management route,
+     * {@code /{stage}/@connections[/{connectionId}]} (raw or percent-encoded {@code @}).
+     */
+    private static boolean isConnectionsManagementPath(String path) {
+        return path != null && (path.contains("/@connections") || path.contains("/%40connections"));
     }
 
     private static String stripPort(String host) {

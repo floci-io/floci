@@ -5,6 +5,8 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.InspectVolumeResponse;
+import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Bind;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -162,11 +165,23 @@ public class ContainerLifecycleManager {
      * @param logStream optional log stream to close (may be null)
      */
     public void stopAndRemove(String containerId, Closeable logStream) {
+        stopAndRemove(containerId, logStream, 5);
+    }
+
+    /**
+     * Stops and removes a container, closing any associated log stream.
+     *
+     * @param containerId the container ID to stop and remove
+     * @param logStream optional log stream to close (may be null)
+     * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
+     *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
+     */
+    public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
 
         boolean stoppedOrMissing = false;
         try {
-            dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+            dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
             stoppedOrMissing = true;
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
@@ -599,6 +614,34 @@ public class ContainerLifecycleManager {
         } catch (DockerException e) {
             LOG.warnv("Failed to inspect volume ''{0}'': {1}", name, e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Attempts to take an authoritative snapshot of all named volumes in the container runtime.
+     * An empty optional means the runtime could not be queried; it is intentionally distinct from
+     * a successful query that returned an empty set so cleanup callers fail closed.
+     */
+    public Optional<Set<String>> tryListVolumeNames() {
+        try {
+            ListVolumesResponse response = dockerClient.listVolumesCmd().exec();
+            if (response == null) {
+                LOG.warn("Container runtime returned no volume-list response");
+                return Optional.empty();
+            }
+            List<InspectVolumeResponse> volumes = response.getVolumes();
+            if (volumes == null) {
+                LOG.warn("Container runtime returned a volume-list response without an inventory");
+                return Optional.empty();
+            }
+            Set<String> names = volumes.stream()
+                    .map(InspectVolumeResponse::getName)
+                    .filter(name -> name != null && !name.isBlank())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            return Optional.of(names);
+        } catch (RuntimeException e) {
+            LOG.warnv("Failed to list container-runtime volumes: {0}", e.getMessage());
+            return Optional.empty();
         }
     }
 

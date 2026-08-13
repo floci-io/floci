@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -317,6 +318,124 @@ public class CloudFormationService {
         return stack.getTemplateBody() != null ? stack.getTemplateBody() : "{}";
     }
 
+    // ── GetTemplateSummary ────────────────────────────────────────────────────
+
+    // IAM resource types whose corresponding property, when a literal string, requires
+    // CAPABILITY_NAMED_IAM instead of the weaker CAPABILITY_IAM.
+    private static final Map<String, String> IAM_RESOURCE_NAME_PROPERTY = Map.of(
+            "AWS::IAM::Role", "RoleName",
+            "AWS::IAM::User", "UserName",
+            "AWS::IAM::Group", "GroupName",
+            "AWS::IAM::ManagedPolicy", "ManagedPolicyName",
+            "AWS::IAM::InstanceProfile", "InstanceProfileName");
+
+    /**
+     * Summarizes a template's Parameters, Resources, Transform and Metadata sections. Accepts the
+     * same three input modes as the real API: an existing stack by name, an inline TemplateBody, or
+     * a TemplateURL. Floci does not enforce IAM capabilities on CreateStack/UpdateStack, so the
+     * Capabilities/CapabilitiesReason fields here are informational only, derived by scanning for
+     * AWS::IAM:: resource types.
+     */
+    public TemplateSummary getTemplateSummary(String stackName, String templateBody, String templateUrl,
+                                              String region) {
+        String resolvedBody;
+        if (stackName != null && !stackName.isBlank()) {
+            Stack stack = getStackOrThrow(stackName, region);
+            // Summarize the template as submitted, not the SAM-expanded version stack.getTemplateBody()
+            // holds post-transform. originalTemplateBody is only absent for stacks persisted by a
+            // floci version predating this field; there is no way to recover the pre-transform body
+            // for those, so this falls back to the (already-transformed) templateBody until the
+            // stack's next CreateChangeSet/UpdateStack call backfills the field.
+            resolvedBody = stack.getOriginalTemplateBody() != null
+                    ? stack.getOriginalTemplateBody()
+                    : stack.getTemplateBody() != null ? stack.getTemplateBody() : "{}";
+        } else {
+            resolvedBody = resolveTemplateBody(templateBody, templateUrl);
+            if (resolvedBody == null) {
+                throw new AwsException("ValidationError",
+                        "One of StackName, TemplateBody or TemplateURL must be specified.", 400);
+            }
+        }
+        JsonNode template;
+        try {
+            template = parseTemplate(resolvedBody);
+        } catch (Exception e) {
+            throw new AwsException("ValidationError", "Template format error: " + e.getMessage(), 400);
+        }
+        return buildTemplateSummary(template);
+    }
+
+    private TemplateSummary buildTemplateSummary(JsonNode template) {
+        String description = template.hasNonNull("Description") ? template.get("Description").asText() : null;
+        String version = template.hasNonNull("AWSTemplateFormatVersion")
+                ? template.get("AWSTemplateFormatVersion").asText()
+                : "2010-09-09";
+
+        List<TemplateSummary.ParameterDeclaration> parameters = new ArrayList<>();
+        JsonNode paramsNode = template.path("Parameters");
+        if (paramsNode.isObject()) {
+            paramsNode.fields().forEachRemaining(entry -> {
+                JsonNode p = entry.getValue();
+                parameters.add(new TemplateSummary.ParameterDeclaration(
+                        entry.getKey(),
+                        p.hasNonNull("Default") ? p.get("Default").asText() : null,
+                        p.path("NoEcho").asBoolean(false),
+                        p.hasNonNull("Description") ? p.get("Description").asText() : null,
+                        p.hasNonNull("Type") ? p.get("Type").asText() : "String"));
+            });
+        }
+
+        LinkedHashSet<String> resourceTypes = new LinkedHashSet<>();
+        boolean hasNamedIamResource = false;
+        JsonNode resourcesNode = template.path("Resources");
+        if (resourcesNode.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> resourceEntries = resourcesNode.fields();
+            while (resourceEntries.hasNext()) {
+                JsonNode resource = resourceEntries.next().getValue();
+                JsonNode typeNode = resource.path("Type");
+                if (!typeNode.isTextual()) {
+                    continue;
+                }
+                String type = typeNode.asText();
+                resourceTypes.add(type);
+                String nameProperty = IAM_RESOURCE_NAME_PROPERTY.get(type);
+                // Presence alone counts as named, even when the value is an intrinsic function
+                // (Ref, Fn::Sub, Fn::Join, ...) that only resolves at deploy time - CloudFormation
+                // requires CAPABILITY_NAMED_IAM whenever the property is set at all.
+                if (nameProperty != null && resource.path("Properties").has(nameProperty)) {
+                    hasNamedIamResource = true;
+                }
+            }
+        }
+
+        List<String> declaredTransforms = new ArrayList<>();
+        JsonNode transformNode = template.path("Transform");
+        if (transformNode.isTextual()) {
+            declaredTransforms.add(transformNode.asText());
+        } else if (transformNode.isArray()) {
+            transformNode.forEach(t -> {
+                if (t.isTextual()) {
+                    declaredTransforms.add(t.asText());
+                }
+            });
+        }
+
+        List<String> iamResourceTypes = resourceTypes.stream()
+                .filter(t -> t.startsWith("AWS::IAM::"))
+                .toList();
+        List<String> capabilities = iamResourceTypes.isEmpty()
+                ? List.of()
+                : List.of(hasNamedIamResource ? "CAPABILITY_NAMED_IAM" : "CAPABILITY_IAM");
+        String capabilitiesReason = iamResourceTypes.isEmpty()
+                ? null
+                : "The following resource(s) require capabilities: [" + String.join(", ", iamResourceTypes) + "]";
+
+        String metadata = template.hasNonNull("Metadata") ? template.get("Metadata").toString() : null;
+
+        return new TemplateSummary(description, parameters, new ArrayList<>(resourceTypes), version,
+                declaredTransforms, capabilities, capabilitiesReason, metadata);
+    }
+
     // ── DescribeStackEvents ───────────────────────────────────────────────────
 
     public List<StackEvent> describeStackEvents(String stackName, String region) {
@@ -410,6 +529,7 @@ public class CloudFormationService {
         String previousTemplateBody = stack.getTemplateBody();
         try {
             JsonNode template = parseTemplate(templateBody);
+            stack.setOriginalTemplateBody(templateBody);
 
             // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
             if (samTransformProcessor.hasSamTransform(template)) {

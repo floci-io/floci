@@ -94,6 +94,7 @@ class RdsServiceTest {
     private Ec2Service ec2Service;
     private RegionResolver regionResolver;
     private EmulatorConfig config;
+    private EmulatorConfig.RdsServiceConfig rdsConfig;
 
     @BeforeEach
     void setUp() {
@@ -103,16 +104,16 @@ class RdsServiceTest {
         regionResolver = new RegionResolver("us-east-1", "123456789012");
         config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.RdsServiceConfig rdsConfig = mock(EmulatorConfig.RdsServiceConfig.class);
+        rdsConfig = mock(EmulatorConfig.RdsServiceConfig.class);
 
         when(config.services()).thenReturn(servicesConfig);
         when(config.defaultAccountId()).thenReturn("123456789012");
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(rdsConfig.proxyBasePort()).thenReturn(7000);
         when(rdsConfig.proxyMaxPort()).thenReturn(7099);
-        when(rdsConfig.defaultPostgresImage()).thenReturn("postgres:16-alpine");
-        when(rdsConfig.defaultMysqlImage()).thenReturn("mysql:8.0");
-        when(rdsConfig.defaultMariadbImage()).thenReturn("mariadb:11");
+        when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.empty());
+        when(rdsConfig.defaultMysqlImage()).thenReturn(Optional.empty());
+        when(rdsConfig.defaultMariadbImage()).thenReturn(Optional.empty());
 
         rdsService = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -186,6 +187,34 @@ class RdsServiceTest {
                 eq("arn:aws:rds:us-east-1:123456789012:db:mydb"), eq("mydb"),
                 any(), any(), eq(DatabaseEngine.POSTGRES),
                 eq("postgres:18.1-alpine"), eq("admin"), eq("password"), eq("dbname"));
+    }
+
+    @Test
+    void configuredPostgresImageIsNotRewrittenForRequestedEngineVersion() {
+        when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.of("postgres:16.14-alpine3.23"));
+
+        rdsService.createDbCluster("cluster1", "postgres", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        verify(containerManager).start(
+                eq("arn:aws:rds:us-east-1:123456789012:cluster:cluster1"), eq("cluster1"),
+                any(), any(), eq(DatabaseEngine.POSTGRES),
+                eq("postgres:16.14-alpine3.23"), eq("admin"), eq("password"), eq("dbname"));
+    }
+
+    @Test
+    void explicitlyConfiguredDefaultPostgresImageIsNotRewritten() {
+        when(rdsConfig.defaultPostgresImage())
+                .thenReturn(Optional.of(EmulatorConfig.RdsServiceConfig.DEFAULT_POSTGRES_IMAGE));
+
+        rdsService.createDbCluster("cluster1", "postgres", "18.1",
+                "admin", "password", "dbname", false, null);
+
+        verify(containerManager).start(
+                eq("arn:aws:rds:us-east-1:123456789012:cluster:cluster1"), eq("cluster1"),
+                any(), any(), eq(DatabaseEngine.POSTGRES),
+                eq(EmulatorConfig.RdsServiceConfig.DEFAULT_POSTGRES_IMAGE),
+                eq("admin"), eq("password"), eq("dbname"));
     }
 
     @Test
