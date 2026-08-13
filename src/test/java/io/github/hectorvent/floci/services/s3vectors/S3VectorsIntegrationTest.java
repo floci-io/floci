@@ -564,4 +564,74 @@ class S3VectorsIntegrationTest {
             .body("vectors[0].key", equalTo("c"))
             .body("nextToken", nullValue());
     }
+
+    @Test
+    @Order(18)
+    void listVectorsByIndexArnResolvesTheArnsOwnRegionNotTheRequestRegion() {
+        String bucketName = "cross-region-vector-bucket";
+        String indexName = "cross-region-idx";
+        String otherRegionAuth = "Credential=AKID/20260101/us-west-2/s3vectors/aws4_request";
+
+        // Create the bucket/index in us-west-2 (via the SigV4 credential scope region).
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .header("Authorization", otherRegionAuth)
+            .body("""
+                { "vectorBucketName": "%s" }
+                """.formatted(bucketName))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(200);
+
+        String indexArn =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .header("Authorization", otherRegionAuth)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "dimension": 2,
+                        "distanceMetric": "cosine",
+                        "dataType": "float32"
+                    }
+                    """.formatted(bucketName, indexName))
+            .when()
+                .post("/CreateIndex")
+            .then()
+                .statusCode(200)
+                .body("indexArn", containsString(":us-west-2:"))
+            .extract().path("indexArn");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .header("Authorization", otherRegionAuth)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "vectors": [{"key": "only", "data": {"float32": [1.0, 0.0]}}]
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/PutVectors")
+        .then()
+            .statusCode(200);
+
+        // No Authorization header here, so this request resolves to the default region — not
+        // us-west-2. The lookup must still succeed because it honors the region encoded in the
+        // ARN itself, not the region the ListVectors request happens to be signed for.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "indexArn": "%s" }
+                """.formatted(indexArn))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("only"));
+    }
 }
