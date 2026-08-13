@@ -149,6 +149,10 @@ public class CloudFormationService {
                                      Map<String, String> tags, String region) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
 
+        // Reject an unresolvable condition dependency graph up front, before any stack state is
+        // created, so CreateStack/UpdateStack fail synchronously the way real CloudFormation does.
+        validateConditionDependencies(resolvedTemplate, parameters, region);
+
         // Detect first creation atomically: the mapping function runs at most once per key, so the
         // flag is only set for the thread that actually creates the stack (no double-recording under
         // concurrent CreateChangeSet calls).
@@ -833,6 +837,54 @@ public class CloudFormationService {
         return conditions;
     }
 
+    /**
+     * Fails a create/update before any stack state is mutated when a resource that will be created
+     * depends on a resource excluded by a false condition. Real CloudFormation rejects such a
+     * template synchronously ("Template format error: Unresolved resource dependencies [...]")
+     * rather than silently skipping the dependent, so mirror that instead of dropping the resource.
+     * Malformed or SAM templates are left for the execution path, which surfaces their own errors.
+     */
+    private void validateConditionDependencies(String templateBody, Map<String, String> params,
+                                               String region) {
+        JsonNode template;
+        try {
+            template = parseTemplate(templateBody);
+        } catch (Exception e) {
+            LOG.debugv("Skipping condition-dependency validation; template did not parse: {0}",
+                    e.getMessage());
+            return;
+        }
+        if (samTransformProcessor.hasSamTransform(template)) {
+            return;
+        }
+        JsonNode resources = template.path("Resources");
+        if (!resources.isObject()) {
+            return;
+        }
+
+        Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
+        Map<String, Boolean> conditions =
+                resolveConditions(template, resolvedParams, null, region, regionResolver.getAccountId());
+
+        Set<String> allIds = new LinkedHashSet<>();
+        resources.fieldNames().forEachRemaining(allIds::add);
+        Set<String> activeIds = new LinkedHashSet<>();
+        Map<String, Set<String>> dependencies = new HashMap<>();
+        for (String logicalId : allIds) {
+            JsonNode resDef = resources.get(logicalId);
+            String condition = resDef.path("Condition").asText(null);
+            if (condition == null || conditions.getOrDefault(condition, false)) {
+                activeIds.add(logicalId);
+            }
+            dependencies.put(logicalId, collectResourceDependencies(resDef, allIds, conditions));
+        }
+
+        Set<String> unresolved = unresolvedConditionDependencies(activeIds, allIds, dependencies);
+        if (!unresolved.isEmpty()) {
+            throw unresolvedDependenciesError(unresolved);
+        }
+    }
+
     private boolean evaluateCondition(JsonNode expr, Map<String, String> params,
                                       Map<String, Boolean> conditions, String region, String accountId) {
         if (expr == null || expr.isNull()) {
@@ -1170,6 +1222,7 @@ public class CloudFormationService {
         Set<String> allIds = new LinkedHashSet<>();
         resources.fieldNames().forEachRemaining(allIds::add);
 
+        Map<String, Set<String>> dependencies = new HashMap<>();
         Set<String> activeIds = new LinkedHashSet<>();
         for (String logicalId : allIds) {
             JsonNode resDef = resources.get(logicalId);
@@ -1177,26 +1230,19 @@ public class CloudFormationService {
             if (condition == null || conditions.getOrDefault(condition, false)) {
                 activeIds.add(logicalId);
             }
+            dependencies.put(logicalId, collectResourceDependencies(resDef, allIds, conditions));
         }
 
-        Map<String, Set<String>> dependencies = new HashMap<>();
-        for (String logicalId : activeIds) {
-            JsonNode resDef = resources.get(logicalId);
-
-            Set<String> deps = new LinkedHashSet<>();
-            collectDependencies(resDef.path("Properties"), allIds, deps);
-
-            JsonNode dependsOn = resDef.path("DependsOn");
-            if (dependsOn.isTextual()) {
-                deps.add(dependsOn.asText());
-            } else if (dependsOn.isArray()) {
-                for (JsonNode d : dependsOn) {
-                    deps.add(d.asText());
-                }
-            }
-
-            dependencies.put(logicalId, deps);
+        // AWS rejects a template whose created resources depend on a resource excluded by a false
+        // condition rather than silently skipping the dependent (verified against real
+        // CloudFormation: CreateStack fails synchronously with "Unresolved resource dependencies").
+        // Fn::If-guarded references are safe because collectDependencies only walks the selected
+        // branch, so a false-branch reference is never recorded as a dependency.
+        Set<String> unresolved = unresolvedConditionDependencies(activeIds, allIds, dependencies);
+        if (!unresolved.isEmpty()) {
+            throw unresolvedDependenciesError(unresolved);
         }
+        dependencies.keySet().retainAll(activeIds);
 
         Map<String, Integer> inDegree = new HashMap<>();
         for (String id : activeIds) {
@@ -1243,7 +1289,53 @@ public class CloudFormationService {
 
     private static final Pattern SUB_VAR_PATTERN = Pattern.compile("\\$\\{([^}]+)}");
 
-    private void collectDependencies(JsonNode node, Set<String> allIds, Set<String> deps) {
+    /**
+     * Collects the logical IDs this resource depends on, both through its {@code Properties}
+     * (Ref/GetAtt/Fn::Sub, and the selected branch of Fn::If) and its explicit {@code DependsOn}.
+     */
+    private Set<String> collectResourceDependencies(JsonNode resDef, Set<String> allIds,
+                                                    Map<String, Boolean> conditions) {
+        Set<String> deps = new LinkedHashSet<>();
+        collectDependencies(resDef.path("Properties"), allIds, deps, conditions);
+
+        JsonNode dependsOn = resDef.path("DependsOn");
+        if (dependsOn.isTextual()) {
+            deps.add(dependsOn.asText());
+        } else if (dependsOn.isArray()) {
+            for (JsonNode d : dependsOn) {
+                deps.add(d.asText());
+            }
+        }
+        return deps;
+    }
+
+    /**
+     * Returns the logical IDs of resources that are excluded by a false condition yet are still
+     * depended upon by a resource that will be created. An empty set means the dependency graph is
+     * resolvable for the current condition values.
+     */
+    private Set<String> unresolvedConditionDependencies(Set<String> activeIds, Set<String> allIds,
+                                                        Map<String, Set<String>> dependencies) {
+        Set<String> unresolved = new LinkedHashSet<>();
+        for (String logicalId : activeIds) {
+            for (String dependency : dependencies.get(logicalId)) {
+                if (allIds.contains(dependency) && !activeIds.contains(dependency)) {
+                    unresolved.add(dependency);
+                }
+            }
+        }
+        return unresolved;
+    }
+
+    private AwsException unresolvedDependenciesError(Set<String> unresolved) {
+        return new AwsException("ValidationError",
+                "Template format error: Unresolved resource dependencies ["
+                        + String.join(", ", unresolved)
+                        + "] in the Resources block of the template", 400);
+    }
+
+    private void collectDependencies(JsonNode node, Set<String> allIds, Set<String> deps,
+                                     Map<String, Boolean> conditions) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return;
         }
@@ -1268,19 +1360,28 @@ public class CloudFormationService {
                 }
                 return;
             }
+            if (node.has("Fn::If")) {
+                JsonNode fnIf = node.get("Fn::If");
+                if (fnIf.isArray() && fnIf.size() == 3) {
+                    boolean condition = conditions.getOrDefault(fnIf.get(0).asText(), false);
+                    collectDependencies(fnIf.get(condition ? 1 : 2), allIds, deps, conditions);
+                    return;
+                }
+            }
             if (node.has("Fn::Sub")) {
-                collectSubDependencies(node.get("Fn::Sub"), allIds, deps);
+                collectSubDependencies(node.get("Fn::Sub"), allIds, deps, conditions);
                 return;
             }
-            node.fields().forEachRemaining(e -> collectDependencies(e.getValue(), allIds, deps));
+            node.fields().forEachRemaining(e -> collectDependencies(e.getValue(), allIds, deps, conditions));
         } else if (node.isArray()) {
             for (JsonNode item : node) {
-                collectDependencies(item, allIds, deps);
+                collectDependencies(item, allIds, deps, conditions);
             }
         }
     }
 
-    private void collectSubDependencies(JsonNode sub, Set<String> allIds, Set<String> deps) {
+    private void collectSubDependencies(JsonNode sub, Set<String> allIds, Set<String> deps,
+                                        Map<String, Boolean> conditions) {
         String template;
         Set<String> explicitVars = new HashSet<>();
 
@@ -1290,7 +1391,7 @@ public class CloudFormationService {
             template = sub.get(0).asText();
             if (sub.size() >= 2 && sub.get(1).isObject()) {
                 sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
-                collectDependencies(sub.get(1), allIds, deps);
+                collectDependencies(sub.get(1), allIds, deps, conditions);
             }
         } else {
             return;
