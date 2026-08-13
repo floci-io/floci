@@ -235,6 +235,56 @@ class CodePipelineServiceTest {
     }
 
     @Test
+    void failedCodeBuildRetryRestoresInputArtifactFromArtifactStore() {
+        Build failed = new Build();
+        failed.setId("proj:1");
+        failed.setBuildComplete(true);
+        failed.setBuildStatus("FAILED");
+        Build succeeded = new Build();
+        succeeded.setId("proj:2");
+        succeeded.setBuildComplete(true);
+        succeeded.setBuildStatus("SUCCEEDED");
+        when(codeBuildService.startBuild(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(failed, succeeded);
+
+        ObjectNode buildStage = mapper.createObjectNode();
+        buildStage.put("name", "Build");
+        ObjectNode action = buildStage.putArray("actions").addObject();
+        action.put("name", "BuildApp");
+        action.putObject("actionTypeId")
+                .put("category", "Build").put("owner", "AWS")
+                .put("provider", "CodeBuild").put("version", "1");
+        action.putObject("configuration").put("ProjectName", "proj");
+        action.putArray("inputArtifacts").addObject().put("name", "SourceOut");
+        ((ArrayNode) action.path("inputArtifacts")).addObject().put("name", "OptionalOutput");
+        action.put("runOrder", 1);
+        createPipeline("retry-build", sourceStage(), buildStage);
+
+        when(s3Service.getObject(eq("bucket"), contains("/OptionalOutput.zip")))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+        String executionId = startExecution("retry-build");
+        awaitStatus(executionId, "Failed");
+
+        service.handle("RetryStageExecution", mapper.createObjectNode()
+                        .put("pipelineName", "retry-build")
+                        .put("pipelineExecutionId", executionId)
+                        .put("stageName", "Build")
+                        .put("retryMode", "FAILED_ACTIONS"),
+                REGION, ACCOUNT);
+
+        assertEquals("Succeeded", awaitStatus(executionId, "Succeeded").getStatus());
+        verify(s3Service).getObject("bucket",
+                "codepipeline/" + executionId + "/SourceOut.zip");
+        verify(s3Service, times(2)).getObject("bucket",
+                "codepipeline/" + executionId + "/OptionalOutput.zip");
+        verify(codeBuildService, times(2)).startBuild(eq(REGION), eq(ACCOUNT), eq("proj"),
+                isNull(), isNull(), isNull(), isNull(), isNull(), eq("S3"),
+                eq("bucket/codepipeline/" + executionId + "/SourceOut.zip"),
+                isNull(), isNull(), isNull(), isNull());
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void codeBuildActionPassesEnvironmentVariablesAndSecondarySources() {
         Build build = new Build();

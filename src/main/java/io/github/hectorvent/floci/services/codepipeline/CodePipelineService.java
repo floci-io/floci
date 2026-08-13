@@ -1408,7 +1408,8 @@ public class CodePipelineService {
         String sourceLocationOverride = null;
         JsonNode inputArtifacts = action.path("inputArtifacts");
         String inputName = inputArtifacts.path(0).path("name").asText(null);
-        byte[] data = inputName != null ? runtimeArtifacts.get(artifactKey(execution, inputName)) : null;
+        byte[] data = inputName != null
+                ? resolveRuntimeArtifact(pipeline, execution, inputName) : null;
         if (data != null) {
             sourceTypeOverride = "S3";
             sourceLocationOverride = uploadRuntimeArtifact(pipeline, execution, inputName, data);
@@ -1417,7 +1418,7 @@ public class CodePipelineService {
         for (int i = 1; i < inputArtifacts.size(); i++) {
             String artifactName = inputArtifacts.path(i).path("name").asText(null);
             byte[] bytes = artifactName != null
-                    ? runtimeArtifacts.get(artifactKey(execution, artifactName)) : null;
+                    ? resolveRuntimeArtifact(pipeline, execution, artifactName) : null;
             if (bytes == null) {
                 continue;
             }
@@ -1447,11 +1448,8 @@ public class CodePipelineService {
 
     private String uploadRuntimeArtifact(CodePipelinePipeline pipeline, CodePipelineExecution execution,
                                          String artifactName, byte[] data) {
-        String bucket = pipeline.getDeclaration().path("artifactStore").path("location").asText(null);
-        if (bucket == null || bucket.isBlank()) {
-            bucket = "codepipeline-artifacts";
-        }
-        String key = "codepipeline/" + execution.getPipelineExecutionId() + "/" + artifactName + ".zip";
+        String bucket = artifactStoreBucket(pipeline);
+        String key = artifactStoreKey(execution, artifactName);
         try {
             s3Service.createBucket(bucket, execution.getRegion());
         } catch (AwsException e) {
@@ -1459,6 +1457,37 @@ public class CodePipelineService {
         }
         s3Service.putObject(bucket, key, data, "application/zip", Map.of());
         return bucket + "/" + key;
+    }
+
+    private byte[] resolveRuntimeArtifact(CodePipelinePipeline pipeline,
+                                          CodePipelineExecution execution,
+                                          String artifactName) {
+        byte[] data = runtimeArtifacts.get(artifactKey(execution, artifactName));
+        if (data != null) {
+            return data;
+        }
+        S3Object persisted;
+        try {
+            persisted = s3Service.getObject(
+                    artifactStoreBucket(pipeline), artifactStoreKey(execution, artifactName));
+        } catch (AwsException e) {
+            if ("NoSuchKey".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+        data = persisted.getData();
+        runtimeArtifacts.put(artifactKey(execution, artifactName), data);
+        return data;
+    }
+
+    private static String artifactStoreBucket(CodePipelinePipeline pipeline) {
+        String bucket = pipeline.getDeclaration().path("artifactStore").path("location").asText(null);
+        return bucket == null || bucket.isBlank() ? "codepipeline-artifacts" : bucket;
+    }
+
+    private static String artifactStoreKey(CodePipelineExecution execution, String artifactName) {
+        return "codepipeline/" + execution.getPipelineExecutionId() + "/" + artifactName + ".zip";
     }
 
     /**
