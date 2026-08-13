@@ -425,8 +425,7 @@ public class CloudHsmV2JsonHandler {
     private Response handleCopyBackupToRegion(JsonNode request, String region) {
         String destRegion = text(request, "DestinationRegion");
         String backupId = text(request, "BackupId");
-        String sourceRegion = text(request, "SourceRegion");
-        Backup backup = service.copyBackupToRegion(destRegion, backupId, sourceRegion);
+        Backup backup = service.copyBackupToRegion(destRegion, backupId, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode destBackup = objectMapper.createObjectNode();
         destBackup.put("CreateTimestamp", backup.getCreateTimestamp().toEpochMilli() / 1000.0);
