@@ -19,6 +19,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
@@ -288,15 +289,10 @@ public class AwsJsonCborController {
         }
     }
 
-    private byte[] decodeBody(byte[] compressed) throws Exception {
-        GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed));
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buffer = new byte[1024];
-        int len;
-        while ((len = gis.read(buffer)) != -1) {
-            out.write(buffer, 0, len);
+    private byte[] decodeBody(byte[] compressed) throws IOException {
+        try (GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed))) {
+            return gis.readAllBytes();
         }
-        return out.toByteArray();
     }
 
     /**
