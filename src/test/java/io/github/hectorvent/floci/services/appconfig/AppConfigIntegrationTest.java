@@ -499,4 +499,32 @@ class AppConfigIntegrationTest {
                 .then()
                 .statusCode(204);
     }
+
+    @Test @Order(30)
+    void deleteConfigurationProfileUnderWrongApplicationIsRejectedNotDeleted() {
+        // emptyProfileId belongs to emptyAppId (created in @Order(25)), not appId - a caller
+        // guessing/reusing a profileId under the wrong application must not be able to delete it.
+        given()
+                .when().delete("/applications/" + appId + "/configurationprofiles/" + emptyProfileId)
+                .then()
+                .statusCode(404);
+
+        given()
+                .when().get("/applications/" + emptyAppId + "/configurationprofiles/" + emptyProfileId)
+                .then()
+                .statusCode(200);
+    }
+
+    @Test @Order(31)
+    void deleteDeploymentStrategyOnPredefinedStrategyIsRejected() {
+        given()
+                .when().delete("/deployementstrategies/AppConfig.AllAtOnce")
+                .then()
+                .statusCode(400);
+
+        given()
+                .when().get("/deploymentstrategies/AppConfig.AllAtOnce")
+                .then()
+                .statusCode(200);
+    }
 }

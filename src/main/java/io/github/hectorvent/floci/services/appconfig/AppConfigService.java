@@ -112,6 +112,24 @@ public class AppConfigService {
     }
 
     public void deleteConfigurationProfile(String appId, String profileId) {
+        // Unlike deleteApplication (a single, unscoped ID), a profile is nested under an
+        // application - a mismatched appId must not be able to delete another application's
+        // profile just because its bare profileId is guessed/known. A profileId that doesn't
+        // exist at all is still an idempotent no-op, matching deleteApplication's convention;
+        // only an existing-but-wrongly-scoped one is rejected.
+        profileStore.get(profileId).ifPresent(profile -> {
+            if (!profile.getApplicationId().equals(appId)) {
+                throw new AwsException("ResourceNotFoundException", "Configuration profile not found in this application", 404);
+            }
+        });
+        // A hosted configuration version isn't independently addressable outside its profile's
+        // lifecycle - cascade the delete so a caller can't still fetch versions for a profile
+        // that's supposedly gone.
+        String versionPrefix = appId + "::" + profileId + "::";
+        versionStore.keys().stream()
+                .filter(k -> k.startsWith(versionPrefix))
+                .toList()
+                .forEach(versionStore::delete);
         profileStore.delete(profileId);
     }
 
@@ -198,6 +216,13 @@ public class AppConfigService {
     }
 
     public void deleteDeploymentStrategy(String id) {
+        // Predefined strategies aren't real stored resources (see builtinStrategy above) -
+        // silently no-op'ing here would report success for a delete that did nothing, and the
+        // "deleted" strategy would still show up in every subsequent Get/List call.
+        if (builtinStrategy(id) != null) {
+            throw new AwsException("BadRequestException",
+                    "Predefined deployment strategy " + id + " cannot be deleted.", 400);
+        }
         strategyStore.delete(id);
     }
 

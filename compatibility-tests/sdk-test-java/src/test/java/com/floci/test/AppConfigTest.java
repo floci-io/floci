@@ -400,7 +400,60 @@ class AppConfigTest {
             try {
                 appConfig.deleteApplication(DeleteApplicationRequest.builder()
                         .applicationId(delAppId).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                System.err.println("Best-effort cleanup for delete-ops-app failed: " + e.getMessage());
+            }
         }
+    }
+
+    @Test
+    @Order(53)
+    @DisplayName("DeleteConfigurationProfile rejects a profile that belongs to a different application")
+    void deleteConfigurationProfileRejectsWrongApplication() {
+        String ownerAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name("profile-owner-app").build()).id();
+        String otherAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name("profile-other-app").build()).id();
+        try {
+            String profileId = appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
+                    .applicationId(ownerAppId)
+                    .name("owned-profile")
+                    .locationUri("hosted")
+                    .type("AWS.Freeform")
+                    .build()).id();
+
+            // Addressing the owner's profile through a DIFFERENT application's path must not
+            // delete it - only "not found", never a real cross-application deletion.
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.deleteConfigurationProfile(
+                    DeleteConfigurationProfileRequest.builder()
+                            .applicationId(otherAppId).configurationProfileId(profileId).build()));
+
+            assertThat(appConfig.getConfigurationProfile(GetConfigurationProfileRequest.builder()
+                    .applicationId(ownerAppId).configurationProfileId(profileId).build()).id())
+                    .isEqualTo(profileId);
+        } finally {
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(ownerAppId).build());
+            } catch (Exception e) {
+                System.err.println("Best-effort cleanup for profile-owner-app failed: " + e.getMessage());
+            }
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(otherAppId).build());
+            } catch (Exception e) {
+                System.err.println("Best-effort cleanup for profile-other-app failed: " + e.getMessage());
+            }
+        }
+    }
+
+    @Test
+    @Order(54)
+    @DisplayName("DeleteDeploymentStrategy rejects a predefined strategy")
+    void deleteDeploymentStrategyRejectsPredefined() {
+        assertThrows(software.amazon.awssdk.services.appconfig.model.BadRequestException.class, () -> appConfig.deleteDeploymentStrategy(
+                DeleteDeploymentStrategyRequest.builder().deploymentStrategyId("AppConfig.AllAtOnce").build()));
+
+        assertThat(appConfig.getDeploymentStrategy(GetDeploymentStrategyRequest.builder()
+                .deploymentStrategyId("AppConfig.AllAtOnce").build()).id())
+                .isEqualTo("AppConfig.AllAtOnce");
     }
 }
