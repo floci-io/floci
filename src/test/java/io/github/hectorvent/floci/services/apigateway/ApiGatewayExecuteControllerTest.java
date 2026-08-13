@@ -20,6 +20,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -211,11 +212,13 @@ class ApiGatewayExecuteControllerTest {
 
         when(regionResolver.resolveRegion(headers)).thenReturn("us-east-1");
         // resolveRegionFromAuthOrNull is unstubbed and returns null by default, i.e. unresolved.
+        // Not a v1 API at the default region...
+        when(apiGatewayService.resolveRestApiRegion("us-east-1", "abc123")).thenReturn("us-east-1");
+        when(apiGatewayService.getRestApi("us-east-1", "abc123")).thenThrow(
+                new AwsException("NotFoundException", "Invalid REST API id specified", 404));
         // The API was actually created in eu-west-1; the default-region lookup must miss...
-        when(apiGatewayV2Service.getApi("us-east-1", "abc123")).thenThrow(
-                new AwsException("NotFoundException", "Invalid API id specified", 404));
-        // ...so resolveHttpApiRegion is consulted and finds the real region.
-        when(apiGatewayV2Service.resolveHttpApiRegion("us-east-1", "abc123")).thenReturn("eu-west-1");
+        // ...so resolveApiRegion is consulted and finds the real region.
+        when(apiGatewayV2Service.resolveApiRegion("us-east-1", "abc123")).thenReturn("eu-west-1");
         when(apiGatewayV2Service.getApi("eu-west-1", "abc123")).thenReturn(new Api());
         // No route configured — dispatchV2 returns 404, but that's downstream of the region fix;
         // what this test asserts is which region the API/route lookups actually ran against.
@@ -225,13 +228,12 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext());
 
         Response response = controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
         assertEquals(404, response.getStatus());
         verify(apiGatewayV2Service).findMatchingRoute("eu-west-1", "abc123", "GET", "/hello");
-        verify(apiGatewayService, never()).resolveRestApiRegion(anyString(), anyString());
     }
 
     @Test
@@ -245,6 +247,10 @@ class ApiGatewayExecuteControllerTest {
         when(headers.getHeaderString("Authorization")).thenReturn(
                 "AWS4-HMAC-SHA256 Credential=AKID/20260215/us-east-1/execute-api/aws4_request");
         when(regionResolver.resolveRegionFromAuthOrNull(anyString())).thenReturn("us-east-1");
+        // Not a v1 API — falls through to v2 at the already-resolved (signed) region.
+        when(apiGatewayService.getRestApi("us-east-1", "abc123")).thenThrow(
+                new AwsException("NotFoundException", "Invalid REST API id specified", 404));
+        when(apiGatewayV2Service.resolveApiRegion("us-east-1", "abc123")).thenReturn("us-east-1");
         when(apiGatewayV2Service.getApi("us-east-1", "abc123")).thenReturn(new Api());
         when(apiGatewayV2Service.findMatchingRoute("us-east-1", "abc123", "GET", "/hello"))
                 .thenReturn(null);
@@ -252,14 +258,14 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext());
 
         controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
-        // A correctly-signed (or otherwise resolved) request must not pay for the fallback
-        // scan at all — resolveHttpApiRegion is only for the "region is a guess" case.
-        verify(apiGatewayV2Service, never()).resolveHttpApiRegion(anyString(), anyString());
-        verify(apiGatewayV2Service).getApi("us-east-1", "abc123");
+        // A correctly-signed (or otherwise resolved) request must not pay for the v1 region
+        // scan — resolveRestApiRegion is only for the "region is a guess" case.
+        verify(apiGatewayService, never()).resolveRestApiRegion(anyString(), anyString());
+        verify(apiGatewayV2Service, atLeastOnce()).getApi("us-east-1", "abc123");
     }
 
     @Test
@@ -275,18 +281,18 @@ class ApiGatewayExecuteControllerTest {
         HttpHeaders headers = mock(HttpHeaders.class);
         when(headers.getHeaderString("Authorization")).thenReturn("Bearer eyJhbGciOiJIUzI1NiJ9.fake.jwt");
 
-        when(apiGatewayV2Service.resolveHttpApiRegion("us-east-1", "restapi1")).thenReturn("us-east-1");
-        // Not a v2 API at the guessed region — falls through to v1, which must also scan.
-        when(apiGatewayV2Service.getApi("us-east-1", "restapi1")).thenThrow(
-                new AwsException("NotFoundException", "Invalid API id specified", 404));
         when(apiGatewayService.resolveRestApiRegion("us-east-1", "restapi1")).thenReturn("ap-southeast-2");
         when(apiGatewayService.getRestApi("ap-southeast-2", "restapi1")).thenThrow(
                 new AwsException("NotFoundException", "Invalid REST API id specified", 404));
+        // Not a v1 API either — falls through to v2, which must also scan.
+        when(apiGatewayV2Service.resolveApiRegion("us-east-1", "restapi1")).thenReturn("us-east-1");
+        when(apiGatewayV2Service.getApi("us-east-1", "restapi1")).thenThrow(
+                new AwsException("NotFoundException", "Invalid API id specified", 404));
 
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext());
 
         controller.dispatch("GET", "restapi1", "prod", "hello", headers, null, null);
 
