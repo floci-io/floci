@@ -74,10 +74,6 @@ public class CloudHsmV2Service {
         this.backups = backups;
     }
 
-    CloudHsmV2Service(StorageBackend<String, Cluster> clusters) {
-        this.clusters = clusters;
-    }
-
     // ──────────────────────────── CreateCluster ────────────────────────────
 
     public Cluster createCluster(String hsmType, List<String> SubnetIds,
@@ -87,7 +83,7 @@ public class CloudHsmV2Service {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "SubnetIds must contain at least one entry.", 400);
         }
-        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\.medium$")) {
+        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\\.medium$")) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "HsmType " + hsmType + " is not valid.", 400);
         }
@@ -416,12 +412,6 @@ public class CloudHsmV2Service {
         }
         return sw.toString();
     }
-            return sw.toString();
-        } catch (Exception e) {
-            LOG.warnv("Failed to generate emulated hardware cert for {0}: {1}", cn, e.getMessage());
-            return "-----BEGIN CERTIFICATE-----\nemulated-" + cn + "\n-----END CERTIFICATE-----\n";
-        }
-    }
 
     private void validatePemCertificate(String pem, String fieldName) {
         if (pem == null || pem.isBlank()) {
@@ -568,7 +558,7 @@ public class CloudHsmV2Service {
 
     public Cluster modifyCluster(String clusterId, String hsmType, BackupRetentionPolicy backupRetentionPolicy, String region) {
         Cluster cluster = getCluster(clusterId, region);
-        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\.medium$")) {
+        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\\.medium$")) {
             throw new AwsException("CloudHsmInvalidRequestException", "HsmType " + hsmType + " is not valid.", 400);
         }
         if (hsmType != null) {

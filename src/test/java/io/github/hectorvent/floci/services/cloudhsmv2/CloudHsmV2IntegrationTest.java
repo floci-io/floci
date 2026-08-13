@@ -782,7 +782,7 @@ class CloudHsmV2IntegrationTest {
             .body("""
                 {
                     "ClusterId": "%s",
-                    "AvailabilityZone": "us-east-1c"
+                    "AvailabilityZone": "us-east-1a"
                 }
                 """.formatted(tempClusterId))
         .when()
