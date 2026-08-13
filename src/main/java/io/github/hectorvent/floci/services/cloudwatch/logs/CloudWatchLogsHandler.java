@@ -45,6 +45,7 @@ public class CloudWatchLogsHandler {
             case "FilterLogEvents" -> handleFilterLogEvents(request, region);
             case "PutRetentionPolicy" -> handlePutRetentionPolicy(request, region);
             case "DeleteRetentionPolicy" -> handleDeleteRetentionPolicy(request, region);
+            case "PutLogGroupDeletionProtection" -> handlePutLogGroupDeletionProtection(request, region);
             case "TagLogGroup" -> handleTagLogGroup(request, region);
             case "UntagLogGroup" -> handleUntagLogGroup(request, region);
             case "ListTagsLogGroup" -> handleListTagsLogGroup(request, region);
@@ -68,14 +69,29 @@ public class CloudWatchLogsHandler {
         String name = request.path("logGroupName").asText();
         Integer retentionInDays = request.has("retentionInDays")
                 ? request.path("retentionInDays").asInt() : null;
+        boolean deletionProtectionEnabled = request.path("deletionProtectionEnabled").asBoolean(false);
         Map<String, String> tags = extractTags(request.path("tags"));
-        logsService.createLogGroup(name, retentionInDays, tags, region);
+        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleDeleteLogGroup(JsonNode request, String region) {
         String name = request.path("logGroupName").asText();
         logsService.deleteLogGroup(name, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutLogGroupDeletionProtection(JsonNode request, String region) {
+        String identifier = request.path("logGroupIdentifier").asText(null);
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("InvalidParameterException", "logGroupIdentifier is required.", 400);
+        }
+        JsonNode enabled = request.get("deletionProtectionEnabled");
+        if (enabled == null || !enabled.isBoolean()) {
+            throw new AwsException("InvalidParameterException", "deletionProtectionEnabled is required.", 400);
+        }
+        String groupName = extractLogGroupNameFromArn(identifier);
+        logsService.putLogGroupDeletionProtection(groupName, enabled.booleanValue(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -93,6 +109,7 @@ public class CloudWatchLogsHandler {
             if (g.getRetentionInDays() != null) {
                 node.put("retentionInDays", g.getRetentionInDays());
             }
+            node.put("deletionProtectionEnabled", g.isDeletionProtectionEnabled());
             node.put("storedBytes", 0);
             node.put("metricFilterCount", 0);
             groupsArray.add(node);

@@ -16,6 +16,9 @@ import static org.hamcrest.Matchers.*;
 class FirehoseIntegrationTest {
 
     private static final String STREAM_NAME = "test-delivery-stream";
+    private static final String KINESIS_SOURCE_STREAM_NAME = "kinesis-source-delivery-stream";
+    private static final String KINESIS_STREAM_ARN = "arn:aws:kinesis:us-east-1:000000000000:stream/events";
+    private static final String SOURCE_ROLE_ARN = "arn:aws:iam::000000000000:role/firehose-role";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -122,6 +125,41 @@ class FirehoseIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(16)
+    void describeDeliveryStreamReturnsKinesisSourceConfiguration() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("""
+                {
+                  "DeliveryStreamName": "%s",
+                  "DeliveryStreamType": "KinesisStreamAsSource",
+                  "KinesisStreamSourceConfiguration": {
+                    "KinesisStreamARN": "%s",
+                    "RoleARN": "%s"
+                  }
+                }
+                """.formatted(KINESIS_SOURCE_STREAM_NAME, KINESIS_STREAM_ARN, SOURCE_ROLE_ARN))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + KINESIS_SOURCE_STREAM_NAME + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamType", equalTo("KinesisStreamAsSource"))
+            .body("DeliveryStreamDescription.Source.KinesisStreamSourceDescription.KinesisStreamARN", equalTo(KINESIS_STREAM_ARN))
+            .body("DeliveryStreamDescription.Source.KinesisStreamSourceDescription.RoleARN", equalTo(SOURCE_ROLE_ARN))
+            .body("DeliveryStreamDescription.Source.KinesisStreamSourceDescription.DeliveryStartTimestamp", notNullValue());
     }
 
     @Test
@@ -266,4 +304,3 @@ class FirehoseIntegrationTest {
             .body("__type", equalTo("InvalidArgumentException"));
     }
 }
-

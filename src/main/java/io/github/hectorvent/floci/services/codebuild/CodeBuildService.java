@@ -39,6 +39,8 @@ public class CodeBuildService {
     private Map<String, Map<String, SourceCredential>> sourceCredentials = new ConcurrentHashMap<>();
     // key: region -> buildId -> build (transient: builds are runtime state)
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Build>> builds = new ConcurrentHashMap<>();
+    // key: region -> buildId -> request buildspec override (transient: builds are runtime state)
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, String>> buildspecOverrides = new ConcurrentHashMap<>();
     // key: region:projectName -> build counter (transient)
     private final ConcurrentHashMap<String, AtomicLong> buildCounters = new ConcurrentHashMap<>();
 
@@ -106,6 +108,10 @@ public class CodeBuildService {
 
     private Map<String, Build> buildsFor(String region) {
         return builds.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private Map<String, String> buildspecOverridesFor(String region) {
+        return buildspecOverrides.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
     // ---- Projects ----
@@ -448,6 +454,9 @@ public class CodeBuildService {
         build.setPhases(new CopyOnWriteArrayList<>());
 
         buildsFor(region).put(buildId, build);
+        if (buildspecOverride != null && !buildspecOverride.isBlank()) {
+            buildspecOverridesFor(region).put(buildId, buildspecOverride);
+        }
         Build responseBuild = copyBuild(build);
 
         runner.startBuild(region, build, project, buildspecOverride);
@@ -500,8 +509,9 @@ public class CodeBuildService {
 
     public Build retryBuild(String region, String account, String buildId) {
         Build original = getBuild(region, buildId);
+        String buildspecOverride = buildspecOverridesFor(region).get(original.getId());
         return startBuild(region, account, original.getProjectName(),
-                null, original.getEnvironment(), original.getArtifacts(),
+                buildspecOverride, original.getEnvironment(), original.getArtifacts(),
                 null, original.getTimeoutInMinutes(), null, null);
     }
 

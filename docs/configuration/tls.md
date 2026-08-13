@@ -36,7 +36,9 @@ client = boto3.client('sts', endpoint_url='https://localhost:4566', verify=False
 When `FLOCI_TLS_ENABLED=true` and no custom certificate is provided, Floci auto-generates a self-signed certificate at startup. The certificate:
 
 - Is persisted to `{persistent-path}/tls/` and reused across restarts
-- Includes `localhost`, `127.0.0.1`, `0.0.0.0`, `*.localhost`, `localhost.floci.io`, and `*.localhost.floci.io` as Subject Alternative Names (SANs)
+- Includes `localhost`, `127.0.0.1`, `0.0.0.0`, `*.localhost`, `localhost.floci.io`,
+  `*.localhost.floci.io`, `*.execute-api.localhost.floci.io`, and
+  `*.execute-api.localhost.localstack.cloud` as Subject Alternative Names (SANs)
 - Automatically includes custom hostnames from `FLOCI_HOSTNAME` and `FLOCI_BASE_URL` in the SANs
 - Is regenerated when hostname configuration changes between restarts
 

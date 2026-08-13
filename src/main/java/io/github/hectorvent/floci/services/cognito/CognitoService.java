@@ -25,6 +25,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import org.jspecify.annotations.Nullable;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.interfaces.RSAPublicKey;
@@ -166,6 +168,7 @@ public class CognitoService {
         populateUserPool(pool, request);
 
         ensureJwtSigningKeys(pool);
+        ensureRefreshTokenSecret(pool);
         poolStore.put(id, pool);
         LOG.infov("Created User Pool: {0}", id);
         return pool;
@@ -271,7 +274,9 @@ public class CognitoService {
     public UserPool describeUserPool(String id) {
         UserPool pool = poolStore.get(id)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
-        if (ensureJwtSigningKeys(pool)) {
+        boolean generatedKeys = ensureJwtSigningKeys(pool);
+        boolean generatedSecret = ensureRefreshTokenSecret(pool);
+        if (generatedKeys || generatedSecret) {
             poolStore.put(id, pool);
         }
         return pool;
@@ -1703,7 +1708,7 @@ public class CognitoService {
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));
         auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti));
-        auth.put("RefreshToken", buildRefreshToken(pool.getId(), user.getUsername(), client.getClientId(), originJti));
+        auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), originJti));
         auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
         auth.put("TokenType", "Bearer");
         return auth;
@@ -2192,6 +2197,32 @@ public class CognitoService {
         }
     }
 
+    private boolean ensureRefreshTokenSecret(UserPool pool) {
+        synchronized (pool) {
+            if (pool.getSigningSecret() != null && !pool.getSigningSecret().isBlank()) {
+                return false;
+            }
+            byte[] secretBytes = new byte[32];
+            new SecureRandom().nextBytes(secretBytes);
+            pool.setSigningSecret(Base64.getEncoder().encodeToString(secretBytes));
+            if (pool.getId() != null) {
+                pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            }
+            return true;
+        }
+    }
+
+    static String hmacSha256(byte[] key, String data) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(key, "HmacSHA256"));
+            return Base64.getEncoder().withoutPadding()
+                    .encodeToString(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to compute refresh token HMAC", e);
+        }
+    }
+
     String hashPassword(String password) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -2293,11 +2324,20 @@ public class CognitoService {
         }
     }
 
-    String buildRefreshToken(String poolId, String username, String clientId, String originJti) {
+    String buildRefreshToken(UserPool pool, String username, String clientId, String originJti) {
+        if (ensureRefreshTokenSecret(pool)) {
+            poolStore.put(pool.getId(), pool);
+        }
         long issuedAt = System.currentTimeMillis();
         String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
-        String raw = poolId + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
-        return Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+        String raw = pool.getId() + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
+        String signature = hmacSha256(refreshTokenSecretBytes(pool), raw);
+        return Base64.getEncoder().withoutPadding()
+                .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
+    }
+
+    static byte[] refreshTokenSecretBytes(UserPool pool) {
+        return Base64.getDecoder().decode(pool.getSigningSecret());
     }
 
     private boolean isTokenRevocationEnabled(UserPoolClient client) {
@@ -2309,13 +2349,21 @@ public class CognitoService {
         try {
             byte[] decoded = Base64.getDecoder().decode(refreshToken);
             String raw = new String(decoded, StandardCharsets.UTF_8);
-            String[] parts = raw.split("\\|", 5);
-            if (parts.length == 5) {
-                return parts; // [poolId, username, clientId, issuedAt, nonce]
+            String[] parts = raw.split("\\|", 6);
+            if (parts.length != 6) {
+                return null;
             }
-            if (parts.length == 4) {
-                return new String[] { parts[0], parts[1], parts[2], "", parts[3] };
+            UserPool pool = poolStore.get(parts[0]).orElse(null);
+            if (pool == null || pool.getSigningSecret() == null || pool.getSigningSecret().isBlank()) {
+                return null;
             }
+            String payload = String.join("|", Arrays.copyOf(parts, 5));
+            byte[] expectedSignature = Base64.getDecoder().decode(hmacSha256(refreshTokenSecretBytes(pool), payload));
+            byte[] actualSignature = Base64.getDecoder().decode(parts[5]);
+            if (!MessageDigest.isEqual(expectedSignature, actualSignature)) {
+                return null;
+            }
+            return Arrays.copyOf(parts, 5); // [poolId, username, clientId, issuedAt, nonce]
         } catch (Exception ignored) { }
         return null;
     }

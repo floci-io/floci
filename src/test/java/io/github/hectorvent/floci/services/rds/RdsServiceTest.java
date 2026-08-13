@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -29,6 +30,8 @@ import org.mockito.ArgumentCaptor;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -187,13 +190,31 @@ class RdsServiceTest {
         when(dockerHostResolver.resolve()).thenReturn("floci.local");
         RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver, null);
 
         DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
                 20, false, null, null, null);
 
         assertEquals("floci.local", instance.getEndpoint().address());
+    }
+
+    @Test
+    void dbInstanceEndpointUsesPublishedProxyPort() {
+        CurrentContainerNetworkResolver currentContainerNetworkResolver = mock(CurrentContainerNetworkResolver.class);
+        when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));
+        when(currentContainerNetworkResolver.resolvePublishedPort(7000)).thenReturn(OptionalInt.of(49173));
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, currentContainerNetworkResolver);
+
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        assertEquals("localhost", instance.getEndpoint().address());
+        assertEquals(49173, instance.getEndpoint().port());
+        assertEquals(7000, instance.getProxyPort());
     }
 
     @Test
@@ -268,6 +289,65 @@ class RdsServiceTest {
     void listDbInstancesReturnsEmptyWhenNotFound() {
         Collection<DbInstance> result = rdsService.listDbInstances("nonexistent");
         assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void listDbInstancesMatchesByArn() {
+        DbInstance created = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        Collection<DbInstance> result = rdsService.listDbInstances(created.getDbInstanceArn());
+        assertEquals(1, result.size());
+        assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
+    }
+
+    @Test
+    void listDbClustersMatchesByArn() {
+        DbCluster created = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        Collection<DbCluster> result = rdsService.listDbClusters(created.getDbClusterArn());
+        assertEquals(1, result.size());
+        assertEquals("cluster1", result.iterator().next().getDbClusterIdentifier());
+    }
+
+    @Test
+    void listDbInstancesDoesNotMatchForeignArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertTrue(rdsService.listDbInstances(
+                "arn:aws:rds:us-east-1:999999999999:db:mydb").isEmpty(), "cross-account ARN must not match");
+        assertTrue(rdsService.listDbInstances(
+                "arn:aws:rds:eu-west-1:123456789012:db:mydb").isEmpty(), "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbClustersDoesNotMatchForeignArn() {
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertTrue(rdsService.listDbClusters(
+                "arn:aws:rds:us-east-1:999999999999:cluster:cluster1").isEmpty(), "cross-account ARN must not match");
+        assertTrue(rdsService.listDbClusters(
+                "arn:aws:rds:eu-west-1:123456789012:cluster:cluster1").isEmpty(), "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbInstancesByDbiResourceIdsUsesExactOrMatching() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        Collection<DbInstance> result = rdsService.listDbInstancesByDbiResourceIds(
+                List.of("db-missing", instance.getDbiResourceId()));
+
+        assertEquals(1, result.size());
+        assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
+        assertTrue(rdsService.listDbInstancesByDbiResourceIds(
+                List.of(instance.getDbiResourceId().toLowerCase())).isEmpty());
     }
 
     @Test
@@ -1070,7 +1150,7 @@ class RdsServiceTest {
                                   SecretsManagerService secretsManager) {
         return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(),
-                secretsManager, null);
+                secretsManager, null, null);
     }
 
     private static List<Subnet> defaultSubnets() {

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +40,14 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         this.delegate = delegate;
         this.requestContextInstance = requestContextInstance;
         this.defaultAccountId = defaultAccountId;
+    }
+
+    /**
+     * In-memory account-aware store with no request context (uses {@code defaultAccountId}).
+     * Useful for unit tests and for callers that need an explicit {@link AccountAwareStorageBackend}.
+     */
+    public static <V> AccountAwareStorageBackend<V> inMemory(String defaultAccountId) {
+        return new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccountId);
     }
 
     @Override
@@ -117,6 +126,43 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             }
             String logicalKey = rawKey.substring(slash + 1);
             delegate.get(rawKey).ifPresent(v -> result.put(logicalKey, v));
+        }
+        return result;
+    }
+
+    /**
+     * Returns all entries across every account, keyed by the raw {@code accountId/logicalKey}
+     * storage key rather than the stripped logical key {@link #scanAllAccountsAsMap()} returns,
+     * so entries sharing a logical key across accounts stay distinguishable.
+     *
+     * <p>A key with no account segment (pre-multi-account data) is attributed to
+     * {@code defaultAccountId} rather than skipped, and migrated in place — unlike {@link #get}'s
+     * per-key migration, this bulk scan has no caller-supplied key to migrate later, so it acts
+     * immediately: already-prefixed keys load first so a legacy key can never win a collision
+     * against one already written under its proper prefix, and a superseded legacy key is
+     * deleted rather than left to collide again on a later restart.
+     */
+    public Map<String, V> scanAllAccountsRaw() {
+        Map<String, V> result = new LinkedHashMap<>();
+        List<String> legacyKeys = new ArrayList<>();
+        for (String rawKey : delegate.keys()) {
+            if (rawKey.indexOf('/') < 0) {
+                legacyKeys.add(rawKey);
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
+        }
+        for (String rawKey : legacyKeys) {
+            String effectiveKey = defaultAccountId + "/" + rawKey;
+            if (result.containsKey(effectiveKey)) {
+                delegate.delete(rawKey);
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(v -> {
+                delegate.put(effectiveKey, v);
+                delegate.delete(rawKey);
+                result.put(effectiveKey, v);
+            });
         }
         return result;
     }

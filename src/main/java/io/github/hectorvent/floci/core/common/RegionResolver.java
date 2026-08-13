@@ -87,6 +87,24 @@ public class RegionResolver {
     }
 
     /**
+     * Returns the region for the current request when called from a request context,
+     * or the configured default region otherwise (async workers, startup, tests).
+     */
+    public String getRegion() {
+        if (requestContextInstance != null) {
+            try {
+                String region = requestContextInstance.get().getRegion();
+                if (region != null) {
+                    return region;
+                }
+            } catch (ContextNotActiveException ignored) {
+                // outside request scope — fall through to default
+            }
+        }
+        return defaultRegion;
+    }
+
+    /**
      * Returns the account ID for the current request when called from a request context,
      * or the configured default account ID otherwise (async workers, startup, tests).
      */

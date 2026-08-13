@@ -104,6 +104,206 @@ class CloudControlIntegrationTest {
         assertListed("AWS::IAM::Role", "CloudControlRole", "RoleName");
     }
 
+    @Test
+    void createResourceProvisionsViaCloudControlAndTokenRoundTrips() throws InterruptedException {
+        String ct = "application/x-amz-json-1.0";
+        // CreateResource AWS::EC2::VPC — Cloud Control is how Formae drives AWS. It is async:
+        // the call returns IN_PROGRESS + a request token immediately.
+        String token = given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.CreateResource")
+                .body("{\"TypeName\":\"AWS::EC2::VPC\",\"DesiredState\":\"{\\\"CidrBlock\\\":\\\"10.77.0.0/16\\\"}\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("ProgressEvent.RequestToken");
+
+        // Poll GetResourceRequestStatus until the async provision reaches SUCCESS.
+        String identifier = null;
+        for (int i = 0; i < 20 && identifier == null; i++) {
+            var pe = given()
+                    .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                    .contentType(ct)
+                    .header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus")
+                    .body("{\"RequestToken\":\"" + token + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract();
+            if ("SUCCESS".equals(pe.path("ProgressEvent.OperationStatus"))) {
+                identifier = pe.path("ProgressEvent.Identifier");
+            } else {
+                Thread.sleep(100);
+            }
+        }
+        assertThat(identifier, containsString("vpc-"));
+
+        // The created VPC is now visible on the read side.
+        assertListed("AWS::EC2::VPC", identifier, "VpcId", ct);
+    }
+
+    @Test
+    void malformedRequestsReportInvalidRequestException() {
+        // InvalidRequestException is the code Cloud Control declares, so an SDK can map it onto a
+        // typed exception. ValidationException is not in the service model.
+        String ct = "application/x-amz-json-1.0";
+
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"DesiredState\":\"{}\"}");
+        assertErrorCode(ct, "CloudApiService.DeleteResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\"}");
+        assertErrorCode(ct, "CloudApiService.GetResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\"}");
+        assertErrorCode(ct, "CloudApiService.ListResources", "{}");
+
+        // GetResourceRequestStatus does not declare InvalidRequestException. Its only declared
+        // error is RequestTokenNotFoundException, which is what an absent token reports.
+        assertErrorCode(ct, "CloudApiService.GetResourceRequestStatus", "{}",
+                404, "RequestTokenNotFoundException");
+
+        // DesiredState is a required member of CreateResourceInput. An absent one used to become
+        // an empty object and provision anyway.
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\"}");
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\",\"DesiredState\":\"\"}");
+        assertErrorCode(ct, "CloudApiService.CreateResource",
+                "{\"TypeName\":\"AWS::EC2::VPC\",\"DesiredState\":\"not json\"}");
+    }
+
+    private void assertErrorCode(String contentType, String target, String body) {
+        assertErrorCode(contentType, target, body, 400, "InvalidRequestException");
+    }
+
+    private void assertErrorCode(String contentType, String target, String body,
+                                 int statusCode, String errorCode) {
+        given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(contentType, TEXT)))
+                .contentType(contentType)
+                .header("X-Amz-Target", target)
+                .body(body)
+                .when().post("/")
+                .then().statusCode(statusCode)
+                .body("__type", containsString(errorCode));
+    }
+
+    @Test
+    void getResourceReadsBackATypeTheReadSideDoesNotList() throws InterruptedException {
+        String ct = "application/x-amz-json-1.0";
+        // AWS::EC2::InternetGateway is provisionable but not one of the listed types, so before
+        // the create-time record existed this GetResource returned ResourceNotFoundException.
+        String token = given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.CreateResource")
+                .body("{\"TypeName\":\"AWS::EC2::InternetGateway\",\"DesiredState\":\"{}\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("ProgressEvent.RequestToken");
+
+        String identifier = awaitIdentifier(token, ct);
+        assertThat(identifier, containsString("igw-"));
+
+        String body = given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.GetResource")
+                .body("{\"TypeName\":\"AWS::EC2::InternetGateway\",\"Identifier\":\"" + identifier + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().asString();
+
+        assertThat(body, containsString(identifier));
+    }
+
+    @Test
+    void deleteResourceReportsFailureWhenItWouldSilentlyNoOp() {
+        String ct = "application/x-amz-json-1.0";
+        // An inline policy's delete needs the principals recorded at create time. Cloud Control
+        // never created this one, so the delete would do nothing — it must not report SUCCESS.
+        given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.DeleteResource")
+                .body("{\"TypeName\":\"AWS::IAM::Policy\",\"Identifier\":\"never-created\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("ProgressEvent.OperationStatus", org.hamcrest.Matchers.equalTo("FAILED"));
+    }
+
+    private String awaitIdentifier(String token, String ct) throws InterruptedException {
+        for (int i = 0; i < 20; i++) {
+            var pe = given()
+                    .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                    .contentType(ct)
+                    .header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus")
+                    .body("{\"RequestToken\":\"" + token + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract();
+            if ("SUCCESS".equals(pe.path("ProgressEvent.OperationStatus"))) {
+                return pe.path("ProgressEvent.Identifier");
+            }
+            Thread.sleep(100);
+        }
+        return null;
+    }
+
+    @Test
+    void listResourcesReportsAnInstancesRuntimeModel() {
+        // Cloud Control reports a resource's current model, not an echo of the desired state, so
+        // an instance has to carry what only the running resource knows — its addresses and the
+        // subnet it landed in. A caller that provisions through Cloud Control and reads back has
+        // no other route to them.
+        String instanceId = given()
+                .formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1")
+                .formParam("MaxCount", "1")
+                .header("Authorization", EC2_AUTH)
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        assertListed("AWS::EC2::Instance", instanceId, "InstanceType");
+
+        // Terminated rather than left running: Ec2IntegrationTest's DescribeNetworkInterfaces
+        // pagination tests assert that the final page carries no nextToken, and they share this
+        // emulator, so an extra live ENI breaks them. TerminateInstances only reaches
+        // shutting-down synchronously — the flip to terminated, which is what those tests filter
+        // on, happens on a background task, so wait for it rather than race it.
+        given()
+                .formParam("Action", "TerminateInstances")
+                .formParam("InstanceId.1", instanceId)
+                .header("Authorization", EC2_AUTH)
+                .when().post("/")
+                .then().statusCode(200);
+        awaitTerminated(instanceId);
+    }
+
+    private void awaitTerminated(String instanceId) {
+        for (int i = 0; i < 100; i++) {
+            String state = given()
+                    .formParam("Action", "DescribeInstances")
+                    .formParam("InstanceId.1", instanceId)
+                    .header("Authorization", EC2_AUTH)
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract().xmlPath()
+                    .getString("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name");
+            if ("terminated".equals(state)) {
+                return;
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted waiting for " + instanceId + " to terminate", e);
+            }
+        }
+        throw new AssertionError(instanceId + " did not reach terminated within 10s");
+    }
+
     private void assertListed(String typeName, String identifier, String propertyName) {
         assertListed(typeName, identifier, propertyName, "application/x-amz-json-1.1");
     }

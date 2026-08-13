@@ -4,7 +4,14 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.batch.BatchService;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
@@ -62,6 +69,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.pipes.PipesService;
@@ -71,6 +79,8 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.Parameter;
+import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
@@ -100,6 +110,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -113,17 +125,26 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_CODE_IDENTITY_ATTR = "FlociLambdaCodeIdentity";
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
-    static final String ROLLBACK_OWNED_ATTR = "__FlociRollbackOwned";
     static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
     private static final String INLINE_CLEANUP_POLICY_NAME_ATTR = "__FlociInlineCleanupPolicyName";
     private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
     private static final String INLINE_CLEANUP_USER_TARGETS_ATTR = "__FlociInlineCleanupUserTargets";
     private static final String INLINE_CLEANUP_GROUP_TARGETS_ATTR = "__FlociInlineCleanupGroupTargets";
+    private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
+    private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
+    private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
+    private static final Set<String> EVENT_BUS_SUPPORTED_PROPERTIES =
+            Set.of("Name", "Description", "Tags", "Policy");
+    private static final Pattern EVENT_BUS_TAG_PATTERN =
+            Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
     private static final String LOG_GROUP_NAME_MODE_ATTR = "FlociLogGroupNameMode";
     private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
     private static final String SECRET_TARGET_OWNER_ATTR = "__FlociSecretTargetOwner";
+    private static final String DDB_REPLICA_TABLE_NAME_ATTR = "TableName";
+    private static final String DDB_REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
+    private static final String DDB_REPLICA_SKIP_DELETION_ATTR = "__FlociDynamoDbReplicaSkipDeletion";
     private static final List<String> SECRET_TARGET_CONNECTION_KEYS = List.of(
             "engine", "host", "port", "dbname", "dbInstanceIdentifier", "dbClusterIdentifier");
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
@@ -173,6 +194,7 @@ public class CloudFormationResourceProvisioner {
     private final AutoScalingService autoScalingService;
     private final FirehoseService firehoseService;
     private final DocDbService docDbService;
+    private final CloudFrontService cloudFrontService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
@@ -207,6 +229,7 @@ public class CloudFormationResourceProvisioner {
                                              AutoScalingService autoScalingService,
                                              FirehoseService firehoseService,
                                              DocDbService docDbService,
+                                             CloudFrontService cloudFrontService,
                                              CloudFormationResourceRegistry resourceRegistry) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
@@ -240,6 +263,7 @@ public class CloudFormationResourceProvisioner {
         this.autoScalingService = autoScalingService;
         this.firehoseService = firehoseService;
         this.docDbService = docDbService;
+        this.cloudFrontService = cloudFrontService;
         this.resourceRegistry = resourceRegistry;
     }
 
@@ -287,7 +311,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::LayerVersion" ->
                         provisionLambdaLayerVersion(resource, properties, engine, region, stackName);
-                case "AWS::IAM::Role" -> provisionIamRole(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::User" -> provisionIamUser(resource, properties, engine, stackName);
                 case "AWS::IAM::AccessKey" -> provisionIamAccessKey(resource, properties, engine);
                 case "AWS::IAM::Policy" -> provisionIamInlinePolicy(resource, properties, engine, stackName);
@@ -306,7 +329,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Route53::HostedZone" -> provisionRoute53HostedZone(resource, properties, engine);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
-                case "AWS::Events::EventBus" -> provisionEventBus(resource, properties, engine, region, stackName);
+                case "AWS::Events::EventBus" -> provisionEventBridgeEventBus(resource, properties, engine, region);
                 case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(resource, properties, engine, region);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
@@ -331,6 +354,7 @@ public class CloudFormationResourceProvisioner {
                         provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
+                case "Custom::DynamoDBReplica" -> provisionDynamoDbReplica(resource, properties, engine, region);
                 case "AWS::ECS::Cluster" -> provisionEcsCluster(resource, properties, engine, region, stackName);
                 case "AWS::ECS::TaskDefinition" -> provisionEcsTaskDefinition(resource, properties, engine, region, stackName);
                 case "AWS::ECS::Service" -> provisionEcsService(resource, properties, engine, region, stackName);
@@ -381,6 +405,8 @@ public class CloudFormationResourceProvisioner {
                         provisionLaunchConfiguration(resource, properties, engine, region, stackName);
                 case "AWS::AutoScaling::AutoScalingGroup" ->
                         provisionAutoScalingGroup(resource, properties, engine, region, stackName);
+                case "AWS::CloudFront::Distribution" ->
+                        provisionCloudFrontDistribution(resource, properties, engine);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -401,12 +427,50 @@ public class CloudFormationResourceProvisioner {
     }
 
     /**
+     * Provision a single resource with no enclosing CloudFormation stack — the Cloud Control
+     * {@code CreateResource} path. Cloud Control DesiredState carries resolved values (no
+     * intrinsics), so a minimal template engine suffices. Reuses the same 114-type provisioning
+     * that CloudFormation stacks use, so any type a stack can create, Cloud Control can too.
+     */
+    public StackResource provisionStandalone(String resourceType, JsonNode properties, String region, String accountId) {
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
+                accountId, region, "cloudcontrol", "cloudcontrol",
+                Map.of(), new HashMap<>(), new HashMap<>(), Map.of(), Map.of(), objectMapper, name -> null);
+        return provision("resource", resourceType, properties, engine, region, accountId, "cloudcontrol");
+    }
+
+    /** Delete a resource by type + physical id — the Cloud Control {@code DeleteResource} path. */
+    public void deleteStandalone(String resourceType, String identifier, String region) {
+        deleteStandalone(resourceType, identifier, region, Map.of());
+    }
+
+    /**
+     * As above, with the attributes recorded when the resource was created. Custom resources, EKS
+     * nodegroups and IAM inline policies cannot be deleted from type and physical id alone, so
+     * without these their delete silently no-ops.
+     */
+    public void deleteStandalone(String resourceType, String identifier, String region,
+                                 Map<String, String> attributes) {
+        StackResource resource = new StackResource();
+        resource.setResourceType(resourceType);
+        resource.setPhysicalId(identifier);
+        resource.setAttributes(new HashMap<>(attributes == null ? Map.of() : attributes));
+        delete(resource, region);
+    }
+
+    /**
      * Deletes a provisioned resource. Custom resources are re-invoked with {@code RequestType=Delete}
      * (using the ServiceToken + properties stashed at create time); everything else delegates to the
      * type-keyed {@link #delete(String, String, String)}.
      */
     public void delete(StackResource resource, String region) {
         String resourceType = resource.getResourceType();
+        // Custom::DynamoDBReplica is applied natively against the DynamoDB service (not via its
+        // provider Lambda), so remove the replica the same way rather than invoking the handler.
+        if ("Custom::DynamoDBReplica".equals(resourceType)) {
+            deleteDynamoDbReplicaSafe(resource, region);
+            return;
+        }
         boolean custom = "AWS::CloudFormation::CustomResource".equals(resourceType)
                 || (resourceType != null && resourceType.startsWith("Custom::"));
         if (custom) {
@@ -465,6 +529,18 @@ public class CloudFormationResourceProvisioner {
             deleteManagedPolicy(resource);
             return;
         }
+        // A Rule on a custom bus is keyed by that bus; the physical id is only the rule name, so the
+        // type/physicalId path resolves to the "default" bus and never finds it — leaving the rule (and
+        // then its bus) undeletable. Pass the bus name captured at provision time.
+        if ("AWS::Events::Rule".equals(resourceType)) {
+            deleteEventBridgeRuleSafe(resource.getPhysicalId(),
+                    resource.getAttributes().get("EventBusName"), region);
+            return;
+        }
+        if ("AWS::Events::EventBus".equals(resourceType)) {
+            deleteEventBusSafe(resource, region);
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
@@ -488,10 +564,9 @@ public class CloudFormationResourceProvisioner {
             case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
             case "AWS::DynamoDB::Table" -> deleteDynamoTableSafe(physicalId, region);
             case "AWS::Lambda::Function" -> deleteLambdaFunctionSafe(physicalId, region);
-            case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
             // AWS::IAM::Policy is inline: it is removed together with its owning principal (see
-            // deleteRoleSafe), or precisely via the StackResource-aware delete path. Nothing to do
-            // here when only the physical id (policy name) is known, as on rollback.
+            // IamRoleCfnProvisioner#delete), or precisely via the StackResource-aware delete path.
+            // Nothing to do here when only the physical id (policy name) is known, as on rollback.
             case "AWS::IAM::Policy" -> { }
             case "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
             case "AWS::IAM::InstanceProfile" -> iamService.deleteInstanceProfile(physicalId);
@@ -504,6 +579,7 @@ public class CloudFormationResourceProvisioner {
                     "ValidationError",
                     "SecretTargetAttachment deletion requires the StackResource metadata that records its managed fields.",
                     400);
+            // No bus context on the type/physicalId path (e.g. CREATE-rollback); targets the default bus.
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
@@ -541,6 +617,7 @@ public class CloudFormationResourceProvisioner {
                     autoScalingService.deleteLaunchConfiguration(region, physicalId);
             case "AWS::AutoScaling::AutoScalingGroup" ->
                     autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
+            case "AWS::CloudFront::Distribution" -> cloudFrontService.removeDistribution(physicalId);
             default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
         }
     }
@@ -1177,8 +1254,8 @@ public class CloudFormationResourceProvisioner {
                 id,
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
-                resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
                 resolveOptional(props, "DBName", engine),
                 firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
                 parseIntProp(props, "AllocatedStorage", engine, 20),
@@ -1208,8 +1285,8 @@ public class CloudFormationResourceProvisioner {
                 id,
                 resolveOptional(props, "Engine", engine),
                 resolveOptional(props, "EngineVersion", engine),
-                resolveOptional(props, "MasterUsername", engine),
-                resolveOptional(props, "MasterUserPassword", engine),
+                resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
+                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
                 resolveOptional(props, "DatabaseName", engine),
                 parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                 resolveOptional(props, "DBClusterParameterGroupName", engine),
@@ -1586,6 +1663,8 @@ public class CloudFormationResourceProvisioner {
         configRequest.put("DeadLetterConfig", resolveMapOrDefault(props, "DeadLetterConfig", engine,
                 mapWithNullValue("TargetArn")));
         configRequest.put("VpcConfig", resolveMapOrDefault(props, "VpcConfig", engine, Map.of()));
+        configRequest.put("FileSystemConfigs",
+                resolveObjectListOrEmpty(props, "FileSystemConfigs", engine));
         putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
 
         createRequest.putAll(configRequest);
@@ -1789,6 +1868,12 @@ public class CloudFormationResourceProvisioner {
                         return true;
                     }
                 }
+                case "FileSystemConfigs" -> {
+                    if (!Objects.equals(normalizeForCompare(fileSystemConfigs(fn)),
+                            normalizeForCompare(desired))) {
+                        return true;
+                    }
+                }
                 case "ImageConfig" -> {
                     if (imageConfigurationChanged(fn, desired)) return true;
                 }
@@ -1816,6 +1901,22 @@ public class CloudFormationResourceProvisioner {
         }
         return map.containsKey("WorkingDirectory")
                 && !Objects.equals(fn.getImageConfigWorkingDirectory(), mapString(map, "WorkingDirectory"));
+    }
+
+    private static List<Map<String, String>> fileSystemConfigs(LambdaFunction fn) {
+        if (fn.getFileSystemConfigs() == null) {
+            return List.of();
+        }
+        return fn.getFileSystemConfigs().stream()
+                .map(CloudFormationResourceProvisioner::fileSystemConfig)
+                .toList();
+    }
+
+    private static Map<String, String> fileSystemConfig(LambdaFileSystemConfig config) {
+        Map<String, String> value = new LinkedHashMap<>();
+        value.put("Arn", config.getArn());
+        value.put("LocalMountPath", config.getLocalMountPath());
+        return value;
     }
 
     private static String sha256Base64(String zipFileBase64) {
@@ -1914,6 +2015,23 @@ public class CloudFormationResourceProvisioner {
         }
         List<String> values = new ArrayList<>();
         resolved.forEach(v -> values.add(v.asText()));
+        return values;
+    }
+
+    private List<Object> resolveObjectListOrEmpty(JsonNode props, String source,
+                                                  CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null) {
+            return List.of();
+        }
+        if (!resolved.isArray()) {
+            throw new AwsException("ValidationError", source + " must be a list", 400);
+        }
+        List<Object> values = new ArrayList<>();
+        resolved.forEach(value -> values.add(jsonNodeToValue(value)));
         return values;
     }
 
@@ -2028,92 +2146,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    // ── IAM Role ──────────────────────────────────────────────────────────────
-
-    private void provisionIamRole(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                  String accountId, String stackName) {
-        String existingRoleName = r.getPhysicalId();
-        String roleName = resolveOptional(props, "RoleName", engine);
-        if (roleName == null || roleName.isBlank()) {
-            roleName = existingRoleName != null && !existingRoleName.isBlank()
-                    ? existingRoleName
-                    : generatePhysicalName(stackName, r.getLogicalId(), 64, false);
-        }
-        final String resolvedRoleName = roleName;
-        if (existingRoleName != null && !existingRoleName.equals(resolvedRoleName)) {
-            throw new AwsException("ValidationError",
-                    "Updating RoleName requires resource replacement, which is not supported.", 400);
-        }
-        String assumeDoc = props != null && props.has("AssumeRolePolicyDocument")
-                ? props.get("AssumeRolePolicyDocument").toString()
-                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
-        String path = resolveOptional(props, "Path", engine);
-        if (path == null) {
-            path = "/";
-        }
-        String description = resolveOptional(props, "Description", engine);
-        List<String> managedPolicyArns = resolveStringList(props, "ManagedPolicyArns", engine);
-
-        IamRole role;
-        boolean createdRole = false;
-        try {
-            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, 3600, Map.of());
-            createdRole = true;
-            r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
-        } catch (AwsException e) {
-            boolean stackAlreadyOwnsRole = existingRoleName != null
-                    && existingRoleName.equals(resolvedRoleName);
-            if (!stackAlreadyOwnsRole || !"EntityAlreadyExists".equals(e.getErrorCode())) {
-                throw e;
-            }
-            // Same-stack update/retry: both the physical name and immutable role ID must match.
-            // A role deleted out of band and recreated under the same name belongs to its new owner.
-            role = iamService.getRole(resolvedRoleName);
-            String existingRoleId = r.getAttributes().get("RoleId");
-            if (existingRoleId == null || existingRoleId.isBlank()
-                    || !existingRoleId.equals(role.getRoleId())) {
-                r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
-                throw e;
-            }
-        }
-
-        r.setPhysicalId(resolvedRoleName);
-        r.getAttributes().put("Arn", role.getArn());
-        r.getAttributes().put("RoleId", role.getRoleId());
-
-        Set<String> originalPolicyArns = new HashSet<>(role.getAttachedPolicyArns());
-        LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
-        try {
-            for (String policyArn : managedPolicyArns) {
-                iamService.attachRolePolicy(resolvedRoleName, policyArn);
-                if (!originalPolicyArns.contains(policyArn)) {
-                    attachedByThisAttempt.add(policyArn);
-                }
-            }
-        } catch (RuntimeException failure) {
-            List<String> rollbackArns = new ArrayList<>(attachedByThisAttempt);
-            Collections.reverse(rollbackArns);
-            boolean cleanupSucceeded = true;
-            for (String policyArn : rollbackArns) {
-                String cleanupDescription = "detach policy " + policyArn + " from role " + resolvedRoleName;
-                if (!attemptIamCleanup(failure, cleanupDescription,
-                        () -> iamService.detachRolePolicy(resolvedRoleName, policyArn))) {
-                    cleanupSucceeded = false;
-                }
-            }
-            if (createdRole) {
-                if (!attemptIamCleanup(failure, "delete role " + resolvedRoleName,
-                        () -> iamService.deleteRole(resolvedRoleName))) {
-                    cleanupSucceeded = false;
-                }
-                if (cleanupSucceeded) {
-                    r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
-                }
-            }
-            throw failure;
-        }
-    }
-
     // ── IAM Policy ────────────────────────────────────────────────────────────
 
     /**
@@ -2215,7 +2247,7 @@ public class CloudFormationResourceProvisioner {
         resource.getAttributes().put("InlineUserTargets", String.join("\n", userTargets));
         resource.getAttributes().put("InlineGroupTargets", String.join("\n", groupTargets));
         if (!roleTargets.isEmpty() || !userTargets.isEmpty() || !groupTargets.isEmpty()) {
-            resource.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+            resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         }
     }
 
@@ -2262,7 +2294,7 @@ public class CloudFormationResourceProvisioner {
         List<String> pendingTargets = new ArrayList<>();
         for (String target : rollbackTargets) {
             String description = "delete inline policy " + currentPolicyName + " from " + target;
-            if (!attemptIamCleanup(failure, description, () -> detachInline(target, cleanup))) {
+            if (!CfnRollback.attemptIamCleanup(failure, description, () -> detachInline(target, cleanup))) {
                 pendingTargets.add(target);
             }
         }
@@ -2303,7 +2335,7 @@ public class CloudFormationResourceProvisioner {
         List<String> roleNames = resolveStringList(props, "Roles", engine);
 
         var policy = iamService.createPolicy(policyName, "/", null, document, Map.of());
-        r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+        r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         r.setPhysicalId(policy.getArn());
         // PolicyArn is the attribute CloudFormation documents for this type, and what a template
         // written against AWS asks for. Without it Fn::GetAtt does not resolve and the unresolved
@@ -2326,31 +2358,19 @@ public class CloudFormationResourceProvisioner {
             boolean cleanupSucceeded = true;
             for (String roleName : rollbackRoles) {
                 String cleanupDescription = "detach policy " + policy.getArn() + " from role " + roleName;
-                if (!attemptIamCleanup(failure, cleanupDescription,
+                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
                         () -> iamService.detachRolePolicy(roleName, policy.getArn()))) {
                     cleanupSucceeded = false;
                 }
             }
-            if (!attemptIamCleanup(failure, "delete policy " + policy.getArn(),
+            if (!CfnRollback.attemptIamCleanup(failure, "delete policy " + policy.getArn(),
                     () -> iamService.deletePolicy(policy.getArn()))) {
                 cleanupSucceeded = false;
             }
             if (cleanupSucceeded) {
-                r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
+                r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
             }
             throw failure;
-        }
-    }
-
-    private boolean attemptIamCleanup(RuntimeException primaryFailure, String description, Runnable cleanup) {
-        try {
-            cleanup.run();
-            return true;
-        } catch (RuntimeException cleanupFailure) {
-            primaryFailure.addSuppressed(cleanupFailure);
-            LOG.warnv("IAM rollback cleanup failed while attempting to {0}: {1}",
-                    description, cleanupFailure.getMessage());
-            return false;
         }
     }
 
@@ -2868,6 +2888,8 @@ public class CloudFormationResourceProvisioner {
                 state, description, roleArn, Map.of(), region);
         r.setPhysicalId(ruleName);
         r.getAttributes().put("Arn", rule.getArn());
+        // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
+        // the right bus (the physical id is only the rule name, which resolves to the default bus).
         if (busName != null && !busName.isBlank()) {
             r.getAttributes().put("EventBusName", busName);
         }
@@ -2915,70 +2937,321 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
+    /**
+     * Provisions an {@code AWS::Events::EventBus} (a custom EventBridge event bus). Without this the
+     * resource would fall through to the generic stub, which assigns a physical id but never registers
+     * the bus with the EventBridge service — so any {@code AWS::Events::Rule} (or PutEvents) targeting
+     * the bus fails "EventBus not found". Per the AWS spec, {@code Ref} returns the bus <em>name</em>
+     * (not the ARN), so the physical id is the name; {@code Fn::GetAtt "Arn"} exposes the ARN.
+     */
+    private void provisionEventBridgeEventBus(StackResource r, JsonNode props,
+                                              CloudFormationTemplateEngine engine, String region) {
+        validateEventBusProperties(props);
+        String existingBusName = r.getPhysicalId();
+        String busName = resolveOptional(props, "Name", engine);
+        validateEventBusName(busName);
+        if (existingBusName != null && !existingBusName.equals(busName)) {
+            throw new AwsException("ValidationError",
+                    "Updating EventBus Name requires resource replacement, which is not supported.", 400);
+        }
+        String description = resolveOptional(props, "Description", engine);
+        if (description != null && description.length() > 512) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Description must not exceed 512 characters.", 400);
+        }
+        Map<String, String> tags = parseEventBusTags(
+                props != null ? props.get("Tags") : null, engine);
+        JsonNode policy = resolveEventBusPolicy(props, engine);
+
+        EventBus bus;
+        boolean createdBus = false;
+        try {
+            bus = eventBridgeService.createEventBus(busName, description, tags, region);
+            createdBus = true;
+            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        } catch (AwsException e) {
+            boolean stackAlreadyOwnsBus = existingBusName != null && existingBusName.equals(busName);
+            if (!stackAlreadyOwnsBus || !"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            bus = eventBridgeService.describeEventBus(busName, region);
+            // A missing created-time means ownership was never tracked, not that it changed: stacks
+            // provisioned before this attribute existed are restored without it. Refusing there would
+            // wedge every later UpdateStack, including no-op ones. Only a recorded time that actually
+            // disagrees means the bus was recreated out of band and belongs to its new owner.
+            String existingCreatedTime = r.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
+            String actualCreatedTime = eventBusCreatedTime(bus);
+            if (existingCreatedTime != null && !existingCreatedTime.equals(actualCreatedTime)) {
+                r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+                throw e;
+            }
+            validateEventBusMutablePropertiesUnchanged(r, bus, description, tags, policy);
+        }
+
+        // Record identity before applying the policy: rollbackCreatedResources skips any resource
+        // whose physicalId is still null, so a putPermission failure after the bus exists would
+        // otherwise orphan it with no way for rollback to find it.
+        r.setPhysicalId(busName);              // Ref → EventBus name (AWS-faithful)
+        r.getAttributes().put("Arn", bus.getArn());
+        r.getAttributes().put("Name", busName);
+        r.getAttributes().put(EVENT_BUS_CREATED_TIME_ATTR, eventBusCreatedTime(bus));
+        recordEventBusManagedTagKeys(r, tags.keySet());
+        recordEventBusManagedPolicy(r, policy);
+
+        // Apply an optional inline resource policy only during creation. Updating it is rejected by
+        // validateEventBusMutablePropertiesUnchanged until stack updates can roll back live resource
+        // mutations transactionally.
+        if (createdBus && !policy.isNull()) {
+            eventBridgeService.putPermission(busName, null, null, null, null, policy.toString(), region);
+        }
+    }
+
+    private void validateEventBusProperties(JsonNode props) {
+        if (props == null || props.isNull()) {
+            return;
+        }
+        if (!props.isObject()) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Properties must be an object.", 400);
+        }
+        List<String> unsupported = new ArrayList<>();
+        props.fieldNames().forEachRemaining(name -> {
+            if (!EVENT_BUS_SUPPORTED_PROPERTIES.contains(name)) {
+                unsupported.add(name);
+            }
+        });
+        if (!unsupported.isEmpty()) {
+            Collections.sort(unsupported);
+            throw new AwsException("ValidationError",
+                    "Unsupported AWS::Events::EventBus properties: "
+                            + String.join(", ", unsupported), 400);
+        }
+    }
+
+    private void validateEventBusName(String busName) {
+        if (busName == null || busName.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Name is required for AWS::Events::EventBus.", 400);
+        }
+        if (busName.length() > 256
+                || !busName.matches("[.\\-_A-Za-z0-9]+")
+                || "default".equals(busName)) {
+            throw new AwsException("ValidationError",
+                    "Invalid custom event bus Name: " + busName, 400);
+        }
+    }
+
+    private Map<String, String> parseEventBusTags(
+            JsonNode tagsNode, CloudFormationTemplateEngine engine) {
+        if (tagsNode == null || tagsNode.isNull()) {
+            return Map.of();
+        }
+        JsonNode resolvedTags = engine.resolveNode(tagsNode);
+        if (!resolvedTags.isArray()) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Tags must be an array.", 400);
+        }
+        if (resolvedTags.size() > 50) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus supports at most 50 tags.", 400);
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (JsonNode entry : resolvedTags) {
+            if (!entry.isObject()) {
+                throw new AwsException("ValidationError",
+                        "Each AWS::Events::EventBus tag must be an object.", 400);
+            }
+            String key = entry.path("Key").asText(null);
+            String value = entry.path("Value").asText(null);
+            if (key == null || key.isEmpty() || key.length() > 128) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Key must contain 1 to 128 characters.", 400);
+            }
+            if (key.regionMatches(true, 0, "aws:", 0, 4)) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Key must not use the reserved aws: prefix.", 400);
+            }
+            if (!EVENT_BUS_TAG_PATTERN.matcher(key).matches()) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Key contains unsupported characters.", 400);
+            }
+            if (value == null || value.length() > 256) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Value must contain at most 256 characters.", 400);
+            }
+            if (!EVENT_BUS_TAG_PATTERN.matcher(value).matches()) {
+                throw new AwsException("ValidationError",
+                        "Event bus tag Value contains unsupported characters.", 400);
+            }
+            if (tags.putIfAbsent(key, value) != null) {
+                throw new AwsException("ValidationError",
+                        "Duplicate event bus tag Key: " + key, 400);
+            }
+        }
+        return tags;
+    }
+
+    private void validateEventBusMutablePropertiesUnchanged(
+            StackResource resource, EventBus bus, String requestedDescription,
+            Map<String, String> requestedTags, JsonNode requestedPolicy) {
+        if (!Objects.equals(bus.getDescription(), requestedDescription)) {
+            throw unsupportedEventBusMutableUpdate();
+        }
+
+        // Stacks persisted by the older EventBus provisioner have no managed-key metadata. There
+        // is no reliable way to distinguish their CloudFormation tags from tags added out of band,
+        // so allow this one-time adoption and start tracking the requested keys afterwards.
+        if (resource.getAttributes().containsKey(EVENT_BUS_MANAGED_TAG_KEYS_ATTR)) {
+            Map<String, String> currentManagedTags = new LinkedHashMap<>();
+            for (String key : eventBusManagedTagKeys(resource)) {
+                if (bus.getTags().containsKey(key)) {
+                    currentManagedTags.put(key, bus.getTags().get(key));
+                }
+            }
+            if (!currentManagedTags.equals(requestedTags)) {
+                throw unsupportedEventBusMutableUpdate();
+            }
+        }
+
+        String managedPolicy = resource.getAttributes().get(EVENT_BUS_MANAGED_POLICY_ATTR);
+        JsonNode policyToCompare = managedPolicy != null
+                ? parseEventBusPolicy(managedPolicy, "stored CloudFormation metadata")
+                : parseEventBusPolicy(bus.getPolicy(), "the existing event bus");
+        if (managedPolicy != null || !requestedPolicy.isNull()) {
+            if (!policyToCompare.equals(requestedPolicy)) {
+                throw unsupportedEventBusMutableUpdate();
+            }
+        }
+    }
+
+    private JsonNode resolveEventBusPolicy(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("Policy") || props.get("Policy").isNull()) {
+            return JsonNodeFactory.instance.nullNode();
+        }
+        return engine.resolveNode(props.get("Policy"));
+    }
+
+    private JsonNode parseEventBusPolicy(String policy, String source) {
+        if (policy == null) {
+            return JsonNodeFactory.instance.nullNode();
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(policy);
+            return parsed != null ? parsed : JsonNodeFactory.instance.nullNode();
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Invalid EventBus policy in " + source + ": " + e.getMessage(), 500);
+        }
+    }
+
+    private void recordEventBusManagedPolicy(StackResource resource, JsonNode policy) {
+        try {
+            resource.getAttributes().put(EVENT_BUS_MANAGED_POLICY_ATTR,
+                    objectMapper.writeValueAsString(policy));
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Failed to store EventBus managed-policy metadata: " + e.getMessage(), 500);
+        }
+    }
+
+    private AwsException unsupportedEventBusMutableUpdate() {
+        return new AwsException("ValidationError",
+                "Updating AWS::Events::EventBus Description, Tags, or Policy is not supported "
+                        + "until transactional rollback is available.", 400);
+    }
+
+    private Set<String> eventBusManagedTagKeys(StackResource resource) {
+        String value = resource.getAttributes().get(EVENT_BUS_MANAGED_TAG_KEYS_ATTR);
+        if (value == null || value.isBlank()) {
+            return Set.of();
+        }
+        try {
+            JsonNode keys = objectMapper.readTree(value);
+            if (!keys.isArray()) {
+                throw new IllegalArgumentException("managed tag keys are not an array");
+            }
+            Set<String> result = new HashSet<>();
+            keys.forEach(key -> result.add(key.asText()));
+            return result;
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Invalid stored EventBus managed-tag metadata: " + e.getMessage(), 500);
+        }
+    }
+
+    private void recordEventBusManagedTagKeys(StackResource resource, Set<String> keys) {
+        try {
+            resource.getAttributes().put(
+                    EVENT_BUS_MANAGED_TAG_KEYS_ATTR,
+                    objectMapper.writeValueAsString(new TreeSet<>(keys)));
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure",
+                    "Failed to store EventBus managed-tag metadata: " + e.getMessage(), 500);
+        }
+    }
+
+    private String eventBusCreatedTime(EventBus bus) {
+        return bus.getCreatedTime() != null ? bus.getCreatedTime().toString() : "";
+    }
+
     private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
         try {
-            // Remove all targets before deleting the rule
+            // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
             var targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {
                 List<String> targetIds = targets.stream().map(Target::getId).toList();
                 eventBridgeService.removeTargets(ruleName, busName, targetIds, region);
             }
             eventBridgeService.deleteRule(ruleName, busName, region);
-        } catch (Exception e) {
-            LOG.debugv("Could not delete EventBridge rule {0}: {1}", ruleName, e.getMessage());
-        }
-    }
-
-    private void provisionEventBus(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                   String region, String stackName) {
-        String name = resolveOptional(props, "Name", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 256, false);
-        }
-        String description = resolveOptional(props, "Description", engine);
-
-        Map<String, String> tags = new HashMap<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.put(key, engine.resolve(tag.path("Value")));
-                }
-            }
-        }
-
-        EventBus bus;
-        try {
-            bus = eventBridgeService.createEventBus(name, description, tags, region);
         } catch (AwsException e) {
-            if ("ResourceAlreadyExistsException".equals(e.getErrorCode())) {
-                bus = eventBridgeService.describeEventBus(name, region);
-            } else {
+            // An already-deleted rule is the one failure that genuinely means "done". Anything else
+            // is a real error worth surfacing rather than hiding behind a debug line.
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
             }
-        }
-
-        // Optional inline resource policy (rare for CDK EventBus constructs).
-        if (props != null && props.has("Policy") && !props.get("Policy").isNull()) {
-            String policyJson = engine.resolveNode(props.get("Policy")).toString();
-            eventBridgeService.putPermission(name, null, null, null, null, policyJson, region);
-        }
-
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", bus.getArn());
-        r.getAttributes().put("Name", name);
-    }
-
-    private void deleteEventBusSafe(String name, String region) {
-        try {
-            eventBridgeService.deleteEventBus(name, region);
+            LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
         } catch (Exception e) {
-            // Warn (not debug): the stack still records the resource as DELETE_COMPLETE, so a bus
-            // left alive here (e.g. rules deleted out of dependency order) is a silent divergence
-            // that must stay diagnosable.
-            LOG.warnv("Could not delete event bus {0}: {1}", name, e.getMessage());
+            throw new AwsException("InternalFailure",
+                    "Could not delete EventBridge rule " + ruleName + ": " + e.getMessage(), 500);
         }
     }
+
+    private void deleteEventBusSafe(String busName, String region) {
+        try {
+            eventBridgeService.deleteEventBus(busName, region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
+        }
+    }
+
+    private void deleteEventBusSafe(StackResource resource, String region) {
+        String busName = resource.getPhysicalId();
+        EventBus bus;
+        try {
+            bus = eventBridgeService.describeEventBus(busName, region);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
+                return;
+            }
+            throw e;
+        }
+
+        // A missing attribute means ownership was never tracked, not that it changed: stacks
+        // provisioned before this attribute existed are restored from cloudformation-stacks.json
+        // without it. Refusing there would leave every such stack permanently in DELETE_FAILED, so
+        // fall back to the pre-tracking behaviour of deleting what the stack recorded it created.
+        String expectedCreatedTime = resource.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
+        if (expectedCreatedTime != null && !expectedCreatedTime.equals(eventBusCreatedTime(bus))) {
+            throw new AwsException("ValidationError",
+                    "EventBus ownership changed; refusing to delete: " + busName, 400);
+        }
+        deleteEventBusSafe(busName, region);
+    }
+
 
     private void provisionEventBusPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                          String region) {
@@ -4076,6 +4349,79 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
+    /**
+     * Provisions a {@code Custom::DynamoDBReplica} — the custom resource the CDK legacy global-table
+     * (dynamodb.Table.replicationRegions) emits per replica region. Its provider Lambda simply calls
+     * DynamoDB UpdateTable with a ReplicaUpdates Create, so apply that directly rather than running
+     * the async CDK Provider framework. {@code Ref} (PhysicalResourceId) follows CDK's
+     * {@code <tableName>-<region>} format.
+     */
+    private void provisionDynamoDbReplica(StackResource r, JsonNode props,
+                                          CloudFormationTemplateEngine engine, String region) {
+        String tableName = resolveOptional(props, "TableName", engine);
+        String replicaRegion = resolveOptional(props, "Region", engine);
+        if (tableName == null || tableName.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing TableName", 400);
+        }
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing Region", 400);
+        }
+        String priorTableName = r.getAttributes().get(DDB_REPLICA_TABLE_NAME_ATTR);
+        String priorRegion = r.getAttributes().get(DDB_REPLICA_REGION_ATTR);
+        if (priorRegion == null || priorRegion.isBlank()) {
+            priorRegion = replicaRegionFromPhysicalId(
+                    r.getPhysicalId(), priorTableName != null ? priorTableName : tableName);
+        }
+        List<String> removeRegions = priorRegion != null
+                && !priorRegion.isBlank()
+                && !priorRegion.equals(replicaRegion)
+                ? List.of(priorRegion)
+                : List.of();
+        // Validate and persist replacement as one operation so an old-replica removal failure
+        // cannot leave the new replica applied while the resource still points at the old region.
+        dynamoDbService.applyReplicaUpdates(
+                tableName, List.of(replicaRegion), removeRegions, region);
+        r.setPhysicalId(tableName + "-" + replicaRegion);
+        r.getAttributes().put(DDB_REPLICA_TABLE_NAME_ATTR, tableName);
+        r.getAttributes().put(DDB_REPLICA_REGION_ATTR, replicaRegion);
+        r.getAttributes().put(DDB_REPLICA_SKIP_DELETION_ATTR,
+                Boolean.toString(Boolean.TRUE.equals(
+                        parseBooleanOrNull(resolveOptional(props, "SkipReplicaDeletion", engine)))));
+    }
+
+    private void deleteDynamoDbReplicaSafe(StackResource r, String region) {
+        if (Boolean.parseBoolean(r.getAttributes().get(DDB_REPLICA_SKIP_DELETION_ATTR))) {
+            LOG.debugv("Keeping replica for retained Custom::DynamoDBReplica {0}", r.getLogicalId());
+            return;
+        }
+        String tableName = r.getAttributes().get(DDB_REPLICA_TABLE_NAME_ATTR);
+        String replicaRegion = r.getAttributes().get(DDB_REPLICA_REGION_ATTR);
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            replicaRegion = replicaRegionFromPhysicalId(r.getPhysicalId(), tableName);
+        }
+        if (tableName == null || tableName.isBlank() || replicaRegion == null || replicaRegion.isBlank()) {
+            return;
+        }
+        try {
+            dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(replicaRegion), region);
+        } catch (Exception e) {
+            LOG.debugv("Could not remove replica {0} from table {1}: {2}",
+                    replicaRegion, tableName, e.getMessage());
+        }
+    }
+
+    private static String replicaRegionFromPhysicalId(String physicalId, String tableName) {
+        if (physicalId == null || physicalId.isBlank()) {
+            return null;
+        }
+        String prefix = tableName + "-";
+        return tableName != null && !tableName.isBlank() && physicalId.startsWith(prefix)
+                ? physicalId.substring(prefix.length())
+                : physicalId;
+    }
+
     // Reads the ResourceProperties stashed at the last create/update (CR_PROPERTIES_ATTR).
     // Returns null when nothing is stashed or it cannot be parsed.
     private ObjectNode readStashedProperties(StackResource r) {
@@ -4772,6 +5118,161 @@ public class CloudFormationResourceProvisioner {
         return node != null && node.hasNonNull(field) ? node.path(field).asText() : null;
     }
 
+    // ── CloudFront ────────────────────────────────────────────────────────────
+
+    /**
+     * Provisions an {@code AWS::CloudFront::Distribution} by translating its {@code DistributionConfig}
+     * property tree into a {@link DistributionConfig} and creating or updating the distribution.
+     * {@code Ref} returns the distribution id; {@code Fn::GetAtt} exposes {@code Id} and
+     * {@code DomainName} (closes #1147, where {@code Fn::GetAtt DomainName} previously returned an
+     * unresolved token).
+     */
+    private void provisionCloudFrontDistribution(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine) {
+        JsonNode dc = props != null ? props.path("DistributionConfig") : null;
+        DistributionConfig config = new DistributionConfig();
+        if (dc != null && !dc.isMissingNode() && !dc.isNull()) {
+            config.setEnabled(cfnBool(dc, "Enabled", engine, true));
+            config.setComment(cfnText(dc, "Comment", engine));
+            config.setDefaultRootObject(cfnText(dc, "DefaultRootObject", engine));
+            config.setHttpVersion(cfnTextOrDefault(dc, "HttpVersion", engine, "http2"));
+            config.setPriceClass(cfnTextOrDefault(dc, "PriceClass", engine, "PriceClass_All"));
+            config.setAliases(cfnStringList(dc.path("Aliases"), engine));
+            config.setOrigins(cfnOrigins(dc, engine));
+            config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));
+            config.setCacheBehaviors(cfnCacheBehaviors(dc, engine));
+            config.setCustomErrorResponses(cfnCustomErrorResponses(dc, engine));
+        }
+
+        Distribution dist = new Distribution();
+        dist.setConfig(config);
+        if (r.getPhysicalId() == null || r.getPhysicalId().isBlank()) {
+            dist = cloudFrontService.createDistribution(dist, Map.of());
+        } else {
+            Distribution existing = cloudFrontService.getDistribution(r.getPhysicalId());
+            dist = cloudFrontService.updateDistribution(
+                    existing.getId(), existing.getEtag(), dist);
+        }
+
+        r.setPhysicalId(dist.getId());
+        r.getAttributes().put("Id", dist.getId());
+        r.getAttributes().put("DomainName", dist.getDomainName());
+        r.getAttributes().put("Arn", dist.getArn());
+    }
+
+    private List<Origin> cfnOrigins(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<Origin> origins = new ArrayList<>();
+        JsonNode items = dc.path("Origins");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                Origin origin = new Origin();
+                origin.setId(cfnText(node, "Id", engine));
+                origin.setDomainName(cfnText(node, "DomainName", engine));
+                String originPath = cfnText(node, "OriginPath", engine);
+                if (!originPath.isEmpty()) {
+                    origin.setOriginPath(originPath);
+                }
+                String originAccessControlId =
+                        cfnText(node, "OriginAccessControlId", engine);
+                if (!originAccessControlId.isEmpty()) {
+                    origin.setOriginAccessControlId(originAccessControlId);
+                }
+                JsonNode s3 = node.path("S3OriginConfig");
+                JsonNode custom = node.path("CustomOriginConfig");
+                if (!custom.isMissingNode() && !custom.isNull()) {
+                    Map<String, Object> coc = new LinkedHashMap<>();
+                    coc.put("HTTPPort", cfnTextOrDefault(custom, "HTTPPort", engine, "80"));
+                    coc.put("HTTPSPort", cfnTextOrDefault(custom, "HTTPSPort", engine, "443"));
+                    coc.put("OriginProtocolPolicy",
+                            cfnTextOrDefault(custom, "OriginProtocolPolicy", engine, "https-only"));
+                    origin.setCustomOriginConfig(coc);
+                } else {
+                    // No CustomOriginConfig => S3 origin (S3OriginConfig may be present or defaulted).
+                    Map<String, String> s3c = new LinkedHashMap<>();
+                    s3c.put("OriginAccessIdentity",
+                            s3.isMissingNode() || s3.isNull() ? "" : cfnText(s3, "OriginAccessIdentity", engine));
+                    origin.setS3OriginConfig(s3c);
+                }
+                origins.add(origin);
+            }
+        }
+        return origins;
+    }
+
+    private DefaultCacheBehavior cfnDefaultCacheBehavior(JsonNode node, CloudFormationTemplateEngine engine) {
+        DefaultCacheBehavior dcb = new DefaultCacheBehavior();
+        if (node != null && !node.isMissingNode() && !node.isNull()) {
+            dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
+            dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+        }
+        return dcb;
+    }
+
+    private List<CacheBehavior> cfnCacheBehaviors(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<CacheBehavior> behaviors = new ArrayList<>();
+        JsonNode items = dc.path("CacheBehaviors");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                CacheBehavior cb = new CacheBehavior();
+                cb.setPathPattern(cfnText(node, "PathPattern", engine));
+                cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
+                cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+                behaviors.add(cb);
+            }
+        }
+        return behaviors;
+    }
+
+    private List<Map<String, Object>> cfnCustomErrorResponses(JsonNode dc, CloudFormationTemplateEngine engine) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        JsonNode items = dc.path("CustomErrorResponses");
+        if (items.isArray()) {
+            for (JsonNode node : items) {
+                Map<String, Object> cer = new LinkedHashMap<>();
+                cer.put("ErrorCode", cfnText(node, "ErrorCode", engine));
+                putIfPresent(cer, "ResponseCode", cfnText(node, "ResponseCode", engine));
+                putIfPresent(cer, "ResponsePagePath", cfnText(node, "ResponsePagePath", engine));
+                putIfPresent(cer, "ErrorCachingMinTTL", cfnText(node, "ErrorCachingMinTTL", engine));
+                result.add(cer);
+            }
+        }
+        return result;
+    }
+
+    private static void putIfPresent(Map<String, Object> map, String key, String value) {
+        if (value != null && !value.isEmpty()) {
+            map.put(key, value);
+        }
+    }
+
+    private List<String> cfnStringList(JsonNode arrayNode, CloudFormationTemplateEngine engine) {
+        List<String> result = new ArrayList<>();
+        if (arrayNode != null && arrayNode.isArray()) {
+            for (JsonNode item : arrayNode) {
+                String value = engine.resolve(item);
+                if (value != null && !value.isEmpty()) {
+                    result.add(value);
+                }
+            }
+        }
+        return result;
+    }
+
+    private String cfnText(JsonNode parent, String field, CloudFormationTemplateEngine engine) {
+        return parent == null ? "" : engine.resolve(parent.path(field));
+    }
+
+    private String cfnTextOrDefault(JsonNode parent, String field, CloudFormationTemplateEngine engine,
+                                    String dflt) {
+        String value = cfnText(parent, field, engine);
+        return value.isEmpty() ? dflt : value;
+    }
+
+    private boolean cfnBool(JsonNode parent, String field, CloudFormationTemplateEngine engine, boolean dflt) {
+        String value = cfnText(parent, field, engine);
+        return value.isEmpty() ? dflt : "true".equalsIgnoreCase(value);
+    }
+
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
@@ -4779,30 +5280,200 @@ public class CloudFormationResourceProvisioner {
         return engine.resolve(props.get(name));
     }
 
+    private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.*?)\\}\\}");
+    private static final Pattern SSM_DYNAMIC_REF_BODY =
+            Pattern.compile("([a-zA-Z0-9_.\\-/]+)(?::([0-9]+))?");
+
+    /**
+     * Resolves CloudFormation dynamic references embedded in a string. Supports
+     * {@code {{resolve:secretsmanager:<secret-id-or-arn>:SecretString:<json-key>:<stage>:<version>}}}
+     * and {@code {{resolve:ssm:<name>:<version>}}} / {@code {{resolve:ssm-secure:<name>:<version>}}},
+     * which CloudFormation substitutes with the live value at deploy time (e.g. an RDS
+     * MasterUserPassword sourced from a generated secret). Unsupported services are left verbatim.
+     */
+    private String resolveDynamicReferences(String value, String region, boolean allowSsmSecure) {
+        if (value == null || !value.contains("{{resolve:")) {
+            return value;
+        }
+        Matcher m = DYNAMIC_REF.matcher(value);
+        StringBuilder sb = new StringBuilder();
+        int previousEnd = 0;
+        while (m.find()) {
+            rejectUnclosedDynamicReference(value.substring(previousEnd, m.start()));
+            String replacement = resolveDynamicRef(m.group(1), m.group(2), region, allowSsmSecure);
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+            previousEnd = m.end();
+        }
+        rejectUnclosedDynamicReference(value.substring(previousEnd));
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String resolveDynamicRef(String service, String body, String region, boolean allowSsmSecure) {
+        if ("secretsmanager".equals(service)) {
+            // body = <secret-id-or-arn>:SecretString:<json-key>:<version-stage>:<version-id>. The
+            // secret id may be an ARN (which itself contains colons), so split on the ":SecretString"
+            // marker rather than on ":". AWS also accepts <secret-id-or-arn>:::: as shorthand for
+            // retrieving the whole current SecretString with the optional fields omitted.
+            String secretId;
+            String[] parts;
+            if (body.endsWith("::::")) {
+                secretId = body.substring(0, body.length() - 4);
+                parts = new String[0];
+            } else if (isValidSecretsManagerSecretId(body)) {
+                secretId = body;
+                parts = new String[0];
+            } else {
+                int marker = body.lastIndexOf(":SecretString");
+                if (marker < 0) {
+                    throw invalidSecretsManagerDynamicReference();
+                }
+                secretId = body.substring(0, marker);
+                String rest = body.substring(marker + ":SecretString".length());
+                if (!rest.isEmpty() && !rest.startsWith(":")) {
+                    throw invalidSecretsManagerDynamicReference();
+                }
+                parts = rest.startsWith(":")
+                        ? rest.substring(1).split(":", -1)
+                        : new String[0];
+            }
+            if (!isValidSecretsManagerSecretId(secretId) || parts.length > 3) {
+                throw invalidSecretsManagerDynamicReference();
+            }
+            String jsonKey = parts.length > 0 ? parts[0] : "";
+            String versionStage = parts.length > 1 && !parts[1].isBlank() ? parts[1] : null;
+            String versionId = parts.length > 2 && !parts[2].isBlank() ? parts[2] : null;
+            if (versionStage != null && versionId != null) {
+                throw new AwsException("ValidationError",
+                        "version-stage and version-id cannot both be specified", 400);
+            }
+            String secretRegion = AwsArnUtils.regionOrDefault(secretId, region);
+            String secretString = secretsManagerService
+                    .getSecretValue(secretId, versionId, versionStage, secretRegion).getSecretString();
+            if (secretString == null) {
+                // A binary-only secret has no SecretString to substitute, so resource creation fails.
+                throw new IllegalStateException(
+                        "secret " + secretId + " has no SecretString value to resolve");
+            }
+            if (jsonKey.isBlank()) {
+                return secretString;
+            }
+            JsonNode json;
+            try {
+                json = objectMapper.readTree(secretString);
+            } catch (Exception e) {
+                throw new AwsException("ValidationError",
+                        "secret " + secretId + " does not contain valid JSON", 400);
+            }
+            if (!json.has(jsonKey)) {
+                // A missing key would otherwise resolve to "" — silently provisioning e.g. a blank
+                // MasterUserPassword. Fail resource creation instead.
+                throw new IllegalStateException(
+                        "JSON key '" + jsonKey + "' not found in secret " + secretId);
+            }
+            return json.get(jsonKey).asText();
+        }
+        if ("ssm".equals(service) || "ssm-secure".equals(service)) {
+            if ("ssm-secure".equals(service) && !allowSsmSecure) {
+                throw new AwsException("ValidationError",
+                        "ssm-secure dynamic references are supported only for MasterUserPassword "
+                                + "on AWS::RDS::DBInstance and AWS::RDS::DBCluster", 400);
+            }
+            Matcher reference = SSM_DYNAMIC_REF_BODY.matcher(body);
+            if (!reference.matches()) {
+                throw invalidSsmDynamicReference();
+            }
+            String parameterName = reference.group(1);
+            String version = reference.group(2);
+            if (version != null) {
+                long wantedVersion;
+                try {
+                    wantedVersion = Long.parseLong(version);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                if (wantedVersion < 1) {
+                    throw new AwsException("ValidationError",
+                            "SSM parameter version must be a positive integer: " + version, 400);
+                }
+                ParameterHistory parameter = ssmService.getParameterHistory(parameterName, region).stream()
+                        .filter(h -> h.getVersion() == wantedVersion)
+                        .findFirst()
+                        .orElseThrow(() -> new AwsException(
+                                "ParameterVersionNotFound",
+                                "Parameter version " + wantedVersion + " not found.", 400));
+                return validatedSsmParameterValue(
+                        service, parameterName, parameter.getType(), parameter.getValue());
+            }
+            Parameter parameter = ssmService.getParameter(parameterName, region);
+            return validatedSsmParameterValue(
+                    service, parameterName, parameter.getType(), parameter.getValue());
+        }
+        // Other dynamic-reference services are not resolved here; leave verbatim.
+        return "{{resolve:" + service + ":" + body + "}}";
+    }
+
+    private static boolean isValidSecretsManagerSecretId(String secretId) {
+        if (secretId == null || secretId.isBlank()) {
+            return false;
+        }
+        if (!secretId.contains(":")) {
+            return true;
+        }
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(secretId);
+            String resource = arn.resource();
+            return "secretsmanager".equals(arn.service())
+                    && !arn.region().isBlank()
+                    && !arn.accountId().isBlank()
+                    && resource.startsWith("secret:")
+                    && resource.length() > "secret:".length()
+                    && !resource.substring("secret:".length()).contains(":");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private static AwsException invalidSecretsManagerDynamicReference() {
+        return new AwsException("ValidationError",
+                "Invalid Secrets Manager dynamic reference", 400);
+    }
+
+    private static void rejectUnclosedDynamicReference(String value) {
+        if (value.contains("{{resolve:secretsmanager:")) {
+            throw invalidSecretsManagerDynamicReference();
+        }
+        if (value.contains("{{resolve:ssm:") || value.contains("{{resolve:ssm-secure:")) {
+            throw invalidSsmDynamicReference();
+        }
+    }
+
+    private static String validatedSsmParameterValue(
+            String service, String parameterName, String parameterType, String value) {
+        boolean validType = "ssm-secure".equals(service)
+                ? "SecureString".equals(parameterType)
+                : "String".equals(parameterType) || "StringList".equals(parameterType);
+        if (!validType) {
+            String expectedType = "ssm-secure".equals(service)
+                    ? "SecureString"
+                    : "String or StringList";
+            throw new AwsException("ValidationError",
+                    "SSM parameter " + parameterName + " must be type " + expectedType
+                            + " for an " + service + " dynamic reference", 400);
+        }
+        return value;
+    }
+
+    private static AwsException invalidSsmDynamicReference() {
+        return new AwsException("ValidationError",
+                "Invalid SSM dynamic reference", 400);
+    }
+
     private String resolveOrDefault(JsonNode props, String name,
                                     CloudFormationTemplateEngine engine, String defaultValue) {
         String value = resolveOptional(props, name, engine);
         return (value != null && !value.isBlank()) ? value : defaultValue;
-    }
-
-    private void deleteRoleSafe(String roleName) {
-        IamRole role;
-        try {
-            role = iamService.getRole(roleName);
-        } catch (AwsException e) {
-            if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("IAM role already gone, treating as deleted: {0}", roleName);
-            return;
-        }
-        for (String policyArn : new ArrayList<>(role.getAttachedPolicyArns())) {
-            iamService.detachRolePolicy(roleName, policyArn);
-        }
-        for (String policyName : new ArrayList<>(role.getInlinePolicies().keySet())) {
-            iamService.deleteRolePolicy(roleName, policyName);
-        }
-        iamService.deleteRole(roleName);
     }
 
     private void deletePolicySafe(String policyArn) {
@@ -4872,7 +5543,7 @@ public class CloudFormationResourceProvisioner {
         } catch (RuntimeException failure) {
             Collections.reverse(detachedRoles);
             for (String roleName : detachedRoles) {
-                attemptIamCleanup(failure,
+                CfnRollback.attemptIamCleanup(failure,
                         "reattach legacy policy " + policyArn + " to role " + roleName,
                         () -> iamService.attachRolePolicy(roleName, policyArn));
             }

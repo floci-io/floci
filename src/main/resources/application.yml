@@ -22,7 +22,8 @@ quarkus:
   native:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # catalog (ec2/image-catalog.yaml), IAM reads its AWS managed-policy
+      # catalog (iam/managed-policies.yaml), AppSync's GraphQL parser reads its
       # message bundles, and API Gateway's Velocity engine reads its default
       # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -32,6 +33,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - ec2/*.yaml
+        - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
@@ -56,6 +58,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
+      - --initialize-at-run-time=graphql.util.IdGenerator
 
 
 floci:
@@ -241,6 +244,13 @@ floci:
       enabled: true
       mock: false
       default-image: "rabbitmq:3-management"
+    kinesis-analytics:
+      enabled: true
+      mock: false
+      # default-image: optional override; uncomment to pin every application to a single image
+      # (e.g. a private registry mirror). When unset, the image is chosen from the requested
+      # RuntimeEnvironment (KinesisAnalyticsRuntimes.imageFor, e.g. FLINK-1_19 -> apache/flink:1.19).
+      # default-image: "apache/flink:1.18"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -258,6 +268,7 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
@@ -448,6 +459,7 @@ floci:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4

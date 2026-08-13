@@ -43,6 +43,15 @@ class CloudWatchLogsServiceTest {
         List<LogGroup> groups = service.describeLogGroups(null, REGION);
         assertEquals(1, groups.size());
         assertEquals("/app/logs", groups.getFirst().getLogGroupName());
+        assertFalse(groups.getFirst().isDeletionProtectionEnabled());
+    }
+
+    @Test
+    void createLogGroupWithDeletionProtectionEnabled() {
+        service.createLogGroup("/app/protected", null, null, true, REGION);
+
+        LogGroup group = service.describeLogGroups("/app/protected", REGION).getFirst();
+        assertTrue(group.isDeletionProtectionEnabled());
     }
 
     @Test
@@ -70,6 +79,29 @@ class CloudWatchLogsServiceTest {
     void deleteLogGroupNotFoundThrows() {
         assertThrows(AwsException.class, () ->
                 service.deleteLogGroup("/missing", REGION));
+    }
+
+    @Test
+    void protectedLogGroupMustBeDisabledBeforeDeletion() {
+        service.createLogGroup("/app/protected", null, null, true, REGION);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.deleteLogGroup("/app/protected", REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(service.logGroupExists("/app/protected", REGION));
+
+        service.putLogGroupDeletionProtection("/app/protected", false, REGION);
+        service.deleteLogGroup("/app/protected", REGION);
+
+        assertFalse(service.logGroupExists("/app/protected", REGION));
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresExistingGroup() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putLogGroupDeletionProtection("/missing", true, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
     }
 
     @Test

@@ -99,6 +99,7 @@ public class ApiGatewayV2Service {
         api.setRouteSelectionExpression(routeSelectionExpression);
         api.setDescription(description);
         api.setApiKeySelectionExpression(apiKeySelectionExpression);
+        api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
 
         if ("WEBSOCKET".equals(protocolType)) {
             api.setApiEndpoint(String.format("wss://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
@@ -131,7 +132,7 @@ public class ApiGatewayV2Service {
      * region, so preferredRegion is whatever RegionResolver defaults to, which need not match
      * where the API was actually created. Falls back to scanning stored keys for the apiId.
      */
-    public String resolveHttpApiRegion(String preferredRegion, String apiId) {
+    public String resolveApiRegion(String preferredRegion, String apiId) {
         if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {
             return preferredRegion;
         }
@@ -184,6 +185,10 @@ public class ApiGatewayV2Service {
         if (request.containsKey("apiKeySelectionExpression") && request.get("apiKeySelectionExpression") != null) {
             api.setApiKeySelectionExpression((String) request.get("apiKeySelectionExpression"));
         }
+        if (request.containsKey("disableExecuteApiEndpoint")
+                && request.get("disableExecuteApiEndpoint") != null) {
+            api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
+        }
         if (request.containsKey("tags")) {
             @SuppressWarnings("unchecked")
             Map<String, String> tags = (Map<String, String>) request.get("tags");
@@ -198,6 +203,10 @@ public class ApiGatewayV2Service {
 
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    private static boolean booleanValue(Object value) {
+        return value != null && Boolean.parseBoolean(String.valueOf(value));
     }
 
     private static Api.Cors toCors(Map<String, Object> m) {

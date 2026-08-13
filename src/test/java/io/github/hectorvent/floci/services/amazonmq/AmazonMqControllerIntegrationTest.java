@@ -41,6 +41,9 @@ class AmazonMqControllerIntegrationTest {
             .body("engineType", equalTo("RABBITMQ"))
             .body("brokerState", equalTo("RUNNING"))
             .body("brokerInstances[0].endpoints[0]", startsWith("amqp://"))
+            // AWS does not expose RabbitMQ users from DescribeBroker. Returning
+            // them makes Terraform call the unsupported standalone User API.
+            .body("users", nullValue())
             // internal bookkeeping is persisted but must never leak into the API
             .body("containerId", nullValue())
             .body("accountId", nullValue())

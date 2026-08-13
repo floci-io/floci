@@ -125,6 +125,9 @@ floci:
     amazonmq:
       enabled: true
       mock: true
+    kinesis-analytics:
+      enabled: true
+      mock: true
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -277,6 +280,7 @@ floci:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4

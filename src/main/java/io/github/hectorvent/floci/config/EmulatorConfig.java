@@ -531,6 +531,7 @@ public interface EmulatorConfig {
         IamServiceConfig iam();
         MskServiceConfig msk();
         AmazonMqServiceConfig amazonmq();
+        KinesisAnalyticsServiceConfig kinesisAnalytics();
         ElastiCacheServiceConfig elasticache();
         MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
@@ -818,6 +819,23 @@ public interface EmulatorConfig {
         String defaultImage();
     }
 
+    interface KinesisAnalyticsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, StartApplication comes up RUNNING immediately with no backing Flink
+         *  container. Useful for tests and hosts without a Docker daemon. */
+        @WithDefault("false")
+        boolean mock();
+
+        /**
+         * Optional fixed image used for every application regardless of the requested
+         * {@code RuntimeEnvironment} (private registry mirror, pinned patch). When unset, the image
+         * is chosen from the runtime via {@code KinesisAnalyticsRuntimes.imageFor(runtimeEnvironment)}.
+         */
+        Optional<String> defaultImage();
+    }
+
     interface ElastiCacheServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -882,6 +900,9 @@ public interface EmulatorConfig {
 
         @WithDefault("mariadb:11")
         String defaultMariadbImage();
+
+        /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
+        Optional<String> endpointHost();
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
@@ -1290,6 +1311,12 @@ public interface EmulatorConfig {
 
         @WithDefault("cloudfront.net")
         String domainSuffix();
+
+        /**
+         * Exact custom-origin hostnames allowed to resolve to private or otherwise non-routable
+         * addresses. Empty by default to match CloudFront's public custom-origin boundary.
+         */
+        Optional<List<String>> allowedPrivateOriginHosts();
     }
 
     interface AppSyncServiceConfig {
