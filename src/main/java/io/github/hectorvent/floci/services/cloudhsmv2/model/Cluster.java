@@ -31,6 +31,7 @@ public class Cluster {
     private Map<String, String> tagList = new LinkedHashMap<>();
     private String backupPolicy;
     private BackupRetentionPolicy backupRetentionPolicy;
+    private String resourcePolicy;
     private String mode;
     private String networkType;
 
@@ -144,6 +145,14 @@ public class Cluster {
 
     public void setBackupRetentionPolicy(BackupRetentionPolicy backupRetentionPolicy) {
         this.backupRetentionPolicy = backupRetentionPolicy;
+    }
+
+    public String getResourcePolicy() {
+        return resourcePolicy;
+    }
+
+    public void setResourcePolicy(String resourcePolicy) {
+        this.resourcePolicy = resourcePolicy;
     }
 
     public String getMode() {

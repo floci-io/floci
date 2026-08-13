@@ -114,14 +114,10 @@ public class CloudHsmV2JsonHandler {
 
         Collection<Cluster> clusters = service.describeClusters(clusterIds, states, vpcIds, region);
 
-        Integer maxResults = request.path("MaxResults").asInt(25);
-        String nextToken = text(request, "NextToken");
+        int maxResults = parseMaxResults(request, 25);
+        int start = parseNextToken(request);
 
         List<Cluster> list = new ArrayList<>(clusters);
-        int start = 0;
-        if (nextToken != null) {
-            start = Integer.parseInt(nextToken);
-        }
         int end = Math.min(start + maxResults, list.size());
         List<Cluster> page = start < list.size() ? list.subList(start, end) : List.of();
 
@@ -203,14 +199,10 @@ public class CloudHsmV2JsonHandler {
         String resourceId = text(request, "ResourceId");
         Map<String, String> tags = service.listTags(resourceId, region);
 
-        Integer maxResults = request.path("MaxResults").asInt(100);
-        String nextToken = text(request, "NextToken");
+        int maxResults = parseMaxResults(request, 100);
+        int start = parseNextToken(request);
 
         List<Map.Entry<String, String>> list = new ArrayList<>(tags.entrySet());
-        int start = 0;
-        if (nextToken != null) {
-            start = Integer.parseInt(nextToken);
-        }
         int end = Math.min(start + maxResults, list.size());
         List<Map.Entry<String, String>> page = start < list.size() ? list.subList(start, end) : List.of();
 
@@ -337,6 +329,12 @@ public class CloudHsmV2JsonHandler {
         if (hsm.getEniIp() != null) {
             node.put("EniIp", hsm.getEniIp());
         }
+        if (hsm.getEniIpV6() != null) {
+            node.put("EniIpV6", hsm.getEniIpV6());
+        }
+        if (hsm.getHsmType() != null) {
+            node.put("HsmType", hsm.getHsmType());
+        }
         if (hsm.getState() != null) {
             node.put("State", hsm.getState());
         }
@@ -367,29 +365,32 @@ public class CloudHsmV2JsonHandler {
         List<String> backupIds = null;
         List<String> clusterIds = null;
         List<String> states = null;
+        List<String> sourceBackupIds = null;
+        List<String> neverExpires = null;
         if (!filters.isMissingNode() && !filters.isNull()) {
             backupIds = parseStringList(filters.path("backupIds"));
             clusterIds = parseStringList(filters.path("clusterIds"));
             states = parseStringList(filters.path("states"));
+            sourceBackupIds = parseStringList(filters.path("sourceBackupIds"));
+            neverExpires = parseStringList(filters.path("neverExpires"));
         }
 
-        Collection<Backup> backups = service.describeBackups(backupIds, clusterIds, states, region);
+        Boolean shared = request.path("Shared").isMissingNode() ? null : request.path("Shared").asBoolean();
+        Boolean sortAscending = request.path("SortAscending").isMissingNode() ? null : request.path("SortAscending").asBoolean();
 
-        Integer maxResults = request.path("MaxResults").asInt(50);
-        String nextToken = text(request, "NextToken");
+        Collection<Backup> backups = service.describeBackups(backupIds, clusterIds, states, sourceBackupIds, neverExpires, shared, sortAscending, region);
+
+        int maxResults = parseMaxResults(request, 50);
+        int start = parseNextToken(request);
 
         List<Backup> list = new ArrayList<>(backups);
-        int start = 0;
-        if (nextToken != null) {
-            start = Integer.parseInt(nextToken);
-        }
         int end = Math.min(start + maxResults, list.size());
         List<Backup> page = start < list.size() ? list.subList(start, end) : List.of();
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Backups");
         for (Backup b : page) {
-            arr.add(backupNode(b));
+            arr.add(backupNode(b, region));
         }
         if (end < list.size()) {
             response.put("NextToken", String.valueOf(end));
@@ -401,7 +402,7 @@ public class CloudHsmV2JsonHandler {
         String backupId = text(request, "BackupId");
         Backup backup = service.deleteBackup(backupId, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Backup", backupNode(backup));
+        response.set("Backup", backupNode(backup, region));
         return Response.ok(response).build();
     }
 
@@ -409,7 +410,7 @@ public class CloudHsmV2JsonHandler {
         String backupId = text(request, "BackupId");
         Backup backup = service.restoreBackup(backupId, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Backup", backupNode(backup));
+        response.set("Backup", backupNode(backup, region));
         return Response.ok(response).build();
     }
 
@@ -418,7 +419,7 @@ public class CloudHsmV2JsonHandler {
         String neverExpires = text(request, "NeverExpires");
         Backup backup = service.modifyBackupAttributes(backupId, neverExpires, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Backup", backupNode(backup));
+        response.set("Backup", backupNode(backup, region));
         return Response.ok(response).build();
     }
 
@@ -463,11 +464,16 @@ public class CloudHsmV2JsonHandler {
         return Response.ok(response).build();
     }
 
-    private ObjectNode backupNode(Backup backup) {
+    private ObjectNode backupNode(Backup backup, String region) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("BackupId", backup.getBackupId());
+        String arnRegion = region != null ? region : "us-east-1";
+        node.put("BackupArn", "arn:aws:cloudhsm:" + arnRegion + ":000000000000:backup/" + backup.getBackupId());
         node.put("BackupState", backup.getBackupState());
         node.put("ClusterId", backup.getClusterId());
+        if (backup.getHsmType() != null) {
+            node.put("HsmType", backup.getHsmType());
+        }
         if (backup.getCreateTimestamp() != null) {
             node.put("CreateTimestamp", backup.getCreateTimestamp().toEpochMilli() / 1000.0);
         }
@@ -492,6 +498,15 @@ public class CloudHsmV2JsonHandler {
         if (backup.getMode() != null) {
             node.put("Mode", backup.getMode());
         }
+        if (backup.getTagList() != null && !backup.getTagList().isEmpty()) {
+            ArrayNode tagList = node.putArray("TagList");
+            for (Map.Entry<String, String> tagEntry : backup.getTagList().entrySet()) {
+                ObjectNode tag = objectMapper.createObjectNode();
+                tag.put("Key", tagEntry.getKey());
+                tag.put("Value", tagEntry.getValue());
+                tagList.add(tag);
+            }
+        }
         return node;
     }
 
@@ -500,6 +515,33 @@ public class CloudHsmV2JsonHandler {
     private String text(JsonNode request, String field) {
         JsonNode node = request.path(field);
         return node.isMissingNode() || node.isNull() ? null : node.asText(null);
+    }
+
+    private int parseMaxResults(JsonNode request, int defaultVal) {
+        if (request.path("MaxResults").isMissingNode() || request.path("MaxResults").isNull()) {
+            return defaultVal;
+        }
+        try {
+            int max = Integer.parseInt(request.path("MaxResults").asText());
+            if (max <= 0) {
+                throw new AwsException("CloudHsmInvalidRequestException", "MaxResults must be greater than 0.", 400);
+            }
+            return max;
+        } catch (NumberFormatException e) {
+            throw new AwsException("CloudHsmInvalidRequestException", "MaxResults must be a valid integer.", 400);
+        }
+    }
+
+    private int parseNextToken(JsonNode request) {
+        String token = text(request, "NextToken");
+        if (token == null) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(token);
+        } catch (NumberFormatException e) {
+            throw new AwsException("CloudHsmInvalidRequestException", "NextToken is invalid.", 400);
+        }
     }
 
     private List<String> parseStringList(JsonNode node) {

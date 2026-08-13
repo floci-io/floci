@@ -83,9 +83,29 @@ public class CloudHsmV2Service {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "SubnetIds must contain at least one entry.", 400);
         }
-        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\\.medium$")) {
+        if (hsmType == null) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "HsmType is required.", 400);
+        }
+        if (!hsmType.equals("hsm1.medium") && !hsmType.equals("hsm2m.medium")) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "HsmType " + hsmType + " is not valid.", 400);
+        }
+        if (mode != null && !mode.equals("FIPS") && !mode.equals("NON_FIPS")) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "Mode must be FIPS or NON_FIPS.", 400);
+        }
+        if (networkType != null && !networkType.equals("IPV4") && !networkType.equals("DUALSTACK")) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "NetworkType must be IPV4 or DUALSTACK.", 400);
+        }
+
+        Backup sourceBackup = null;
+        if (sourceBackupId != null && !sourceBackupId.isEmpty()) {
+            sourceBackup = getBackup(sourceBackupId, region);
+            if (mode == null && sourceBackup.getMode() != null) {
+                mode = sourceBackup.getMode();
+            }
         }
 
         String clusterId = "cluster-" + generateShortId();
@@ -93,7 +113,7 @@ public class CloudHsmV2Service {
         Cluster cluster = new Cluster();
         cluster.setClusterId(clusterId);
         cluster.setState(ClusterState.UNINITIALIZED);
-        cluster.setHsmType(hsmType != null ? hsmType : DEFAULT_HSM_TYPE);
+        cluster.setHsmType(hsmType);
         cluster.setVpcId("vpc-" + generateShortId());
         cluster.setSubnetIds(new ArrayList<>(SubnetIds));
         cluster.setSourceBackupId(sourceBackupId);
@@ -205,8 +225,28 @@ public class CloudHsmV2Service {
         validatePemCertificate(trustAnchor, "TrustAnchor");
 
         // Parse and validate the certificates
-        parsePemCertificate(signedCert, "SignedCert");
-        parsePemCertificate(trustAnchor, "TrustAnchor");
+        X509CertificateHolder signedCertHolder = parsePemCertificate(signedCert, "SignedCert");
+        X509CertificateHolder trustAnchorHolder = parsePemCertificate(trustAnchor, "TrustAnchor");
+
+        // Verify TrustAnchor is self-signed
+        if (!trustAnchorHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "TrustAnchor must be a self-signed certificate.", 400);
+        }
+
+        // Verify SignedCert was issued by TrustAnchor
+        if (!signedCertHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "SignedCert must be issued by the provided TrustAnchor.", 400);
+        }
+
+        // Verify SignedCert matches the cluster CSR
+        String clusterCsr = cluster.getCertificates().getClusterCsr();
+        PKCS10CertificationRequest csrHolder = parsePemCsr(clusterCsr);
+        if (!signedCertHolder.getSubjectPublicKeyInfo().equals(csrHolder.getSubjectPublicKeyInfo())) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "SignedCert public key does not match the cluster CSR public key.", 400);
+        }
 
         // Persist the cluster certificate
         Certificates certs = cluster.getCertificates();
@@ -266,8 +306,27 @@ public class CloudHsmV2Service {
         hsm.setClusterId(clusterId);
         hsm.setSubnetId(subnetId);
         hsm.setEniId("eni-" + generateShortId());
-        hsm.setEniIp("10.0." + (SECURE_RANDOM.nextInt(254) + 1) + "." + (SECURE_RANDOM.nextInt(254) + 1));
-        hsm.setIpAddress(ipAddress != null ? ipAddress : hsm.getEniIp());
+        hsm.setHsmType(cluster.getHsmType());
+
+        if (ipAddress != null) {
+            if (ipAddress.contains(":")) {
+                hsm.setEniIpV6(ipAddress);
+                hsm.setEniIp("10.0." + (SECURE_RANDOM.nextInt(254) + 1) + "." + (SECURE_RANDOM.nextInt(254) + 1));
+            } else {
+                hsm.setEniIp(ipAddress);
+                if ("DUALSTACK".equals(cluster.getNetworkType())) {
+                    hsm.setEniIpV6("2001:db8::" + Integer.toHexString(SECURE_RANDOM.nextInt(65535)));
+                }
+            }
+            hsm.setIpAddress(ipAddress);
+        } else {
+            hsm.setEniIp("10.0." + (SECURE_RANDOM.nextInt(254) + 1) + "." + (SECURE_RANDOM.nextInt(254) + 1));
+            if ("DUALSTACK".equals(cluster.getNetworkType())) {
+                hsm.setEniIpV6("2001:db8::" + Integer.toHexString(SECURE_RANDOM.nextInt(65535)));
+            }
+            hsm.setIpAddress(hsm.getEniIp());
+        }
+
         hsm.setState("ACTIVE");
         hsm.setCreatedAt(Instant.now());
 
@@ -332,22 +391,39 @@ public class CloudHsmV2Service {
     // ──────────────────────────── TagResource ────────────────────────────
 
     public void tagResource(String resourceId, Map<String, String> tags, String region) {
-        Cluster cluster = getCluster(resourceId, region);
-        if (tags != null && !tags.isEmpty()) {
-            cluster.getTagList().putAll(tags);
+        if (resourceId.startsWith("backup-")) {
+            Backup backup = getBackup(resourceId, region);
+            if (tags != null && !tags.isEmpty()) {
+                backup.getTagList().putAll(tags);
+            }
+            backups.put(regionKey(region, resourceId), backup);
+        } else {
+            Cluster cluster = getCluster(resourceId, region);
+            if (tags != null && !tags.isEmpty()) {
+                cluster.getTagList().putAll(tags);
+            }
+            clusters.put(regionKey(region, resourceId), cluster);
         }
-        clusters.put(regionKey(region, resourceId), cluster);
     }
 
     public void untagResource(String resourceId, List<String> tagKeys, String region) {
-        Cluster cluster = getCluster(resourceId, region);
-        tagKeys.forEach(cluster.getTagList()::remove);
-        clusters.put(regionKey(region, resourceId), cluster);
+        if (resourceId.startsWith("backup-")) {
+            Backup backup = getBackup(resourceId, region);
+            tagKeys.forEach(backup.getTagList()::remove);
+            backups.put(regionKey(region, resourceId), backup);
+        } else {
+            Cluster cluster = getCluster(resourceId, region);
+            tagKeys.forEach(cluster.getTagList()::remove);
+            clusters.put(regionKey(region, resourceId), cluster);
+        }
     }
 
     public Map<String, String> listTags(String resourceId, String region) {
-        Cluster cluster = getCluster(resourceId, region);
-        return new LinkedHashMap<>(cluster.getTagList());
+        if (resourceId.startsWith("backup-")) {
+            return new LinkedHashMap<>(getBackup(resourceId, region).getTagList());
+        } else {
+            return new LinkedHashMap<>(getCluster(resourceId, region).getTagList());
+        }
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -366,7 +442,12 @@ public class CloudHsmV2Service {
     }
 
     private String generateShortId() {
-        return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        String alphabet = "234567abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        StringBuilder sb = new StringBuilder(17);
+        for (int i = 0; i < 17; i++) {
+            sb.append(alphabet.charAt(SECURE_RANDOM.nextInt(alphabet.length())));
+        }
+        return sb.toString();
     }
 
     private String generateCsr(String clusterId) {
@@ -437,7 +518,7 @@ public class CloudHsmV2Service {
         }
     }
 
-    private void parsePemCertificate(String pem, String fieldName) {
+    private X509CertificateHolder parsePemCertificate(String pem, String fieldName) {
         try (PEMParser parser = new PEMParser(new StringReader(pem))) {
             Object obj = parser.readObject();
             if (obj == null) {
@@ -448,11 +529,24 @@ public class CloudHsmV2Service {
                 throw new AwsException("CloudHsmInvalidRequestException",
                         fieldName + " is not a valid X.509 certificate.", 400);
             }
+            return (X509CertificateHolder) obj;
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     fieldName + " is malformed: " + e.getMessage(), 400);
+        }
+    }
+
+    private PKCS10CertificationRequest parsePemCsr(String pem) {
+        try (PEMParser parser = new PEMParser(new StringReader(pem))) {
+            Object obj = parser.readObject();
+            if (obj instanceof PKCS10CertificationRequest) {
+                return (PKCS10CertificationRequest) obj;
+            }
+            throw new RuntimeException("Not a valid CSR");
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to parse CSR", e);
         }
     }
 
@@ -467,21 +561,36 @@ public class CloudHsmV2Service {
         backup.setCreateTimestamp(Instant.now());
         backup.setNeverExpires("False");
         backup.setMode(cluster.getMode());
+        backup.setHsmType(cluster.getHsmType());
         backups.put(regionKey(region, backup.getBackupId()), backup);
     }
 
     public Collection<Backup> describeBackups(List<String> filterBackupIds, List<String> filterClusterIds,
-                                              List<String> filterStates, String region) {
+                                              List<String> filterStates, List<String> filterSourceBackupIds,
+                                              List<String> filterNeverExpires, Boolean shared, Boolean sortAscending, String region) {
         Collection<Backup> all = backups.scan(k -> k.startsWith(region + "::"));
         List<Backup> filtered = new ArrayList<>();
         for (Backup b : all) {
             boolean matchId = filterBackupIds == null || filterBackupIds.isEmpty() || filterBackupIds.contains(b.getBackupId());
             boolean matchCluster = filterClusterIds == null || filterClusterIds.isEmpty() || filterClusterIds.contains(b.getClusterId());
             boolean matchState = filterStates == null || filterStates.isEmpty() || filterStates.contains(b.getBackupState());
-            if (matchId && matchCluster && matchState) {
+            boolean matchSourceBackup = filterSourceBackupIds == null || filterSourceBackupIds.isEmpty() || filterSourceBackupIds.contains(b.getSourceBackup());
+            boolean matchNeverExpires = filterNeverExpires == null || filterNeverExpires.isEmpty() || filterNeverExpires.contains(b.getNeverExpires() == null ? "False" : b.getNeverExpires());
+
+            if (matchId && matchCluster && matchState && matchSourceBackup && matchNeverExpires) {
+                if (Boolean.TRUE.equals(shared)) {
+                    continue; // Floci does not currently support cross-account sharing, so shared is always empty
+                }
                 filtered.add(b);
             }
         }
+
+        if (Boolean.TRUE.equals(sortAscending)) {
+            filtered.sort(java.util.Comparator.comparing(Backup::getCreateTimestamp));
+        } else {
+            filtered.sort(java.util.Comparator.comparing(Backup::getCreateTimestamp).reversed());
+        }
+
         return filtered;
     }
 
@@ -497,6 +606,12 @@ public class CloudHsmV2Service {
         Backup backup = getBackup(backupId, region);
         if (!"PENDING_DELETION".equals(backup.getBackupState())) {
             throw new AwsException("CloudHsmInvalidRequestException", "Backup must be in PENDING_DELETION state", 400);
+        }
+        if (backup.getDeleteTimestamp() != null) {
+            long daysSinceDeletion = java.time.Duration.between(backup.getDeleteTimestamp(), Instant.now()).toDays();
+            if (daysSinceDeletion > 7) {
+                throw new AwsException("CloudHsmInvalidRequestException", "Backup is past the 7-day deletion window", 400);
+            }
         }
         backup.setBackupState("READY");
         backup.setDeleteTimestamp(null);
@@ -526,6 +641,7 @@ public class CloudHsmV2Service {
         copy.setSourceBackup(backupId);
         copy.setSourceCluster(source.getClusterId());
         copy.setMode(source.getMode());
+        copy.setHsmType(source.getHsmType());
         copy.setNeverExpires(source.getNeverExpires());
         backups.put(regionKey(destinationRegion, copy.getBackupId()), copy);
         return copy;
@@ -534,33 +650,60 @@ public class CloudHsmV2Service {
     // ──────────────────────────── Resource Policies ────────────────────────────
 
     public void putResourcePolicy(String resourceArn, String policy, String region) {
-        String backupId = extractBackupId(resourceArn);
-        Backup backup = getBackup(backupId, region);
-        if (!"READY".equals(backup.getBackupState())) {
-            throw new AwsException("CloudHsmInvalidRequestException", "Backup must be READY to apply a policy", 400);
+        String id = extractId(resourceArn);
+        if (id.startsWith("backup-")) {
+            Backup backup = getBackup(id, region);
+            if (!"READY".equals(backup.getBackupState())) {
+                throw new AwsException("CloudHsmInvalidRequestException", "Backup must be READY to apply a policy", 400);
+            }
+            backup.setResourcePolicy(policy);
+            backups.put(regionKey(region, id), backup);
+        } else {
+            Cluster cluster = getCluster(id, region);
+            cluster.setResourcePolicy(policy);
+            clusters.put(regionKey(region, id), cluster);
         }
-        backup.setResourcePolicy(policy);
-        backups.put(regionKey(region, backupId), backup);
     }
 
     public String getResourcePolicy(String resourceArn, String region) {
-        String backupId = extractBackupId(resourceArn);
-        Backup backup = getBackup(backupId, region);
-        return backup.getResourcePolicy();
+        String id = extractId(resourceArn);
+        if (id.startsWith("backup-")) {
+            return getBackup(id, region).getResourcePolicy();
+        } else {
+            return getCluster(id, region).getResourcePolicy();
+        }
     }
 
-    public void deleteResourcePolicy(String resourceArn, String region) {
-        String backupId = extractBackupId(resourceArn);
-        Backup backup = getBackup(backupId, region);
-        backup.setResourcePolicy(null);
-        backups.put(regionKey(region, backupId), backup);
+    public String deleteResourcePolicy(String resourceArn, String region) {
+        String id = extractId(resourceArn);
+        String oldPolicy = null;
+        if (id.startsWith("backup-")) {
+            Backup backup = getBackup(id, region);
+            oldPolicy = backup.getResourcePolicy();
+            backup.setResourcePolicy(null);
+            backups.put(regionKey(region, id), backup);
+        } else {
+            Cluster cluster = getCluster(id, region);
+            oldPolicy = cluster.getResourcePolicy();
+            cluster.setResourcePolicy(null);
+            clusters.put(regionKey(region, id), cluster);
+        }
+        return oldPolicy;
     }
 
-    private String extractBackupId(String arn) {
-        if (arn == null || !arn.contains("backup/")) {
+    private String extractId(String arn) {
+        if (arn == null) {
             throw new AwsException("CloudHsmInvalidRequestException", "Invalid ResourceArn format", 400);
         }
-        return arn.substring(arn.lastIndexOf('/') + 1);
+        if (arn.contains("backup/")) {
+            return arn.substring(arn.lastIndexOf('/') + 1);
+        } else if (arn.contains("cluster/")) {
+            return arn.substring(arn.lastIndexOf('/') + 1);
+        }
+        if (arn.startsWith("cluster-") || arn.startsWith("backup-")) {
+            return arn;
+        }
+        throw new AwsException("CloudHsmInvalidRequestException", "Invalid ResourceArn format", 400);
     }
 
     // ──────────────────────────── ModifyCluster ────────────────────────────
@@ -574,9 +717,17 @@ public class CloudHsmV2Service {
             cluster.setHsmType(hsmType);
         }
         if (backupRetentionPolicy != null) {
-            int val = Integer.parseInt(backupRetentionPolicy.getValue());
-            if (val < 7 || val > 379) {
-                throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value must be between 7 and 379.", 400);
+            String valStr = backupRetentionPolicy.getValue();
+            if (valStr == null) {
+                throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value is missing.", 400);
+            }
+            try {
+                int val = Integer.parseInt(valStr);
+                if (val < 7 || val > 379) {
+                    throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value must be between 7 and 379.", 400);
+                }
+            } catch (NumberFormatException e) {
+                throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value must be a valid integer.", 400);
             }
             cluster.setBackupRetentionPolicy(backupRetentionPolicy);
         }

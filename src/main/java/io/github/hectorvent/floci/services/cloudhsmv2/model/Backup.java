@@ -25,6 +25,7 @@ public class Backup {
     private String resourcePolicy;
     private Map<String, String> tagList = new LinkedHashMap<>();
     private String mode;
+    private String hsmType;
 
     public String getBackupId() {
         return backupId;
@@ -128,5 +129,13 @@ public class Backup {
 
     public void setMode(String mode) {
         this.mode = mode;
+    }
+
+    public String getHsmType() {
+        return hsmType;
+    }
+
+    public void setHsmType(String hsmType) {
+        this.hsmType = hsmType;
     }
 }

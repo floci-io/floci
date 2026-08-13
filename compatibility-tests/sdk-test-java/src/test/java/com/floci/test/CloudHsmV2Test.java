@@ -22,39 +22,43 @@ public class CloudHsmV2Test {
                 .networkType(NetworkType.IPV4)
                 .backupRetentionPolicy(b -> b.type("DAYS").value("30"))
         );
-        
+
         Cluster cluster = createClusterResponse.cluster();
         assertThat(cluster.clusterId()).startsWith("cluster-");
         assertThat(cluster.hsmType()).isEqualTo("hsm1.medium");
         assertThat(cluster.stateAsString()).isEqualTo("UNINITIALIZED");
         assertThat(cluster.certificates().clusterCsr()).isNotBlank();
-        
+
         String clusterId = cluster.clusterId();
 
         // 2. Initialize Cluster
         DescribeClustersResponse initDescribe = client.describeClusters(r -> r
                 .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
-        String hardwareCert = initDescribe.clusters().get(0).certificates().awsHardwareCertificate();
+        String csr = initDescribe.clusters().get(0).certificates().clusterCsr();
+        String[] certs;
+        try { certs = generateCerts(csr); } catch (Exception e) { throw new RuntimeException(e); }
+        String signedCert = certs[0];
+        String trustAnchor = certs[1];
 
         InitializeClusterResponse initResp = client.initializeCluster(r -> r
                 .clusterId(clusterId)
-                .signedCert(hardwareCert)
-                .trustAnchor(hardwareCert)
+                .signedCert(signedCert)
+                .trustAnchor(trustAnchor)
         );
-        
+
         assertThat(initResp.stateAsString()).isEqualTo("INITIALIZED");
-        
+
         // 3. Create HSM
         CreateHsmResponse hsmResp = client.createHsm(r -> r
                 .clusterId(clusterId)
                 .availabilityZone("us-east-1a")
                 .ipAddress("10.0.1.5")
         );
-        
+
         Hsm hsm = hsmResp.hsm();
         assertThat(hsm.hsmId()).startsWith("hsm-");
         assertThat(hsm.stateAsString()).isEqualTo("ACTIVE");
-        
+
         String hsmId = hsm.hsmId();
 
         // 4. Describe Clusters
@@ -83,7 +87,7 @@ public class CloudHsmV2Test {
                 .clusterId(clusterId)
         );
         assertThat(delCluster.cluster().stateAsString()).isEqualTo("DELETE_IN_PROGRESS");
-        
+
         // 8. Delete Backup
         DeleteBackupResponse delBackup = client.deleteBackup(r -> r
                 .backupId(backupId)
@@ -100,24 +104,64 @@ public class CloudHsmV2Test {
         String clusterId = createClusterResponse.cluster().clusterId();
         DescribeClustersResponse describeResp = client.describeClusters(r -> r
                 .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
-        String hardwareCert = describeResp.clusters().get(0).certificates().awsHardwareCertificate();
+        String csr = describeResp.clusters().get(0).certificates().clusterCsr();
+        String[] certs;
+        try { certs = generateCerts(csr); } catch (Exception e) { throw new RuntimeException(e); }
+        String signedCert = certs[0];
+        String trustAnchor = certs[1];
 
-        client.initializeCluster(r -> r.clusterId(clusterId).signedCert(hardwareCert).trustAnchor(hardwareCert));
-        
+        client.initializeCluster(r -> r.clusterId(clusterId).signedCert(signedCert).trustAnchor(trustAnchor));
+
         Hsm hsm = client.createHsm(r -> r.clusterId(clusterId).availabilityZone("us-east-1b")).hsm();
-        
+
         // Test exactly one selector rule
         assertThatThrownBy(() -> client.deleteHsm(r -> r
                 .clusterId(clusterId)
                 .hsmId(hsm.hsmId())
                 .eniId(hsm.eniId())
         )).hasMessageContaining("Exactly one of HsmId, EniId, or EniIp must be specified");
-        
+
         // Test successful delete with EniId
         DeleteHsmResponse delResp = client.deleteHsm(r -> r
                 .clusterId(clusterId)
                 .eniId(hsm.eniId())
         );
         assertThat(delResp.hsmId()).isEqualTo(hsm.hsmId());
+    }
+
+    private String[] generateCerts(String csrPem) throws Exception {
+        java.security.Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
+        java.security.KeyPairGenerator keyGen = java.security.KeyPairGenerator.getInstance("RSA", "BC");
+        keyGen.initialize(2048, new java.security.SecureRandom());
+        java.security.KeyPair caKeyPair = keyGen.generateKeyPair();
+        org.bouncycastle.asn1.x500.X500Name caName = new org.bouncycastle.asn1.x500.X500Name("CN=Floci Test CA");
+        long now = System.currentTimeMillis();
+        java.util.Date startDate = new java.util.Date(now);
+        java.util.Date endDate = new java.util.Date(now + 365L * 24 * 3600 * 1000);
+        java.math.BigInteger serial = java.math.BigInteger.valueOf(now);
+        org.bouncycastle.cert.X509v3CertificateBuilder caBuilder = new org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+                caName, serial, startDate, endDate, caName, caKeyPair.getPublic());
+        org.bouncycastle.operator.ContentSigner caSigner = new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256WithRSA")
+                .setProvider("BC").build(caKeyPair.getPrivate());
+        org.bouncycastle.cert.X509CertificateHolder caHolder = caBuilder.build(caSigner);
+        java.io.StringWriter caSw = new java.io.StringWriter();
+        try (org.bouncycastle.openssl.jcajce.JcaPEMWriter pw = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(caSw)) {
+            pw.writeObject(caHolder);
+        }
+        String trustAnchor = caSw.toString();
+        org.bouncycastle.pkcs.PKCS10CertificationRequest csr;
+        try (org.bouncycastle.openssl.PEMParser parser = new org.bouncycastle.openssl.PEMParser(new java.io.StringReader(csrPem))) {
+            csr = (org.bouncycastle.pkcs.PKCS10CertificationRequest) parser.readObject();
+        }
+        java.security.PublicKey csrPublicKey = new org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter().setProvider("BC").getPublicKey(csr.getSubjectPublicKeyInfo());
+        org.bouncycastle.cert.X509v3CertificateBuilder certBuilder = new org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+                caName, serial.add(java.math.BigInteger.ONE), startDate, endDate, csr.getSubject(), csrPublicKey);
+        org.bouncycastle.cert.X509CertificateHolder certHolder = certBuilder.build(caSigner);
+        java.io.StringWriter certSw = new java.io.StringWriter();
+        try (org.bouncycastle.openssl.jcajce.JcaPEMWriter pw = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(certSw)) {
+            pw.writeObject(certHolder);
+        }
+        String signedCert = certSw.toString();
+        return new String[]{signedCert, trustAnchor};
     }
 }

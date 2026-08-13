@@ -20,6 +20,8 @@ public class Hsm {
     private String state;
     private String stateMessage;
     private Instant createdAt;
+    private String eniIpV6;
+    private String hsmType;
 
     public String getHsmId() {
         return hsmId;
@@ -99,5 +101,21 @@ public class Hsm {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getEniIpV6() {
+        return eniIpV6;
+    }
+
+    public void setEniIpV6(String eniIpV6) {
+        this.eniIpV6 = eniIpV6;
+    }
+
+    public String getHsmType() {
+        return hsmType;
+    }
+
+    public void setHsmType(String hsmType) {
+        this.hsmType = hsmType;
     }
 }
