@@ -32,6 +32,12 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
+import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.time.temporal.ChronoUnit;
+import java.util.stream.Collectors;
 import java.time.Instant;
 import java.util.*;
 
@@ -53,12 +59,19 @@ public class CloudHsmV2Service {
 
     private final SecureRandom SECURE_RANDOM = new SecureRandom();
     private final StorageBackend<String, Cluster> clusters;
-
+    private final StorageBackend<String, Backup> backups;
 
     @Inject
     public CloudHsmV2Service(StorageFactory storageFactory) {
         this.clusters = storageFactory.create("cloudhsmv2", "cloudhsmv2-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {});
+        this.backups = storageFactory.create("cloudhsmv2", "cloudhsmv2-backups.json",
+                new TypeReference<Map<String, Backup>>() {});
+    }
+
+    CloudHsmV2Service(StorageBackend<String, Cluster> clusters, StorageBackend<String, Backup> backups) {
+        this.clusters = clusters;
+        this.backups = backups;
     }
 
     CloudHsmV2Service(StorageBackend<String, Cluster> clusters) {
@@ -68,10 +81,15 @@ public class CloudHsmV2Service {
     // ──────────────────────────── CreateCluster ────────────────────────────
 
     public Cluster createCluster(String hsmType, List<String> SubnetIds,
-                                 String sourceBackupId, Map<String, String> tags, String region) {
+                                 String sourceBackupId, Map<String, String> tags,
+                                 String mode, String networkType, BackupRetentionPolicy backupRetentionPolicy, String region) {
         if (SubnetIds == null || SubnetIds.isEmpty()) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "SubnetIds must contain at least one entry.", 400);
+        }
+        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\.medium$")) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "HsmType " + hsmType + " is not valid.", 400);
         }
 
         String clusterId = "cluster-" + generateShortId();
@@ -87,18 +105,43 @@ public class CloudHsmV2Service {
         cluster.setCreateTimestamp(Instant.now());
         cluster.setBackupPolicy(DEFAULT_BACKUP_POLICY);
         cluster.setTagList(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
+        cluster.setMode(mode != null ? mode : "FIPS");
+        cluster.setNetworkType(networkType != null ? networkType : "IPV4");
+        if (backupRetentionPolicy != null) {
+            int val = Integer.parseInt(backupRetentionPolicy.getValue());
+            if (val < 7 || val > 379) {
+                throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value must be between 7 and 379.", 400);
+            }
+            cluster.setBackupRetentionPolicy(backupRetentionPolicy);
+        } else {
+            cluster.setBackupRetentionPolicy(new BackupRetentionPolicy("DAYS", "90"));
+        }
 
-        // Generate CSR for the cluster
         Certificates certs = new Certificates();
         certs.setClusterCsr(generateCsr(clusterId));
-        // Emulate AWS hardware certs
-        certs.setAwsHardwareCertificate(generateEmulatedHardwareCert("AWS CloudHSM Hardware CA"));
-        certs.setManufacturerHardwareCertificate(generateEmulatedHardwareCert("HSM Manufacturer CA"));
-        certs.setHsmCertificate(generateEmulatedHardwareCert("HSM Instance " + clusterId));
+
+        try {
+            KeyPair mfrKeyPair = generateKeyPair();
+            X500Name mfrName = new X500Name("CN=HSM Manufacturer CA,O=AWS,C=US");
+            certs.setManufacturerHardwareCertificate(generateCert(mfrName, mfrName, mfrKeyPair.getPublic(), mfrKeyPair.getPrivate()));
+
+            KeyPair awsKeyPair = generateKeyPair();
+            X500Name awsName = new X500Name("CN=AWS CloudHSM Hardware CA,O=AWS,C=US");
+            certs.setAwsHardwareCertificate(generateCert(awsName, mfrName, awsKeyPair.getPublic(), mfrKeyPair.getPrivate()));
+
+            KeyPair hsmKeyPair = generateKeyPair();
+            X500Name hsmName = new X500Name("CN=HSM Instance " + clusterId + ",O=AWS,C=US");
+            certs.setHsmCertificate(generateCert(hsmName, awsName, hsmKeyPair.getPublic(), awsKeyPair.getPrivate()));
+        } catch (Exception e) {
+            LOG.warnv("Failed to generate emulated hardware certs: {0}", e.getMessage());
+        }
+
         cluster.setCertificates(certs);
 
         String storageKey = regionKey(region, clusterId);
         clusters.put(storageKey, cluster);
+
+        createBackupInternal(clusterId, region);
 
         LOG.infov("Created CloudHSM v2 cluster {0} in region {1}", clusterId, region);
         return cluster;
@@ -107,13 +150,8 @@ public class CloudHsmV2Service {
     // ──────────────────────────── DescribeClusters ────────────────────────────
 
     public Collection<Cluster> describeClusters(List<String> filterClusterIds,
-                                                 List<String> filterStates, String region) {
+                                                 List<String> filterStates, List<String> filterVpcIds, String region) {
         Collection<Cluster> all = clusters.scan(k -> k.startsWith(region + "::"));
-
-        if ((filterClusterIds == null || filterClusterIds.isEmpty())
-                && (filterStates == null || filterStates.isEmpty())) {
-            return all;
-        }
 
         List<Cluster> filtered = new ArrayList<>();
         for (Cluster c : all) {
@@ -121,7 +159,9 @@ public class CloudHsmV2Service {
                     || filterClusterIds.contains(c.getClusterId());
             boolean matchState = filterStates == null || filterStates.isEmpty()
                     || filterStates.contains(c.getState().wireValue());
-            if (matchId && matchState) {
+            boolean matchVpc = filterVpcIds == null || filterVpcIds.isEmpty()
+                    || filterVpcIds.contains(c.getVpcId());
+            if (matchId && matchState && matchVpc) {
                 filtered.add(c);
             }
         }
@@ -187,7 +227,7 @@ public class CloudHsmV2Service {
 
     // ──────────────────────────── CreateHsm ────────────────────────────
 
-    public Hsm createHsm(String clusterId, String availabilityZone, String region) {
+    public Hsm createHsm(String clusterId, String availabilityZone, String ipAddress, String region) {
         Cluster cluster = getCluster(clusterId, region);
 
         if (cluster.getState() != ClusterState.INITIALIZED
@@ -201,37 +241,42 @@ public class CloudHsmV2Service {
                     "AvailabilityZone is required.", 400);
         }
 
+        List<String> subnetIds = cluster.getSubnetIds();
+        String regionPrefix = region != null ? region : "us-east-1";
+        String subnetId = null;
+        for (int i = 0; i < subnetIds.size(); i++) {
+            if ((regionPrefix + (char) ('a' + i)).equals(availabilityZone)) {
+                subnetId = subnetIds.get(i);
+                break;
+            }
+        }
+        if (subnetId == null) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "AvailabilityZone " + availabilityZone + " is not mapped to a subnet in this cluster.", 400);
+        }
+
         Hsm hsm = new Hsm();
         hsm.setHsmId("hsm-" + generateShortId());
         hsm.setAvailabilityZone(availabilityZone);
         hsm.setClusterId(clusterId);
-        List<String> subnetIds = cluster.getSubnetIds();
-        String subnetId = "";
-        if(subnetId == null || subnetId.isEmpty()) {
-            int azIndex = availabilityZone.length() > 0 ? (availabilityZone.charAt(availabilityZone.length() - 1) - 'a') : 0;
-            if (azIndex >= 0 && azIndex < subnetIds.size()) {
-                subnetId = subnetIds.get(azIndex);
-            }
-        }
-        if (subnetId == null || subnetId.isEmpty()) {
-            // AZ not in the list, use first available subnet
-            subnetId = subnetIds.get(0);
-        }
         hsm.setSubnetId(subnetId);
         hsm.setEniId("eni-" + generateShortId());
         hsm.setEniIp("10.0." + (SECURE_RANDOM.nextInt(254) + 1) + "." + (SECURE_RANDOM.nextInt(254) + 1));
+        hsm.setIpAddress(ipAddress != null ? ipAddress : hsm.getEniIp());
         hsm.setState("ACTIVE");
         hsm.setCreatedAt(Instant.now());
 
         cluster.getHsms().add(hsm);
 
-        // Auto-transition to ACTIVE if initialized and now has HSMs
         if (cluster.isReadyForActive()) {
             cluster.setState(ClusterState.ACTIVE);
             cluster.setStateMessage("Cluster is active");
         }
 
         clusters.put(regionKey(region, clusterId), cluster);
+
+        createBackupInternal(clusterId, region);
+
         LOG.infov("Created HSM {0} in cluster {1}", hsm.getHsmId(), clusterId);
         return hsm;
     }
@@ -243,7 +288,7 @@ public class CloudHsmV2Service {
         if (hsmId != null && !hsmId.isEmpty()) count++;
         if (eniId != null && !eniId.isEmpty()) count++;
         if (eniIp != null && !eniIp.isEmpty()) count++;
-        
+
         if (count != 1) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "Exactly one of HsmId, EniId, or EniIp must be specified", 400);
@@ -316,7 +361,7 @@ public class CloudHsmV2Service {
     }
 
     private String generateShortId() {
-        return UUID.randomUUID().toString().replace("-", "").substring(0, 17);
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
     }
 
     private String generateCsr(String clusterId) {
@@ -347,37 +392,30 @@ public class CloudHsmV2Service {
         }
     }
 
-    private String generateEmulatedHardwareCert(String cn) {
-        try {
-            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME);
-            keyGen.initialize(2048, SECURE_RANDOM);
-            KeyPair keyPair = keyGen.generateKeyPair();
+    private KeyPair generateKeyPair() throws Exception {
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME);
+        keyGen.initialize(2048, SECURE_RANDOM);
+        return keyGen.generateKeyPair();
+    }
 
-            X500Name issuer = new X500Name("CN=" + cn + ",O=AWS,C=US");
-            BigInteger serial = new BigInteger(128, SECURE_RANDOM);
-            Instant now = Instant.now();
+    private String generateCert(X500Name subject, X500Name issuer, PublicKey pubKey, PrivateKey signerKey) throws Exception {
+        BigInteger serial = new BigInteger(128, SECURE_RANDOM);
+        Instant now = Instant.now();
+        X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
+                issuer, serial, Date.from(now), Date.from(now.plusSeconds(365L * 24 * 3600)), subject, pubKey);
 
-            X509v3CertificateBuilder certBuilder =
-                    new JcaX509v3CertificateBuilder(
-                            issuer, serial,
-                            Date.from(now),
-                            Date.from(now.plusSeconds(365L * 24 * 3600)),
-                            issuer, keyPair.getPublic());
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME).build(signerKey);
+        X509CertificateHolder holder = certBuilder.build(signer);
+        X509Certificate cert = new JcaX509CertificateConverter()
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME).getCertificate(holder);
 
-            ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
-                    .setProvider(BouncyCastleProvider.PROVIDER_NAME)
-                    .build(keyPair.getPrivate());
-
-            X509CertificateHolder holder = certBuilder.build(signer);
-            X509Certificate cert =
-                    new JcaX509CertificateConverter()
-                            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
-                            .getCertificate(holder);
-
-            StringWriter sw = new StringWriter();
-            try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
-                pemWriter.writeObject(cert);
-            }
+        StringWriter sw = new StringWriter();
+        try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
+            pemWriter.writeObject(cert);
+        }
+        return sw.toString();
+    }
             return sw.toString();
         } catch (Exception e) {
             LOG.warnv("Failed to generate emulated hardware cert for {0}: {1}", cn, e.getMessage());
@@ -418,4 +456,141 @@ public class CloudHsmV2Service {
                     fieldName + " is malformed: " + e.getMessage(), 400);
         }
     }
+
+    // ──────────────────────────── Backups ────────────────────────────
+
+    private void createBackupInternal(String clusterId, String region) {
+        Cluster cluster = getCluster(clusterId, region);
+        Backup backup = new Backup();
+        backup.setBackupId("backup-" + generateShortId());
+        backup.setBackupState("READY");
+        backup.setClusterId(clusterId);
+        backup.setCreateTimestamp(Instant.now());
+        backup.setNeverExpires("False");
+        backup.setMode(cluster.getMode());
+        backups.put(regionKey(region, backup.getBackupId()), backup);
+    }
+
+    public Collection<Backup> describeBackups(List<String> filterBackupIds, List<String> filterClusterIds,
+                                              List<String> filterStates, String region) {
+        Collection<Backup> all = backups.scan(k -> k.startsWith(region + "::"));
+        List<Backup> filtered = new ArrayList<>();
+        for (Backup b : all) {
+            boolean matchId = filterBackupIds == null || filterBackupIds.isEmpty() || filterBackupIds.contains(b.getBackupId());
+            boolean matchCluster = filterClusterIds == null || filterClusterIds.isEmpty() || filterClusterIds.contains(b.getClusterId());
+            boolean matchState = filterStates == null || filterStates.isEmpty() || filterStates.contains(b.getBackupState());
+            if (matchId && matchCluster && matchState) {
+                filtered.add(b);
+            }
+        }
+        return filtered;
+    }
+
+    public Backup deleteBackup(String backupId, String region) {
+        Backup backup = getBackup(backupId, region);
+        backup.setBackupState("PENDING_DELETION");
+        backup.setDeleteTimestamp(Instant.now());
+        backups.put(regionKey(region, backupId), backup);
+        return backup;
+    }
+
+    public Backup restoreBackup(String backupId, String region) {
+        Backup backup = getBackup(backupId, region);
+        if (!"PENDING_DELETION".equals(backup.getBackupState())) {
+            throw new AwsException("CloudHsmInvalidRequestException", "Backup must be in PENDING_DELETION state", 400);
+        }
+        backup.setBackupState("READY");
+        backup.setDeleteTimestamp(null);
+        backups.put(regionKey(region, backupId), backup);
+        return backup;
+    }
+
+    public Backup modifyBackupAttributes(String backupId, String neverExpires, String region) {
+        Backup backup = getBackup(backupId, region);
+        if (neverExpires != null) {
+            backup.setNeverExpires(neverExpires);
+        }
+        backups.put(regionKey(region, backupId), backup);
+        return backup;
+    }
+
+    public Backup copyBackupToRegion(String destinationRegion, String backupId, String sourceRegion) {
+        // Source region emulation: we'll just clone the backup locally.
+        Backup source = getBackup(backupId, sourceRegion != null ? sourceRegion : "us-east-1");
+        Backup copy = new Backup();
+        copy.setBackupId("backup-" + generateShortId());
+        copy.setBackupState("READY");
+        copy.setClusterId(source.getClusterId());
+        copy.setCreateTimestamp(source.getCreateTimestamp());
+        copy.setCopyTimestamp(Instant.now());
+        copy.setSourceRegion(sourceRegion != null ? sourceRegion : "us-east-1");
+        copy.setSourceBackup(backupId);
+        copy.setSourceCluster(source.getClusterId());
+        copy.setMode(source.getMode());
+        copy.setNeverExpires(source.getNeverExpires());
+        backups.put(regionKey(destinationRegion, copy.getBackupId()), copy);
+        return copy;
+    }
+
+    // ──────────────────────────── Resource Policies ────────────────────────────
+
+    public void putResourcePolicy(String resourceArn, String policy, String region) {
+        String backupId = extractBackupId(resourceArn);
+        Backup backup = getBackup(backupId, region);
+        if (!"READY".equals(backup.getBackupState())) {
+            throw new AwsException("CloudHsmInvalidRequestException", "Backup must be READY to apply a policy", 400);
+        }
+        backup.setResourcePolicy(policy);
+        backups.put(regionKey(region, backupId), backup);
+    }
+
+    public String getResourcePolicy(String resourceArn, String region) {
+        String backupId = extractBackupId(resourceArn);
+        Backup backup = getBackup(backupId, region);
+        return backup.getResourcePolicy();
+    }
+
+    public void deleteResourcePolicy(String resourceArn, String region) {
+        String backupId = extractBackupId(resourceArn);
+        Backup backup = getBackup(backupId, region);
+        backup.setResourcePolicy(null);
+        backups.put(regionKey(region, backupId), backup);
+    }
+
+    private String extractBackupId(String arn) {
+        if (arn == null || !arn.contains("backup/")) {
+            throw new AwsException("CloudHsmInvalidRequestException", "Invalid ResourceArn format", 400);
+        }
+        return arn.substring(arn.lastIndexOf('/') + 1);
+    }
+
+    // ──────────────────────────── ModifyCluster ────────────────────────────
+
+    public Cluster modifyCluster(String clusterId, String hsmType, BackupRetentionPolicy backupRetentionPolicy, String region) {
+        Cluster cluster = getCluster(clusterId, region);
+        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\.medium$")) {
+            throw new AwsException("CloudHsmInvalidRequestException", "HsmType " + hsmType + " is not valid.", 400);
+        }
+        if (hsmType != null) {
+            cluster.setHsmType(hsmType);
+        }
+        if (backupRetentionPolicy != null) {
+            int val = Integer.parseInt(backupRetentionPolicy.getValue());
+            if (val < 7 || val > 379) {
+                throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value must be between 7 and 379.", 400);
+            }
+            cluster.setBackupRetentionPolicy(backupRetentionPolicy);
+        }
+        clusters.put(regionKey(region, clusterId), cluster);
+        return cluster;
+    }
+
+    private Backup getBackup(String backupId, String region) {
+        if (backupId == null || backupId.isBlank()) {
+            throw new AwsException("CloudHsmInvalidRequestException", "BackupId is required.", 400);
+        }
+        return backups.get(regionKey(region, backupId)).orElseThrow(() ->
+                new AwsException("CloudHsmResourceNotFoundException", "Backup " + backupId + " not found.", 400));
+    }
+
 }

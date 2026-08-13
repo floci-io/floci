@@ -20,6 +20,10 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
+import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
+import java.util.stream.Collectors;
+
 
 /**
  * CloudHSM v2 JSON 1.1 handler. Dispatched from
@@ -47,9 +51,18 @@ public class CloudHsmV2JsonHandler {
                 case "CreateCluster" -> handleCreateCluster(request, region);
                 case "DescribeClusters" -> handleDescribeClusters(request, region);
                 case "DeleteCluster" -> handleDeleteCluster(request, region);
+                case "ModifyCluster" -> handleModifyCluster(request, region);
                 case "InitializeCluster" -> handleInitializeCluster(request, region);
                 case "CreateHsm" -> handleCreateHsm(request, region);
                 case "DeleteHsm" -> handleDeleteHsm(request, region);
+                case "DescribeBackups" -> handleDescribeBackups(request, region);
+                case "DeleteBackup" -> handleDeleteBackup(request, region);
+                case "RestoreBackup" -> handleRestoreBackup(request, region);
+                case "ModifyBackupAttributes" -> handleModifyBackupAttributes(request, region);
+                case "CopyBackupToRegion" -> handleCopyBackupToRegion(request, region);
+                case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+                case "GetResourcePolicy" -> handleGetResourcePolicy(request, region);
+                case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
                 case "TagResource" -> handleTagResource(request, region);
                 case "UntagResource" -> handleUntagResource(request, region);
                 case "ListTags" -> handleListTags(request, region);
@@ -73,8 +86,15 @@ public class CloudHsmV2JsonHandler {
         List<String> SubnetIds = parseStringList(request.path("SubnetIds"));
         String sourceBackupId = text(request, "SourceBackupId");
         Map<String, String> tags = parseTagList(request.path("TagList"));
+        String mode = text(request, "Mode");
+        String networkType = text(request, "NetworkType");
+        BackupRetentionPolicy backupRetentionPolicy = null;
+        if (!request.path("BackupRetentionPolicy").isMissingNode()) {
+            JsonNode brpNode = request.path("BackupRetentionPolicy");
+            backupRetentionPolicy = new BackupRetentionPolicy(brpNode.path("Type").asText(null), brpNode.path("Value").asText(null));
+        }
 
-        Cluster cluster = service.createCluster(hsmType, SubnetIds, sourceBackupId, tags, region);
+        Cluster cluster = service.createCluster(hsmType, SubnetIds, sourceBackupId, tags, mode, networkType, backupRetentionPolicy, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Cluster", clusterNode(cluster, region));
@@ -85,17 +105,33 @@ public class CloudHsmV2JsonHandler {
         JsonNode filters = request.path("Filters");
         List<String> clusterIds = null;
         List<String> states = null;
+        List<String> vpcIds = null;
         if (!filters.isMissingNode() && !filters.isNull()) {
             clusterIds = parseStringList(filters.path("clusterIds"));
             states = parseStringList(filters.path("states"));
+            vpcIds = parseStringList(filters.path("vpcIds"));
         }
 
-        Collection<Cluster> clusters = service.describeClusters(clusterIds, states, region);
+        Collection<Cluster> clusters = service.describeClusters(clusterIds, states, vpcIds, region);
+
+        Integer maxResults = request.path("MaxResults").asInt(25);
+        String nextToken = text(request, "NextToken");
+
+        List<Cluster> list = new ArrayList<>(clusters);
+        int start = 0;
+        if (nextToken != null) {
+            start = Integer.parseInt(nextToken);
+        }
+        int end = Math.min(start + maxResults, list.size());
+        List<Cluster> page = start < list.size() ? list.subList(start, end) : List.of();
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Clusters");
-        for (Cluster c : clusters) {
+        for (Cluster c : page) {
             arr.add(clusterNode(c, region));
+        }
+        if (end < list.size()) {
+            response.put("NextToken", String.valueOf(end));
         }
         return Response.ok(response).build();
     }
@@ -127,8 +163,9 @@ public class CloudHsmV2JsonHandler {
     private Response handleCreateHsm(JsonNode request, String region) {
         String clusterId = text(request, "ClusterId");
         String az = text(request, "AvailabilityZone");
+        String ipAddress = text(request, "IpAddress");
 
-        Hsm hsm = service.createHsm(clusterId, az, region);
+        Hsm hsm = service.createHsm(clusterId, az, ipAddress, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Hsm", hsmNode(hsm));
@@ -166,14 +203,28 @@ public class CloudHsmV2JsonHandler {
         String resourceId = text(request, "ResourceId");
         Map<String, String> tags = service.listTags(resourceId, region);
 
+        Integer maxResults = request.path("MaxResults").asInt(100);
+        String nextToken = text(request, "NextToken");
+
+        List<Map.Entry<String, String>> list = new ArrayList<>(tags.entrySet());
+        int start = 0;
+        if (nextToken != null) {
+            start = Integer.parseInt(nextToken);
+        }
+        int end = Math.min(start + maxResults, list.size());
+        List<Map.Entry<String, String>> page = start < list.size() ? list.subList(start, end) : List.of();
+
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("TagList");
-        tags.forEach((k, v) -> {
+        for (Map.Entry<String, String> tagEntry : page) {
             ObjectNode tag = objectMapper.createObjectNode();
-            tag.put("Key", k);
-            tag.put("Value", v);
+            tag.put("Key", tagEntry.getKey());
+            tag.put("Value", tagEntry.getValue());
             arr.add(tag);
-        });
+        }
+        if (end < list.size()) {
+            response.put("NextToken", String.valueOf(end));
+        }
         return Response.ok(response).build();
     }
 
@@ -199,6 +250,18 @@ public class CloudHsmV2JsonHandler {
         }
         if (cluster.getBackupPolicy() != null) {
             node.put("BackupPolicy", cluster.getBackupPolicy());
+        }
+        if (cluster.getMode() != null) {
+            node.put("Mode", cluster.getMode());
+        }
+        if (cluster.getNetworkType() != null) {
+            node.put("NetworkType", cluster.getNetworkType());
+        }
+        if (cluster.getBackupRetentionPolicy() != null) {
+            ObjectNode brp = objectMapper.createObjectNode();
+            brp.put("Type", cluster.getBackupRetentionPolicy().getType());
+            brp.put("Value", cluster.getBackupRetentionPolicy().getValue());
+            node.set("BackupRetentionPolicy", brp);
         }
 
         // SubnetMapping - derive from SubnetIds for response
@@ -279,6 +342,156 @@ public class CloudHsmV2JsonHandler {
         }
         if (hsm.getStateMessage() != null) {
             node.put("StateMessage", hsm.getStateMessage());
+        }
+        return node;
+    }
+
+
+    private Response handleModifyCluster(JsonNode request, String region) {
+        String clusterId = text(request, "ClusterId");
+        String hsmType = text(request, "HsmType");
+        BackupRetentionPolicy backupRetentionPolicy = null;
+        if (!request.path("BackupRetentionPolicy").isMissingNode()) {
+            JsonNode brpNode = request.path("BackupRetentionPolicy");
+            backupRetentionPolicy = new BackupRetentionPolicy(brpNode.path("Type").asText(null), brpNode.path("Value").asText(null));
+        }
+
+        Cluster cluster = service.modifyCluster(clusterId, hsmType, backupRetentionPolicy, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Cluster", clusterNode(cluster, region));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeBackups(JsonNode request, String region) {
+        JsonNode filters = request.path("Filters");
+        List<String> backupIds = null;
+        List<String> clusterIds = null;
+        List<String> states = null;
+        if (!filters.isMissingNode() && !filters.isNull()) {
+            backupIds = parseStringList(filters.path("backupIds"));
+            clusterIds = parseStringList(filters.path("clusterIds"));
+            states = parseStringList(filters.path("states"));
+        }
+
+        Collection<Backup> backups = service.describeBackups(backupIds, clusterIds, states, region);
+
+        Integer maxResults = request.path("MaxResults").asInt(50);
+        String nextToken = text(request, "NextToken");
+
+        List<Backup> list = new ArrayList<>(backups);
+        int start = 0;
+        if (nextToken != null) {
+            start = Integer.parseInt(nextToken);
+        }
+        int end = Math.min(start + maxResults, list.size());
+        List<Backup> page = start < list.size() ? list.subList(start, end) : List.of();
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("Backups");
+        for (Backup b : page) {
+            arr.add(backupNode(b));
+        }
+        if (end < list.size()) {
+            response.put("NextToken", String.valueOf(end));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteBackup(JsonNode request, String region) {
+        String backupId = text(request, "BackupId");
+        Backup backup = service.deleteBackup(backupId, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Backup", backupNode(backup));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRestoreBackup(JsonNode request, String region) {
+        String backupId = text(request, "BackupId");
+        Backup backup = service.restoreBackup(backupId, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Backup", backupNode(backup));
+        return Response.ok(response).build();
+    }
+
+    private Response handleModifyBackupAttributes(JsonNode request, String region) {
+        String backupId = text(request, "BackupId");
+        String neverExpires = text(request, "NeverExpires");
+        Backup backup = service.modifyBackupAttributes(backupId, neverExpires, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Backup", backupNode(backup));
+        return Response.ok(response).build();
+    }
+
+    private Response handleCopyBackupToRegion(JsonNode request, String region) {
+        String destRegion = text(request, "DestinationRegion");
+        String backupId = text(request, "BackupId");
+        String sourceRegion = text(request, "SourceRegion");
+        Backup backup = service.copyBackupToRegion(destRegion, backupId, sourceRegion);
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode destBackup = objectMapper.createObjectNode();
+        destBackup.put("CreateTimestamp", backup.getCreateTimestamp().toEpochMilli() / 1000.0);
+        destBackup.put("SourceBackup", backup.getSourceBackup());
+        destBackup.put("SourceCluster", backup.getSourceCluster());
+        destBackup.put("SourceRegion", backup.getSourceRegion());
+        response.set("DestinationBackup", destBackup);
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String resourceArn = text(request, "ResourceArn");
+        String policy = text(request, "Policy");
+        service.putResourcePolicy(resourceArn, policy, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ResourceArn", resourceArn);
+        response.put("Policy", policy);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetResourcePolicy(JsonNode request, String region) {
+        String resourceArn = text(request, "ResourceArn");
+        String policy = service.getResourcePolicy(resourceArn, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Policy", policy);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteResourcePolicy(JsonNode request, String region) {
+        String resourceArn = text(request, "ResourceArn");
+        service.deleteResourcePolicy(resourceArn, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ResourceArn", resourceArn);
+        response.put("Policy", "DELETED");
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode backupNode(Backup backup) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("BackupId", backup.getBackupId());
+        node.put("BackupState", backup.getBackupState());
+        node.put("ClusterId", backup.getClusterId());
+        if (backup.getCreateTimestamp() != null) {
+            node.put("CreateTimestamp", backup.getCreateTimestamp().toEpochMilli() / 1000.0);
+        }
+        if (backup.getDeleteTimestamp() != null) {
+            node.put("DeleteTimestamp", backup.getDeleteTimestamp().toEpochMilli() / 1000.0);
+        }
+        if (backup.getCopyTimestamp() != null) {
+            node.put("CopyTimestamp", backup.getCopyTimestamp().toEpochMilli() / 1000.0);
+        }
+        if (backup.getNeverExpires() != null) {
+            node.put("NeverExpires", "True".equalsIgnoreCase(backup.getNeverExpires()));
+        }
+        if (backup.getSourceRegion() != null) {
+            node.put("SourceRegion", backup.getSourceRegion());
+        }
+        if (backup.getSourceBackup() != null) {
+            node.put("SourceBackup", backup.getSourceBackup());
+        }
+        if (backup.getSourceCluster() != null) {
+            node.put("SourceCluster", backup.getSourceCluster());
+        }
+        if (backup.getMode() != null) {
+            node.put("Mode", backup.getMode());
         }
         return node;
     }

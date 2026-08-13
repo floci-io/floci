@@ -30,7 +30,9 @@ public class Cluster {
     private Instant createTimestamp;
     private Map<String, String> tagList = new LinkedHashMap<>();
     private String backupPolicy;
-    private String backupRetentionPolicy;
+    private BackupRetentionPolicy backupRetentionPolicy;
+    private String mode;
+    private String networkType;
 
     public String getClusterId() {
         return clusterId;
@@ -136,12 +138,28 @@ public class Cluster {
         this.backupPolicy = backupPolicy;
     }
 
-    public String getBackupRetentionPolicy() {
+    public BackupRetentionPolicy getBackupRetentionPolicy() {
         return backupRetentionPolicy;
     }
 
-    public void setBackupRetentionPolicy(String backupRetentionPolicy) {
+    public void setBackupRetentionPolicy(BackupRetentionPolicy backupRetentionPolicy) {
         this.backupRetentionPolicy = backupRetentionPolicy;
+    }
+
+    public String getMode() {
+        return mode;
+    }
+
+    public void setMode(String mode) {
+        this.mode = mode;
+    }
+
+    public String getNetworkType() {
+        return networkType;
+    }
+
+    public void setNetworkType(String networkType) {
+        this.networkType = networkType;
     }
 
     /** True when the cluster has been initialized and has at least one HSM. */
