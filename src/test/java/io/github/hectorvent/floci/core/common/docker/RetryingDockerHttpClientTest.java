@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
 
@@ -112,6 +113,33 @@ class RetryingDockerHttpClientTest {
     }
 
     @Test
+    void injectsCanonicalCloseWhilePreservingRequestDataAndHeaders() {
+        Response ok = mock(Response.class);
+        FakeTransport delegate = new FakeTransport(attempt -> ok);
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+
+        byte[] body = "{\"Image\":\"busybox\"}".getBytes(StandardCharsets.UTF_8);
+        Request create = Request.builder()
+                .method(Request.Method.POST)
+                .path("/containers/create")
+                .bodyBytes(body)
+                .putHeader("Content-Type", "application/json")
+                .putHeader("connection", "keep-alive")
+                .build();
+
+        assertSame(ok, client.execute(create));
+        Request effective = delegate.seenRequests.get(0);
+        assertEquals(create.method(), effective.method());
+        assertEquals(create.path(), effective.path());
+        assertSame(body, effective.bodyBytes());
+        assertEquals("application/json", effective.headers().get("Content-Type"));
+        assertEquals("close", effective.headers().get("Connection"));
+        assertEquals(1, effective.headers().entrySet().stream()
+                .filter(entry -> "Connection".equalsIgnoreCase(entry.getKey()))
+                .count(), "the transport must receive one unambiguous Connection header");
+    }
+
+    @Test
     void doesNotRetryOneShotStreamBody() {
         FakeTransport delegate = new FakeTransport(attempt -> {
             throw brokenPipe();
@@ -132,6 +160,9 @@ class RetryingDockerHttpClientTest {
         assertEquals("Broken pipe", thrown.getCause().getMessage());
         assertEquals(1, delegate.calls.get(),
                 "a one-shot stream body cannot be replayed; the transport must not retry it");
+        assertSame(tar, delegate.seenRequests.get(0).body(),
+                "adding Connection: close must preserve the one-shot stream object");
+        assertEquals("close", delegate.seenRequests.get(0).headers().get("Connection"));
     }
 
     @Test
@@ -150,6 +181,9 @@ class RetryingDockerHttpClientTest {
         assertThrows(RuntimeException.class, () -> client.execute(attach));
         assertEquals(1, delegate.calls.get(),
                 "a hijacked (bidirectional stdin) request must never be replayed");
+        assertSame(attach, delegate.seenRequests.get(0),
+                "hijacked requests must reach docker-java unchanged for Connection: Upgrade");
+        assertEquals(Map.of(), delegate.seenRequests.get(0).headers());
     }
 
     @Test
@@ -171,6 +205,8 @@ class RetryingDockerHttpClientTest {
         assertThrows(RuntimeException.class, () -> startClient.execute(execStart));
         assertEquals(1, startDelegate.calls.get(),
                 "exec-start re-runs the command if replayed; it must surface after one attempt");
+        assertEquals("close", startDelegate.seenRequests.get(0).headers().get("Connection"),
+                "non-replayable exec control calls must still retire their connection");
 
         // The exclusion is contains("/exec"), not startsWith: exec-create
         // (POST /containers/{id}/exec) is also excluded, and this pins that breadth so a later

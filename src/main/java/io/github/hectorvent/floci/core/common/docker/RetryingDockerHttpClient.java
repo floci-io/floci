@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.transport.DockerHttpClient;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Decorates a {@link DockerHttpClient} with the {@link DockerRetry} policy so every docker call
@@ -38,6 +40,9 @@ import java.io.IOException;
  */
 public final class RetryingDockerHttpClient implements DockerHttpClient {
 
+    static final String CONNECTION_HEADER = "Connection";
+    static final String CONNECTION_CLOSE = "close";
+
     /**
      * Mirrors the per-call-site policy this decorator replaces: six attempts at 500ms
      * exponential backoff (capped by {@link DockerRetry#BACKOFF_CAP_MS}) rides out the
@@ -62,10 +67,46 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
 
     @Override
     public Response execute(Request request) {
-        if (!isReplayable(request)) {
-            return delegate.execute(request);
+        Request effectiveRequest = withConnectionClose(request);
+        if (!isReplayable(effectiveRequest)) {
+            return delegate.execute(effectiveRequest);
         }
-        return DockerRetry.call(maxAttempts, backoffMillis, () -> delegate.execute(request));
+        return DockerRetry.call(maxAttempts, backoffMillis, () -> delegate.execute(effectiveRequest));
+    }
+
+    /**
+     * Retires every non-hijacked control-plane connection after its response instead of returning
+     * it to docker-java's pool. The upstream Apache transport disables stale-connection validation,
+     * so a Podman-closed pooled socket can otherwise be leased again and fail on its next write.
+     *
+     * <p>This is independent of retry eligibility: one-shot archive uploads and {@code /exec}
+     * requests must not be replayed, but their successfully completed connections must not be
+     * returned to the pool either. Hijacked requests remain unchanged because docker-java upgrades
+     * those connections and manages their lifetime as streams.
+     */
+    static Request withConnectionClose(Request request) {
+        if (request.hijackedInput() != null) {
+            return request;
+        }
+
+        Map<String, String> headers = new LinkedHashMap<>();
+        request.headers().forEach((name, value) -> {
+            if (!CONNECTION_HEADER.equalsIgnoreCase(name)) {
+                headers.put(name, value);
+            }
+        });
+        headers.put(CONNECTION_HEADER, CONNECTION_CLOSE);
+
+        Request.Builder builder = Request.builder()
+                .method(request.method())
+                .path(request.path())
+                .headers(headers);
+        if (request.bodyBytes() != null) {
+            builder.bodyBytes(request.bodyBytes());
+        } else if (request.body() != null) {
+            builder.body(request.body());
+        }
+        return builder.build();
     }
 
     /**
