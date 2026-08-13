@@ -1,11 +1,17 @@
 package io.github.hectorvent.floci.services.ram;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -27,7 +33,8 @@ class RamServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new RamService();
+        service = new RamService(new SharedStorageFactory());
+        service.initializeStorage();
     }
 
     @Test
@@ -117,5 +124,22 @@ class RamServiceTest {
                 service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(other.getResourceShareArn()));
         assertEquals(1, resources.size());
         assertEquals("ec2:Subnet", resources.get(0).type());
+    }
+
+    private static final class SharedStorageFactory extends StorageFactory {
+        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
+
+        private SharedStorageFactory() {
+            super(null, null);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <V> StorageBackend<String, V> create(String serviceName,
+                                                    String fileName,
+                                                    TypeReference<Map<String, V>> typeReference) {
+            return (StorageBackend<String, V>) stores.computeIfAbsent(
+                    fileName, ignored -> new InMemoryStorage<>());
+        }
     }
 }

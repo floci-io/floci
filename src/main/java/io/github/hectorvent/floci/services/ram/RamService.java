@@ -1,14 +1,19 @@
 package io.github.hectorvent.floci.services.ram;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * AWS Resource Access Manager (RAM) business logic.
@@ -27,17 +32,32 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class RamService {
 
-    private volatile boolean sharingWithOrganizationEnabled;
+    private static final String ORGANIZATION_SHARING_KEY = "sharing-with-organization-enabled";
 
-    private final Map<String, ResourceShare> sharesByArn = new ConcurrentHashMap<>();
+    private final StorageFactory storageFactory;
+    private StorageBackend<String, ResourceShare> shares;
+    private StorageBackend<String, Boolean> settings;
+
+    @Inject
+    public RamService(StorageFactory storageFactory) {
+        this.storageFactory = storageFactory;
+    }
+
+    @PostConstruct
+    void initializeStorage() {
+        shares = storageFactory.create("ram", "ram-resource-shares.json",
+                new TypeReference<Map<String, ResourceShare>>() {});
+        settings = storageFactory.create("ram", "ram-settings.json",
+                new TypeReference<Map<String, Boolean>>() {});
+    }
 
     public boolean enableSharingWithAwsOrganization() {
-        sharingWithOrganizationEnabled = true;
+        settings.put(ORGANIZATION_SHARING_KEY, true);
         return true;
     }
 
     public boolean isSharingWithOrganizationEnabled() {
-        return sharingWithOrganizationEnabled;
+        return settings.get(ORGANIZATION_SHARING_KEY).orElse(false);
     }
 
     public ResourceShare createResourceShare(String name, List<String> principals,
@@ -47,7 +67,7 @@ public class RamService {
                 + ":resource-share/" + UUID.randomUUID();
         ResourceShare share = new ResourceShare(
                 arn, name, owningAccountId, principals, resourceArns, allowExternalPrincipals);
-        sharesByArn.put(arn, share);
+        putForOwner(share);
         return share;
     }
 
@@ -57,7 +77,7 @@ public class RamService {
      */
     public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner) {
         List<ResourceShare> result = new ArrayList<>();
-        for (ResourceShare share : sharesByArn.values()) {
+        for (ResourceShare share : allShares()) {
             if (isVisible(share, callerAccountId, resourceOwner)) {
                 result.add(share);
             }
@@ -73,7 +93,7 @@ public class RamService {
     public List<SharedResource> listResources(String callerAccountId, String resourceOwner,
                                               List<String> resourceShareArns) {
         List<SharedResource> result = new ArrayList<>();
-        for (ResourceShare share : sharesByArn.values()) {
+        for (ResourceShare share : allShares()) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
@@ -86,6 +106,22 @@ public class RamService {
             }
         }
         return result;
+    }
+
+    private void putForOwner(ResourceShare share) {
+        if (shares instanceof AccountAwareStorageBackend<ResourceShare> accountAware) {
+            accountAware.putForAccount(
+                    share.getOwningAccountId(), share.getResourceShareArn(), share);
+            return;
+        }
+        shares.put(share.getResourceShareArn(), share);
+    }
+
+    private List<ResourceShare> allShares() {
+        if (shares instanceof AccountAwareStorageBackend<ResourceShare> accountAware) {
+            return accountAware.scanAllAccounts();
+        }
+        return shares.scan(key -> true);
     }
 
     private boolean isVisible(ResourceShare share, String callerAccountId, String resourceOwner) {
