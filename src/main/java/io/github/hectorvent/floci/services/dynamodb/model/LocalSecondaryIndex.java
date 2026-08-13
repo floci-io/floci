@@ -63,6 +63,7 @@ public class LocalSecondaryIndex {
     public long getItemCount() { return itemCount; }
     public void setItemCount(long itemCount) { this.itemCount = itemCount; }
 
+    @JsonIgnore
     public String getPartitionKeyName() {
         return keySchema.stream()
                 .filter(k -> "HASH".equals(k.getKeyType()))
@@ -71,6 +72,7 @@ public class LocalSecondaryIndex {
                 .orElseThrow();
     }
 
+    @JsonIgnore
     public String getSortKeyName() {
         return keySchema.stream()
                 .filter(k -> "RANGE".equals(k.getKeyType()))
