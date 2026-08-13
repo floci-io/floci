@@ -174,6 +174,7 @@ public class StepFunctionsJsonHandler {
         response.put("type", sm.getType());
         response.put("status", sm.getStatus());
         response.put("creationDate", sm.getCreationDate());
+        response.put("updateDate", sm.getUpdateDate());
         if (sm.getDescription() != null) {
             response.put("description", sm.getDescription());
         }

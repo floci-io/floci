@@ -56,6 +56,7 @@ class StepFunctionsUpdateStateMachineIntegrationTest {
         // The update is reflected in DescribeStateMachine.
         call("DescribeStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
+                .body("updateDate", notNullValue())
                 .body("roleArn", is("arn:aws:iam::000000000000:role/r2"))
                 .body("definition", containsString("\"Wait\""));
     }
