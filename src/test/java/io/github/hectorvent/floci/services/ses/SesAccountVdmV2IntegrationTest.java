@@ -28,7 +28,9 @@ class SesAccountVdmV2IntegrationTest {
     @Order(0)
     void getAccount_vdmAttributesAbsentUntilConfigured() {
         // A region where PutAccountVdmAttributes was never called omits the VdmAttributes key
-        // entirely; AWS only surfaces it once VDM has been configured for that region.
+        // entirely; AWS only surfaces it once VDM has been configured for that region. Confirmed
+        // against a live account: eu-west-1 and ap-northeast-1 (never configured) omit VdmAttributes,
+        // while a region that was configured then disabled reports VdmEnabled DISABLED.
         given().header("Authorization", AUTH)
         .when().get("/v2/email/account").then().statusCode(200)
                 .body("VdmAttributes", nullValue());
