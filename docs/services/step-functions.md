@@ -35,6 +35,17 @@
 | `UntagResource` | - |
 <!-- floci:actions:end -->
 
+## Map concurrency
+
+Map states honor `MaxConcurrency` and, for JSONPath state machines, `MaxConcurrencyPath`.
+JSONata state machines may supply `MaxConcurrency` as an expression. A value of `0`, or an
+omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline Map states and
+10,000 for Distributed Map states. `MaxConcurrency: 1` runs iterations sequentially.
+
+Results remain in input order even when iterations finish out of order. If an iteration fails,
+the Map state fails promptly, cancels its active sibling iterations, and does not start queued
+iterations.
+
 ## Configuration
 
 | Variable | Default | Description |
