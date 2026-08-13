@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -200,5 +201,29 @@ class OrganizationsServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.describeOrganization(OUTSIDER_ACCOUNT));
         assertEquals("AWSOrganizationsNotInUseException", error.getErrorCode());
+    }
+    @Test
+    void controlTowerGuardrailsReconcileRegisteredAndSecurityOusIdempotently() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String rootId = organization.getRoot().getId();
+        String registered = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Infrastructure", null).getId();
+        String security = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Security", null).getId();
+        String unrelated = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Suspended", null).getId();
+
+        service.ensureControlTowerGuardrails(MANAGEMENT_ACCOUNT, Set.of(registered));
+        service.ensureControlTowerGuardrails(MANAGEMENT_ACCOUNT, Set.of(registered));
+
+        OrganizationPolicy guardrail =
+                service.describePolicy(MANAGEMENT_ACCOUNT, OrganizationsService.CONTROL_TOWER_GUARDRAIL_ID);
+        assertEquals(OrganizationsService.CONTROL_TOWER_GUARDRAIL_NAME, guardrail.getName());
+        assertFalse(guardrail.isAwsManaged());
+        assertTrue(guardrail.getTargets().containsAll(Set.of(registered, security)));
+        assertFalse(guardrail.getTargets().contains(unrelated));
+        assertTrue(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, registered, "SERVICE_CONTROL_POLICY")
+                .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
+        assertTrue(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, security, "SERVICE_CONTROL_POLICY")
+                .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
+        assertFalse(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, unrelated, "SERVICE_CONTROL_POLICY")
+                .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
     }
 }

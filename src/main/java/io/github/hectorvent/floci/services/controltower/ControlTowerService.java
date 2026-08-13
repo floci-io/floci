@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.controltower.model.EnabledBaseline;
 import io.github.hectorvent.floci.services.controltower.model.LandingZone;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -53,12 +54,13 @@ public class ControlTowerService {
     private static final String IDENTITY_CENTER_BASELINE_ID = "LN25R72TTG6IGPTQ";
     private static final String IDENTITY_CENTER_ENABLED_BASELINE_ID = "FLOCIIDCBASELINE1";
     private static final String IDENTITY_CENTER_BASELINE_VERSION = "1.0";
+    private static final String CONTROL_TOWER_BASELINE_ID = "17BSJV3IGJ2QSGA2";
 
     // Static baseline catalog. Only `name` is load-bearing (LZA matches case-insensitively on
     // name at register-organizational-unit/index.ts:109-111 and :502); ids are fixed for
     // determinism. Baseline arns are region-qualified with an empty account field, like real CT.
     private static final List<BaselineCatalogEntry> BASELINE_CATALOG = List.of(
-            new BaselineCatalogEntry("AWSControlTowerBaseline", "17BSJV3IGJ2QSGA2",
+            new BaselineCatalogEntry("AWSControlTowerBaseline", CONTROL_TOWER_BASELINE_ID,
                     "Sets up resources to govern an OU."),
             new BaselineCatalogEntry(IDENTITY_CENTER_BASELINE_NAME, IDENTITY_CENTER_BASELINE_ID,
                     "Sets up resources shared for IAM Identity Center access."),
@@ -69,13 +71,14 @@ public class ControlTowerService {
 
     private final StorageBackend<String, LandingZone> landingZoneStore;
     private final StorageBackend<String, EnabledBaseline> enabledBaselineStore;
+    private final OrganizationsService organizationsService;
     // Operation ledger: opId -> operationType. In-memory on purpose: pollers within one pipeline
     // run are the only consumers, and unknown ids still answer SUCCEEDED (restart-safe for LZA).
     private final Map<String, String> operations = new ConcurrentHashMap<>();
     private final List<String> operationOrder = new CopyOnWriteArrayList<>();
 
     @Inject
-    public ControlTowerService(StorageFactory storageFactory) {
+    public ControlTowerService(StorageFactory storageFactory, OrganizationsService organizationsService) {
         this(
                 storageFactory.create(
                         "controltower",
@@ -86,14 +89,23 @@ public class ControlTowerService {
                         "controltower",
                         "controltower-enabled-baselines.json",
                         new TypeReference<Map<String, EnabledBaseline>>() {
-                        }));
+                        }),
+                organizationsService);
     }
 
     ControlTowerService(
             StorageBackend<String, LandingZone> landingZoneStore,
             StorageBackend<String, EnabledBaseline> enabledBaselineStore) {
+        this(landingZoneStore, enabledBaselineStore, null);
+    }
+
+    ControlTowerService(
+            StorageBackend<String, LandingZone> landingZoneStore,
+            StorageBackend<String, EnabledBaseline> enabledBaselineStore,
+            OrganizationsService organizationsService) {
         this.landingZoneStore = landingZoneStore;
         this.enabledBaselineStore = enabledBaselineStore;
+        this.organizationsService = organizationsService;
     }
 
     public synchronized LandingZone getOrSeedLandingZone(String accountId, String region) {
@@ -253,6 +265,7 @@ public class ControlTowerService {
         requireObject(request, "Request body");
         String prefix = region + "::";
         List<EnabledBaseline> stored = enabledBaselineStore.scan(key -> key.startsWith(prefix));
+        reconcileControlTowerGuardrails(accountId, stored);
 
         List<EnabledBaseline> result = new ArrayList<>(stored.size() + 1);
         if (identityCenterAutoEnabled(accountId, region, stored)) {
@@ -316,6 +329,10 @@ public class ControlTowerService {
         String targetIdentifier = requireText(request, "targetIdentifier");
         JsonNode parameters = request.get("parameters");
 
+        if (isControlTowerOuBaseline(baselineIdentifier)) {
+            reconcileControlTowerGuardrails(accountId, targetIdentifier);
+        }
+
         String key = region + "::" + targetIdentifier;
         String arn = "arn:aws:controltower:" + region + ":" + accountId
                 + ":enabledbaseline/" + shortId();
@@ -372,6 +389,39 @@ public class ControlTowerService {
 
     public String getBaselineOperationType(String operationIdentifier) {
         return operations.getOrDefault(operationIdentifier, OP_TYPE_BASELINE_ENABLED);
+    }
+
+    private void reconcileControlTowerGuardrails(String accountId, List<EnabledBaseline> baselines) {
+        if (organizationsService == null) {
+            return;
+        }
+        Set<String> ouIds = baselines.stream()
+                .filter(baseline -> isControlTowerOuBaseline(baseline.getBaselineIdentifier()))
+                .map(EnabledBaseline::getTargetIdentifier)
+                .map(ControlTowerService::organizationalUnitId)
+                .flatMap(Optional::stream)
+                .collect(Collectors.toSet());
+        organizationsService.ensureControlTowerGuardrails(accountId, ouIds);
+    }
+
+    private void reconcileControlTowerGuardrails(String accountId, String targetIdentifier) {
+        if (organizationsService == null) {
+            return;
+        }
+        organizationalUnitId(targetIdentifier).ifPresent(ouId ->
+                organizationsService.ensureControlTowerGuardrails(accountId, Set.of(ouId)));
+    }
+
+    private static boolean isControlTowerOuBaseline(String baselineIdentifier) {
+        return baselineIdentifier != null && baselineIdentifier.endsWith("/" + CONTROL_TOWER_BASELINE_ID);
+    }
+
+    private static Optional<String> organizationalUnitId(String targetIdentifier) {
+        if (targetIdentifier == null) {
+            return Optional.empty();
+        }
+        String candidate = targetIdentifier.substring(targetIdentifier.lastIndexOf('/') + 1);
+        return candidate.startsWith("ou-") ? Optional.of(candidate) : Optional.empty();
     }
 
     private boolean identityCenterAutoEnabled(String accountId, String region, List<EnabledBaseline> stored) {

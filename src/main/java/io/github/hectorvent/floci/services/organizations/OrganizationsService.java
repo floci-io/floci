@@ -768,6 +768,56 @@ public class OrganizationsService {
         return new EffectivePolicy(merged.toString(), policyType, effectiveTarget, Instant.now());
     }
 
+    // ──────────────────────────── Control Tower guardrails ────────────────────────────
+
+    static final String CONTROL_TOWER_GUARDRAIL_ID = "p-flocictguardrail";
+    static final String CONTROL_TOWER_GUARDRAIL_NAME = "aws-guardrails-FlociControlTowerBaseline";
+
+    /**
+     * Reconciles the Organizations side effect of Control Tower OU registration. Real Control
+     * Tower attaches customer-managed SCPs named {@code aws-guardrails-*}; LZA 1.14 uses that
+     * observable contract to validate top-level OU governance. The Security OU is governed by
+     * the landing zone itself and therefore may not appear in the enabled-baseline targets.
+     */
+    public void ensureControlTowerGuardrails(String callerAccountId, Set<String> registeredOuIds) {
+        Organization organization;
+        try {
+            organization = requireManagementAccount(callerAccountId);
+        } catch (AwsException e) {
+            return;
+        }
+        Set<String> targetIds = new java.util.LinkedHashSet<>(registeredOuIds);
+        organizationalUnitsIn(organization).stream()
+                .filter(ou -> "Security".equals(ou.getName()))
+                .map(OrganizationalUnit::getId)
+                .forEach(targetIds::add);
+        if (targetIds.isEmpty()) {
+            return;
+        }
+        targetIds.forEach(targetId -> requireOrganizationalUnit(organization, targetId));
+
+        OrganizationPolicy guardrail = policiesIn(organization).stream()
+                .filter(policy -> SERVICE_CONTROL_POLICY.equals(policy.getType()))
+                .filter(policy -> CONTROL_TOWER_GUARDRAIL_NAME.equals(policy.getName()))
+                .findFirst()
+                .orElseGet(() -> {
+                    OrganizationPolicy policy = new OrganizationPolicy();
+                    policy.setId(CONTROL_TOWER_GUARDRAIL_ID);
+                    policy.setName(CONTROL_TOWER_GUARDRAIL_NAME);
+                    policy.setDescription("Control Tower governance marker for registered OUs");
+                    policy.setType(SERVICE_CONTROL_POLICY);
+                    policy.setContent(FULL_AWS_ACCESS_CONTENT);
+                    policy.setAwsManaged(false);
+                    policy.setOrganizationId(organization.getId());
+                    policy.setArn(policyArn(organization, CONTROL_TOWER_GUARDRAIL_ID, SERVICE_CONTROL_POLICY));
+                    return policy;
+                });
+
+        if (guardrail.getTargets().addAll(targetIds) || guardrail.getTargets().isEmpty()) {
+            policies.putForAccount(organization.getMasterAccountId(), guardrail.getId(), guardrail);
+        }
+    }
+
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String callerAccountId, String resourceId) {
