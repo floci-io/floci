@@ -175,20 +175,19 @@ public class IamService implements SessionAccountLookup {
         return catalog;
     }
 
+    /**
+     * Makes the AWS-managed policy catalog available.
+     *
+     * <p>The catalog itself is the single source of truth: {@link #getPolicy} resolves
+     * {@code arn:aws:iam::aws:policy/*} from it directly, and {@link #listPolicies} reads
+     * the AWS scope from it too. Earlier versions also mirrored every entry into the
+     * default-account store, but that copy was never read back — {@code listPolicies}
+     * explicitly filters AWS-managed ARNs out of the local scan to avoid listing them
+     * twice — and writing the full published catalog to disk on every start costs about a
+     * megabyte of persisted state and several seconds of startup for nothing.
+     */
     void seedAwsManagedPolicies() {
-        // Managed policies are served globally from the catalog (see getPolicy); this also
-        // mirrors them into the default-account store so ListPolicies(Scope=AWS) lists them.
-        int seeded = 0;
-        for (Map.Entry<String, IamPolicy> entry : awsManagedPolicies.entrySet()) {
-            if (policies.get(entry.getKey()).isPresent()) {
-                continue;
-            }
-            policies.put(entry.getKey(), entry.getValue());
-            seeded++;
-        }
-        if (seeded > 0) {
-            LOG.infov("Seeded {0} AWS managed policies", seeded);
-        }
+        LOG.debugv("AWS managed policy catalog available: {0} policies", awsManagedPolicies.size());
     }
 
     private void seedDefaultDeployerPrincipal() {

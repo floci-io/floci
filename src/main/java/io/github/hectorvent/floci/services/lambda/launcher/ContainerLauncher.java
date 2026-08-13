@@ -32,13 +32,17 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -272,6 +276,25 @@ public class ContainerLauncher {
             }
             // Small code takes the original per-container direct copy below (no volume): it's fast
             // enough that a shared volume's helper round-trip would only add cold-start latency.
+        }
+
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            var efsCfg = config.storage().efs();
+            fn.getFileSystemConfigs().forEach(fileSystem -> {
+                String volumeName = efsVolumeName(fileSystem.getArn());
+                lifecycleManager.ensureSharedVolume(volumeName,
+                        efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
+                        efsCfg.initImage());
+                specBuilder.withNamedVolume(volumeName, fileSystem.getLocalMountPath(), false);
+            });
+            efsCfg.mountUser().ifPresent(user -> {
+                if (!user.matches("^\\d+(:\\d+)?$")) {
+                    throw new IllegalArgumentException(
+                            "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + user);
+                }
+                specBuilder.withUser(user);
+            });
+            efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
         }
 
         // For Image package type use ImageConfig.Command/EntryPoint/WorkingDirectory if set, otherwise fall back to Handler (Zip-style)
@@ -764,6 +787,25 @@ public class ContainerLauncher {
         }
         String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
         return "floci-code-" + fname + "-" + h;
+    }
+
+    static String efsVolumeName(String accessPointArn) {
+        int separator = Math.max(accessPointArn.lastIndexOf('/'), accessPointArn.lastIndexOf(':'));
+        String resourceId = separator >= 0 ? accessPointArn.substring(separator + 1) : accessPointArn;
+        if (resourceId.isBlank()) {
+            throw new IllegalArgumentException("File system access point ARN must include a resource id");
+        }
+        return "floci-efs-" + resourceId + "-" + sha256Hex(accessPointArn);
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required but not available", e);
+        }
     }
 
     /**
