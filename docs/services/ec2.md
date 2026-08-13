@@ -202,10 +202,10 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateSecurityGroup | Creates a security group in a VPC. |
 | DescribeSecurityGroups | Lists or returns stored security groups. |
 | DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
-| AuthorizeSecurityGroupIngress | Adds inbound permissions to a security group. |
-| AuthorizeSecurityGroupEgress | Adds outbound permissions to a security group. |
-| RevokeSecurityGroupIngress | Removes inbound permissions from a security group. |
-| RevokeSecurityGroupEgress | Removes outbound permissions from a security group. |
+| AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |
+| AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
+| RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. |
+| RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
 | ModifySecurityGroupRules | Updates supported fields on security group rules. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |

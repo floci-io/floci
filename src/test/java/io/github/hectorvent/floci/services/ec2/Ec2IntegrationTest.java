@@ -883,10 +883,11 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            // Must contain at least the default egress-all rule plus the authorized
-            // ingress (ssh/22) and egress (tcp/443) rules
+            // Exactly the default egress-all rule plus the authorized ingress (ssh/22) and egress
+            // (tcp/443) rules. Exact, not "at least": each permission carries a single source, so a
+            // fan-out that double-emitted would still satisfy a lower bound.
             .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
-                    greaterThanOrEqualTo(3))
+                    equalTo(3))
             .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.groupId",
                     everyItem(equalTo(securityGroupId)));
     }
