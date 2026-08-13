@@ -164,13 +164,21 @@ services:
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
-**Stubbed:** `ListLayers` and `ListLayerVersions` return empty arrays. No layer storage exists.
+**Layers:** `PublishLayerVersion`, `GetLayerVersion`, `ListLayerVersions`, `ListLayers`, and
+`DeleteLayerVersion` are implemented, with real local storage under
+`{lambda.codePath}/layers/{name}/{version}`. `CreateFunction`/`UpdateFunctionConfiguration`
+validate each `Layers` ARN eagerly against that storage, matching real AWS - an unresolvable ARN
+is rejected with `InvalidParameterValueException`, not silently accepted. Only resolves layers
+published into this same local Floci instance; a real AWS-owned layer ARN (e.g. the AWS AppConfig
+Extension or a Datadog-published layer) can never resolve here, since there's no mechanism in
+Floci for fetching real AWS content - publish your own copy of the layer's content locally under
+a name you control and reference that ARN instead.
 
 ## Not Implemented
 
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
-- Layers (`PublishLayerVersion`, `DeleteLayerVersion`, `GetLayerVersion`, `GetLayerVersionByArn`, `AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
+- Layer permissions and cross-account ARN lookup (`GetLayerVersionByArn`, `AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - Dead-letter, async invoke config, and event invoke config operations
 - `InvokeWithResponseStream`

@@ -311,6 +311,90 @@ class LambdaLayerIntegrationTest {
             .statusCode(400);
     }
 
+    // ── Attach-time layer validation on CreateFunction/UpdateFunctionConfiguration ────────────
+    // Real AWS rejects an unresolvable Layers ARN eagerly, at attach time, with
+    // InvalidParameterValueException - previously Floci accepted any ARN unconditionally and the
+    // failure only ever surfaced as a silent warning log when the container tried to launch.
+
+    @Test
+    @Order(17)
+    void createFunction_withNonExistentLayer_returns400() throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "layer-validation-create-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Code": { "ZipFile": "%s" },
+                    "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:no-such-layer:1"]
+                }
+                """.formatted(functionZipBase64()))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        // The function must not have been created at all - not partially, not with the layer
+        // dropped.
+        given()
+        .when()
+            .get("/2015-03-31/functions/layer-validation-create-fn")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(18)
+    void updateFunctionConfiguration_withNonExistentLayer_returns400AndLeavesLayersUnchanged() throws Exception {
+        String fnName = "layer-validation-update-fn";
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Code": { "ZipFile": "%s" },
+                    "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:%s:2"]
+                }
+                """.formatted(fnName, functionZipBase64(), LAYER_NAME))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(201);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:no-such-layer:1"]
+                }
+                """)
+        .when()
+            .put("/2015-03-31/functions/" + fnName + "/configuration")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + fnName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.Layers", hasSize(1))
+            .body("Configuration.Layers[0].Arn", containsString(":layer:" + LAYER_NAME + ":2"));
+
+        given()
+        .when()
+            .delete("/2015-03-31/functions/" + fnName)
+        .then()
+            .statusCode(204);
+    }
+
     // ── cleanup ──────────────────────────────────────────────────────────────
 
     @Test
