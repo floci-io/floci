@@ -258,14 +258,12 @@ public class RdsContainerManager {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
         String[] cmd = {
                 "pg_dumpall",
-                "-U", effectiveUser,
-                "--clean",
-                "--if-exists"
+                "-U", effectiveUser
         };
         try {
             ContainerExecResult result = execInContainer(containerId, cmd, 120);
             if (result.exitCode() != 0) {
-                throw new RuntimeException("pg_dump failed with exit code " + result.exitCode() + ": " + result.stderr());
+                throw new RuntimeException("pg_dumpall failed with exit code " + result.exitCode() + ": " + result.stderr());
             }
             return result.output();
         } catch (Exception e) {
@@ -275,18 +273,17 @@ public class RdsContainerManager {
 
     public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
-        
+
         try {
-            // Write the sql dump to a tar in memory to copy to the container
+            String restoreScript = postgresRestoreScript(effectiveUser);
+
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-            try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
+            try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar =
+                         new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
                 tar.setLongFileMode(org.apache.commons.compress.archivers.tar.TarArchiveOutputStream.LONGFILE_GNU);
-                byte[] bytes = sqlDump.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                org.apache.commons.compress.archivers.tar.TarArchiveEntry entry = new org.apache.commons.compress.archivers.tar.TarArchiveEntry("dump.sql");
-                entry.setSize(bytes.length);
-                tar.putArchiveEntry(entry);
-                tar.write(bytes);
-                tar.closeArchiveEntry();
+
+                addTarEntry(tar, "dump.sql", sqlDump);
+                addTarEntry(tar, "restore.sh", restoreScript);
             }
 
             try (java.io.InputStream tarStream = new java.io.ByteArrayInputStream(bos.toByteArray())) {
@@ -296,13 +293,7 @@ public class RdsContainerManager {
                         .exec();
             }
 
-            String[] cmd = {
-                    "psql",
-                    "-v", "ON_ERROR_STOP=1",
-                    "-U", effectiveUser,
-                    "-d", "template1",
-                    "-f", "/tmp/dump.sql"
-            };
+            String[] cmd = { "sh", "/tmp/restore.sh" };
 
             ContainerExecResult result = null;
             for (int i = 0; i < 60; i++) {
@@ -310,7 +301,7 @@ public class RdsContainerManager {
                 if (result.exitCode() == 0) {
                     break;
                 }
-                if (result.exitCode() != 2) { // 2 = connection error, 3 = script error
+                if (result.exitCode() != 2) {
                     break;
                 }
                 try {
@@ -320,14 +311,57 @@ public class RdsContainerManager {
                     throw new RuntimeException("Interrupted while restoring postgres snapshot", ie);
                 }
             }
-            
+
             if (result == null || result.exitCode() != 0) {
                 String errMsg = result != null ? (result.stderr().isEmpty() ? result.output() : result.stderr()) : "";
-                throw new RuntimeException("psql restore failed with exit code " + (result != null ? result.exitCode() : -1) + ": " + errMsg);
+                throw new RuntimeException("psql restore failed with exit code "
+                        + (result != null ? result.exitCode() : -1) + ": " + errMsg);
             }
+        } catch (RuntimeException e) {
+            throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to restore postgres snapshot", e);
         }
+    }
+
+    static String postgresRestoreScript(String user) {
+        return """
+                #!/bin/sh
+                set -e
+                USER='%s'
+
+                # Drop all non-template, non-postgres databases
+                psql -U "$USER" -d postgres -tAc \
+                  "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'" \
+                  | while read -r db; do
+                      [ -z "$db" ] && continue
+                      psql -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \"$db\""
+                    done
+
+                # Drop all non-current-user, non-system roles
+                psql -U "$USER" -d postgres -tAc \
+                  "SELECT rolname FROM pg_roles WHERE rolname <> current_user AND rolname NOT LIKE 'pg_%%'" \
+                  | while read -r role; do
+                      [ -z "$role" ] && continue
+                      psql -U "$USER" -d postgres -c "DROP ROLE IF EXISTS \"$role\""
+                    done
+
+                # Replay the dump connected to postgres
+                psql -U "$USER" -d postgres -f /tmp/dump.sql
+                """.formatted(user);
+    }
+
+    private static void addTarEntry(
+            org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar,
+            String name, String content) throws java.io.IOException {
+        byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        org.apache.commons.compress.archivers.tar.TarArchiveEntry entry =
+                new org.apache.commons.compress.archivers.tar.TarArchiveEntry(name);
+        entry.setSize(bytes.length);
+        entry.setMode(0755);
+        tar.putArchiveEntry(entry);
+        tar.write(bytes);
+        tar.closeArchiveEntry();
     }
 
     private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {

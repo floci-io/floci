@@ -156,6 +156,36 @@ class RdsContainerManagerTest {
         assertEquals("floci-rds-db1", spec.getValue().name());
     }
 
+    @Test
+    void restoreScriptConnectsToPostgresDatabase() {
+        String script = RdsContainerManager.postgresRestoreScript("admin");
+
+        assertTrue(script.contains("-d postgres"), "Script must connect to postgres, not template1");
+        assertTrue(script.contains("-f /tmp/dump.sql"), "Script must replay the dump file");
+    }
+
+    @Test
+    void restoreScriptDropsNonSystemDatabasesAndRoles() {
+        String script = RdsContainerManager.postgresRestoreScript("admin");
+
+        assertTrue(script.contains("datistemplate = false"),
+                "Script must only drop non-template databases");
+        assertTrue(script.contains("datname <> 'postgres'"),
+                "Script must preserve the postgres database");
+        assertTrue(script.contains("rolname <> current_user"),
+                "Script must not drop the current user");
+        assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),
+                "Script must not drop system roles");
+    }
+
+    @Test
+    void restoreScriptInterpolatesUser() {
+        String script = RdsContainerManager.postgresRestoreScript("myuser");
+
+        assertTrue(script.contains("USER='myuser'"),
+                "Script must set the USER variable to the effective user");
+    }
+
     private static EmulatorConfig config(Path hostRoot) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
