@@ -228,7 +228,28 @@ public class EcsJsonHandler {
         TaskDefinition td = service.describeTaskDefinition(tdRef, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", taskDefinitionNode(td));
+        if (includesTags(req)) {
+            resp.set("tags", tagsNode(td.getTags() != null ? td.getTags() : Map.of()));
+        }
         return Response.ok(resp).build();
+    }
+
+    /**
+     * Returns {@code true} when the request asked for tags via {@code "include": ["TAGS"]}.
+     * ECS documents the tags as a top-level {@code tags} array next to the described resource,
+     * and omits the key entirely when TAGS was not requested.
+     */
+    private boolean includesTags(JsonNode req) {
+        JsonNode include = req.path("include");
+        if (!include.isArray()) {
+            return false;
+        }
+        for (JsonNode entry : include) {
+            if ("TAGS".equalsIgnoreCase(entry.asText())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Response handleListTaskDefinitions(JsonNode req, String region) {
