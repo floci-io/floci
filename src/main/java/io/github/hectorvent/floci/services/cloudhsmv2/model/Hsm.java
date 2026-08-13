@@ -16,6 +16,7 @@ public class Hsm {
     private String subnetId;
     private String eniId;
     private String eniIp;
+    private String ipAddress;
     private String state;
     private String stateMessage;
     private Instant createdAt;
@@ -66,6 +67,14 @@ public class Hsm {
 
     public void setEniIp(String eniIp) {
         this.eniIp = eniIp;
+    }
+
+    public String getIpAddress() {
+        return ipAddress;
+    }
+
+    public void setIpAddress(String ipAddress) {
+        this.ipAddress = ipAddress;
     }
 
     public String getState() {
