@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -258,7 +259,7 @@ class SamTransformProcessor {
         authProps.put("Name", authorizerName);
         authProps.put("AuthorizerType", "JWT");
 
-        authProps.set("IdentitySource", resolveIdentitySource(samAuthorizer));
+        authProps.set("IdentitySource", resolveIdentitySource(authorizerName, samAuthorizer));
 
         JsonNode jwtConfig = samAuthorizer.path("JwtConfiguration");
 
@@ -283,19 +284,21 @@ class SamTransformProcessor {
      * Resolves the SAM authorizer's {@code IdentitySource}, accepting either the documented array
      * form or a single scalar string — mirroring
      * {@code CloudFormationResourceProvisioner.resolveIdentitySource}, since the raw
-     * {@code AWS::ApiGatewayV2::Authorizer} resource this expands to accepts both. Defaults to
-     * {@code $request.header.Authorization} when the SAM template doesn't specify one, matching
-     * SAM's own default for JWT authorizers.
+     * {@code AWS::ApiGatewayV2::Authorizer} resource this expands to accepts both. SAM itself
+     * rejects a JWT authorizer with no {@code IdentitySource} ({@code _validate_jwt_authorizer} in
+     * samtranslator/model/apigatewayv2.py), so an absent or empty value is a template error here
+     * too.
      */
-    private ArrayNode resolveIdentitySource(JsonNode samAuthorizer) {
+    private ArrayNode resolveIdentitySource(String authorizerName, JsonNode samAuthorizer) {
         ArrayNode identitySource = objectMapper.createArrayNode();
         JsonNode raw = samAuthorizer.path("IdentitySource");
         if (raw.isTextual()) {
             identitySource.add(raw.asText());
-        } else if (raw.isArray()) {
+        } else if (raw.isArray() && !raw.isEmpty()) {
             raw.forEach(v -> identitySource.add(v.asText()));
         } else {
-            identitySource.add("$request.header.Authorization");
+            throw new AwsException("ValidationError",
+                    "OAuth2 Authorizer must define 'IdentitySource'; authorizer " + authorizerName, 400);
         }
         return identitySource;
     }

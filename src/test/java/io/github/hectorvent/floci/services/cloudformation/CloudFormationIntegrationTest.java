@@ -6940,6 +6940,7 @@ class CloudFormationIntegrationTest {
                     "Auth": {
                       "Authorizers": {
                         "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization",
                           "JwtConfiguration": {
                             "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
                             "audience": ["my-client-id"]
@@ -7087,6 +7088,82 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_samHttpApiAuthorizerMissingIdentitySourceIsRejected() {
+        // Real SAM's _validate_jwt_authorizer rejects a JWT authorizer with no IdentitySource
+        // rather than defaulting it — CreateStack must fail the same way instead of silently
+        // provisioning an authorizer that would never have deployed for real.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "JwtConfiguration": {
+                            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "audience": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-missing-identitysource-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_FAILED</StackStatus>"))
+            .body(containsString("IdentitySource"));
+    }
+
+    @Test
     void createStack_samHttpApiPerEventAuthNoneOverridesDefaultAuthorizer() {
         // Mirrors a function with two HttpApi events on the same explicit HttpApi: one route picks
         // up Auth.DefaultAuthorizer, the other opts out via Auth: {Authorizer: NONE} (SAM's documented
@@ -7131,6 +7208,7 @@ class CloudFormationIntegrationTest {
                     "Auth": {
                       "Authorizers": {
                         "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization",
                           "JwtConfiguration": {
                             "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
                             "audience": ["my-client-id"]
