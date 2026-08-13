@@ -665,32 +665,15 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
+        DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
+        DynamoDbAccessPathValidator.validateQuery(accessPath, keyConditions, keyConditionExpression,
+                filterExpression, null, exprAttrNames);
+        String pkName = accessPath.partitionKeyName();
+        String skName = accessPath.sortKeyName();
+        List<String> sortKeyNames = accessPath.sortKeyNames();
+
         var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new QueryResult(List.of(), 0, null);
-
-        // Resolve key names: use GSI or table keys
-        String pkName;
-        String skName;
-        List<String> sortKeyNames;
-        if (indexName != null) {
-            var gsi = table.findGsi(indexName);
-            if (gsi.isPresent()) {
-                pkName = gsi.get().getPartitionKeyName();
-                skName = gsi.get().getSortKeyName();
-                sortKeyNames = gsi.get().getSortKeyNames();
-            } else {
-                var lsi = table.findLsi(indexName)
-                        .orElseThrow(() -> new AwsException("ValidationException",
-                                "The table does not have the specified index: " + indexName, 400));
-                pkName = lsi.getPartitionKeyName();
-                skName = lsi.getSortKeyName();
-                sortKeyNames = lsi.getSortKeyNames();
-            }
-        } else {
-            pkName = table.getPartitionKeyName();
-            skName = table.getSortKeyName();
-            sortKeyNames = table.getSortKeyNames();
-        }
 
         List<JsonNode> results = new ArrayList<>();
 
@@ -713,19 +696,17 @@ public class DynamoDbService {
                 }
             }
         } else if (keyConditionExpression != null) {
-            // Modern expression format with exprAttrNames support
-            results = queryWithExpression(items, pkName, skName, keyConditionExpression,
-                                          expressionAttrValues, exprAttrNames);
+            results = queryWithExpression(items, keyConditionExpression,
+                    expressionAttrValues, exprAttrNames);
         }
 
         // Filter out items without GSI key attributes (sparse index behavior).
         // DynamoDB excludes items from a GSI if any key attribute is null/missing.
-        if (indexName != null) {
-            String finalPkName = pkName;
-            String finalSkName = skName;
+        if (accessPath.isIndex()) {
+            Set<String> indexKeys = accessPath.keyAttributeNames();
             results = results.stream()
-                    .filter(item -> item.has(finalPkName) && hasNonNullAttribute(item, finalPkName))
-                    .filter(item -> finalSkName == null || (item.has(finalSkName) && hasNonNullAttribute(item, finalSkName)))
+                    .filter(item -> indexKeys.stream().allMatch(
+                            key -> item.has(key) && hasNonNullAttribute(item, key)))
                     .toList();
         }
 
@@ -838,6 +819,8 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
+        DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
+
         var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new ScanResult(List.of(), 0, null);
 
@@ -849,19 +832,12 @@ public class DynamoDbService {
         // When scanning a secondary index, the LastEvaluatedKey must carry the index key
         // attributes in addition to the base table key. Cursor navigation still uses the
         // (unique) base table key, which is a total order even when index sort keys tie.
-        boolean indexScan = indexName != null;
+        boolean indexScan = accessPath.isIndex();
         String lekPkName = pkName;
         String lekSkName = skName;
         if (indexScan) {
-            var gsi = table.findGsi(indexName);
-            var lsi = table.findLsi(indexName);
-            if (gsi.isPresent()) {
-                lekPkName = gsi.get().getPartitionKeyName();
-                lekSkName = gsi.get().getSortKeyName();
-            } else if (lsi.isPresent()) {
-                lekPkName = lsi.get().getPartitionKeyName();
-                lekSkName = lsi.get().getSortKeyName();
-            }
+            lekPkName = accessPath.partitionKeyName();
+            lekSkName = accessPath.sortKeyName();
         }
 
         var source = exclusiveStartKey != null
@@ -2641,61 +2617,15 @@ public class DynamoDbService {
     }
 
     private List<JsonNode> queryWithExpression(ConcurrentSkipListMap<String, JsonNode> items,
-                                                String pkName, String skName,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
                                                 JsonNode exprAttrNames) {
         List<JsonNode> results = new ArrayList<>();
-
-        // Use token-based splitting that correctly handles BETWEEN...AND and compact format
-        String[] keyParts = ExpressionEvaluator.splitKeyCondition(expression);
-        String pkExpression = keyParts[0];
-        String skExpression = keyParts[1];
-
-        // Extract pk attr name from expression (may use #alias)
-        // Strip outer parens for PK extraction (e.g. "(#f0 = :v0)" → "#f0 = :v0")
-        String pkExprStripped = pkExpression.trim();
-        while (pkExprStripped.startsWith("(") && pkExprStripped.endsWith(")")) {
-            pkExprStripped = pkExprStripped.substring(1, pkExprStripped.length() - 1).trim();
-        }
-        String pkAttrInExpr = pkExprStripped.split("\\s*=\\s*")[0].trim();
-        String resolvedPkName = resolveAttributeName(pkAttrInExpr, exprAttrNames);
-
-        // Validate the PK attribute in the expression matches the actual table/index PK
-        if (!resolvedPkName.equals(pkName)) {
-            throw new AwsException("ValidationException",
-                    "Query condition missed key schema element: " + pkName, 400);
-        }
-
-        // Extract pk value placeholder
-        int colonIdx = pkExprStripped.indexOf(':');
-        String pkPlaceholder = null;
-        if (colonIdx >= 0) {
-            int end = colonIdx + 1;
-            while (end < pkExprStripped.length() && (Character.isLetterOrDigit(pkExprStripped.charAt(end)) || pkExprStripped.charAt(end) == '_')) {
-                end++;
-            }
-            pkPlaceholder = pkExprStripped.substring(colonIdx, end);
-        }
-        String pkValue = pkPlaceholder != null && expressionAttrValues != null
-                ? extractScalarValue(expressionAttrValues.get(pkPlaceholder))
-                : null;
-
         for (JsonNode item : items.values()) {
-            if (!item.has(resolvedPkName)) continue;
-            if (pkValue != null && !matchesAttributeValue(item.get(resolvedPkName), pkValue)) {
-                continue;
+            if (ExpressionEvaluator.matches(expression, item, exprAttrNames, expressionAttrValues)) {
+                results.add(item);
             }
-
-            if (skExpression != null && skName != null) {
-                if (!ExpressionEvaluator.matches(skExpression, item, exprAttrNames, expressionAttrValues)) {
-                    continue;
-                }
-            }
-
-            results.add(item);
         }
-
         return results;
     }
 

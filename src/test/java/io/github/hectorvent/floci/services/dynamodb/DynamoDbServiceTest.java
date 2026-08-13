@@ -612,6 +612,34 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void scanRejectsUnknownIndexOnEmptyTable() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.scan(
+                "Orders", null, null, null, null, null, null, "missing-index", region));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("The table does not have the specified index: missing-index", error.getMessage());
+    }
+
+    @Test
+    void queryRejectsNonKeyConditionOnEmptyTable() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":customer", attributeValue("S", "c1"));
+        values.set(":total", attributeValue("N", "10"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.query(
+                "Orders", null, values, "customerId = :customer AND total > :total",
+                null, null, null, null, null, null, region));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Query key condition not supported", error.getMessage());
+    }
+
+    @Test
     void updateItemSetIfNotExistsOnNonExistentItemCreatesAttribute() {
         String region = "eu-west-1";
         createOrdersTable(region);

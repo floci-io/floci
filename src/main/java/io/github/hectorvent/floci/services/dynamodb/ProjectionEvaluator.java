@@ -28,8 +28,7 @@ final class ProjectionEvaluator {
         if (item == null || projectionExpression == null || projectionExpression.isBlank()) {
             return (ObjectNode) item;
         }
-        validateProjectionExpression(projectionExpression);
-        DynamoDbReservedWords.check(projectionExpression, "ProjectionExpression");
+        validateExpression(projectionExpression);
         ObjectNode result = MAPPER.createObjectNode();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
             List<String> segments = resolvePath(rawPath.trim(), exprAttrNames);
@@ -53,6 +52,17 @@ final class ProjectionEvaluator {
         return result;
     }
 
+    static Set<String> topLevelAttributes(String projectionExpression, JsonNode exprAttrNames) {
+        var attributes = new java.util.HashSet<String>();
+        for (String rawPath : splitProjectionPaths(projectionExpression)) {
+            List<String> segments = resolvePath(rawPath.trim(), exprAttrNames);
+            if (!segments.isEmpty()) {
+                attributes.add(segments.getFirst());
+            }
+        }
+        return Set.copyOf(attributes);
+    }
+
     static void validateSyntax(String expression, String expressionType) {
         if (expression == null || expression.isBlank()) return;
         char first = expression.charAt(0);
@@ -64,8 +74,9 @@ final class ProjectionEvaluator {
         }
     }
 
-    private static void validateProjectionExpression(String expression) {
+    static void validateExpression(String expression) {
         validateSyntax(expression, "ProjectionExpression");
+        DynamoDbReservedWords.check(expression, "ProjectionExpression");
     }
 
     // ── Path splitting ──
