@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Ipam;
@@ -347,14 +348,16 @@ public class Ec2IpamService {
     }
 
     public IpamPool deleteIpamPool(String region, String ipamPoolId) {
-        IpamPool pool = requirePool(region, ipamPoolId);
-        pools.delete(key(pool.getRegion(), pool.getIpamPoolId()));
+        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        IpamPool pool = ownedPool.pool();
+        deletePool(ownedPool);
         pool.setState("delete-complete");
         return pool;
     }
 
     public IpamPoolCidr provisionIpamPoolCidr(String region, String ipamPoolId, String cidr) {
-        IpamPool pool = requirePool(region, ipamPoolId);
+        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        IpamPool pool = ownedPool.pool();
         if (cidr == null || cidr.isBlank()) {
             throw new AwsException("MissingParameter", "Cidr is required.", 400);
         }
@@ -372,7 +375,7 @@ public class Ec2IpamService {
         }
         IpamPoolCidr poolCidr = new IpamPoolCidr(cidr, "provisioned");
         pool.getProvisionedCidrs().add(poolCidr);
-        pools.put(key(pool.getRegion(), pool.getIpamPoolId()), pool);
+        savePool(ownedPool);
         return poolCidr;
     }
 
@@ -385,7 +388,8 @@ public class Ec2IpamService {
     public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
                                                    Integer netmaskLength, String cidr,
                                                    String description) {
-        IpamPool pool = requirePool(region, ipamPoolId);
+        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        IpamPool pool = ownedPool.pool();
         List<String> provisioned = pool.getProvisionedCidrs().stream()
                 .map(IpamPoolCidr::getCidr).toList();
         List<String> occupied = occupiedSpace(pool);
@@ -421,14 +425,15 @@ public class Ec2IpamService {
         allocation.setResourceType("custom");
         allocation.setResourceOwner(config.defaultAccountId());
         pool.getAllocations().add(allocation);
-        pools.put(key(pool.getRegion(), pool.getIpamPoolId()), pool);
+        savePool(ownedPool);
         LOG.infov("Allocated {0} from IPAM pool {1}", chosen, ipamPoolId);
         return allocation;
     }
 
     public boolean releaseIpamPoolAllocation(String region, String ipamPoolId,
                                              String ipamPoolAllocationId, String cidr) {
-        IpamPool pool = requirePool(region, ipamPoolId);
+        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        IpamPool pool = ownedPool.pool();
         boolean removed = pool.getAllocations().removeIf(a ->
                 (ipamPoolAllocationId != null && ipamPoolAllocationId.equals(a.getIpamPoolAllocationId()))
                         || (ipamPoolAllocationId == null && cidr != null && cidr.equals(a.getCidr())));
@@ -436,7 +441,7 @@ public class Ec2IpamService {
             throw new AwsException("InvalidIpamPoolAllocationId.NotFound",
                     "Allocation " + ipamPoolAllocationId + " not found in pool " + ipamPoolId + ".", 400);
         }
-        pools.put(key(pool.getRegion(), pool.getIpamPoolId()), pool);
+        savePool(ownedPool);
         return true;
     }
 
@@ -453,7 +458,7 @@ public class Ec2IpamService {
         for (IpamPoolAllocation allocation : pool.getAllocations()) {
             occupied.add(allocation.getCidr());
         }
-        for (IpamPool other : pools.scan(k -> true)) {
+        for (IpamPool other : allPools()) {
             if (pool.getIpamPoolId().equals(other.getSourceIpamPoolId())) {
                 for (IpamPoolCidr provisioned : other.getProvisionedCidrs()) {
                     occupied.add(provisioned.getCidr());
@@ -479,19 +484,87 @@ public class Ec2IpamService {
     }
 
     private IpamPool requirePool(String region, String ipamPoolId) {
+        return requireOwnedPool(region, ipamPoolId).pool();
+    }
+
+    private OwnedPool requireOwnedPool(String region, String ipamPoolId) {
+        if (pools instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<IpamPool> accountAware =
+                    (AccountAwareStorageBackend<IpamPool>) rawAccountAware;
+            Optional<AccountAwareStorageBackend.OwnedEntry<IpamPool>> exact =
+                    accountAware.findAnyAccountEntry(key(region, ipamPoolId));
+            if (exact.isPresent()) {
+                var entry = exact.get();
+                return new OwnedPool(entry.account(), entry.value());
+            }
+            for (IpamPool pool : accountAware.scanAllAccounts()) {
+                if (pool.getIpamPoolId().equals(ipamPoolId)) {
+                    var entry = accountAware.findAnyAccountEntry(
+                            key(pool.getRegion(), pool.getIpamPoolId())).orElseThrow();
+                    return new OwnedPool(entry.account(), entry.value());
+                }
+            }
+            throw poolNotFound(ipamPoolId);
+        }
+
         Optional<IpamPool> direct = pools.get(key(region, ipamPoolId));
         if (direct.isPresent()) {
-            return direct.get();
+            return new OwnedPool(null, direct.get());
         }
         // RAM-shared pools are resolved from other accounts/regions by id.
         for (IpamPool pool : pools.scan(k -> true)) {
             if (pool.getIpamPoolId().equals(ipamPoolId)) {
-                return pool;
+                return new OwnedPool(null, pool);
             }
         }
-        throw new AwsException("InvalidIpamPoolId.NotFound",
+        throw poolNotFound(ipamPoolId);
+    }
+
+    private List<IpamPool> allPools() {
+        if (pools instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<IpamPool> accountAware =
+                    (AccountAwareStorageBackend<IpamPool>) rawAccountAware;
+            return accountAware.scanAllAccounts();
+        }
+        return pools.scan(k -> true);
+    }
+
+    private void savePool(OwnedPool ownedPool) {
+        IpamPool pool = ownedPool.pool();
+        String poolKey = key(pool.getRegion(), pool.getIpamPoolId());
+        if (ownedPool.accountId() != null
+                && pools instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<IpamPool> accountAware =
+                    (AccountAwareStorageBackend<IpamPool>) rawAccountAware;
+            accountAware.putForAccount(ownedPool.accountId(), poolKey, pool);
+            return;
+        }
+        pools.put(poolKey, pool);
+    }
+
+    private void deletePool(OwnedPool ownedPool) {
+        IpamPool pool = ownedPool.pool();
+        String poolKey = key(pool.getRegion(), pool.getIpamPoolId());
+        if (ownedPool.accountId() != null
+                && pools instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<IpamPool> accountAware =
+                    (AccountAwareStorageBackend<IpamPool>) rawAccountAware;
+            accountAware.deleteForAccount(ownedPool.accountId(), poolKey);
+            return;
+        }
+        pools.delete(poolKey);
+    }
+
+    private static AwsException poolNotFound(String ipamPoolId) {
+        return new AwsException("InvalidIpamPoolId.NotFound",
                 "IPAM pool " + ipamPoolId + " does not exist.", 400);
     }
+
+    private record OwnedPool(String accountId, IpamPool pool) {}
 
     private static String key(String region, String id) {
         return region + "|" + id;
