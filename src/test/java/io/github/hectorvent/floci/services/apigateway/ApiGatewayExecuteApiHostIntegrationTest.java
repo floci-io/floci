@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -13,12 +15,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
+@TestProfile(ApiGatewayExecuteApiHostIntegrationTest.ConfiguredHostnameProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayExecuteApiHostIntegrationTest {
 
@@ -138,6 +142,17 @@ class ApiGatewayExecuteApiHostIntegrationTest {
 
     @Test
     @Order(6)
+    void invokesRegionBearingConfiguredHost() {
+        given()
+                .header("Host", apiId + ".execute-api." + REGION + ".floci:4566")
+                .when().get("/accounts")
+                .then()
+                .statusCode(200)
+                .body("path", equalTo("/backend"));
+    }
+
+    @Test
+    @Order(7)
     void createsRestApiWithSameIdentifier() {
         given()
                 .contentType(ContentType.JSON)
@@ -218,7 +233,7 @@ class ApiGatewayExecuteApiHostIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void directPathPrefersRestApiWhenIdentifiersCollide() {
         given()
                 .when().get("/execute-api/" + apiId + "/dev/accounts")
@@ -228,7 +243,7 @@ class ApiGatewayExecuteApiHostIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void hostPathRetainsHttpApiRoutingWhenIdentifiersCollide() {
         given()
                 .header("Host", apiId + ".execute-api.localhost.floci.io")
@@ -239,7 +254,7 @@ class ApiGatewayExecuteApiHostIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void disabledExecuteApiEndpointReturnsNotFoundAndCanBeReenabled() {
         given()
                 .header("Authorization", AUTHORIZATION)
@@ -281,7 +296,7 @@ class ApiGatewayExecuteApiHostIntegrationTest {
      * so its direct path resolves to REST and never reaches the v2 dispatch this guards.
      */
     @Test
-    @Order(10)
+    @Order(11)
     void disabledExecuteApiEndpointAlsoRejectsTheDirectPath() {
         String isolatedApiId = given()
                 .header("Authorization", AUTHORIZATION)
@@ -313,5 +328,12 @@ class ApiGatewayExecuteApiHostIntegrationTest {
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then()
                 .statusCode(201);
+    }
+
+    public static class ConfiguredHostnameProfile implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("floci.hostname", "floci");
+        }
     }
 }

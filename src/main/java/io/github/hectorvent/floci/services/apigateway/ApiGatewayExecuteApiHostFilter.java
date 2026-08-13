@@ -12,6 +12,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.ext.Provider;
+import org.eclipse.microprofile.config.ConfigProvider;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
@@ -25,23 +26,15 @@ import java.util.regex.Pattern;
 public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteApiHostFilter.class);
-    // Accepts both the region-bearing AWS shape and Floci's built-in DNS suffixes:
-    //   {apiId}.execute-api.{region}.localhost[:port]        (local, region-bearing)
-    //   {apiId}.execute-api.{region}.amazonaws.com           (real AWS shape)
-    //   {apiId}.execute-api.localhost.floci.io               (built-in suffix, regionless)
-    //   {apiId}.execute-api.localhost.localstack.cloud       (built-in suffix, regionless)
-    // AWS's invoke URL carries the region in the hostname, so the region-bearing form is the
-    // primary target; the regionless built-in suffixes are kept for local convenience (region is
-    // then recovered from the SigV4 scope or a cross-region apiId lookup). Group 1 = apiId.
-    private static final Pattern EXECUTE_API_HOST = Pattern.compile(
-            "^([a-z0-9-]+)\\.execute-api\\."
-                    + "(?:[a-z]{2}-[a-z-]+-\\d+\\.(?:localhost|amazonaws\\.com)"
-                    + "|localhost\\.(?:floci\\.io|localstack\\.cloud))$",
+    private static final Pattern EXECUTE_API_PREFIX = Pattern.compile("^([a-z0-9-]+)\\.execute-api\\.(.+)$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern AWS_REGION = Pattern.compile("^[a-z]{2}-[a-z-]+-\\d+$",
             Pattern.CASE_INSENSITIVE);
 
     private final ApiGatewayLookup apiGatewayLookup;
     private final RegionResolver regionResolver;
     private final ApiGatewayExecuteRouteContext routeContext;
+    private final String baseHostname;
 
     @Inject
     public ApiGatewayExecuteApiHostFilter(ApiGatewayV2Service apiGatewayV2Service,
@@ -67,18 +60,24 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             public void requireStage(String region, String apiId, String stageName) {
                 apiGatewayV2Service.getStage(region, apiId, stageName);
             }
-        }, regionResolver, routeContext);
+        }, regionResolver, routeContext, null);
     }
 
     ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver) {
-        this(apiGatewayLookup, regionResolver, new ApiGatewayExecuteRouteContext());
+        this(apiGatewayLookup, regionResolver, new ApiGatewayExecuteRouteContext(), "localhost");
     }
 
     ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver,
                                    ApiGatewayExecuteRouteContext routeContext) {
+        this(apiGatewayLookup, regionResolver, routeContext, "localhost");
+    }
+
+    ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver,
+                                   ApiGatewayExecuteRouteContext routeContext, String baseHostname) {
         this.apiGatewayLookup = apiGatewayLookup;
         this.regionResolver = regionResolver;
         this.routeContext = routeContext;
+        this.baseHostname = baseHostname;
     }
 
     @Override
@@ -88,12 +87,10 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             return;
         }
 
-        Matcher matcher = EXECUTE_API_HOST.matcher(stripPort(host));
-        if (!matcher.matches()) {
+        String apiId = extractApiId(host, baseHostname != null ? baseHostname : configuredHostname());
+        if (apiId == null) {
             return;
         }
-
-        String apiId = matcher.group(1).toLowerCase(Locale.ROOT);
         // Region: the host label when it is a real AWS region (…execute-api.{region}.…), else the
         // SigV4 credential scope. The cross-region apiId scan (resolveApiRegion) is the final
         // fallback so an API created outside the default region still resolves — including on the
@@ -185,17 +182,63 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Extracts the {@code apiId} from an execute-api virtual host, or {@code null} when the host
-     * is not an execute-api host. Shared with the WebSocket {@code $connect} handler so the host
-     * grammar lives in exactly one place (this filter and the handler must agree on which hosts
-     * are execute-api hosts).
+     * Resolves the optional hostname override at request time so native images do not capture a
+     * build-time value before container-specific environment configuration is applied.
+     */
+    public static String configuredHostname() {
+        return ConfigProvider.getConfig().getOptionalValue("floci.hostname", String.class).orElse("localhost");
+    }
+
+    /**
+     * Extracts the {@code apiId} from an execute-api virtual host using the configured hostname.
+     */
+    public static String extractApiIdForConfiguredHostname(String host) {
+        return extractApiId(host, configuredHostname());
+    }
+
+    /**
+     * Extracts the {@code apiId} from an execute-api virtual host using the default local hostname.
+     *
+     * @see #extractApiId(String, String)
      */
     public static String extractApiId(String host) {
+        return extractApiId(host, "localhost");
+    }
+
+    /**
+     * Extracts the {@code apiId} from an execute-api virtual host, or {@code null} when the host
+     * is not an execute-api host. Region-bearing hosts accept the configured Floci hostname, the
+     * local {@code localhost} form, and AWS's {@code amazonaws.com} form. The public built-in
+     * suffixes remain regionless convenience forms.
+     */
+    public static String extractApiId(String host, String baseHostname) {
         if (host == null) {
             return null;
         }
-        Matcher matcher = EXECUTE_API_HOST.matcher(stripPort(host));
-        return matcher.matches() ? matcher.group(1).toLowerCase(Locale.ROOT) : null;
+
+        Matcher matcher = EXECUTE_API_PREFIX.matcher(stripPort(host));
+        if (!matcher.matches()) {
+            return null;
+        }
+
+        String tail = matcher.group(2);
+        if ("localhost.floci.io".equalsIgnoreCase(tail)
+                || "localhost.localstack.cloud".equalsIgnoreCase(tail)) {
+            return matcher.group(1).toLowerCase(Locale.ROOT);
+        }
+
+        int firstDot = tail.indexOf('.');
+        if (firstDot <= 0 || !AWS_REGION.matcher(tail.substring(0, firstDot)).matches()) {
+            return null;
+        }
+
+        String endpointHost = tail.substring(firstDot + 1);
+        if ("localhost".equalsIgnoreCase(endpointHost)
+                || "amazonaws.com".equalsIgnoreCase(endpointHost)
+                || (baseHostname != null && baseHostname.equalsIgnoreCase(endpointHost))) {
+            return matcher.group(1).toLowerCase(Locale.ROOT);
+        }
+        return null;
     }
 
     /**

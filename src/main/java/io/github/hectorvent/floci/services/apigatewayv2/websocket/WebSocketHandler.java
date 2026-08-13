@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
@@ -97,7 +98,7 @@ public class WebSocketHandler {
      */
     private void handleSubdomainWebSocketUpgrade(RoutingContext ctx) {
         String host = resolveRequestHost(ctx);
-        String apiId = io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter.extractApiId(host);
+        String apiId = ApiGatewayExecuteApiHostFilter.extractApiIdForConfiguredHostname(host);
         if (apiId == null) {
             ctx.next();
             return;
