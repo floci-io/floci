@@ -157,9 +157,12 @@ public class S3VectorsService {
 
     /**
      * Lists the vectors stored in an index with cursor-based pagination, ordered by key.
+     * The index may be identified by {@code bucketName}/{@code indexName} or by {@code indexArn} alone,
+     * matching the ListVectors input contract.
      */
-    public ListVectorsResult listVectors(String bucketName, String indexName, int maxResults, String nextToken, String region) {
-        VectorIndex index = getIndex(bucketName, indexName, region);
+    public ListVectorsResult listVectors(String bucketName, String indexName, String indexArn,
+                                          int maxResults, String nextToken, String region) {
+        VectorIndex index = resolveIndex(bucketName, indexName, indexArn, region);
         int limit = maxResults > 0 ? Math.min(maxResults, 1000) : 500;
         String lastKey = decodeToken(nextToken);
 
@@ -194,21 +197,43 @@ public class S3VectorsService {
     }
 
     /**
-     * Encodes a pagination cursor as Base64 JSON, matching AcmService's listCertificates cursor.
+     * Resolves an index by name or by ARN (format: {@code <bucketArn>/index/<indexName>}), matching
+     * ListVectors' "vectorBucketName + indexName, or indexArn alone" input contract.
+     */
+    private VectorIndex resolveIndex(String bucketName, String indexName, String indexArn, String region) {
+        if (indexName != null && !indexName.isBlank()) {
+            return getIndex(bucketName, indexName, region);
+        }
+        if (indexArn == null || indexArn.isBlank()) {
+            throw new AwsException("ValidationException", "Either indexName or indexArn is required.", 400);
+        }
+        int marker = indexArn.lastIndexOf("/index/");
+        if (marker < 0) {
+            throw new AwsException("ValidationException", "Malformed indexArn: " + indexArn, 400);
+        }
+        String bucketPart = indexArn.substring(0, marker);
+        String indexNameFromArn = indexArn.substring(marker + "/index/".length());
+        String bucketNameFromArn = bucketPart.substring(bucketPart.lastIndexOf('/') + 1);
+        return getIndex(bucketNameFromArn, indexNameFromArn, region);
+    }
+
+    /**
+     * Encodes a pagination cursor as an opaque Base64 token over the raw key — no JSON wrapping, so
+     * keys containing quotes or other JSON-significant characters round-trip correctly.
      */
     private String encodeToken(String lastKey) {
-        if (lastKey == null) return null;
-        String json = "{\"lastKey\":\"" + lastKey + "\"}";
-        return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
+        if (lastKey == null) {
+            return null;
+        }
+        return Base64.getEncoder().encodeToString(lastKey.getBytes(StandardCharsets.UTF_8));
     }
 
     private String decodeToken(String token) {
-        if (token == null || token.isEmpty()) return null;
+        if (token == null || token.isEmpty()) {
+            return null;
+        }
         try {
-            String json = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
-            int start = json.indexOf("\"lastKey\":\"") + 11;
-            int end = json.indexOf("\"", start);
-            return json.substring(start, end);
+            return new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
         } catch (Exception e) {
             throw new AwsException("InvalidNextTokenException", "Invalid pagination token", 400);
         }
