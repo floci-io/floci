@@ -493,6 +493,51 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(15)
+    void sendInvocation_writeFails_requeuesAndClearsInFlight() throws Exception {
+        // Post-atomic-decision race: disconnect between dispatch commitment and
+        // .end() flush strands the invocation in inFlight. Force it by ending the
+        // parked ctx from beforeSendInvocationWrite; assert onFailure requeues +
+        // clears inFlight.
+        java.util.concurrent.atomic.AtomicReference<io.vertx.ext.web.RoutingContext> parkedCtx =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        server.stop().get(5, TimeUnit.SECONDS);
+        port = findFreePort();
+        server = new RuntimeApiServer(vertx, port) {
+            @Override protected void afterEnqueueDispatchLockReleased(io.vertx.ext.web.RoutingContext waitingCtx) {
+                parkedCtx.set(waitingCtx);
+            }
+            @Override protected void beforeSendInvocationWrite(String requestId) {
+                io.vertx.ext.web.RoutingContext ctx = parkedCtx.get();
+                if (ctx != null && !ctx.response().ended()) {
+                    ctx.response().setStatusCode(500).end();
+                }
+            }
+        };
+        server.start().get(5, TimeUnit.SECONDS);
+
+        HttpRequest parkedRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        httpClient.sendAsync(parkedRequest, HttpResponse.BodyHandlers.ofString());
+        awaitWaitingContexts(1);
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-write-fails", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        // Wait for the runOnContext-scheduled dispatch (and its failed write) to fire.
+        Thread.sleep(500);
+
+        assertEquals(1, server.pendingQueueSize(),
+                "invocation must be requeued after write failure — zero means stranded.");
+        assertEquals(0, server.inFlightSize(),
+                "inFlight must be cleared alongside the requeue.");
+    }
+
+    @Test
+    @Timeout(15)
     void quiesceAtomicallyClearsInFlightWithStopped() throws Exception {
         // The dispatch guards in enqueue()'s deferred callback and NEXT_PATH read
         // `stopped` under the server lock and act on it. Their correctness depends on

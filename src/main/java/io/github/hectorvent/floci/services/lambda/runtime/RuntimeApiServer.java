@@ -140,6 +140,21 @@ public class RuntimeApiServer {
         }
     }
 
+    /** Test-only: number of invocations queued waiting for a /next poller. Used by
+     * the requeue-on-write-failure test to verify the requeue actually happened. */
+    int pendingQueueSize() {
+        synchronized (lock) {
+            return pendingQueue.size();
+        }
+    }
+
+    /** Test-only: number of invocations currently in flight. Used alongside
+     * {@link #pendingQueueSize()} to verify a requeue-on-failure both offered
+     * to pendingQueue AND cleared the stale inFlight entry. */
+    int inFlightSize() {
+        return inFlight.size();
+    }
+
     /**
      * Test-only: called at the start of enqueue()'s deferred sendInvocation,
      * before the guard's `stopped` re-check. A test subclass overrides this to
@@ -843,13 +858,33 @@ public class RuntimeApiServer {
         String body = (payload != null && payload.length > 0)
               ? new String(payload)
               : "{}";
-        ctx.response()
-                .setStatusCode(200)
-                .putHeader("Content-Type", "application/json")
-                .putHeader("Lambda-Runtime-Aws-Request-Id", invocation.getRequestId())
-                .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getFunctionArn())
-                .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()))
-                .end(body);
+        // Vert.x reports a client-side disconnect two ways: setStatusCode/putHeader
+        // throw synchronously if the response is already ended, .end() returns a
+        // failed Future if the socket dies mid-flush. Funnel both into one handler.
+        Future<Void> write;
+        try {
+            write = ctx.response()
+                    .setStatusCode(200)
+                    .putHeader("Content-Type", "application/json")
+                    .putHeader("Lambda-Runtime-Aws-Request-Id", invocation.getRequestId())
+                    .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getFunctionArn())
+                    .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()))
+                    .end(body);
+        } catch (IllegalStateException alreadyEnded) {
+            write = Future.failedFuture(alreadyEnded);
+        }
+        write.onFailure(err -> {
+            // Requeue for the next /next poller; mirrors enqueue()'s ctx-ended branch.
+            // Skip if quiesce() beat us — it already swept inFlight and settled the
+            // future with ContainerStopped.
+            synchronized (lock) {
+                if (stopped) {
+                    return;
+                }
+                pendingQueue.offer(invocation);
+                inFlight.remove(invocation.getRequestId());
+            }
+        });
     }
 
     private Future<Void> sendExtensionEvent(RoutingContext ctx, ExtensionEvent event) {
