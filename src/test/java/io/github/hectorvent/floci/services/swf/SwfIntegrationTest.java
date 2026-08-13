@@ -1303,6 +1303,68 @@ class SwfIntegrationTest {
                 .body("nextPageToken", nullValue());
     }
 
+    @Test
+    void domainsAreScopedByTheRegionInTheSigV4CredentialScope() {
+        String domain = uniqueName("wire-region");
+
+        // The region is read from the credential scope of the Authorization header, so the
+        // same name must register once per region rather than colliding.
+        callInRegion("RegisterDomain", """
+                {"name": "%s", "description": "east",
+                 "workflowExecutionRetentionPeriodInDays": "1"}
+                """.formatted(domain), "us-east-1")
+                .then().statusCode(200);
+        callInRegion("RegisterDomain", """
+                {"name": "%s", "description": "west",
+                 "workflowExecutionRetentionPeriodInDays": "2"}
+                """.formatted(domain), "eu-west-1")
+                .then().statusCode(200);
+
+        // Each region keeps its own description, retention, and ARN.
+        callInRegion("DescribeDomain", """
+                {"name": "%s"}
+                """.formatted(domain), "us-east-1")
+                .then()
+                .body("domainInfo.description", equalTo("east"))
+                .body("domainInfo.arn", containsString(":us-east-1:"))
+                .body("configuration.workflowExecutionRetentionPeriodInDays", equalTo("1"));
+        callInRegion("DescribeDomain", """
+                {"name": "%s"}
+                """.formatted(domain), "eu-west-1")
+                .then()
+                .body("domainInfo.description", equalTo("west"))
+                .body("domainInfo.arn", containsString(":eu-west-1:"))
+                .body("configuration.workflowExecutionRetentionPeriodInDays", equalTo("2"));
+
+        // A type registered in one region is unknown in the other.
+        callInRegion("RegisterWorkflowType", """
+                {"domain": "%s", "name": "EastOnly", "version": "1.0",
+                 "defaultTaskList": {"name": "tl"},
+                 "defaultTaskStartToCloseTimeout": "60",
+                 "defaultExecutionStartToCloseTimeout": "600",
+                 "defaultChildPolicy": "TERMINATE"}
+                """.formatted(domain), "us-east-1")
+                .then().statusCode(200);
+        callInRegion("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED"}
+                """.formatted(domain), "eu-west-1")
+                .then().body("typeInfos", hasSize(0));
+        callInRegion("DescribeWorkflowType", """
+                {"domain": "%s", "workflowType": {"name": "EastOnly", "version": "1.0"}}
+                """.formatted(domain), "eu-west-1")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#UnknownResourceFault"));
+
+        // Re-registering within one region is still a duplicate.
+        callInRegion("RegisterDomain", """
+                {"name": "%s", "workflowExecutionRetentionPeriodInDays": "1"}
+                """.formatted(domain), "us-east-1")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazonaws.swf.base.model#DomainAlreadyExistsFault"));
+    }
+
     // ───────────────────────────── Counting and tags ─────────────────────────
 
     @Test
@@ -1490,6 +1552,23 @@ class SwfIntegrationTest {
     private static Response call(String action, String body) {
         return given()
                 .header("X-Amz-Target", "SimpleWorkflowService." + action)
+                .contentType(SWF_CONTENT_TYPE)
+                .body(body)
+                .when()
+                .post("/");
+    }
+
+    /**
+     * Sends a request whose SigV4 credential scope names {@code region}, which is how the
+     * emulator decides which region's state a call addresses. Only the scope is used, so the
+     * signature itself does not have to be valid.
+     */
+    private static Response callInRegion(String action, String body, String region) {
+        return given()
+                .header("X-Amz-Target", "SimpleWorkflowService." + action)
+                .header("Authorization", "AWS4-HMAC-SHA256 "
+                        + "Credential=test/20260101/" + region + "/swf/aws4_request, "
+                        + "SignedHeaders=host;x-amz-target, Signature=not-verified")
                 .contentType(SWF_CONTENT_TYPE)
                 .body(body)
                 .when()
