@@ -334,4 +334,73 @@ class AppConfigTest {
                 ListTagsForResourceRequest.builder().resourceArn(arn).build());
         assertThat(listed.tags()).isNotNull();
     }
+
+    @Test
+    @Order(52)
+    @DisplayName("DeleteConfigurationProfile / DeleteHostedConfigurationVersion / ListDeploymentStrategies / DeleteDeploymentStrategy")
+    void deleteAndListOperationsPreviouslyReturnedNoSuchBucket() {
+        // These four operations had no route at all, so the request fell through to S3's
+        // generic path-style catch-all and returned a raw S3 NoSuchBucket 404 instead of a real
+        // AppConfig response. Exercised via the SDK (not raw HTTP) so a regression here surfaces
+        // as an SDK-level exception, matching how a real caller would hit it.
+        String delAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name("delete-ops-app")
+                .build()).id();
+        try {
+            String delProfileId = appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
+                    .applicationId(delAppId)
+                    .name("delete-ops-profile")
+                    .locationUri("hosted")
+                    .type("AWS.Freeform")
+                    .build()).id();
+
+            appConfig.createHostedConfigurationVersion(CreateHostedConfigurationVersionRequest.builder()
+                    .applicationId(delAppId)
+                    .configurationProfileId(delProfileId)
+                    .contentType("application/json")
+                    .content(SdkBytes.fromUtf8String("{\"throwaway\": true}"))
+                    .build());
+
+            appConfig.deleteHostedConfigurationVersion(DeleteHostedConfigurationVersionRequest.builder()
+                    .applicationId(delAppId)
+                    .configurationProfileId(delProfileId)
+                    .versionNumber(1)
+                    .build());
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.getHostedConfigurationVersion(
+                    GetHostedConfigurationVersionRequest.builder()
+                            .applicationId(delAppId).configurationProfileId(delProfileId).versionNumber(1).build()));
+
+            appConfig.deleteConfigurationProfile(DeleteConfigurationProfileRequest.builder()
+                    .applicationId(delAppId)
+                    .configurationProfileId(delProfileId)
+                    .build());
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.getConfigurationProfile(
+                    GetConfigurationProfileRequest.builder()
+                            .applicationId(delAppId).configurationProfileId(delProfileId).build()));
+
+            String delStrategyId = appConfig.createDeploymentStrategy(CreateDeploymentStrategyRequest.builder()
+                    .name("delete-ops-strategy")
+                    .deploymentDurationInMinutes(0)
+                    .growthFactor(100f)
+                    .finalBakeTimeInMinutes(0)
+                    .build()).id();
+
+            ListDeploymentStrategiesResponse listed = appConfig.listDeploymentStrategies(
+                    ListDeploymentStrategiesRequest.builder().build());
+            assertThat(listed.items())
+                    .extracting(strategy -> strategy.id())
+                    .contains("AppConfig.AllAtOnce", "AppConfig.Linear50PercentEvery30Seconds",
+                            "AppConfig.Canary10Percent20Minutes", delStrategyId);
+
+            appConfig.deleteDeploymentStrategy(DeleteDeploymentStrategyRequest.builder()
+                    .deploymentStrategyId(delStrategyId).build());
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.getDeploymentStrategy(
+                    GetDeploymentStrategyRequest.builder().deploymentStrategyId(delStrategyId).build()));
+        } finally {
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder()
+                        .applicationId(delAppId).build());
+            } catch (Exception ignored) {}
+        }
+    }
 }

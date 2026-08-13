@@ -111,6 +111,10 @@ public class AppConfigService {
                 .toList();
     }
 
+    public void deleteConfigurationProfile(String appId, String profileId) {
+        profileStore.delete(profileId);
+    }
+
     // ──────────────────────────── Hosted Configuration Version ────────────────────────────
 
     public HostedConfigurationVersion createHostedConfigurationVersion(String appId, String profileId, byte[] content, String contentType, String description) {
@@ -153,6 +157,10 @@ public class AppConfigService {
                 .toList();
     }
 
+    public void deleteHostedConfigurationVersion(String appId, String profileId, int versionNumber) {
+        versionStore.delete(appId + "::" + profileId + "::" + versionNumber);
+    }
+
     // ──────────────────────────── Deployment Strategy ────────────────────────────
 
     public DeploymentStrategy createDeploymentStrategy(Map<String, Object> request) {
@@ -174,6 +182,23 @@ public class AppConfigService {
         DeploymentStrategy builtin = builtinStrategy(id);
         if (builtin != null) return builtin;
         return strategyStore.get(id).orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404));
+    }
+
+    public List<DeploymentStrategy> listDeploymentStrategies() {
+        // Real AWS's ListDeploymentStrategies includes the predefined strategies alongside
+        // custom ones (confirmed via the API reference's own sample response) - the predefined
+        // ones aren't in strategyStore at all (see getDeploymentStrategy's builtinStrategy check
+        // above), so they need to be added explicitly here too.
+        List<DeploymentStrategy> result = new ArrayList<>(List.of(
+                builtinStrategy("AppConfig.AllAtOnce"),
+                builtinStrategy("AppConfig.Linear50PercentEvery30Seconds"),
+                builtinStrategy("AppConfig.Canary10Percent20Minutes")));
+        result.addAll(strategyStore.scan(k -> true));
+        return result;
+    }
+
+    public void deleteDeploymentStrategy(String id) {
+        strategyStore.delete(id);
     }
 
     private static DeploymentStrategy builtinStrategy(String id) {

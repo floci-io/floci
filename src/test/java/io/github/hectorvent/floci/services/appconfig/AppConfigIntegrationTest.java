@@ -406,4 +406,97 @@ class AppConfigIntegrationTest {
                 .header("Version-Label", equalTo(""))
                 .body(equalTo(""));
     }
+
+    // ──────────────────────────── Delete/list operations that previously 404'd ────────────────────────────
+    // DeleteConfigurationProfile, DeleteHostedConfigurationVersion, ListDeploymentStrategies, and
+    // DeleteDeploymentStrategy had no route at all, so requests fell through to S3's generic
+    // path-style catch-all (GET/DELETE /{bucket}[/{key}]) and returned a misleading NoSuchBucket
+    // 404 instead of a real AppConfig response.
+
+    @Test @Order(26)
+    void deleteConfigurationProfileRemovesIt() {
+        String throwawayProfileId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"throwaway-profile\", \"LocationUri\": \"hosted\", \"Type\": \"AWS.Freeform\"}")
+                .when().post("/applications/" + appId + "/configurationprofiles")
+                .then()
+                .statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .when().delete("/applications/" + appId + "/configurationprofiles/" + throwawayProfileId)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/applications/" + appId + "/configurationprofiles/" + throwawayProfileId)
+                .then()
+                .statusCode(404);
+    }
+
+    @Test @Order(27)
+    void deleteHostedConfigurationVersionRemovesIt() {
+        String versionNumberHeader = given()
+                .header("Content-Type", "application/json")
+                .body("{\"throwaway\": true}".getBytes())
+                .when().post("/applications/" + appId + "/configurationprofiles/" + profileId + "/hostedconfigurationversions")
+                .then()
+                .statusCode(201)
+                .extract().header("Version-Number");
+        int versionNumber = Integer.parseInt(versionNumberHeader);
+
+        given()
+                .when().delete("/applications/" + appId + "/configurationprofiles/" + profileId
+                        + "/hostedconfigurationversions/" + versionNumber)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/applications/" + appId + "/configurationprofiles/" + profileId
+                        + "/hostedconfigurationversions/" + versionNumber)
+                .then()
+                .statusCode(404);
+    }
+
+    @Test @Order(28)
+    void listDeploymentStrategiesIncludesBuiltinsAndCustom() {
+        given()
+                .when().get("/deploymentstrategies")
+                .then()
+                .statusCode(200)
+                .body("Items.Id", hasItems("AppConfig.AllAtOnce", "AppConfig.Linear50PercentEvery30Seconds",
+                        "AppConfig.Canary10Percent20Minutes", strategyId));
+    }
+
+    @Test @Order(29)
+    void deleteDeploymentStrategyRemovesIt() {
+        String throwawayStrategyId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"throwaway-strategy\", \"DeploymentDurationInMinutes\": 0, \"GrowthFactor\": 100, \"FinalBakeTimeInMinutes\": 0}")
+                .when().post("/deploymentstrategies")
+                .then()
+                .statusCode(201)
+                .extract().path("Id");
+
+        // AWS's own API model spells DeleteDeploymentStrategy's path "deployementstrategies"
+        // (extra "e") - every other deployment-strategy operation correctly uses
+        // "deploymentstrategies". Confirmed against the real API reference and reproduced
+        // against the real AWS SDK for Java v2 (see AppConfigController#deleteDeploymentStrategy).
+        given()
+                .when().delete("/deployementstrategies/" + throwawayStrategyId)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/deploymentstrategies/" + throwawayStrategyId)
+                .then()
+                .statusCode(404);
+
+        // Deleting an already-deleted (or never-existing) strategy is idempotent, matching
+        // DeleteApplication's existing convention - not an error.
+        given()
+                .when().delete("/deployementstrategies/" + throwawayStrategyId)
+                .then()
+                .statusCode(204);
+    }
 }

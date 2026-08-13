@@ -118,6 +118,13 @@ public class AppConfigController {
         return Response.ok(root).build();
     }
 
+    @DELETE
+    @Path("/applications/{appId}/configurationprofiles/{profileId}")
+    public Response deleteConfigurationProfile(@PathParam("appId") String appId, @PathParam("profileId") String profileId) {
+        service.deleteConfigurationProfile(appId, profileId);
+        return Response.noContent().build();
+    }
+
     // ──────────────────────────── Hosted Configuration Version ────────────────────────────
 
     @GET
@@ -152,6 +159,15 @@ public class AppConfigController {
         return versionResponse(version, 200);
     }
 
+    @DELETE
+    @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions/{versionNumber}")
+    public Response deleteHostedConfigurationVersion(@PathParam("appId") String appId,
+                                                     @PathParam("profileId") String profileId,
+                                                     @PathParam("versionNumber") int versionNumber) {
+        service.deleteHostedConfigurationVersion(appId, profileId, versionNumber);
+        return Response.noContent().build();
+    }
+
     private Response versionResponse(HostedConfigurationVersion v, int status) {
         Response.ResponseBuilder rb = Response.status(status).entity(v.getContent());
         rb.header("Application-Id", v.getApplicationId());
@@ -177,6 +193,28 @@ public class AppConfigController {
     @Path("/deploymentstrategies/{id}")
     public Response getDeploymentStrategy(@PathParam("id") String id) {
         return Response.ok(service.getDeploymentStrategy(id)).build();
+    }
+
+    @GET
+    @Path("/deploymentstrategies")
+    public Response listDeploymentStrategies() {
+        List<DeploymentStrategy> items = service.listDeploymentStrategies();
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode arr = root.putArray("Items");
+        items.forEach(arr::addPOJO);
+        return Response.ok(root).build();
+    }
+
+    // AWS's own API model spells this path "deployementstrategies" (extra "e") - every other
+    // deployment-strategy operation correctly uses "deploymentstrategies". Confirmed against the
+    // real API reference (both the Request Syntax and Sample Request sections agree) and
+    // reproduced against the real AWS SDK for Java v2, which sends the misspelled path literally -
+    // matching that typo, not "fixing" it, is what real AWS wire-protocol compatibility means here.
+    @DELETE
+    @Path("/deployementstrategies/{id}")
+    public Response deleteDeploymentStrategy(@PathParam("id") String id) {
+        service.deleteDeploymentStrategy(id);
+        return Response.noContent().build();
     }
 
     // ──────────────────────────── Deployment ────────────────────────────
