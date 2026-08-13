@@ -11,6 +11,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -54,11 +55,12 @@ class StepFunctionsUpdateStateMachineIntegrationTest {
         assertTrue(update.asString().contains("\"stateMachineVersionArn\":null"));
 
         // The update is reflected in DescribeStateMachine.
-        call("DescribeStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}")
+        Response describe = call("DescribeStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
-                .body("updateDate", notNullValue())
                 .body("roleArn", is("arn:aws:iam::000000000000:role/r2"))
-                .body("definition", containsString("\"Wait\""));
+                .body("definition", containsString("\"Wait\""))
+                .extract().response();
+        assertFalse(describe.jsonPath().getMap("").containsKey("updateDate"));
     }
 
     @Test
