@@ -132,6 +132,37 @@ public class RuntimeApiServer {
     // Null if quiesce() has not run.
     private CompletableFuture<Void> extensionWritesFlushed;
 
+    /** Test-only: number of /next pollers parked in waitingContexts, for
+     * tests that want to await the parked state deterministically without sleeping. */
+    int waitingContextsSize() {
+        synchronized (lock) {
+            return waitingContexts.size();
+        }
+    }
+
+    /**
+     * Test-only: called at the start of enqueue()'s deferred sendInvocation,
+     * before the guard's `stopped` re-check. A test subclass overrides this to
+     * gate the dispatch on a CountDownLatch and drive a specific interleaving
+     * with quiesce(). Empty no-op in production.
+     */
+    protected void beforeEnqueueDeferredDispatch() { }
+
+    /**
+     * Test-only: called at the start of NEXT_PATH's post-lock guard block, before
+     * the guard's `stopped` re-check. Same shape as {@link #beforeEnqueueDeferredDispatch}
+     * but for the synchronous handler-thread dispatch path.
+     */
+    protected void beforeNextPathDispatchGuard() { }
+
+    /**
+     * Test-only: called inside quiesce() immediately after the lock has been
+     * released, before any outside-lock work runs. Test subclasses override
+     * to freeze quiesce at that point and drive a dispatch through the guard
+     * against a supposedly-partially-swept state, proving atomicity holds.
+     */
+    protected void afterQuiesceStoppedFlagSet() { }
+
     // Set once an extension reports an init/exit error. Real AWS treats both as fatal to the
     // execution environment, so the container must neither accept new work nor be reused.
     //
@@ -296,6 +327,7 @@ public class RuntimeApiServer {
             if (faultedNow) {
                 ctx.response().setStatusCode(204).end();
             } else if (toDispatch != null) {
+                beforeNextPathDispatchGuard();
                 // Re-check `stopped` under the lock: quiesce() may have run since our
                 // poll above, in which case it completed toDispatch's future with
                 // ContainerStopped and dispatching now would silently discard /response.
@@ -570,6 +602,7 @@ public class RuntimeApiServer {
             inFlightToFail = new ArrayList<>(inFlight.values());
             inFlight.clear();
         }
+        afterQuiesceStoppedFlagSet();
 
         // Extension SHUTDOWN writes go through the event loop; chain on end() rather
         // than the scheduled handler's return, because response.end() is async and the
@@ -724,6 +757,7 @@ public class RuntimeApiServer {
         if (waitingCtxForInvocation != null) {
             final RoutingContext waitingCtx = waitingCtxForInvocation;
             vertx.runOnContext(v -> {
+                beforeEnqueueDeferredDispatch();
                 // Re-check `stopped` under the lock: quiesce() may have run since the
                 // enclosing enqueue() released it, in which case it already completed
                 // the caller's future with ContainerStopped. Dispatching now would
