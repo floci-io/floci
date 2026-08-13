@@ -351,6 +351,15 @@ public class S3Controller {
             }
             String region = locationConstraint != null ? locationConstraint : regionResolver.resolveRegion(httpHeaders);
             s3Service.createBucket(bucket, region);
+            // CreateBucketConfiguration may carry a <Tags> array; AWS applies those tags to the
+            // new bucket, so a follow-up GetBucketTagging / ListTagsForResource must return them.
+            if (body != null && body.length > 0) {
+                Map<String, String> creationTags = XmlParser.extractPairs(
+                        new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
+                if (!creationTags.isEmpty()) {
+                    s3Service.putBucketTagging(bucket, creationTags);
+                }
+            }
             String lockEnabled = httpHeaders.getHeaderString("x-amz-bucket-object-lock-enabled");
             if ("true".equalsIgnoreCase(lockEnabled)) {
                 s3Service.putBucketVersioning(bucket, "Enabled");
