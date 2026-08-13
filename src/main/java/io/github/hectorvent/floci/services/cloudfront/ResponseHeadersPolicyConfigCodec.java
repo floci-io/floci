@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.XmlParser.XmlElement;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -29,6 +30,8 @@ import java.util.regex.Pattern;
  * the same shape to compute the headers to apply.
  */
 final class ResponseHeadersPolicyConfigCodec {
+
+    private static final Logger LOG = Logger.getLogger(ResponseHeadersPolicyConfigCodec.class);
 
     private ResponseHeadersPolicyConfigCodec() {
     }
@@ -345,6 +348,8 @@ final class ResponseHeadersPolicyConfigCodec {
             samplingRate = Double.parseDouble(
                     String.valueOf(serverTiming.getOrDefault("SamplingRate", "0")));
         } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring invalid CloudFront Server-Timing sampling rate {0}: {1}",
+                    serverTiming.get("SamplingRate"), e.getMessage());
             return false;
         }
         if (samplingRate <= 0) {
@@ -445,6 +450,8 @@ final class ResponseHeadersPolicyConfigCodec {
             String portRegex = "\\Q" + portPattern.replace("*", "\\E.*\\Q") + "\\E";
             return Pattern.matches(portRegex, Integer.toString(viewer.getPort()));
         } catch (IllegalArgumentException e) {
+            LOG.debugv("CloudFront CORS origin match rejected pattern {0} for viewer origin {1}: {2}",
+                    allowedOrigin, viewerOrigin, e.getMessage());
             return false;
         }
     }
