@@ -84,15 +84,21 @@ class SesAccountAttributesTest {
     }
 
     private static void restoreVdmAttributes() {
-        if (sesV2 == null || originalVdm == null || originalVdm.vdmEnabled() == null) {
+        if (sesV2 == null) {
             return;
         }
+        // VDM has no un-configure API, so a region that started unconfigured (no VdmAttributes in
+        // GetAccount) can only be reset to DISABLED once the round-trip test has enabled it.
+        VdmAttributes.Builder vdm = VdmAttributes.builder();
+        if (originalVdm != null && originalVdm.vdmEnabled() != null) {
+            vdm.vdmEnabled(originalVdm.vdmEnabled())
+                    .dashboardAttributes(originalVdm.dashboardAttributes())
+                    .guardianAttributes(originalVdm.guardianAttributes());
+        } else {
+            vdm.vdmEnabled(FeatureStatus.DISABLED);
+        }
         sesV2.putAccountVdmAttributes(PutAccountVdmAttributesRequest.builder()
-                .vdmAttributes(VdmAttributes.builder()
-                        .vdmEnabled(originalVdm.vdmEnabled())
-                        .dashboardAttributes(originalVdm.dashboardAttributes())
-                        .guardianAttributes(originalVdm.guardianAttributes())
-                        .build())
+                .vdmAttributes(vdm.build())
                 .build());
     }
 

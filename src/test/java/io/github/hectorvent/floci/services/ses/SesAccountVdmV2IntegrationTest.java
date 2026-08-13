@@ -8,12 +8,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Integration tests for the SES V2 account VDM attributes: {@code PUT /v2/email/account/vdm}
  * (PutAccountVdmAttributes) and the {@code GET /v2/email/account} (GetAccount) round-trip. VDM is
  * account/region-scoped, so this uses an isolated region and leaves it DISABLED at the end. Shapes
- * and defaults are verified against real AWS (VDM is opt-in, so it defaults to DISABLED).
+ * and defaults are verified against real AWS: VDM is opt-in and defaults to DISABLED, and the
+ * Dashboard/Guardian sub-attributes are only returned while VdmEnabled is ENABLED.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -24,12 +26,12 @@ class SesAccountVdmV2IntegrationTest {
 
     @Test
     @Order(0)
-    void getAccount_vdmDefaultsToDisabled() {
+    void getAccount_vdmAttributesAbsentUntilConfigured() {
+        // A region where PutAccountVdmAttributes was never called omits the VdmAttributes key
+        // entirely; AWS only surfaces it once VDM has been configured for that region.
         given().header("Authorization", AUTH)
         .when().get("/v2/email/account").then().statusCode(200)
-                .body("VdmAttributes.VdmEnabled", equalTo("DISABLED"))
-                .body("VdmAttributes.DashboardAttributes.EngagementMetrics", equalTo("DISABLED"))
-                .body("VdmAttributes.GuardianAttributes.OptimizedSharedDelivery", equalTo("DISABLED"));
+                .body("VdmAttributes", nullValue());
     }
 
     @Test
@@ -96,9 +98,24 @@ class SesAccountVdmV2IntegrationTest {
 
     @Test
     @Order(7)
-    void putVdm_optionalAttributesDefaultToDisabled() {
-        // Only VdmEnabled is supplied; the optional dashboard/guardian members default to DISABLED.
-        // Also restores this region's VDM state to DISABLED.
+    void putVdm_enabledWithoutNested_defaultsNestedToDisabled() {
+        // Enabling VDM without supplying the optional members: AWS surfaces both nested objects with
+        // their DISABLED defaults once VdmEnabled is ENABLED.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
+        .when().put("/v2/email/account/vdm").then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+        .when().get("/v2/email/account").then().statusCode(200)
+                .body("VdmAttributes.VdmEnabled", equalTo("ENABLED"))
+                .body("VdmAttributes.DashboardAttributes.EngagementMetrics", equalTo("DISABLED"))
+                .body("VdmAttributes.GuardianAttributes.OptimizedSharedDelivery", equalTo("DISABLED"));
+    }
+
+    @Test
+    @Order(8)
+    void putVdm_disabled_omitsNestedAttributes() {
+        // Disabling VDM drops the nested objects again, and restores this region to DISABLED.
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
@@ -106,7 +123,7 @@ class SesAccountVdmV2IntegrationTest {
         given().header("Authorization", AUTH)
         .when().get("/v2/email/account").then().statusCode(200)
                 .body("VdmAttributes.VdmEnabled", equalTo("DISABLED"))
-                .body("VdmAttributes.DashboardAttributes.EngagementMetrics", equalTo("DISABLED"))
-                .body("VdmAttributes.GuardianAttributes.OptimizedSharedDelivery", equalTo("DISABLED"));
+                .body("VdmAttributes.DashboardAttributes", nullValue())
+                .body("VdmAttributes.GuardianAttributes", nullValue());
     }
 }

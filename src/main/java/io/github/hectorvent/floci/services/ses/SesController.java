@@ -1812,13 +1812,19 @@ public class SesController {
             reasons.add(r);
         }
 
-        AccountVdmAttributes vdm = sesService.getAccountVdmAttributes(region);
-        ObjectNode vdmAttrs = result.putObject("VdmAttributes");
-        vdmAttrs.put("VdmEnabled", featureStatus(vdm.vdmEnabled()));
-        vdmAttrs.putObject("DashboardAttributes")
-                .put("EngagementMetrics", featureStatus(vdm.engagementMetrics()));
-        vdmAttrs.putObject("GuardianAttributes")
-                .put("OptimizedSharedDelivery", featureStatus(vdm.optimizedSharedDelivery()));
+        // AWS only surfaces VdmAttributes once VDM has been configured for the region (an untouched
+        // region omits the key entirely), and only adds the Dashboard/Guardian sub-attributes while
+        // VdmEnabled is ENABLED.
+        sesService.findAccountVdmAttributes(region).ifPresent(vdm -> {
+            ObjectNode vdmAttrs = result.putObject("VdmAttributes");
+            vdmAttrs.put("VdmEnabled", featureStatus(vdm.vdmEnabled()));
+            if (vdm.vdmEnabled()) {
+                vdmAttrs.putObject("DashboardAttributes")
+                        .put("EngagementMetrics", featureStatus(vdm.engagementMetrics()));
+                vdmAttrs.putObject("GuardianAttributes")
+                        .put("OptimizedSharedDelivery", featureStatus(vdm.optimizedSharedDelivery()));
+            }
+        });
 
         return Response.ok(result).build();
     }

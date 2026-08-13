@@ -1016,12 +1016,12 @@ public class SesService {
         LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);
     }
 
-    // VDM (Virtual Deliverability Manager) is opt-in, so each flag defaults to DISABLED (false)
-    // until PutAccountVdmAttributes turns it on. The whole tuple is stored under one region key so
-    // GetAccount never observes a partially updated state.
-    public AccountVdmAttributes getAccountVdmAttributes(String region) {
-        return accountVdmStore.get(accountVdmKey(region))
-                .orElseGet(() -> new AccountVdmAttributes(false, false, false));
+    // VDM (Virtual Deliverability Manager) is opt-in and per region: GetAccount omits VdmAttributes
+    // entirely until PutAccountVdmAttributes is called for the region, so this returns empty when the
+    // region was never configured. The whole tuple is stored under one region key so GetAccount never
+    // observes a partially updated state.
+    public Optional<AccountVdmAttributes> findAccountVdmAttributes(String region) {
+        return accountVdmStore.get(accountVdmKey(region));
     }
 
     public void putAccountVdmAttributes(String region, AccountVdmAttributes vdm) {
