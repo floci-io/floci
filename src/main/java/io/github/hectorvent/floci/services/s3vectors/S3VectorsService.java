@@ -207,14 +207,26 @@ public class S3VectorsService {
         if (indexArn == null || indexArn.isBlank()) {
             throw new AwsException("ValidationException", "Either indexName or indexArn is required.", 400);
         }
-        int marker = indexArn.lastIndexOf("/index/");
-        if (marker < 0) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(indexArn);
+        } catch (IllegalArgumentException e) {
             throw new AwsException("ValidationException", "Malformed indexArn: " + indexArn, 400);
         }
-        String bucketPart = indexArn.substring(0, marker);
-        String indexNameFromArn = indexArn.substring(marker + "/index/".length());
-        String bucketNameFromArn = bucketPart.substring(bucketPart.lastIndexOf('/') + 1);
-        return getIndex(bucketNameFromArn, indexNameFromArn, region);
+        if (!"s3vectors".equals(parsed.service())) {
+            throw new AwsException("ValidationException", "Not an S3 Vectors indexArn: " + indexArn, 400);
+        }
+        String resource = parsed.resource();
+        int marker = resource.lastIndexOf("/index/");
+        if (marker < 0 || !resource.startsWith("bucket/")) {
+            throw new AwsException("ValidationException", "Malformed indexArn: " + indexArn, 400);
+        }
+        String bucketNameFromArn = resource.substring("bucket/".length(), marker);
+        String indexNameFromArn = resource.substring(marker + "/index/".length());
+        // The ARN carries its own region — an index in one region must resolve there regardless
+        // of which region the ListVectors request itself was signed for.
+        String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
+        return getIndex(bucketNameFromArn, indexNameFromArn, arnRegion);
     }
 
     /**
