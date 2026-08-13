@@ -1855,6 +1855,175 @@ public class S3Service implements Resettable {
     }
 
     /**
+     * Identifies one of the per-bucket configuration sub-resources
+     * ({@code ?inventory}, {@code ?analytics}, {@code ?metrics}, {@code ?intelligent-tiering}).
+     *
+     * <p>All four are pure CRUD-on-document APIs in Floci: the XML sent to the {@code Put*}
+     * operation is stored verbatim under its id and echoed back by {@code Get*} and {@code List*}.
+     * No inventory reports, analytics exports, metric publication or tier transitions happen.
+     */
+    private enum BucketConfigurationKind {
+        INVENTORY("InventoryConfiguration", "ListInventoryConfigurationsResult"),
+        ANALYTICS("AnalyticsConfiguration", "ListBucketAnalyticsConfigurationResult"),
+        METRICS("MetricsConfiguration", "ListMetricsConfigurationsResult"),
+        INTELLIGENT_TIERING("IntelligentTieringConfiguration", "ListBucketIntelligentTieringConfigurationsResult");
+
+        private final String documentElement;
+        private final String listResultElement;
+
+        BucketConfigurationKind(String documentElement, String listResultElement) {
+            this.documentElement = documentElement;
+            this.listResultElement = listResultElement;
+        }
+
+        Map<String, String> configurationsOf(Bucket bucket) {
+            return switch (this) {
+                case INVENTORY -> bucket.getInventoryConfigurations();
+                case ANALYTICS -> bucket.getAnalyticsConfigurations();
+                case METRICS -> bucket.getMetricsConfigurations();
+                case INTELLIGENT_TIERING -> bucket.getIntelligentTieringConfigurations();
+            };
+        }
+    }
+
+    private Bucket requireBucket(String bucketName) {
+        return bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+    }
+
+    private static String requireConfigurationId(String id) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidArgument", "The configuration id must not be empty.", 400);
+        }
+        return id;
+    }
+
+    /** Strips a leading XML declaration so a stored document can be embedded in a list response. */
+    private static String stripXmlDeclaration(String xml) {
+        String trimmed = xml.trim();
+        if (trimmed.startsWith("<?xml")) {
+            int end = trimmed.indexOf("?>");
+            if (end >= 0) {
+                trimmed = trimmed.substring(end + 2).trim();
+            }
+        }
+        return trimmed;
+    }
+
+    private String getBucketConfiguration(String bucketName, BucketConfigurationKind kind, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        String configuration = kind.configurationsOf(bucket).get(requireConfigurationId(id));
+        if (configuration == null) {
+            throw new AwsException("NoSuchConfiguration", "The specified configuration does not exist.", 404);
+        }
+        return configuration;
+    }
+
+    private void putBucketConfiguration(String bucketName, BucketConfigurationKind kind, String id, String xml) {
+        Bucket bucket = requireBucket(bucketName);
+        requireConfigurationId(id);
+        if (xml == null || xml.isBlank()) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        String document = stripXmlDeclaration(xml);
+        if (!document.contains("<" + kind.documentElement)) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        kind.configurationsOf(bucket).put(id, document);
+        bucketStore.put(bucketName, bucket);
+    }
+
+    private void deleteBucketConfiguration(String bucketName, BucketConfigurationKind kind, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        if (kind.configurationsOf(bucket).remove(requireConfigurationId(id)) == null) {
+            throw new AwsException("NoSuchConfiguration", "The specified configuration does not exist.", 404);
+        }
+        bucketStore.put(bucketName, bucket);
+    }
+
+    private String listBucketConfigurations(String bucketName, BucketConfigurationKind kind, String continuationToken) {
+        Bucket bucket = requireBucket(bucketName);
+        XmlBuilder xml = new XmlBuilder()
+                .start(kind.listResultElement, AwsNamespaces.S3)
+                .elem("IsTruncated", false);
+        if (continuationToken != null && !continuationToken.isBlank()) {
+            xml.elem("ContinuationToken", continuationToken);
+        }
+        for (String configuration : kind.configurationsOf(bucket).values()) {
+            xml.raw(configuration);
+        }
+        return xml.end(kind.listResultElement).build();
+    }
+
+    public String getBucketInventoryConfiguration(String bucketName, String id) {
+        return getBucketConfiguration(bucketName, BucketConfigurationKind.INVENTORY, id);
+    }
+
+    public void putBucketInventoryConfiguration(String bucketName, String id, String xml) {
+        putBucketConfiguration(bucketName, BucketConfigurationKind.INVENTORY, id, xml);
+    }
+
+    public void deleteBucketInventoryConfiguration(String bucketName, String id) {
+        deleteBucketConfiguration(bucketName, BucketConfigurationKind.INVENTORY, id);
+    }
+
+    public String listBucketInventoryConfigurations(String bucketName, String continuationToken) {
+        return listBucketConfigurations(bucketName, BucketConfigurationKind.INVENTORY, continuationToken);
+    }
+
+    public String getBucketAnalyticsConfiguration(String bucketName, String id) {
+        return getBucketConfiguration(bucketName, BucketConfigurationKind.ANALYTICS, id);
+    }
+
+    public void putBucketAnalyticsConfiguration(String bucketName, String id, String xml) {
+        putBucketConfiguration(bucketName, BucketConfigurationKind.ANALYTICS, id, xml);
+    }
+
+    public void deleteBucketAnalyticsConfiguration(String bucketName, String id) {
+        deleteBucketConfiguration(bucketName, BucketConfigurationKind.ANALYTICS, id);
+    }
+
+    public String listBucketAnalyticsConfigurations(String bucketName, String continuationToken) {
+        return listBucketConfigurations(bucketName, BucketConfigurationKind.ANALYTICS, continuationToken);
+    }
+
+    public String getBucketMetricsConfiguration(String bucketName, String id) {
+        return getBucketConfiguration(bucketName, BucketConfigurationKind.METRICS, id);
+    }
+
+    public void putBucketMetricsConfiguration(String bucketName, String id, String xml) {
+        putBucketConfiguration(bucketName, BucketConfigurationKind.METRICS, id, xml);
+    }
+
+    public void deleteBucketMetricsConfiguration(String bucketName, String id) {
+        deleteBucketConfiguration(bucketName, BucketConfigurationKind.METRICS, id);
+    }
+
+    public String listBucketMetricsConfigurations(String bucketName, String continuationToken) {
+        return listBucketConfigurations(bucketName, BucketConfigurationKind.METRICS, continuationToken);
+    }
+
+    public String getBucketIntelligentTieringConfiguration(String bucketName, String id) {
+        return getBucketConfiguration(bucketName, BucketConfigurationKind.INTELLIGENT_TIERING, id);
+    }
+
+    public void putBucketIntelligentTieringConfiguration(String bucketName, String id, String xml) {
+        putBucketConfiguration(bucketName, BucketConfigurationKind.INTELLIGENT_TIERING, id, xml);
+    }
+
+    public void deleteBucketIntelligentTieringConfiguration(String bucketName, String id) {
+        deleteBucketConfiguration(bucketName, BucketConfigurationKind.INTELLIGENT_TIERING, id);
+    }
+
+    public String listBucketIntelligentTieringConfigurations(String bucketName, String continuationToken) {
+        return listBucketConfigurations(bucketName, BucketConfigurationKind.INTELLIGENT_TIERING, continuationToken);
+    }
+
+    /**
      * Stores the bucket Request Payment configuration. AWS only allows the values
      * {@code BucketOwner} and {@code Requester}; we accept either and reject anything
      * else with {@code MalformedXML} to match the real S3 behavior.

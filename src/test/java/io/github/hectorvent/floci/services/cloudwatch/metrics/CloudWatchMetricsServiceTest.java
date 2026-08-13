@@ -26,6 +26,7 @@ class CloudWatchMetricsServiceTest {
         service = new CloudWatchMetricsService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000")
         );
     }

@@ -37,6 +37,7 @@ class CloudWatchMetricsJsonHandlerTest {
         CloudWatchMetricsService service = new CloudWatchMetricsService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver(REGION, "000000000000")
         );
         handler = new CloudWatchMetricsJsonHandler(service, MAPPER);

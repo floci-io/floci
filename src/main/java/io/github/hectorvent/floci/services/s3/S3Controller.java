@@ -314,6 +314,26 @@ public class S3Controller {
                 s3Service.putBucketRequestPayment(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
+            if (hasQueryParam(uriInfo, "inventory")) {
+                s3Service.putBucketInventoryConfiguration(bucket, configurationId(uriInfo),
+                        new String(body, StandardCharsets.UTF_8));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "analytics")) {
+                s3Service.putBucketAnalyticsConfiguration(bucket, configurationId(uriInfo),
+                        new String(body, StandardCharsets.UTF_8));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "metrics")) {
+                s3Service.putBucketMetricsConfiguration(bucket, configurationId(uriInfo),
+                        new String(body, StandardCharsets.UTF_8));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                s3Service.putBucketIntelligentTieringConfiguration(bucket, configurationId(uriInfo),
+                        new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
 
             String locationConstraint = null;
             if (body != null && body.length > 0) {
@@ -380,6 +400,22 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "ownershipControls")) {
                 s3Service.deleteBucketOwnershipControls(bucket);
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "inventory")) {
+                s3Service.deleteBucketInventoryConfiguration(bucket, configurationId(uriInfo));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "analytics")) {
+                s3Service.deleteBucketAnalyticsConfiguration(bucket, configurationId(uriInfo));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "metrics")) {
+                s3Service.deleteBucketMetricsConfiguration(bucket, configurationId(uriInfo));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                s3Service.deleteBucketIntelligentTieringConfiguration(bucket, configurationId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "replication")) {
@@ -486,6 +522,34 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "requestPayment")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketRequestPayment", authorization);
                 return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
+            }
+            if (hasQueryParam(uriInfo, "inventory")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetInventoryConfiguration", authorization);
+                String id = optionalConfigurationId(uriInfo);
+                return Response.ok(id != null
+                        ? s3Service.getBucketInventoryConfiguration(bucket, id)
+                        : s3Service.listBucketInventoryConfigurations(bucket, continuationToken)).build();
+            }
+            if (hasQueryParam(uriInfo, "analytics")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetAnalyticsConfiguration", authorization);
+                String id = optionalConfigurationId(uriInfo);
+                return Response.ok(id != null
+                        ? s3Service.getBucketAnalyticsConfiguration(bucket, id)
+                        : s3Service.listBucketAnalyticsConfigurations(bucket, continuationToken)).build();
+            }
+            if (hasQueryParam(uriInfo, "metrics")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetMetricsConfiguration", authorization);
+                String id = optionalConfigurationId(uriInfo);
+                return Response.ok(id != null
+                        ? s3Service.getBucketMetricsConfiguration(bucket, id)
+                        : s3Service.listBucketMetricsConfigurations(bucket, continuationToken)).build();
+            }
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetIntelligentTieringConfiguration", authorization);
+                String id = optionalConfigurationId(uriInfo);
+                return Response.ok(id != null
+                        ? s3Service.getBucketIntelligentTieringConfiguration(bucket, id)
+                        : s3Service.listBucketIntelligentTieringConfigurations(bucket, continuationToken)).build();
             }
 
             // --- Website Hosting Redirection Logic ---
@@ -1443,6 +1507,25 @@ public class S3Controller {
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    /**
+     * Returns the {@code id} query parameter that identifies a bucket configuration sub-resource
+     * ({@code ?inventory&id=}, {@code ?analytics&id=}, {@code ?metrics&id=},
+     * {@code ?intelligent-tiering&id=}), or {@code null} when it is absent. On GET its absence
+     * selects the {@code List*Configurations} operation instead of {@code Get*Configuration}.
+     */
+    private String optionalConfigurationId(UriInfo uriInfo) {
+        String id = uriInfo.getQueryParameters().getFirst("id");
+        return id != null && !id.isBlank() ? id : null;
+    }
+
+    private String configurationId(UriInfo uriInfo) {
+        String id = optionalConfigurationId(uriInfo);
+        if (id == null) {
+            throw new AwsException("InvalidArgument", "The configuration id must not be empty.", 400);
+        }
+        return id;
     }
 
     private Response handlePutBucketNotification(String bucket, byte[] body) {

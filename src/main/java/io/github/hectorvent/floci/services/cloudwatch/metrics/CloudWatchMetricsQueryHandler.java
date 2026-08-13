@@ -6,6 +6,9 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricStream;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricStreamFilter;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricStreamStatisticsConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -45,6 +48,12 @@ public class CloudWatchMetricsQueryHandler {
             case "ListTagsForResource" -> handleListTagsForResource(params, region);
             case "TagResource" -> handleTagResource(params, region);
             case "UntagResource" -> handleUntagResource(params, region);
+            case "PutMetricStream" -> handlePutMetricStream(params, region);
+            case "GetMetricStream" -> handleGetMetricStream(params, region);
+            case "DeleteMetricStream" -> handleDeleteMetricStream(params, region);
+            case "ListMetricStreams" -> handleListMetricStreams(params, region);
+            case "StartMetricStreams" -> handleSetMetricStreamsState(params, region, true);
+            case "StopMetricStreams" -> handleSetMetricStreamsState(params, region, false);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported by CloudWatch Query.", AwsNamespaces.CW, 400);
         };
@@ -264,13 +273,7 @@ public class CloudWatchMetricsQueryHandler {
 
     private Response handleTagResource(MultivaluedMap<String, String> params, String region) {
         String arn = params.getFirst("ResourceARN");
-        Map<String, String> tags = new LinkedHashMap<>();
-        for (int i = 1; ; i++) {
-            String key = params.getFirst("Tags.member." + i + ".Key");
-            if (key == null) break;
-            tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
-        }
-        metricsService.tagResource(arn, tags, region);
+        metricsService.tagResource(arn, parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", null)).build();
     }
 
@@ -284,6 +287,194 @@ public class CloudWatchMetricsQueryHandler {
         }
         metricsService.untagResource(arn, keys, region);
         return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", null)).build();
+    }
+
+    // ──────────────────────────── Metric Streams ────────────────────────────
+
+    private Response handlePutMetricStream(MultivaluedMap<String, String> params, String region) {
+        MetricStream stream = new MetricStream();
+        stream.setName(params.getFirst("Name"));
+        stream.setFirehoseArn(params.getFirst("FirehoseArn"));
+        stream.setRoleArn(params.getFirst("RoleArn"));
+        stream.setOutputFormat(params.getFirst("OutputFormat"));
+        stream.setIncludeLinkedAccountsMetrics(
+                Boolean.parseBoolean(params.getFirst("IncludeLinkedAccountsMetrics")));
+        stream.setIncludeFilters(parseStreamFilters(params, "IncludeFilters"));
+        stream.setExcludeFilters(parseStreamFilters(params, "ExcludeFilters"));
+        stream.setStatisticsConfigurations(parseStatisticsConfigurations(params));
+        stream.setTags(parseTags(params));
+
+        MetricStream stored = metricsService.putMetricStream(stream, region);
+        String xml = new XmlBuilder().elem("Arn", stored.getArn()).build();
+        return Response.ok(AwsQueryResponse.envelope("PutMetricStream", null, xml)).build();
+    }
+
+    private Response handleGetMetricStream(MultivaluedMap<String, String> params, String region) {
+        MetricStream stream = metricsService.getMetricStream(params.getFirst("Name"), region);
+        XmlBuilder xml = new XmlBuilder()
+                .elem("Arn", stream.getArn())
+                .elem("Name", stream.getName())
+                .elem("FirehoseArn", stream.getFirehoseArn())
+                .elem("RoleArn", stream.getRoleArn())
+                .elem("State", stream.getState())
+                .elem("OutputFormat", stream.getOutputFormat())
+                .elem("CreationDate", formatEpochSeconds(stream.getCreationDate()))
+                .elem("LastUpdateDate", formatEpochSeconds(stream.getLastUpdateDate()))
+                .elem("IncludeLinkedAccountsMetrics", stream.isIncludeLinkedAccountsMetrics());
+        appendStreamFilters(xml, "IncludeFilters", stream.getIncludeFilters());
+        appendStreamFilters(xml, "ExcludeFilters", stream.getExcludeFilters());
+        appendStatisticsConfigurations(xml, stream.getStatisticsConfigurations());
+        return Response.ok(AwsQueryResponse.envelope("GetMetricStream", null, xml.build())).build();
+    }
+
+    private Response handleDeleteMetricStream(MultivaluedMap<String, String> params, String region) {
+        metricsService.deleteMetricStream(params.getFirst("Name"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteMetricStream", null)).build();
+    }
+
+    private Response handleListMetricStreams(MultivaluedMap<String, String> params, String region) {
+        List<MetricStream> streams = metricsService.listMetricStreams(region);
+        XmlBuilder xml = new XmlBuilder().start("Entries");
+        for (MetricStream stream : streams) {
+            xml.start("member")
+                    .elem("Arn", stream.getArn())
+                    .elem("Name", stream.getName())
+                    .elem("FirehoseArn", stream.getFirehoseArn())
+                    .elem("State", stream.getState())
+                    .elem("OutputFormat", stream.getOutputFormat())
+                    .elem("CreationDate", formatEpochSeconds(stream.getCreationDate()))
+                    .elem("LastUpdateDate", formatEpochSeconds(stream.getLastUpdateDate()))
+                    .end("member");
+        }
+        xml.end("Entries");
+        return Response.ok(AwsQueryResponse.envelope("ListMetricStreams", null, xml.build())).build();
+    }
+
+    private Response handleSetMetricStreamsState(MultivaluedMap<String, String> params, String region, boolean start) {
+        List<String> names = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("Names.member." + i);
+            if (name == null) {
+                break;
+            }
+            names.add(name);
+        }
+        metricsService.setMetricStreamsState(names, start, region);
+        String action = start ? "StartMetricStreams" : "StopMetricStreams";
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(action, null)).build();
+    }
+
+    private void appendStreamFilters(XmlBuilder xml, String element, List<MetricStreamFilter> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return;
+        }
+        xml.start(element);
+        for (MetricStreamFilter filter : filters) {
+            xml.start("member").elem("Namespace", filter.getNamespace());
+            if (!filter.getMetricNames().isEmpty()) {
+                xml.start("MetricNames");
+                for (String metricName : filter.getMetricNames()) {
+                    xml.elem("member", metricName);
+                }
+                xml.end("MetricNames");
+            }
+            xml.end("member");
+        }
+        xml.end(element);
+    }
+
+    private void appendStatisticsConfigurations(XmlBuilder xml,
+                                                List<MetricStreamStatisticsConfiguration> configurations) {
+        if (configurations == null || configurations.isEmpty()) {
+            return;
+        }
+        xml.start("StatisticsConfigurations");
+        for (MetricStreamStatisticsConfiguration configuration : configurations) {
+            xml.start("member").start("IncludeMetrics");
+            for (var metric : configuration.getIncludeMetrics()) {
+                xml.start("member")
+                        .elem("Namespace", metric.namespace())
+                        .elem("MetricName", metric.metricName())
+                        .end("member");
+            }
+            xml.end("IncludeMetrics").start("AdditionalStatistics");
+            for (String stat : configuration.getAdditionalStatistics()) {
+                xml.elem("member", stat);
+            }
+            xml.end("AdditionalStatistics").end("member");
+        }
+        xml.end("StatisticsConfigurations");
+    }
+
+    private List<MetricStreamFilter> parseStreamFilters(MultivaluedMap<String, String> params, String prefix) {
+        List<MetricStreamFilter> filters = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = prefix + ".member." + i;
+            String namespace = params.getFirst(base + ".Namespace");
+            if (namespace == null) {
+                break;
+            }
+            List<String> metricNames = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String metricName = params.getFirst(base + ".MetricNames.member." + j);
+                if (metricName == null) {
+                    break;
+                }
+                metricNames.add(metricName);
+            }
+            filters.add(new MetricStreamFilter(namespace, metricNames));
+        }
+        return filters;
+    }
+
+    private List<MetricStreamStatisticsConfiguration> parseStatisticsConfigurations(
+            MultivaluedMap<String, String> params) {
+        List<MetricStreamStatisticsConfiguration> configurations = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = "StatisticsConfigurations.member." + i;
+            if (params.getFirst(base + ".IncludeMetrics.member.1.Namespace") == null
+                    && params.getFirst(base + ".AdditionalStatistics.member.1") == null) {
+                break;
+            }
+            MetricStreamStatisticsConfiguration configuration = new MetricStreamStatisticsConfiguration();
+            List<MetricStreamStatisticsConfiguration.IncludeMetric> includeMetrics = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String namespace = params.getFirst(base + ".IncludeMetrics.member." + j + ".Namespace");
+                if (namespace == null) {
+                    break;
+                }
+                includeMetrics.add(new MetricStreamStatisticsConfiguration.IncludeMetric(namespace,
+                        params.getFirst(base + ".IncludeMetrics.member." + j + ".MetricName")));
+            }
+            configuration.setIncludeMetrics(includeMetrics);
+            List<String> additionalStatistics = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String stat = params.getFirst(base + ".AdditionalStatistics.member." + j);
+                if (stat == null) {
+                    break;
+                }
+                additionalStatistics.add(stat);
+            }
+            configuration.setAdditionalStatistics(additionalStatistics);
+            configurations.add(configuration);
+        }
+        return configurations;
+    }
+
+    private Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("Tags.member." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
+        }
+        return tags;
+    }
+
+    private static String formatEpochSeconds(long epochSeconds) {
+        return DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(epochSeconds));
     }
 
     // ──────────────────────────── Parsing Helpers ────────────────────────────

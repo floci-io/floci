@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricStream;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -18,6 +19,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -28,6 +30,7 @@ public class CloudWatchMetricsService {
 
     private final StorageBackend<String, MetricDatum> metricStore;
     private final StorageBackend<String, MetricAlarm> alarmStore;
+    private final StorageBackend<String, MetricStream> metricStreamStore;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -36,14 +39,18 @@ public class CloudWatchMetricsService {
                 new TypeReference<Map<String, MetricDatum>>() {});
         this.alarmStore = storageFactory.create("cloudwatchmetrics", "cwalarms.json",
                 new TypeReference<Map<String, MetricAlarm>>() {});
+        this.metricStreamStore = storageFactory.create("cloudwatchmetrics", "cwmetricstreams.json",
+                new TypeReference<Map<String, MetricStream>>() {});
         this.regionResolver = regionResolver;
     }
 
     CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
                              StorageBackend<String, MetricAlarm> alarmStore,
+                             StorageBackend<String, MetricStream> metricStreamStore,
                              RegionResolver regionResolver) {
         this.metricStore = metricStore;
         this.alarmStore = alarmStore;
+        this.metricStreamStore = metricStreamStore;
         this.regionResolver = regionResolver;
     }
 
@@ -278,12 +285,71 @@ public class CloudWatchMetricsService {
         LOG.infov("SetAlarmState: {0} -> {1}", alarmName, stateValue);
     }
 
+    // ──────────────────────────── Metric Streams ────────────────────────────
+
+    /**
+     * Creates or replaces a metric stream. Floci records the definition only: nothing is ever
+     * delivered to {@code FirehoseArn}. A stream that already exists keeps its creation date
+     * and its tags, matching CloudWatch, which only applies {@code Tags} when the stream is new.
+     */
+    public MetricStream putMetricStream(MetricStream stream, String region) {
+        String key = region + "::" + stream.getName();
+        long now = Instant.now().getEpochSecond();
+        MetricStream existing = metricStreamStore.get(key).orElse(null);
+        if (existing != null) {
+            stream.setCreationDate(existing.getCreationDate());
+            stream.setState(existing.getState());
+            stream.setTags(existing.getTags());
+        } else {
+            stream.setCreationDate(now);
+        }
+        stream.setLastUpdateDate(now);
+        stream.setArn(regionResolver.buildArn("cloudwatch", region, "metric-stream/" + stream.getName()));
+        metricStreamStore.put(key, stream);
+        LOG.infov("PutMetricStream: {0} in {1}", stream.getName(), region);
+        return stream;
+    }
+
+    public MetricStream getMetricStream(String name, String region) {
+        return metricStreamStore.get(region + "::" + name)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Metric stream not found: " + name, 404));
+    }
+
+    public void deleteMetricStream(String name, String region) {
+        metricStreamStore.delete(region + "::" + name);
+        LOG.infov("DeleteMetricStream: {0} in {1}", name, region);
+    }
+
+    public List<MetricStream> listMetricStreams(String region) {
+        return metricStreamStore.scan(k -> k.startsWith(region + "::"))
+                .stream()
+                .sorted(Comparator.comparing(MetricStream::getName))
+                .toList();
+    }
+
+    /** Moves the named streams to {@code running} ({@code start}) or {@code stopped}. */
+    public void setMetricStreamsState(List<String> names, boolean start, String region) {
+        for (String name : names) {
+            MetricStream stream = getMetricStream(name, region);
+            stream.setState(start ? MetricStream.STATE_RUNNING : MetricStream.STATE_STOPPED);
+            stream.setLastUpdateDate(Instant.now().getEpochSecond());
+            metricStreamStore.put(region + "::" + stream.getName(), stream);
+        }
+    }
+
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
-        return alarmStore.scan(k -> k.startsWith(region + "::"))
+        Map<String, String> alarmTags = alarmStore.scan(k -> k.startsWith(region + "::"))
                 .stream()
                 .filter(a -> resourceArn.equals(a.getAlarmArn()))
                 .findFirst()
                 .map(MetricAlarm::getTags)
+                .orElse(null);
+        if (alarmTags != null) {
+            return alarmTags;
+        }
+        return findMetricStreamByArn(resourceArn, region)
+                .map(MetricStream::getTags)
                 .orElse(Map.of());
     }
 
@@ -296,6 +362,10 @@ public class CloudWatchMetricsService {
                     alarm.getTags().putAll(tags);
                     alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
                 });
+        findMetricStreamByArn(resourceArn, region).ifPresent(stream -> {
+            stream.getTags().putAll(tags);
+            metricStreamStore.put(region + "::" + stream.getName(), stream);
+        });
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
@@ -307,6 +377,17 @@ public class CloudWatchMetricsService {
                     tagKeys.forEach(alarm.getTags()::remove);
                     alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
                 });
+        findMetricStreamByArn(resourceArn, region).ifPresent(stream -> {
+            tagKeys.forEach(stream.getTags()::remove);
+            metricStreamStore.put(region + "::" + stream.getName(), stream);
+        });
+    }
+
+    private Optional<MetricStream> findMetricStreamByArn(String resourceArn, String region) {
+        return metricStreamStore.scan(k -> k.startsWith(region + "::"))
+                .stream()
+                .filter(s -> resourceArn.equals(s.getArn()))
+                .findFirst();
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

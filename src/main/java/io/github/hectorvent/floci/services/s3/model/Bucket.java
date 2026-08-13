@@ -5,6 +5,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @RegisterForReflection
@@ -30,6 +31,12 @@ public class Bucket {
     private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
     private String region;
     private WebsiteConfiguration websiteConfiguration;
+    // Per-bucket configuration sub-resources, keyed by their configuration id.
+    // Values are the raw XML documents supplied on PUT so they round-trip verbatim.
+    private Map<String, String> inventoryConfigurations = new LinkedHashMap<>();
+    private Map<String, String> analyticsConfigurations = new LinkedHashMap<>();
+    private Map<String, String> metricsConfigurations = new LinkedHashMap<>();
+    private Map<String, String> intelligentTieringConfigurations = new LinkedHashMap<>();
 
     public Bucket() {
         this.tags = new HashMap<>();
@@ -113,4 +120,25 @@ public class Bucket {
 
     public WebsiteConfiguration getWebsiteConfiguration() { return websiteConfiguration; }
     public void setWebsiteConfiguration(WebsiteConfiguration websiteConfiguration) { this.websiteConfiguration = websiteConfiguration; }
+
+    public Map<String, String> getInventoryConfigurations() { return inventoryConfigurations; }
+    public void setInventoryConfigurations(Map<String, String> inventoryConfigurations) {
+        this.inventoryConfigurations = inventoryConfigurations != null ? inventoryConfigurations : new LinkedHashMap<>();
+    }
+
+    public Map<String, String> getAnalyticsConfigurations() { return analyticsConfigurations; }
+    public void setAnalyticsConfigurations(Map<String, String> analyticsConfigurations) {
+        this.analyticsConfigurations = analyticsConfigurations != null ? analyticsConfigurations : new LinkedHashMap<>();
+    }
+
+    public Map<String, String> getMetricsConfigurations() { return metricsConfigurations; }
+    public void setMetricsConfigurations(Map<String, String> metricsConfigurations) {
+        this.metricsConfigurations = metricsConfigurations != null ? metricsConfigurations : new LinkedHashMap<>();
+    }
+
+    public Map<String, String> getIntelligentTieringConfigurations() { return intelligentTieringConfigurations; }
+    public void setIntelligentTieringConfigurations(Map<String, String> intelligentTieringConfigurations) {
+        this.intelligentTieringConfigurations =
+                intelligentTieringConfigurations != null ? intelligentTieringConfigurations : new LinkedHashMap<>();
+    }
 }
