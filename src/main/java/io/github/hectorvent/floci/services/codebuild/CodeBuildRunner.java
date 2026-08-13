@@ -853,7 +853,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     static String defaultCuratedSubstitute(String osArch) {
         boolean arm = osArch.contains("aarch64") || osArch.contains("arm");
         return arm
-                ? "public.ecr.aws/codebuild/amazonlinux-aarch64-standard:4.0"
+                ? "public.ecr.aws/codebuild/amazonlinux2-aarch64-standard:4.0"
                 : "public.ecr.aws/codebuild/amazonlinux-x86_64-standard:6.0";
     }
 

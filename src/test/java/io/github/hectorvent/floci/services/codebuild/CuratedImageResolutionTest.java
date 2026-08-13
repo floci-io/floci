@@ -50,7 +50,7 @@ class CuratedImageResolutionTest {
     void defaultSubstituteFollowsHostArchitecture() {
         assertEquals("public.ecr.aws/codebuild/amazonlinux-x86_64-standard:6.0",
                 CodeBuildRunner.defaultCuratedSubstitute("amd64"));
-        assertEquals("public.ecr.aws/codebuild/amazonlinux-aarch64-standard:4.0",
+        assertEquals("public.ecr.aws/codebuild/amazonlinux2-aarch64-standard:4.0",
                 CodeBuildRunner.defaultCuratedSubstitute("aarch64"));
     }
 
