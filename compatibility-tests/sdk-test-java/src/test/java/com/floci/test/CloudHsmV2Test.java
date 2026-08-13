@@ -32,12 +32,14 @@ public class CloudHsmV2Test {
         String clusterId = cluster.clusterId();
 
         // 2. Initialize Cluster
-        // Since we are mocking, we can just use the generated CSR or dummy certificates
-        String dummyCert = "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n";
+        DescribeClustersResponse initDescribe = client.describeClusters(r -> r
+                .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
+        String hardwareCert = initDescribe.clusters().get(0).certificates().awsHardwareCertificate();
+
         InitializeClusterResponse initResp = client.initializeCluster(r -> r
                 .clusterId(clusterId)
-                .signedCert(dummyCert)
-                .trustAnchor(dummyCert)
+                .signedCert(hardwareCert)
+                .trustAnchor(hardwareCert)
         );
         
         assertThat(initResp.stateAsString()).isEqualTo("INITIALIZED");
@@ -96,8 +98,11 @@ public class CloudHsmV2Test {
                 .subnetIds("subnet-1", "subnet-2")
         );
         String clusterId = createClusterResponse.cluster().clusterId();
-        String dummyCert = "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n";
-        client.initializeCluster(r -> r.clusterId(clusterId).signedCert(dummyCert).trustAnchor(dummyCert));
+        DescribeClustersResponse describeResp = client.describeClusters(r -> r
+                .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
+        String hardwareCert = describeResp.clusters().get(0).certificates().awsHardwareCertificate();
+
+        client.initializeCluster(r -> r.clusterId(clusterId).signedCert(hardwareCert).trustAnchor(hardwareCert));
         
         Hsm hsm = client.createHsm(r -> r.clusterId(clusterId).availabilityZone("us-east-1b")).hsm();
         

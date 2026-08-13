@@ -104,7 +104,16 @@ public class CloudHsmV2Service {
         cluster.setMode(mode != null ? mode : "FIPS");
         cluster.setNetworkType(networkType != null ? networkType : "IPV4");
         if (backupRetentionPolicy != null) {
-            int val = Integer.parseInt(backupRetentionPolicy.getValue());
+            String brpValue = backupRetentionPolicy.getValue();
+            if (brpValue == null) {
+                throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value is required.", 400);
+            }
+            int val;
+            try {
+                val = Integer.parseInt(brpValue);
+            } catch (NumberFormatException e) {
+                throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value must be an integer.", 400);
+            }
             if (val < 7 || val > 379) {
                 throw new AwsException("CloudHsmInvalidRequestException", "BackupRetentionPolicy Value must be between 7 and 379.", 400);
             }
