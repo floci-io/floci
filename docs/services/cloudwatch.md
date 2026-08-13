@@ -15,6 +15,7 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 |---|---|
 | `CreateLogGroup` | Create a log group |
 | `DeleteLogGroup` | Delete a log group |
+| `PutLogGroupDeletionProtection` | Enable or disable deletion protection for a log group by name or ARN |
 | `DescribeLogGroups` | List log groups |
 | `CreateLogStream` | Create a log stream inside a log group |
 | `DeleteLogStream` | Delete a log stream |
@@ -37,6 +38,10 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `StartQuery` | Start a Logs Insights query (see [Logs Insights](#logs-insights)) |
 | `GetQueryResults` | Get the status and results of a Logs Insights query |
 | `StopQuery` | Stop a query that has not completed yet |
+
+Log group deletion protection defaults to disabled and is persisted with the log group. When it is
+enabled, `DeleteLogGroup` returns `ValidationException` until protection is explicitly disabled
+with `PutLogGroupDeletionProtection`.
 
 Two actions are currently simplified:
 

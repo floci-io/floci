@@ -128,12 +128,23 @@ public class CloudWatchLogsService {
     // ──────────────────────────── Log Groups ────────────────────────────
 
     public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
-        createLogGroupForAccount(null, name, retentionInDays, tags, region);
+        createLogGroup(name, retentionInDays, tags, false, region);
+    }
+
+    public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
+                               boolean deletionProtectionEnabled, String region) {
+        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, region);
     }
 
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, String region) {
+        createLogGroupForAccount(accountId, name, retentionInDays, tags, false, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, boolean deletionProtectionEnabled, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
         }
@@ -146,6 +157,7 @@ public class CloudWatchLogsService {
         group.setLogGroupName(name);
         group.setCreatedTime(System.currentTimeMillis());
         group.setRetentionInDays(retentionInDays);
+        group.setDeletionProtectionEnabled(deletionProtectionEnabled);
         if (tags != null) {
             group.setTags(new HashMap<>(tags));
         }
@@ -155,9 +167,15 @@ public class CloudWatchLogsService {
 
     public void deleteLogGroup(String name, String region) {
         String key = groupKey(region, name);
-        groupStore.get(key)
+        LogGroup group = groupStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + name, 400));
+        if (group.isDeletionProtectionEnabled()) {
+            throw new AwsException("ValidationException",
+                    "The specified log group has deletion protection enabled. "
+                            + "Disable deletion protection before deleting the log group.",
+                    400);
+        }
 
         // Cascade: delete all streams and events for this group
         String streamPrefix = streamKeyPrefix(region, name);
@@ -193,6 +211,15 @@ public class CloudWatchLogsService {
         });
         result.sort(Comparator.comparing(LogGroup::getLogGroupName));
         return result;
+    }
+
+    public void putLogGroupDeletionProtection(String groupName, boolean enabled, String region) {
+        String key = groupKey(region, groupName);
+        LogGroup group = groupStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified log group does not exist: " + groupName, 400));
+        group.setDeletionProtectionEnabled(enabled);
+        groupStore.put(key, group);
     }
 
     public void putRetentionPolicy(String groupName, int days, String region) {
