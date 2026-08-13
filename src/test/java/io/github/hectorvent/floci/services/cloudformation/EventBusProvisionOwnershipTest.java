@@ -58,7 +58,7 @@ class EventBusProvisionOwnershipTest {
                 MAPPER,
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
-                null,
+                null, null,
                 new CloudFormationResourceRegistry(List.of()));
     }
 

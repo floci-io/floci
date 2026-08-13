@@ -45,7 +45,7 @@ class EventBusDeleteOwnershipTest {
                 new ObjectMapper(),
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
-                null,
+                null, null,
                 new CloudFormationResourceRegistry(List.of()));
     }
 
