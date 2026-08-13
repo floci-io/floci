@@ -1274,6 +1274,35 @@ class SwfIntegrationTest {
                 .body("message", equalTo("Invalid token"));
     }
 
+    @Test
+    void listWorkflowTypes_appliesReverseOrderBeforePaging() {
+        String domain = uniqueName("wf-revpaging");
+        registerDomain(domain);
+        for (int i = 0; i < 5; i++) {
+            registerWorkflowType(domain, "Paged" + i, "1.0");
+        }
+
+        // The live service reverses the whole result set and then pages it, so the first
+        // reversed page is the tail of the ascending order rather than a reversed first page.
+        Response first = call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 3,
+                 "reverseOrder": true}
+                """.formatted(domain));
+        first.then()
+                .statusCode(200)
+                .body("typeInfos.workflowType.name", equalTo(List.of("Paged4", "Paged3", "Paged2")))
+                .body("nextPageToken", notNullValue());
+
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 3,
+                 "reverseOrder": true, "nextPageToken": "%s"}
+                """.formatted(domain, first.path("nextPageToken").toString()))
+                .then()
+                .statusCode(200)
+                .body("typeInfos.workflowType.name", equalTo(List.of("Paged1", "Paged0")))
+                .body("nextPageToken", nullValue());
+    }
+
     // ───────────────────────────── Counting and tags ─────────────────────────
 
     @Test
