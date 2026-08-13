@@ -84,6 +84,7 @@ nav:
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - KMS: services/kms.md
+    - CloudHSM v2: services/cloudhsmv2.md
     - Kinesis: services/kinesis.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
