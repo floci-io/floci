@@ -394,7 +394,7 @@ public class S3VectorsController {
         String region = regionResolver.resolveRegion(headers);
         int maxResults = request.maxResults() != null ? request.maxResults() : 0;
         S3VectorsService.ListVectorsResult result = service.listVectors(
-                request.vectorBucketName(), request.indexName(), maxResults, request.nextToken(), region);
+                request.vectorBucketName(), request.indexName(), request.indexArn(), maxResults, request.nextToken(), region);
 
         boolean returnData = request.returnData() != null && request.returnData();
         boolean returnMetadata = request.returnMetadata() != null && request.returnMetadata();
