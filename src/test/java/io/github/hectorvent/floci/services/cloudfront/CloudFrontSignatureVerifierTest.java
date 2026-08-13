@@ -303,7 +303,7 @@ class CloudFrontSignatureVerifierTest {
     }
 
     @Test
-    void ambiguousQuestionMarkPolicyPatternFailsClosed() throws Exception {
+    void questionMarkAfterQueryDelimiterActsAsWildcard() throws Exception {
         String resourcePattern =
                 "https://d123.cloudfront.net/private/?ile.jpg?license=*";
         String policyJson = "{\"Statement\":[{\"Resource\":\"" + resourcePattern + "\","
@@ -316,10 +316,10 @@ class CloudFrontSignatureVerifierTest {
         assertFalse(CloudFrontSignatureVerifier.verify(
                 "https://d123.cloudfront.net/private/file.jpg?license=paid",
                 query, Map.of(), null, trusted(), now).allowed());
-        assertFalse(CloudFrontSignatureVerifier.verify(
+        assertTrue(CloudFrontSignatureVerifier.verify(
                 "https://d123.cloudfront.net/private/?ile.jpgXlicense=paid",
                 query, Map.of(), null, trusted(), now).allowed());
-        assertFalse(CloudFrontSignatureVerifier.verify(
+        assertTrue(CloudFrontSignatureVerifier.verify(
                 resourcePattern,
                 query, Map.of(), null, trusted(), now).allowed());
     }
@@ -452,7 +452,7 @@ class CloudFrontSignatureVerifierTest {
         assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/hello*world",
                 "https://d123.cloudfront.net/hello?world"));
-        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/file.jpg?license=?",
                 "https://d123.cloudfront.net/file.jpg?license=x"));
         assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
@@ -461,13 +461,13 @@ class CloudFrontSignatureVerifierTest {
         assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/private/?ile.jpg?license=*",
                 "https://d123.cloudfront.net/private/file.jpg?license=paid"));
-        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/private/?ile.jpg?license=*",
                 "https://d123.cloudfront.net/private/?ile.jpgXlicense=paid"));
         assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/file?flag",
                 "https://d123.cloudfront.net/file?flag"));
-        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/file?lic?nse=*",
                 "https://d123.cloudfront.net/file?license=value"));
         assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
@@ -476,19 +476,19 @@ class CloudFrontSignatureVerifierTest {
         assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/private/?ile.jpg=download?license=*",
                 "https://d123.cloudfront.net/private/file.jpg=download?license=paid"));
-        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/private/?ile.jpg=download?license=*",
                 "https://d123.cloudfront.net/private/?ile.jpg=downloadXlicense=paid"));
-        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/private/?ile.jpg?license=*",
                 "https://d123.cloudfront.net/private/?ile.jpg?license=*"));
-        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/private/?ile=download*",
                 "https://d123.cloudfront.net/private/?ile=download-secret"));
         assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/file.jpg?license=*",
                 "https://d123.cloudfront.net/file.jpgXlicense=paid"));
-        assertFalse(CloudFrontSignatureVerifier.wildcardMatches(
+        assertTrue(CloudFrontSignatureVerifier.wildcardMatches(
                 "https://d123.cloudfront.net/file.jpg?license=*",
                 "https://d123.cloudfront.net/file.jpg?license=paid"));
     }

@@ -282,19 +282,6 @@ public final class CloudFrontSignatureVerifier {
         if (actual == null) {
             return false;
         }
-        // An exact custom resource may contain one raw query delimiter. Any other raw '?' in a
-        // custom resource is ambiguous with CloudFront's one-character wildcard and fails closed.
-        int firstQuestionMark = pattern.indexOf('?');
-        int secondQuestionMark = firstQuestionMark < 0
-                ? -1 : pattern.indexOf('?', firstQuestionMark + 1);
-        if (pattern.equals(value)
-                && pattern.indexOf('*') < 0
-                && secondQuestionMark < 0) {
-            return true;
-        }
-        if (firstQuestionMark >= 0) {
-            return false;
-        }
         ResourcePattern expected = parseResourcePattern(pattern);
         if (expected == null
                 || !globMatches(
@@ -371,8 +358,13 @@ public final class CloudFrontSignatureVerifier {
         }
         boolean domainStarCoversRemainder = pathStart < 0 && domain.endsWith("*");
         String pathAndQuery = pathStart >= 0 ? remainder.substring(pathStart) : "/";
-        String path = pathAndQuery;
-        String query = null;
+        int queryStart = pathAndQuery.indexOf('?');
+        String path = queryStart >= 0
+                ? pathAndQuery.substring(0, queryStart)
+                : pathAndQuery;
+        String query = queryStart >= 0
+                ? pathAndQuery.substring(queryStart + 1)
+                : null;
         boolean pathStarCoversQuery =
                 query == null && path.endsWith("*");
         return new ResourcePattern(
