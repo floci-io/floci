@@ -26,6 +26,10 @@ services:
     doc: docs/services/cloudformation.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cloudformation/CloudFormationQueryHandler.java, mode: switch }
+  - service: cloudhsmv2
+    doc: docs/services/cloudhsmv2.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/cloudhsmv2/CloudHsmV2JsonHandler.java, mode: switch }
   - service: cloudtrail
     doc: docs/services/cloudtrail.md
     sources:
@@ -97,7 +101,6 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/bcmdataexports/BcmDataExportsJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/ce/CostExplorerJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudcontrol/CloudControlJsonHandler.java }  # no standalone action table yet
-  - { path: src/main/java/io/github/hectorvent/floci/services/cloudhsmv2/CloudHsmV2JsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudmap/CloudMapHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/logs/CloudWatchLogsHandler.java }  # multi-table doc (nested handler)
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java }  # multi-table doc (nested handler)

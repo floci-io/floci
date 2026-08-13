@@ -238,19 +238,32 @@ public class CloudHsmV2Service {
 
     // ──────────────────────────── DeleteHsm ────────────────────────────
 
-    public Hsm deleteHsm(String clusterId, String hsmId, String region) {
+    public Hsm deleteHsm(String clusterId, String hsmId, String eniId, String eniIp, String region) {
+        int count = 0;
+        if (hsmId != null && !hsmId.isEmpty()) count++;
+        if (eniId != null && !eniId.isEmpty()) count++;
+        if (eniIp != null && !eniIp.isEmpty()) count++;
+        
+        if (count != 1) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "Exactly one of HsmId, EniId, or EniIp must be specified", 400);
+        }
+
         Cluster cluster = getCluster(clusterId, region);
 
         Hsm target = null;
         for (Hsm h : cluster.getHsms()) {
-            if (h.getHsmId().equals(hsmId)) {
+            if ((hsmId != null && hsmId.equals(h.getHsmId())) ||
+                (eniId != null && eniId.equals(h.getEniId())) ||
+                (eniIp != null && eniIp.equals(h.getEniIp()))) {
                 target = h;
                 break;
             }
         }
         if (target == null) {
+            String selector = hsmId != null ? hsmId : (eniId != null ? eniId : eniIp);
             throw new AwsException("CloudHsmResourceNotFoundException",
-                    "HSM " + hsmId + " not found in cluster " + clusterId, 404);
+                    "HSM " + selector + " not found in cluster " + clusterId, 400);
         }
 
         cluster.getHsms().remove(target);
