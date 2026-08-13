@@ -83,6 +83,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
+    private static final Map<String, String> SERVICE_LINKED_ROLE_NAMES = Map.of(
+            "autoscaling.amazonaws.com", "AutoScaling",
+            "cloud9.amazonaws.com", "AWSCloud9"
+    );
     private static final String AMAZONAWS_DOMAIN = ".amazonaws.com";
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
@@ -667,6 +671,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * roles on AWS, and a config declaring both must not collide on one name here.
      */
     private static String derivedServiceName(String awsServiceName) {
+        String canonicalName = SERVICE_LINKED_ROLE_NAMES.get(awsServiceName);
+        if (canonicalName != null) {
+            return canonicalName;
+        }
         String core = awsServiceName == null ? "" : awsServiceName;
         if (core.endsWith(AMAZONAWS_DOMAIN)) {
             core = core.substring(0, core.length() - AMAZONAWS_DOMAIN.length());

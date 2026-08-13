@@ -218,6 +218,28 @@ class IamServiceTest {
     // =========================================================================
 
     @Test
+    void createServiceLinkedRoleForEc2AutoScalingUsesAwsCanonicalName() {
+        IamRole role = iamService.createServiceLinkedRole(
+                "autoscaling.amazonaws.com", null, "EC2 Auto Scaling SLR");
+
+        assertEquals("AWSServiceRoleForAutoScaling", role.getRoleName());
+        assertEquals(
+                "arn:aws:iam::000000000000:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+                role.getArn());
+    }
+
+    @Test
+    void createServiceLinkedRoleForCloud9UsesAwsCanonicalName() {
+        IamRole role = iamService.createServiceLinkedRole(
+                "cloud9.amazonaws.com", null, "Cloud9 SLR");
+
+        assertEquals("AWSServiceRoleForAWSCloud9", role.getRoleName());
+        assertEquals(
+                "arn:aws:iam::000000000000:role/aws-service-role/cloud9.amazonaws.com/AWSServiceRoleForAWSCloud9",
+                role.getArn());
+    }
+
+    @Test
     void createAndGetRole() {
         String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
         IamRole role = iamService.createRole("LambdaExec", "/", trustPolicy, "Lambda role", 3600, null);
