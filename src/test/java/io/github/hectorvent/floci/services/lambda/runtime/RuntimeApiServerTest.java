@@ -264,9 +264,9 @@ class RuntimeApiServerTest {
 
     /**
      * Replaces the default {@code server} with a subclass whose test-only overrides
-     * gate the three race points on the caller-supplied Runnables. Used only by the
-     * two race tests below; other tests keep the plain server. Rebinds the port
-     * because start() binds on construction.
+     * gate the four race points on the caller-supplied Runnables. Used only by the
+     * race tests below; other tests keep the plain server. Rebinds the port because
+     * start() binds on construction.
      */
     private void installGatedServer(Runnable beforeEnqueueDispatch,
                                     Runnable beforeNextPathGuard,
@@ -277,6 +277,27 @@ class RuntimeApiServerTest {
             @Override protected void beforeEnqueueDeferredDispatch() { beforeEnqueueDispatch.run(); }
             @Override protected void beforeNextPathDispatchGuard() { beforeNextPathGuard.run(); }
             @Override protected void afterQuiesceStoppedFlagSet() { afterQuiesceStoppedFlag.run(); }
+        };
+        server.start().get(5, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Variant of {@link #installGatedServer} for the ctx-ends-during-dispatch race:
+     * inject state after enqueue()'s dispatch lock is released, observe whether
+     * sendInvocation subsequently ran.
+     */
+    private void installGatedServerWithDispatchObservation(
+            java.util.function.Consumer<io.vertx.ext.web.RoutingContext> afterEnqueueLockReleased,
+            java.util.function.Consumer<String> onSendInvocation) throws Exception {
+        server.stop().get(5, TimeUnit.SECONDS);
+        port = findFreePort();
+        server = new RuntimeApiServer(vertx, port) {
+            @Override protected void afterEnqueueDispatchLockReleased(io.vertx.ext.web.RoutingContext waitingCtx) {
+                afterEnqueueLockReleased.accept(waitingCtx);
+            }
+            @Override protected void beforeSendInvocationWrite(String requestId) {
+                onSendInvocation.accept(requestId);
+            }
         };
         server.start().get(5, TimeUnit.SECONDS);
     }
@@ -430,6 +451,44 @@ class RuntimeApiServerTest {
         InvokeResult result = invocation.getResultFuture().get(2, TimeUnit.SECONDS);
         assertEquals("Unhandled", result.getFunctionError());
         assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+    }
+
+    @Test
+    @Timeout(15)
+    void enqueueDeferredDispatch_ctxEndsAfterLockRelease_dispatchesOrRequeuesAtomically() throws Exception {
+        // Pre-fix, enqueue()'s deferred callback read waitingCtx.response().ended()
+        // twice — once inside the lock deciding requeue, once outside deciding send.
+        // A disconnect between the two reads made neither branch fire and stranded
+        // the invocation in inFlight until the function deadline. Force that
+        // interleaving by ending the ctx from afterEnqueueDispatchLockReleased.
+        java.util.concurrent.atomic.AtomicInteger sendInvocationCalls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        installGatedServerWithDispatchObservation(
+                waitingCtx -> {
+                    if (!waitingCtx.response().ended()) {
+                        waitingCtx.response().setStatusCode(500).end();
+                    }
+                },
+                requestId -> sendInvocationCalls.incrementAndGet());
+
+        HttpRequest parkedRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        httpClient.sendAsync(parkedRequest, HttpResponse.BodyHandlers.ofString());
+        awaitWaitingContexts(1);
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-ctx-ends", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        // Wait for the runOnContext-scheduled dispatch to have fired.
+        Thread.sleep(500);
+
+        assertEquals(1, sendInvocationCalls.get(),
+                "sendInvocation must run exactly once — a zero count means the "
+                        + "invocation was stranded (the pre-fix stranded-inFlight bug).");
     }
 
     @Test

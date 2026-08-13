@@ -163,6 +163,21 @@ public class RuntimeApiServer {
      */
     protected void afterQuiesceStoppedFlagSet() { }
 
+    /**
+     * Test-only: called inside enqueue()'s deferred dispatch after lock release,
+     * before the send/requeue decision is acted on. Test subclasses override to
+     * mutate the parked ctx (e.g. end it) and prove the decision was committed
+     * atomically inside the lock.
+     */
+    protected void afterEnqueueDispatchLockReleased(RoutingContext waitingCtx) { }
+
+    /**
+     * Test-only: called at the top of sendInvocation so tests can observe whether
+     * a dispatch actually ran. Distinguishes "sent to a dead ctx" from "skipped,
+     * stranded" — both leave the invocation in inFlight otherwise.
+     */
+    protected void beforeSendInvocationWrite(String requestId) { }
+
     // Set once an extension reports an init/exit error. Real AWS treats both as fatal to the
     // execution environment, so the container must neither accept new work nor be reused.
     //
@@ -758,23 +773,36 @@ public class RuntimeApiServer {
             final RoutingContext waitingCtx = waitingCtxForInvocation;
             vertx.runOnContext(v -> {
                 beforeEnqueueDeferredDispatch();
-                // Re-check `stopped` under the lock: quiesce() may have run since the
-                // enclosing enqueue() released it, in which case it already completed
-                // the caller's future with ContainerStopped. Dispatching now would
-                // silently discard the runtime's /response.
-                boolean alreadyHandled;
-                boolean shouldRequeue;
+                // Two things could have changed between enqueue()'s lock release and
+                // this deferred dispatch reaching the event loop:
+                //   1. quiesce() may have run — atomic with clearing inFlight and
+                //      completing the caller's future with ContainerStopped. Skip.
+                //   2. The parked client may have disconnected — the ctx is ended and
+                //      writing to it would fail. Requeue for the next /next poller
+                //      and drop this stale inFlight entry (the next poller will re-put
+                //      the invocation into inFlight under its own lock).
+                //
+                // Read waitingCtx.response().ended() ONCE, under the lock, so the
+                // dispatch/requeue decision is committed atomically. Reading it a
+                // second time outside the lock (as the code did previously) let a
+                // disconnect between the two reads produce a stranded inFlight entry:
+                // the inside-lock read saw !ended → no requeue; the outside-lock read
+                // saw ended → no send; neither branch fired.
+                boolean shouldDispatch;
                 synchronized (lock) {
-                    alreadyHandled = stopped;
-                    shouldRequeue = !alreadyHandled && waitingCtx.response().ended();
-                    if (shouldRequeue) {
+                    if (stopped) {
+                        return;
+                    }
+                    if (waitingCtx.response().ended()) {
                         pendingQueue.offer(invocation);
+                        inFlight.remove(invocation.getRequestId());
+                        shouldDispatch = false;
+                    } else {
+                        shouldDispatch = true;
                     }
                 }
-                if (alreadyHandled) {
-                    return;
-                }
-                if (!waitingCtx.response().ended()) {
+                afterEnqueueDispatchLockReleased(waitingCtx);
+                if (shouldDispatch) {
                     sendInvocation(waitingCtx, invocation);
                 }
             });
@@ -808,6 +836,7 @@ public class RuntimeApiServer {
     }
 
     private void sendInvocation(RoutingContext ctx, PendingInvocation invocation) {
+        beforeSendInvocationWrite(invocation.getRequestId());
         // Invariant: callers put the invocation in inFlight under the lock before
         // dispatching, so no inFlight.put here.
         byte[] payload = invocation.getPayload();
