@@ -77,6 +77,14 @@ final class ResponseHeadersPolicyValidator {
         List<?> origins = requiredList(cors, "AccessControlAllowOrigins", true);
 
         validateCorsHeaderPatterns(headers, "AccessControlAllowHeaders entry", true);
+        if (Boolean.parseBoolean(cors.get("AccessControlAllowCredentials").toString())) {
+            for (Object header : headers) {
+                if (header.toString().contains("*")) {
+                    throw invalid("AccessControlAllowHeaders cannot contain wildcards when "
+                            + "AccessControlAllowCredentials is true.");
+                }
+            }
+        }
         Set<String> normalizedMethods = new HashSet<>();
         for (Object method : methods) {
             String configured = requireSafeText(method, "AccessControlAllowMethods entry", 16);

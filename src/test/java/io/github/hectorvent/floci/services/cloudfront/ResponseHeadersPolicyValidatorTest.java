@@ -77,6 +77,21 @@ class ResponseHeadersPolicyValidatorTest {
     }
 
     @Test
+    void rejectsWildcardAllowHeadersWhenCredentialsAreAllowed() {
+        Map<String, Object> exactWildcard = validCors();
+        exactWildcard.put("AccessControlAllowCredentials", "true");
+        exactWildcard.put("AccessControlAllowHeaders", List.of("*"));
+        assertError("InvalidArgument", policy(
+                "credentialed-exact-wildcard", Map.of("CorsConfig", exactWildcard)));
+
+        Map<String, Object> embeddedWildcard = validCors();
+        embeddedWildcard.put("AccessControlAllowCredentials", "true");
+        embeddedWildcard.put("AccessControlAllowHeaders", List.of("x-amz-*"));
+        assertError("InvalidArgument", policy(
+                "credentialed-embedded-wildcard", Map.of("CorsConfig", embeddedWildcard)));
+    }
+
+    @Test
     void rejectsUnsafeDuplicateAndForbiddenHeaders() {
         assertError("InvalidArgument", policy("unsafe-header", Map.of(
                 "CustomHeadersConfig", List.of(Map.of(
