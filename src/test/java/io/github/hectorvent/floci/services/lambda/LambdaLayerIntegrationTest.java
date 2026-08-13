@@ -358,6 +358,7 @@ class LambdaLayerIntegrationTest {
                     "Runtime": "nodejs20.x",
                     "Role": "arn:aws:iam::000000000000:role/lambda-role",
                     "Handler": "index.handler",
+                    "Description": "original description",
                     "Code": { "ZipFile": "%s" },
                     "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:%s:2"]
                 }
@@ -367,10 +368,16 @@ class LambdaLayerIntegrationTest {
         .then()
             .statusCode(201);
 
+        // Description is bundled into the SAME rejected request as the bad layer - this is
+        // the regression check for validating Layers before any field mutation: if Layers
+        // were checked where it's applied (after Description is already set on the live
+        // stored object), this update would be rejected but Description would already have
+        // silently changed.
         given()
             .contentType("application/json")
             .body("""
                 {
+                    "Description": "should not be applied",
                     "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:no-such-layer:1"]
                 }
                 """)
@@ -384,6 +391,7 @@ class LambdaLayerIntegrationTest {
         .when()
             .get("/2015-03-31/functions/" + fnName)
         .then()
+            .body("Configuration.Description", equalTo("original description"))
             .statusCode(200)
             .body("Configuration.Layers", hasSize(1))
             .body("Configuration.Layers[0].Arn", containsString(":layer:" + LAYER_NAME + ":2"));

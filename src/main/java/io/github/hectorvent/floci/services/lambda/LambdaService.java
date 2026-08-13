@@ -484,6 +484,18 @@ public class LambdaService {
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
 
+        // Validated before any field mutation below, not inline where Layers is applied further
+        // down - fn is the live object backing this store entry (InMemoryStorage#get returns the
+        // same reference, not a copy), so validating this late would leave every
+        // already-applied field (Description, Timeout, ...) live on a rejected update, since
+        // nothing here is transactional and there's a single save() at the very end.
+        @SuppressWarnings("unchecked")
+        List<String> layerList = request.containsKey("Layers") && request.get("Layers") instanceof List
+                ? (List<String>) request.get("Layers") : null;
+        if (request.containsKey("Layers")) {
+            validateLayersResolvable(layerList);
+        }
+
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (request.get("VpcConfig") instanceof Map<?, ?>) {
             @SuppressWarnings("unchecked")
@@ -566,10 +578,6 @@ public class LambdaService {
         }
 
         if (request.containsKey("Layers")) {
-            @SuppressWarnings("unchecked")
-            List<String> layerList = request.get("Layers") instanceof List
-                    ? (List<String>) request.get("Layers") : null;
-            validateLayersResolvable(layerList);
             fn.setLayers(layerList != null ? new ArrayList<>(layerList) : new ArrayList<>());
         }
 
