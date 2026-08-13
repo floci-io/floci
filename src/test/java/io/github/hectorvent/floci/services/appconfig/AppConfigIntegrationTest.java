@@ -346,7 +346,7 @@ class AppConfigIntegrationTest {
     }
 
     @Test @Order(24)
-    void tagExtensionAndExtensionAssociationArnsAreAcceptedNotRejected() {
+    void listTagsForExtensionAndExtensionAssociationArnsIsAcceptedNotRejected() {
         String extensionArn = "arn:aws:appconfig:us-east-1:000000000000:extension/some-extension-id";
         String associationArn = "arn:aws:appconfig:us-east-1:000000000000:extensionassociation/some-association-id";
         given()

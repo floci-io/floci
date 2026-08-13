@@ -22,11 +22,10 @@ import java.util.Set;
  *   <li>{@code arn:aws:appconfig:<region>:<account>:extension/<extensionId>}
  *   <li>{@code arn:aws:appconfig:<region>:<account>:extensionassociation/<associationId>}
  * </ul>
- * Only application-level tags are stored; every other resource type above is a real,
- * taggable AppConfig resource per the API (unlike e.g. hostedconfigurationversion, which AWS
- * does not support tagging for at all), so its ARN shape is accepted, but the tag call itself
- * is a no-op - this satisfies callers (e.g. Terraform's AWS provider) that read tags back after
- * a write without erroring on a resource type Floci doesn't yet persist tags for.
+ * Only application-level tags are actually stored; every other recognized ARN shape above is
+ * accepted (not rejected with a 400) but the tag call itself is a no-op - this satisfies callers
+ * (e.g. Terraform's AWS provider) that read tags back after a write without erroring on a resource
+ * type Floci doesn't yet persist tags for.
  */
 @ApplicationScoped
 public class AppConfigTagHandler implements TagHandler {
