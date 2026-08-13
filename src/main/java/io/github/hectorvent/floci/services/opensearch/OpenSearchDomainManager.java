@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
@@ -98,18 +99,34 @@ public class OpenSearchDomainManager {
         LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
                 domain.getDomainName(), domain.getEngineVersion(), image);
 
-        int hostPort = portAllocator.allocate(
-                config.services().opensearch().proxyBasePort(),
-                config.services().opensearch().proxyMaxPort());
-
         lifecycleManager.removeIfExists(containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("discovery.type", "single-node")
-                .withPortBinding(OPENSEARCH_PORT, hostPort)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation();
+
+        // Container-name DNS only resolves on a user-defined Docker network, and
+        // nothing in this codebase's own container-orchestration idiom guarantees
+        // the spawned OpenSearch container and Floci itself land on one together
+        // (see withDockerNetwork's own fallback chain) — Floci's default `docker
+        // run` invocation leaves both on the anonymous default bridge, which does
+        // IP routing between containers but no by-name resolution. Every other
+        // container-backed service here (Neptune, MemoryDB, RDS) already sidesteps
+        // this by addressing its backend via the container's own resolved IP
+        // (ContainerLifecycleManager.EndpointInfo) rather than its Docker name; see
+        // NeptuneContainerManager.start / MemoryDbContainerManager.start. This
+        // domain's own container follows the same pattern below instead of the
+        // name-based URL construction it used before.
+        if (!containerDetector.isRunningInContainer()) {
+            int hostPort = portAllocator.allocate(
+                    config.services().opensearch().proxyBasePort(),
+                    config.services().opensearch().proxyMaxPort());
+            specBuilder.withPortBinding(OPENSEARCH_PORT, hostPort);
+        } else {
+            specBuilder.withExposedPort(OPENSEARCH_PORT);
+        }
 
         applyEngineEnv(specBuilder, domain.getEngineVersion());
 
@@ -140,19 +157,19 @@ public class OpenSearchDomainManager {
         }
         domain.setContainerId(info.containerId());
 
-        if (containerDetector.isRunningInContainer()) {
-            domain.setEndpoint("http://" + containerName + ":" + OPENSEARCH_PORT);
-        } else {
-            domain.setEndpoint("http://localhost:" + hostPort);
-        }
+        EndpointInfo endpoint = info.getEndpoint(OPENSEARCH_PORT);
+        domain.setEndpoint("http://" + endpoint.host() + ":" + endpoint.port());
 
-        LOG.infov("OpenSearch container {0} started for domain {1} on port {2}",
-                info.containerId(), domain.getDomainName(), String.valueOf(hostPort));
+        LOG.infov("OpenSearch container {0} started for domain {1} at {2}",
+                info.containerId(), domain.getDomainName(), endpoint);
     }
 
     public boolean isReady(Domain domain) {
-        String containerName = containerName(domain);
-        String url = "http://" + containerName + ":" + OPENSEARCH_PORT + "/_cluster/health";
+        String endpoint = domain.getEndpoint();
+        if (endpoint == null || endpoint.isBlank()) {
+            return false;
+        }
+        String url = endpoint + "/_cluster/health";
         try {
             HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
             conn.setConnectTimeout(2000);
