@@ -89,6 +89,7 @@ public class ApiGatewayExecuteController {
     private final WebSocketConnectionManager webSocketConnectionManager;
     private final ElbV2Service elbV2Service;
     private final SqsQueryHandler sqsQueryHandler;
+    private final ApiGatewayExecuteRouteContext routeContext;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -97,7 +98,8 @@ public class ApiGatewayExecuteController {
                                        AwsServiceRouter serviceRouter,
                                        WebSocketConnectionManager webSocketConnectionManager,
                                        ElbV2Service elbV2Service,
-                                       SqsQueryHandler sqsQueryHandler) {
+                                       SqsQueryHandler sqsQueryHandler,
+                                       ApiGatewayExecuteRouteContext routeContext) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -108,6 +110,7 @@ public class ApiGatewayExecuteController {
         this.webSocketConnectionManager = webSocketConnectionManager;
         this.elbV2Service = elbV2Service;
         this.sqsQueryHandler = sqsQueryHandler;
+        this.routeContext = routeContext;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -245,30 +248,33 @@ public class ApiGatewayExecuteController {
     Response dispatch(String httpMethod, String apiId, String stageName,
                               String proxy, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         String region = regionResolver.resolveRegion(headers);
-
-        // Check if this is a v2 (HTTP API) or v1 (REST API)
-        boolean isV2 = false;
-        try {
-            apiGatewayV2Service.getApi(region, apiId);
-            isV2 = true;
-        } catch (AwsException ignored) {
-            // Not a v2 API — fall through to v1 handling
+        String httpApiRegion = routeContext.httpApiRegion();
+        if (httpApiRegion != null) {
+            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, httpApiRegion);
         }
 
-        if (isV2) {
-            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, region);
-        }
-
-        // Resolve region for unsigned data-plane requests
+        String preferredRegion = region;
         String auth = headers.getHeaderString("Authorization");
         if (auth == null || auth.isBlank()) {
             region = apiGatewayService.resolveRestApiRegion(region, apiId);
         }
 
-        // Verify API and stage exist
-        Stage stage;
         try {
             apiGatewayService.getRestApi(region, apiId);
+        } catch (AwsException restApiError) {
+            String v2Region = apiGatewayV2Service.resolveApiRegion(preferredRegion, apiId);
+            try {
+                apiGatewayV2Service.getApi(v2Region, apiId);
+                return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, v2Region);
+            } catch (AwsException ignored) {
+                return Response.status(restApiError.getHttpStatus())
+                        .entity(jsonMessage(restApiError.getMessage()))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+        }
+
+        Stage stage;
+        try {
             stage = apiGatewayService.getStage(region, apiId, stageName);
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus())
@@ -1262,6 +1268,22 @@ public class ApiGatewayExecuteController {
     private Response dispatchV2(String httpMethod, String apiId, String stageName,
                                 String proxy, HttpHeaders headers, UriInfo uriInfo,
                                 byte[] body, String region) {
+        // disableExecuteApiEndpoint is enforced here rather than in the caller because both the
+        // host-based route (*.execute-api.localhost.*, already rejected by ApiGatewayExecuteApiHostFilter)
+        // and the direct /execute-api/{apiId}/{stage}/... route land here. Checking at the single
+        // choke point keeps the two entry points from disagreeing about whether an API is invokable.
+        // A missing API is not this method's error to report — findMatchingRoute below 404s.
+        try {
+            if (apiGatewayV2Service.getApi(region, apiId).isDisableExecuteApiEndpoint()) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity(jsonMessage("Not Found"))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+        } catch (AwsException e) {
+            LOG.debugv(e, "HTTP API lookup failed before execute-api dispatch: apiId={0}, region={1}",
+                    apiId, region);
+        }
+
         String path = "/" + (proxy == null ? "" : proxy);
 
         Route route = apiGatewayV2Service.findMatchingRoute(region, apiId, httpMethod, path);
@@ -1316,7 +1338,7 @@ public class ApiGatewayExecuteController {
 
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, stageName, headers, uriInfo, body, requestId);
+                apiId, region, stageName, headers, uriInfo, body, requestId);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1882,7 +1904,7 @@ public class ApiGatewayExecuteController {
     }
 
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
-                                     String apiId, String stageName,
+                                     String apiId, String region, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
         ObjectNode event = objectMapper.createObjectNode();
@@ -1915,7 +1937,7 @@ public class ApiGatewayExecuteController {
         ObjectNode ctx = event.putObject("requestContext");
         ctx.put("accountId", regionResolver.getAccountId());
         ctx.put("apiId", apiId);
-        ctx.put("domainName", apiId + ".execute-api.us-east-1.amazonaws.com");
+        ctx.put("domainName", apiId + ".execute-api." + region + ".amazonaws.com");
         ctx.put("domainPrefix", apiId);
         ctx.put("requestId", requestId);
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
