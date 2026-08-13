@@ -204,10 +204,38 @@ class S3VectorsIntegrationTest {
                     "vectorBucketName": "%s",
                     "indexName": "%s",
                     "queryVector": {
-                        "float32": [1.0, 0.1, 0.0]
+                        "float32": [1.0, 0.0, 0.0]
                     },
-                    "topK": 1,
-                    "returnMetadata": true
+                    "topK": 2,
+                    "returnMetadata": true,
+                    "returnDistance": true
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/QueryVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(2))
+            .body("vectors[0].key", equalTo("v1"))
+            .body("vectors[0].distance", equalTo(0.0f))
+            .body("vectors[0].metadata.label", equalTo("first"))
+            .body("vectors[1].key", equalTo("v2"))
+            .body("vectors[1].distance", equalTo(1.0f));
+    }
+
+    @Test
+    @Order(10)
+    void queryVectors_withoutReturnDistance_omitsDistance() {
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "queryVector": {
+                        "float32": [1.0, 0.0, 0.0]
+                    },
+                    "topK": 1
                 }
                 """.formatted(BUCKET_NAME, INDEX_NAME))
         .when()
@@ -215,13 +243,11 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200)
             .body("vectors", hasSize(1))
-            .body("vectors[0].key", equalTo("v1"))
-            .body("vectors[0].distance", notNullValue())
-            .body("vectors[0].metadata.label", equalTo("first"));
+            .body("vectors[0]", not(hasKey("distance")));
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void deleteVectors() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -256,7 +282,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void deleteIndex() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -287,7 +313,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void deleteVectorBucket() {
         given()
             .contentType(JSON_CONTENT_TYPE)
