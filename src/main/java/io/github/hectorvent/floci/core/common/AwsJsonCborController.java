@@ -21,6 +21,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayOutputStream;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Generic dispatcher for all AWS services that use the application/cbor protocol,
@@ -182,9 +183,15 @@ public class AwsJsonCborController {
         LOG.debugv("Smithy RPC v2 CBOR: service={0}, operation={1}", serviceId, operation);
 
         try {
-            JsonNode request = (body != null && body.length > 0)
-                    ? CBOR_MAPPER.readTree(body)
-                    : objectMapper.createObjectNode();
+            JsonNode request;
+            if (body != null && body.length > 0) {
+                if( httpHeaders.getRequestHeader("Content-encoding") != null && httpHeaders.getRequestHeader("Content-Encoding").contains("gzip")) {
+                    body = decodeBody(body);
+                }
+                request = CBOR_MAPPER.readTree(body);
+            } else {
+                request = objectMapper.createObjectNode();
+            }
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = dispatchCbor(serviceId, operation, request, region);
@@ -279,6 +286,17 @@ public class AwsJsonCborController {
             LOG.error("Error processing CBOR request: " + serviceKey + "." + action, e);
             return Response.status(500).build();
         }
+    }
+
+    private byte[] decodeBody(byte[] compressed) throws Exception {
+        GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int len;
+        while ((len = gis.read(buffer)) != -1) {
+            out.write(buffer, 0, len);
+        }
+        return out.toByteArray();
     }
 
     /**
