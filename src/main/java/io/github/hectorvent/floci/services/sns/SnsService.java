@@ -57,6 +57,8 @@ public class SnsService implements Resettable {
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
     private static final int MAX_PUBLISH_SIZE = 262_144;
     private static final int PUSH_CAPTURE_LIMIT = 1000;
+    private static final String CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC =
+            "aws-controltower-AggregateSecurityNotifications";
     private static final List<String> PENDING_CONFIRMATION_PROTOCOLS =
             List.of("http", "https", "email", "email-json", "sms");
     /** Mobile-push platforms Floci mocks. iOS and Android only — anything else is rejected. */
@@ -255,7 +257,7 @@ public class SnsService implements Resettable {
 
     public Subscription subscribe(String topicArn, String protocol, String endpoint, String region, Map<String, String> attributes) {
         String topicKey = topicKey(region, topicArn);
-        if (topicStore.get(topicKey).isEmpty()) {
+        if (topicStore.get(topicKey).isEmpty() && !ensureControlTowerManagedTopic(topicArn, region)) {
             throw new AwsException("NotFound", "Topic does not exist.", 404);
         }
         if (protocol == null || protocol.isBlank()) {
@@ -301,6 +303,16 @@ public class SnsService implements Resettable {
         }
 
         return subscription;
+    }
+
+    private boolean ensureControlTowerManagedTopic(String topicArn, String region) {
+        String expectedArn = regionResolver.buildArn(
+                "sns", region, CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC);
+        if (!expectedArn.equals(topicArn)) {
+            return false;
+        }
+        createTopic(CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC, Map.of(), Map.of(), region);
+        return true;
     }
 
     public String confirmSubscription(String topicArn, String token, String region) {
