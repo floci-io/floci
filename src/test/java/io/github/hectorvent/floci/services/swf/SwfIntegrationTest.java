@@ -8,7 +8,10 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasItem;
@@ -18,6 +21,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end coverage of the SWF wire protocol: registration, the decider/worker
@@ -1161,6 +1165,113 @@ class SwfIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("com.amazonaws.swf.base.model#UnknownResourceFault"))
                 .body("message", equalTo("Unknown activity, scheduledEventId = 5"));
+    }
+
+    @Test
+    void listWorkflowTypes_appliesMaximumPageSizeAndNextPageToken() {
+        String domain = uniqueName("wf-paging");
+        registerDomain(domain);
+        for (int i = 0; i < 5; i++) {
+            registerWorkflowType(domain, "Paged" + i, "1.0");
+        }
+
+        Response first = call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 2}
+                """.formatted(domain));
+        first.then()
+                .statusCode(200)
+                .body("typeInfos.size()", equalTo(2))
+                .body("nextPageToken", notNullValue());
+
+        String token = first.path("nextPageToken");
+        Response second = call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 2,
+                 "nextPageToken": "%s"}
+                """.formatted(domain, token));
+        second.then()
+                .statusCode(200)
+                .body("typeInfos.size()", equalTo(2))
+                .body("nextPageToken", notNullValue());
+
+        // Page 2 must not repeat page 1.
+        List<String> firstNames = first.path("typeInfos.workflowType.name");
+        List<String> secondNames = second.path("typeInfos.workflowType.name");
+        assertTrue(java.util.Collections.disjoint(firstNames, secondNames),
+                "page 2 repeated page 1: " + firstNames + " / " + secondNames);
+
+        // The final page carries no token, even when it is exactly full.
+        Response third = call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 2,
+                 "nextPageToken": "%s"}
+                """.formatted(domain, second.path("nextPageToken").toString()));
+        third.then()
+                .statusCode(200)
+                .body("typeInfos.size()", equalTo(1))
+                .body("nextPageToken", nullValue());
+
+        // An absent maximumPageSize returns everything.
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED"}
+                """.formatted(domain))
+                .then()
+                .body("typeInfos.size()", equalTo(5))
+                .body("nextPageToken", nullValue());
+    }
+
+    @Test
+    void listActivityTypesAndListDomains_paginateTheSameWay() {
+        String domain = uniqueName("act-paging");
+        registerDomain(domain);
+        for (int i = 0; i < 3; i++) {
+            registerActivityType(domain, "PagedAct" + i, "1.0");
+        }
+
+        Response page = call("ListActivityTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 2}
+                """.formatted(domain));
+        page.then()
+                .statusCode(200)
+                .body("typeInfos.size()", equalTo(2))
+                .body("nextPageToken", notNullValue());
+
+        call("ListActivityTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 2,
+                 "nextPageToken": "%s"}
+                """.formatted(domain, page.path("nextPageToken").toString()))
+                .then()
+                .body("typeInfos.size()", equalTo(1))
+                .body("nextPageToken", nullValue());
+
+        // At least the domain just registered exists, so page size 1 must cap the listing.
+        call("ListDomains", """
+                {"registrationStatus": "REGISTERED", "maximumPageSize": 1}
+                """)
+                .then()
+                .statusCode(200)
+                .body("domainInfos.size()", equalTo(1));
+    }
+
+    @Test
+    void listOperations_rejectAnOversizedPageSizeAndACorruptToken() {
+        String domain = uniqueName("paging-validation");
+        registerDomain(domain);
+        registerWorkflowType(domain, "TestWf", "1.0");
+
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "maximumPageSize": 1001}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazon.coral.validate#ValidationException"))
+                .body("message", containsString("less than or equal to 1000"));
+
+        call("ListWorkflowTypes", """
+                {"domain": "%s", "registrationStatus": "REGISTERED", "nextPageToken": "garbage"}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazon.coral.validate#ValidationException"))
+                .body("message", equalTo("Invalid token"));
     }
 
     // ───────────────────────────── Counting and tags ─────────────────────────

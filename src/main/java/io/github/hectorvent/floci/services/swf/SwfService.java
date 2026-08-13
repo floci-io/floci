@@ -43,7 +43,7 @@ import java.util.function.Predicate;
  *
  * <p>Event ordering. Every state transition appends to the execution's history under the
  * execution's monotonic {@code nextEventId}. All mutation is serialized per domain via
- * {@link #domainLock(String)} because deciders and workers poll concurrently, and a
+ * {@link #domainLock(String, String)} because deciders and workers poll concurrently, and a
  * torn history (two events sharing an id, or an activity closing twice) is
  * indistinguishable from corruption to an SDK-driven decider.
  *
@@ -65,6 +65,8 @@ public class SwfService implements Resettable {
 
     private static final int MAX_TAGS = 50;
     private static final int DEFAULT_HISTORY_PAGE_SIZE = 1000;
+    /** SWF caps maximumPageSize at 1000 on the registration lists. */
+    private static final int MAX_REGISTRATION_PAGE_SIZE = 1000;
 
     private final StorageBackend<String, SwfDomain> domainStore;
     private final StorageBackend<String, SwfWorkflowType> workflowTypeStore;
@@ -114,7 +116,7 @@ public class SwfService implements Resettable {
         if (tags != null && tags.size() > MAX_TAGS) {
             throw SwfFaults.fault(SwfConstants.TOO_MANY_TAGS, name);
         }
-        if (domainStore.get(name).isPresent()) {
+        if (domainStore.get(domainKey(region, name)).isPresent()) {
             throw SwfFaults.domainAlreadyExists(name);
         }
 
@@ -127,13 +129,13 @@ public class SwfService implements Resettable {
         if (tags != null) {
             domain.getTags().putAll(tags);
         }
-        domainStore.put(name, domain);
-        LOG.debugv("Registered SWF domain {0}", name);
+        domainStore.put(domainKey(region, name), domain);
+        LOG.debugv("Registered SWF domain {0} in {1}", name, region);
     }
 
-    public SwfDomain describeDomain(String name) {
+    public SwfDomain describeDomain(String region, String name) {
         requireName(name, "name");
-        return domainStore.get(name).orElseThrow(() -> SwfFaults.unknownDomain(name));
+        return domainStore.get(domainKey(region, name)).orElseThrow(() -> SwfFaults.unknownDomain(name));
     }
 
     /**
@@ -141,50 +143,51 @@ public class SwfService implements Resettable {
      * readable — SWF only rejects registration and execution-starting operations on them —
      * so the deprecation check lives at those call sites instead of here.
      */
-    private SwfDomain requireDomain(String name) {
+    private SwfDomain requireDomain(String region, String name) {
         requireName(name, "domain");
-        return domainStore.get(name).orElseThrow(() -> SwfFaults.unknownDomain(name));
+        return domainStore.get(domainKey(region, name)).orElseThrow(() -> SwfFaults.unknownDomain(name));
     }
 
-    public List<SwfDomain> listDomains(String registrationStatus) {
+    public List<SwfDomain> listDomains(String region, String registrationStatus) {
         String status = requireRegistrationStatus(registrationStatus);
-        List<SwfDomain> domains = domainStore.scan(k -> true);
+        String prefix = region + ":";
+        List<SwfDomain> domains = domainStore.scan(k -> k.startsWith(prefix));
         domains.removeIf(d -> !status.equals(d.getStatus()));
         domains.sort(Comparator.comparing(SwfDomain::getName));
         return domains;
     }
 
-    public void deprecateDomain(String name) {
-        SwfDomain domain = requireDomain(name);
+    public void deprecateDomain(String region, String name) {
+        SwfDomain domain = requireDomain(region, name);
         if (domain.isDeprecated()) {
             throw SwfFaults.domainDeprecated(name);
         }
         domain.setStatus(SwfConstants.STATUS_DEPRECATED);
         domain.setDeprecationDate(now());
-        domainStore.put(name, domain);
+        domainStore.put(domainKey(region, name), domain);
     }
 
-    public void undeprecateDomain(String name) {
-        SwfDomain domain = requireDomain(name);
+    public void undeprecateDomain(String region, String name) {
+        SwfDomain domain = requireDomain(region, name);
         if (!domain.isDeprecated()) {
             throw SwfFaults.domainAlreadyExists(name);
         }
         domain.setStatus(SwfConstants.STATUS_REGISTERED);
         domain.setDeprecationDate(null);
-        domainStore.put(name, domain);
+        domainStore.put(domainKey(region, name), domain);
     }
 
     // ───────────────────────────── Workflow types ────────────────────────────
 
-    public void registerWorkflowType(String domainName, SwfWorkflowType type) {
-        SwfDomain domain = requireDomain(domainName);
+    public void registerWorkflowType(String region, String domainName, SwfWorkflowType type) {
+        SwfDomain domain = requireDomain(region, domainName);
         if (domain.isDeprecated()) {
             throw SwfFaults.domainDeprecated(domainName);
         }
         requireName(type.getName(), "name");
         requireName(type.getVersion(), "version");
 
-        String key = typeKey(domainName, type.getName(), type.getVersion());
+        String key = typeKey(region, domainName, type.getName(), type.getVersion());
         if (workflowTypeStore.get(key).isPresent()) {
             throw SwfFaults.workflowTypeAlreadyExists(type.getName(), type.getVersion());
         }
@@ -193,23 +196,23 @@ public class SwfService implements Resettable {
         workflowTypeStore.put(key, type);
     }
 
-    public SwfWorkflowType describeWorkflowType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        return findWorkflowType(domainName, name, version);
+    public SwfWorkflowType describeWorkflowType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        return findWorkflowType(region, domainName, name, version);
     }
 
-    private SwfWorkflowType findWorkflowType(String domainName, String name, String version) {
+    private SwfWorkflowType findWorkflowType(String region, String domainName, String name, String version) {
         requireName(name, "workflowType.name");
         requireName(version, "workflowType.version");
-        return workflowTypeStore.get(typeKey(domainName, name, version))
+        return workflowTypeStore.get(typeKey(region, domainName, name, version))
                 .orElseThrow(() -> SwfFaults.unknownWorkflowType(name, version));
     }
 
-    public List<SwfWorkflowType> listWorkflowTypes(String domainName, String name,
+    public List<SwfWorkflowType> listWorkflowTypes(String region, String domainName, String name,
                                                    String registrationStatus, boolean reverseOrder) {
-        requireDomain(domainName);
+        requireDomain(region, domainName);
         String status = requireRegistrationStatus(registrationStatus);
-        String prefix = domainName + "/";
+        String prefix = region + ":" + domainName + "/";
         List<SwfWorkflowType> types = workflowTypeStore.scan(k -> k.startsWith(prefix));
         types.removeIf(t -> !status.equals(t.getStatus()));
         if (name != null && !name.isEmpty()) {
@@ -222,49 +225,49 @@ public class SwfService implements Resettable {
         return types;
     }
 
-    public void deprecateWorkflowType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        SwfWorkflowType type = findWorkflowType(domainName, name, version);
+    public void deprecateWorkflowType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        SwfWorkflowType type = findWorkflowType(region, domainName, name, version);
         if (type.isDeprecated()) {
             throw SwfFaults.workflowTypeDeprecated(name, version);
         }
         type.setStatus(SwfConstants.STATUS_DEPRECATED);
         type.setDeprecationDate(now());
-        workflowTypeStore.put(typeKey(domainName, name, version), type);
+        workflowTypeStore.put(typeKey(region, domainName, name, version), type);
     }
 
-    public void undeprecateWorkflowType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        SwfWorkflowType type = findWorkflowType(domainName, name, version);
+    public void undeprecateWorkflowType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        SwfWorkflowType type = findWorkflowType(region, domainName, name, version);
         if (!type.isDeprecated()) {
             throw SwfFaults.workflowTypeAlreadyExists(name, version);
         }
         type.setStatus(SwfConstants.STATUS_REGISTERED);
         type.setDeprecationDate(null);
-        workflowTypeStore.put(typeKey(domainName, name, version), type);
+        workflowTypeStore.put(typeKey(region, domainName, name, version), type);
     }
 
     /** SWF only deletes a type that is already deprecated. */
-    public void deleteWorkflowType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        SwfWorkflowType type = findWorkflowType(domainName, name, version);
+    public void deleteWorkflowType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        SwfWorkflowType type = findWorkflowType(region, domainName, name, version);
         if (!type.isDeprecated()) {
             throw SwfFaults.typeNotDeprecated();
         }
-        workflowTypeStore.delete(typeKey(domainName, name, version));
+        workflowTypeStore.delete(typeKey(region, domainName, name, version));
     }
 
     // ───────────────────────────── Activity types ────────────────────────────
 
-    public void registerActivityType(String domainName, SwfActivityType type) {
-        SwfDomain domain = requireDomain(domainName);
+    public void registerActivityType(String region, String domainName, SwfActivityType type) {
+        SwfDomain domain = requireDomain(region, domainName);
         if (domain.isDeprecated()) {
             throw SwfFaults.domainDeprecated(domainName);
         }
         requireName(type.getName(), "name");
         requireName(type.getVersion(), "version");
 
-        String key = typeKey(domainName, type.getName(), type.getVersion());
+        String key = typeKey(region, domainName, type.getName(), type.getVersion());
         if (activityTypeStore.get(key).isPresent()) {
             throw SwfFaults.activityTypeAlreadyExists(type.getName(), type.getVersion());
         }
@@ -273,23 +276,23 @@ public class SwfService implements Resettable {
         activityTypeStore.put(key, type);
     }
 
-    public SwfActivityType describeActivityType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        return findActivityType(domainName, name, version);
+    public SwfActivityType describeActivityType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        return findActivityType(region, domainName, name, version);
     }
 
-    private SwfActivityType findActivityType(String domainName, String name, String version) {
+    private SwfActivityType findActivityType(String region, String domainName, String name, String version) {
         requireName(name, "activityType.name");
         requireName(version, "activityType.version");
-        return activityTypeStore.get(typeKey(domainName, name, version))
+        return activityTypeStore.get(typeKey(region, domainName, name, version))
                 .orElseThrow(() -> SwfFaults.unknownActivityType(name, version));
     }
 
-    public List<SwfActivityType> listActivityTypes(String domainName, String name,
+    public List<SwfActivityType> listActivityTypes(String region, String domainName, String name,
                                                    String registrationStatus, boolean reverseOrder) {
-        requireDomain(domainName);
+        requireDomain(region, domainName);
         String status = requireRegistrationStatus(registrationStatus);
-        String prefix = domainName + "/";
+        String prefix = region + ":" + domainName + "/";
         List<SwfActivityType> types = activityTypeStore.scan(k -> k.startsWith(prefix));
         types.removeIf(t -> !status.equals(t.getStatus()));
         if (name != null && !name.isEmpty()) {
@@ -302,47 +305,47 @@ public class SwfService implements Resettable {
         return types;
     }
 
-    public void deprecateActivityType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        SwfActivityType type = findActivityType(domainName, name, version);
+    public void deprecateActivityType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        SwfActivityType type = findActivityType(region, domainName, name, version);
         if (type.isDeprecated()) {
             throw SwfFaults.activityTypeDeprecated(name, version);
         }
         type.setStatus(SwfConstants.STATUS_DEPRECATED);
         type.setDeprecationDate(now());
-        activityTypeStore.put(typeKey(domainName, name, version), type);
+        activityTypeStore.put(typeKey(region, domainName, name, version), type);
     }
 
-    public void undeprecateActivityType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        SwfActivityType type = findActivityType(domainName, name, version);
+    public void undeprecateActivityType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        SwfActivityType type = findActivityType(region, domainName, name, version);
         if (!type.isDeprecated()) {
             throw SwfFaults.activityTypeAlreadyExists(name, version);
         }
         type.setStatus(SwfConstants.STATUS_REGISTERED);
         type.setDeprecationDate(null);
-        activityTypeStore.put(typeKey(domainName, name, version), type);
+        activityTypeStore.put(typeKey(region, domainName, name, version), type);
     }
 
-    public void deleteActivityType(String domainName, String name, String version) {
-        requireDomain(domainName);
-        SwfActivityType type = findActivityType(domainName, name, version);
+    public void deleteActivityType(String region, String domainName, String name, String version) {
+        requireDomain(region, domainName);
+        SwfActivityType type = findActivityType(region, domainName, name, version);
         if (!type.isDeprecated()) {
             throw SwfFaults.typeNotDeprecated();
         }
-        activityTypeStore.delete(typeKey(domainName, name, version));
+        activityTypeStore.delete(typeKey(region, domainName, name, version));
     }
 
     // ─────────────────────────── Execution lifecycle ─────────────────────────
 
     public String startWorkflowExecution(StartWorkflowExecutionRequest request) {
-        SwfDomain domain = requireDomain(request.domain());
+        SwfDomain domain = requireDomain(request.region(), request.domain());
         if (domain.isDeprecated()) {
             throw SwfFaults.domainDeprecated(request.domain());
         }
         requireName(request.workflowId(), "workflowId");
 
-        SwfWorkflowType type = findWorkflowType(request.domain(), request.typeName(), request.typeVersion());
+        SwfWorkflowType type = findWorkflowType(request.region(), request.domain(), request.typeName(), request.typeVersion());
         if (type.isDeprecated()) {
             throw SwfFaults.workflowTypeDeprecated(type.getName(), type.getVersion());
         }
@@ -350,8 +353,8 @@ public class SwfService implements Resettable {
         // The open-run check and the insert have to be one atomic step, or two concurrent
         // starts for the same workflowId both scan clean and persist distinct run keys,
         // leaving two open runs where SWF guarantees one.
-        synchronized (domainLock(request.domain())) {
-            if (findOpenExecution(request.domain(), request.workflowId()).isPresent()) {
+        synchronized (domainLock(request.region(), request.domain())) {
+            if (findOpenExecution(request.region(), request.domain(), request.workflowId()).isPresent()) {
                 throw SwfFaults.executionAlreadyStarted();
             }
 
@@ -367,6 +370,7 @@ public class SwfService implements Resettable {
 
     private SwfWorkflowExecution buildExecution(StartWorkflowExecutionRequest request, SwfWorkflowType type) {
         SwfWorkflowExecution execution = new SwfWorkflowExecution();
+        execution.setRegion(request.region());
         execution.setDomain(request.domain());
         execution.setWorkflowId(request.workflowId());
         execution.setRunId(newRunId());
@@ -404,32 +408,32 @@ public class SwfService implements Resettable {
         return value;
     }
 
-    public SwfWorkflowExecution describeWorkflowExecution(String domainName, String workflowId, String runId) {
-        requireDomain(domainName);
-        return requireExecution(domainName, workflowId, runId);
+    public SwfWorkflowExecution describeWorkflowExecution(String region, String domainName, String workflowId, String runId) {
+        requireDomain(region, domainName);
+        return requireExecution(region, domainName, workflowId, runId);
     }
 
-    private SwfWorkflowExecution requireExecution(String domainName, String workflowId, String runId) {
+    private SwfWorkflowExecution requireExecution(String region, String domainName, String workflowId, String runId) {
         requireName(workflowId, "execution.workflowId");
         if (runId == null || runId.isEmpty()) {
-            return findOpenExecution(domainName, workflowId)
+            return findOpenExecution(region, domainName, workflowId)
                     .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, ""));
         }
-        return executionStore.get(executionKey(domainName, workflowId, runId))
+        return executionStore.get(executionKey(region, domainName, workflowId, runId))
                 .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
     }
 
-    private Optional<SwfWorkflowExecution> findOpenExecution(String domainName, String workflowId) {
-        String prefix = domainName + "/" + workflowId + "/";
+    private Optional<SwfWorkflowExecution> findOpenExecution(String region, String domainName, String workflowId) {
+        String prefix = region + ":" + domainName + "/" + workflowId + "/";
         return executionStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(SwfWorkflowExecution::isOpen)
                 .findFirst();
     }
 
-    public List<SwfHistoryEvent> getWorkflowExecutionHistory(String domainName, String workflowId, String runId,
-                                                             boolean reverseOrder) {
-        requireDomain(domainName);
-        SwfWorkflowExecution execution = requireExecution(domainName, workflowId, runId);
+    public List<SwfHistoryEvent> getWorkflowExecutionHistory(String region, String domainName, String workflowId,
+                                                             String runId, boolean reverseOrder) {
+        requireDomain(region, domainName);
+        SwfWorkflowExecution execution = requireExecution(region, domainName, workflowId, runId);
         List<SwfHistoryEvent> events = new ArrayList<>(execution.getEvents());
         if (reverseOrder) {
             java.util.Collections.reverse(events);
@@ -444,9 +448,28 @@ public class SwfService implements Resettable {
         return Math.min(requested, DEFAULT_HISTORY_PAGE_SIZE);
     }
 
-    public List<SwfWorkflowExecution> listExecutions(String domainName, ExecutionFilter filter, boolean closed) {
-        requireDomain(domainName);
-        String prefix = domainName + "/";
+    /**
+     * Page size for the registration lists (ListDomains, ListWorkflowTypes,
+     * ListActivityTypes).
+     *
+     * <p>Measured against the live service: an absent or zero {@code maximumPageSize} means
+     * "no caller limit" and returns everything up to the service maximum, while a value above
+     * 1000 is rejected rather than clamped.
+     */
+    public int registrationPageSize(Integer requested) {
+        if (requested == null || requested == 0) {
+            return MAX_REGISTRATION_PAGE_SIZE;
+        }
+        if (requested < 0 || requested > MAX_REGISTRATION_PAGE_SIZE) {
+            throw SwfFaults.validationConstraint(String.valueOf(requested), "maximumPageSize",
+                    "Member must have value less than or equal to " + MAX_REGISTRATION_PAGE_SIZE);
+        }
+        return requested;
+    }
+
+    public List<SwfWorkflowExecution> listExecutions(String region, String domainName, ExecutionFilter filter, boolean closed) {
+        requireDomain(region, domainName);
+        String prefix = region + ":" + domainName + "/";
         List<SwfWorkflowExecution> executions = executionStore.scan(k -> k.startsWith(prefix));
         executions.removeIf(e -> closed == e.isOpen());
         executions.removeIf(filter.negate());
@@ -454,11 +477,11 @@ public class SwfService implements Resettable {
         return executions;
     }
 
-    public int countPendingActivityTasks(String domainName, String taskList) {
-        requireDomain(domainName);
+    public int countPendingActivityTasks(String region, String domainName, String taskList) {
+        requireDomain(region, domainName);
         requireName(taskList, "taskList.name");
         int count = 0;
-        for (SwfWorkflowExecution execution : executionsIn(domainName)) {
+        for (SwfWorkflowExecution execution : executionsIn(region, domainName)) {
             for (SwfActivityTask task : execution.getActivities().values()) {
                 if (SwfActivityTask.STATE_SCHEDULED.equals(task.getState()) && taskList.equals(task.getTaskList())) {
                     count++;
@@ -468,11 +491,11 @@ public class SwfService implements Resettable {
         return count;
     }
 
-    public int countPendingDecisionTasks(String domainName, String taskList) {
-        requireDomain(domainName);
+    public int countPendingDecisionTasks(String region, String domainName, String taskList) {
+        requireDomain(region, domainName);
         requireName(taskList, "taskList.name");
         int count = 0;
-        for (SwfWorkflowExecution execution : executionsIn(domainName)) {
+        for (SwfWorkflowExecution execution : executionsIn(region, domainName)) {
             SwfDecisionTask task = execution.getDecisionTask();
             if (task != null && SwfDecisionTask.STATE_SCHEDULED.equals(task.getState())
                     && taskList.equals(task.getTaskList())) {
@@ -482,8 +505,8 @@ public class SwfService implements Resettable {
         return count;
     }
 
-    private List<SwfWorkflowExecution> executionsIn(String domainName) {
-        String prefix = domainName + "/";
+    private List<SwfWorkflowExecution> executionsIn(String region, String domainName) {
+        String prefix = region + ":" + domainName + "/";
         return executionStore.scan(k -> k.startsWith(prefix));
     }
 
@@ -494,11 +517,11 @@ public class SwfService implements Resettable {
      * none is available. SWF long-polls for up to 60s; the emulator answers immediately and
      * lets the caller decide whether to poll again, which keeps request threads free.
      */
-    public Optional<SwfDecisionTask> pollForDecisionTask(String domainName, String taskList, String identity) {
-        requireDomain(domainName);
+    public Optional<SwfDecisionTask> pollForDecisionTask(String region, String domainName, String taskList, String identity) {
+        requireDomain(region, domainName);
         requireName(taskList, "taskList.name");
 
-        List<SwfWorkflowExecution> candidates = executionsIn(domainName);
+        List<SwfWorkflowExecution> candidates = executionsIn(region, domainName);
         candidates.sort(Comparator.comparingDouble(e -> {
             SwfDecisionTask task = e.getDecisionTask();
             return task != null ? task.getScheduledTimestamp() : Double.MAX_VALUE;
@@ -514,7 +537,7 @@ public class SwfService implements Resettable {
     }
 
     private SwfDecisionTask tryClaimDecisionTask(SwfWorkflowExecution candidate, String taskList, String identity) {
-        synchronized (domainLock(candidate.getDomain())) {
+        synchronized (domainLock(candidate)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(candidate)).orElse(null);
             if (execution == null || !execution.isOpen()) {
                 return null;
@@ -562,7 +585,7 @@ public class SwfService implements Resettable {
      */
     public void respondDecisionTaskCompleted(String taskToken, List<Decision> decisions, String executionContext) {
         SwfWorkflowExecution located = executionForDecisionToken(taskToken);
-        synchronized (domainLock(located.getDomain())) {
+        synchronized (domainLock(located)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(SwfFaults::unknownTaskToken);
             SwfDecisionTask task = execution.getDecisionTask();
@@ -655,7 +678,7 @@ public class SwfService implements Resettable {
         String typeName = decision.nested("activityType", "name");
         String typeVersion = decision.nested("activityType", "version");
 
-        SwfActivityType type = activityTypeStore.get(typeKey(execution.getDomain(), typeName, typeVersion))
+        SwfActivityType type = activityTypeStore.get(typeKey(execution.getRegion(), execution.getDomain(), typeName, typeVersion))
                 .orElse(null);
         if (type == null) {
             appendScheduleActivityTaskFailed(execution, decision, decisionEventId, "ACTIVITY_TYPE_DOES_NOT_EXIST");
@@ -817,7 +840,7 @@ public class SwfService implements Resettable {
     private void continueAsNew(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
         String version = firstNonEmpty(decision.string("workflowTypeVersion"), execution.getWorkflowTypeVersion());
         SwfWorkflowType type = workflowTypeStore
-                .get(typeKey(execution.getDomain(), execution.getWorkflowTypeName(), version)).orElse(null);
+                .get(typeKey(execution.getRegion(), execution.getDomain(), execution.getWorkflowTypeName(), version)).orElse(null);
         if (type == null) {
             appendEvent(execution, "ContinueAsNewWorkflowExecutionFailed")
                     .attr("cause", "WORKFLOW_TYPE_DOES_NOT_EXIST")
@@ -834,7 +857,7 @@ public class SwfService implements Resettable {
         }
 
         StartWorkflowExecutionRequest request = new StartWorkflowExecutionRequest(
-                execution.getDomain(), execution.getWorkflowId(), type.getName(), version,
+                execution.getRegion(), execution.getDomain(), execution.getWorkflowId(), type.getName(), version,
                 decision.nested("taskList", "name"), decision.string("taskPriority"),
                 decision.string("input"), decision.string("executionStartToCloseTimeout"),
                 decision.string("taskStartToCloseTimeout"), decision.string("childPolicy"),
@@ -931,7 +954,7 @@ public class SwfService implements Resettable {
                 .attr("decisionTaskCompletedEventId", decisionEventId)
                 .attr("control", decision.string("control"));
 
-        SwfWorkflowExecution target = resolveTarget(execution.getDomain(), targetWorkflowId, targetRunId);
+        SwfWorkflowExecution target = resolveTarget(execution.getRegion(), execution.getDomain(), targetWorkflowId, targetRunId);
         if (target == null || !target.isOpen()) {
             appendEvent(execution, "SignalExternalWorkflowExecutionFailed")
                     .attr("workflowId", nullToEmpty(targetWorkflowId))
@@ -963,7 +986,7 @@ public class SwfService implements Resettable {
                 .attr("decisionTaskCompletedEventId", decisionEventId)
                 .attr("control", decision.string("control"));
 
-        SwfWorkflowExecution target = resolveTarget(execution.getDomain(), targetWorkflowId, targetRunId);
+        SwfWorkflowExecution target = resolveTarget(execution.getRegion(), execution.getDomain(), targetWorkflowId, targetRunId);
         if (target == null || !target.isOpen()) {
             appendEvent(execution, "RequestCancelExternalWorkflowExecutionFailed")
                     .attr("workflowId", nullToEmpty(targetWorkflowId))
@@ -989,14 +1012,14 @@ public class SwfService implements Resettable {
         String typeName = decision.nested("workflowType", "name");
         String typeVersion = decision.nested("workflowType", "version");
 
-        SwfWorkflowType type = workflowTypeStore.get(typeKey(execution.getDomain(), typeName, typeVersion))
+        SwfWorkflowType type = workflowTypeStore.get(typeKey(execution.getRegion(), execution.getDomain(), typeName, typeVersion))
                 .orElse(null);
         if (type == null || type.isDeprecated()) {
             appendStartChildFailed(execution, decision, decisionEventId,
                     type == null ? "WORKFLOW_TYPE_DOES_NOT_EXIST" : "WORKFLOW_TYPE_DEPRECATED", 0L);
             return;
         }
-        if (findOpenExecution(execution.getDomain(), childWorkflowId).isPresent()) {
+        if (findOpenExecution(execution.getRegion(), execution.getDomain(), childWorkflowId).isPresent()) {
             appendStartChildFailed(execution, decision, decisionEventId, "WORKFLOW_ALREADY_RUNNING", 0L);
             return;
         }
@@ -1021,7 +1044,7 @@ public class SwfService implements Resettable {
                 .attr("lambdaRole", firstNonEmpty(decision.string("lambdaRole"), type.getDefaultLambdaRole()));
 
         StartWorkflowExecutionRequest request = new StartWorkflowExecutionRequest(
-                execution.getDomain(), childWorkflowId, typeName, typeVersion,
+                execution.getRegion(), execution.getDomain(), childWorkflowId, typeName, typeVersion,
                 decision.nested("taskList", "name"), decision.string("taskPriority"),
                 decision.string("input"), decision.string("executionStartToCloseTimeout"),
                 decision.string("taskStartToCloseTimeout"), decision.string("childPolicy"),
@@ -1133,7 +1156,7 @@ public class SwfService implements Resettable {
 
         try {
             LambdaInvocationResult result = lambdaInvoker.invoke(
-                    lambdaRegion(execution), name, payload);
+                    execution.getRegion(), name, payload);
             if (result.functionError() != null && !result.functionError().isEmpty()) {
                 appendEvent(execution, "LambdaFunctionFailed")
                         .attr("scheduledEventId", scheduled.getEventId())
@@ -1165,31 +1188,13 @@ public class SwfService implements Resettable {
         execution.setDecisionNeeded(true);
     }
 
-    /**
-     * The region to invoke Lambda in: taken from the execution's domain ARN, which was built
-     * from the region the domain was registered in, so a Lambda scheduled by a workflow in
-     * one region is not invoked in another. Falls back to the configured default when the ARN
-     * is not in the expected shape.
-     */
-    private String lambdaRegion(SwfWorkflowExecution execution) {
-        SwfDomain domain = domainStore.get(execution.getDomain()).orElse(null);
-        if (domain != null && domain.getArn() != null) {
-            // arn:aws:swf:<region>:<account>:/domain/<name>
-            String[] parts = domain.getArn().split(":", 5);
-            if (parts.length >= 4 && !parts[3].isEmpty()) {
-                return parts[3];
-            }
-        }
-        return regionResolver.getDefaultRegion();
-    }
-
     // ────────────────────────────── Activity tasks ───────────────────────────
 
-    public Optional<SwfActivityTask> pollForActivityTask(String domainName, String taskList, String identity) {
-        requireDomain(domainName);
+    public Optional<SwfActivityTask> pollForActivityTask(String region, String domainName, String taskList, String identity) {
+        requireDomain(region, domainName);
         requireName(taskList, "taskList.name");
 
-        List<SwfWorkflowExecution> candidates = executionsIn(domainName);
+        List<SwfWorkflowExecution> candidates = executionsIn(region, domainName);
         candidates.sort(Comparator.comparingDouble(SwfWorkflowExecution::getStartTimestamp));
         for (SwfWorkflowExecution candidate : candidates) {
             SwfActivityTask claimed = tryClaimActivityTask(candidate, taskList, identity);
@@ -1201,7 +1206,7 @@ public class SwfService implements Resettable {
     }
 
     private SwfActivityTask tryClaimActivityTask(SwfWorkflowExecution candidate, String taskList, String identity) {
-        synchronized (domainLock(candidate.getDomain())) {
+        synchronized (domainLock(candidate)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(candidate)).orElse(null);
             if (execution == null || !execution.isOpen()) {
                 return null;
@@ -1323,12 +1328,12 @@ public class SwfService implements Resettable {
 
     // ───────────────────────── External execution control ────────────────────
 
-    public void signalWorkflowExecution(String domainName, String workflowId, String runId,
+    public void signalWorkflowExecution(String region, String domainName, String workflowId, String runId,
                                         String signalName, String input) {
-        requireDomain(domainName);
+        requireDomain(region, domainName);
         requireName(signalName, "signalName");
-        SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
-        synchronized (domainLock(located.getDomain())) {
+        SwfWorkflowExecution located = requireExecution(region, domainName, workflowId, runId);
+        synchronized (domainLock(located)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
             if (!execution.isOpen()) {
@@ -1349,10 +1354,10 @@ public class SwfService implements Resettable {
         executionStore.put(executionKey(execution), execution);
     }
 
-    public void requestCancelWorkflowExecution(String domainName, String workflowId, String runId) {
-        requireDomain(domainName);
-        SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
-        synchronized (domainLock(located.getDomain())) {
+    public void requestCancelWorkflowExecution(String region, String domainName, String workflowId, String runId) {
+        requireDomain(region, domainName);
+        SwfWorkflowExecution located = requireExecution(region, domainName, workflowId, runId);
+        synchronized (domainLock(located)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
             if (!execution.isOpen()) {
@@ -1373,11 +1378,11 @@ public class SwfService implements Resettable {
         executionStore.put(executionKey(execution), execution);
     }
 
-    public void terminateWorkflowExecution(String domainName, String workflowId, String runId,
+    public void terminateWorkflowExecution(String region, String domainName, String workflowId, String runId,
                                            String reason, String details, String childPolicy) {
-        requireDomain(domainName);
-        SwfWorkflowExecution located = requireExecution(domainName, workflowId, runId);
-        synchronized (domainLock(located.getDomain())) {
+        requireDomain(region, domainName);
+        SwfWorkflowExecution located = requireExecution(region, domainName, workflowId, runId);
+        synchronized (domainLock(located)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
                     .orElseThrow(() -> SwfFaults.unknownExecution(workflowId, runId));
             if (!execution.isOpen()) {
@@ -1427,6 +1432,9 @@ public class SwfService implements Resettable {
     /**
      * SWF tagging targets a domain by ARN. The domain name is the segment after
      * {@code /domain/}; anything else is not a taggable SWF resource.
+     *
+     * <p>The region is read out of the ARN rather than the request: an ARN already names its
+     * region, and tagging a domain in another region must not resolve to the caller's.
      */
     private SwfDomain domainForArn(String resourceArn) {
         if (resourceArn == null || resourceArn.isEmpty()) {
@@ -1437,7 +1445,11 @@ public class SwfService implements Resettable {
             throw SwfFaults.unknownDomain(resourceArn);
         }
         String name = resourceArn.substring(marker + "/domain/".length());
-        return domainStore.get(name).orElseThrow(() -> SwfFaults.unknownDomain(name));
+        // arn:aws:swf:<region>:<account>:/domain/<name>
+        String[] parts = resourceArn.split(":", 5);
+        String arnRegion = parts.length >= 4 ? parts[3] : regionResolver.getDefaultRegion();
+        return domainStore.get(domainKey(arnRegion, name))
+                .orElseThrow(() -> SwfFaults.unknownDomain(name));
     }
 
     // ──────────────────────────────── Timeouts ───────────────────────────────
@@ -1690,8 +1702,8 @@ public class SwfService implements Resettable {
         if (SwfConstants.CLOSE_STATUS_CONTINUED_AS_NEW.equals(execution.getCloseStatus())) {
             return;
         }
-        String parentKey = executionKey(execution.getDomain(), execution.getParentWorkflowId(),
-                execution.getParentRunId());
+        String parentKey = executionKey(execution.getRegion(), execution.getDomain(),
+                execution.getParentWorkflowId(), execution.getParentRunId());
         SwfWorkflowExecution parent = executionStore.get(parentKey).orElse(null);
         if (parent == null || !parent.isOpen()) {
             return;
@@ -1752,7 +1764,7 @@ public class SwfService implements Resettable {
             return;
         }
         for (Map.Entry<String, String> entry : execution.getChildExecutions().entrySet()) {
-            String childKey = executionKey(execution.getDomain(), entry.getKey(), entry.getValue());
+            String childKey = executionKey(execution.getRegion(), execution.getDomain(), entry.getKey(), entry.getValue());
             SwfWorkflowExecution child = executionStore.get(childKey).orElse(null);
             if (child == null || !child.isOpen()) {
                 continue;
@@ -1778,7 +1790,7 @@ public class SwfService implements Resettable {
             return true;
         }
         return execution.getChildExecutions().entrySet().stream().anyMatch(entry -> executionStore
-                .get(executionKey(execution.getDomain(), entry.getKey(), entry.getValue()))
+                .get(executionKey(execution.getRegion(), execution.getDomain(), entry.getKey(), entry.getValue()))
                 .filter(SwfWorkflowExecution::isOpen)
                 .isPresent());
     }
@@ -1806,7 +1818,7 @@ public class SwfService implements Resettable {
     public int openChildCount(SwfWorkflowExecution execution) {
         return (int) execution.getChildExecutions().entrySet().stream()
                 .filter(entry -> executionStore
-                        .get(executionKey(execution.getDomain(), entry.getKey(), entry.getValue()))
+                        .get(executionKey(execution.getRegion(), execution.getDomain(), entry.getKey(), entry.getValue()))
                         .filter(SwfWorkflowExecution::isOpen)
                         .isPresent())
                 .count();
@@ -1814,28 +1826,42 @@ public class SwfService implements Resettable {
 
     // ──────────────────────────────── Helpers ───────────────────────────────
 
-    private SwfWorkflowExecution resolveTarget(String domainName, String workflowId, String runId) {
+    private SwfWorkflowExecution resolveTarget(String region, String domainName, String workflowId, String runId) {
         if (workflowId == null || workflowId.isEmpty()) {
             return null;
         }
         if (runId != null && !runId.isEmpty()) {
-            return executionStore.get(executionKey(domainName, workflowId, runId)).orElse(null);
+            return executionStore.get(executionKey(region, domainName, workflowId, runId)).orElse(null);
         }
-        return findOpenExecution(domainName, workflowId).orElse(null);
+        return findOpenExecution(region, domainName, workflowId).orElse(null);
     }
 
     /**
-     * One lock per domain. See the class Javadoc: parent/child and multi-run invariants
-     * span executions, so the lock has to cover the whole family to stay non-nested.
+     * One lock per region-qualified domain. See the class Javadoc: parent/child and multi-run
+     * invariants span executions, so the lock has to cover the whole family to stay
+     * non-nested. The region is part of the lock identity because the same domain name in two
+     * regions is two independent domains — and because it must agree with
+     * {@link #domainLockForKey(String)}, which derives the same scope from a storage key.
      */
-    private Object domainLock(String domain) {
-        return domainLocks.computeIfAbsent(domain, k -> new Object());
+    private Object domainLock(String region, String domain) {
+        return domainLocks.computeIfAbsent(region + ":" + domain, k -> new Object());
     }
 
-    /** Locks the domain of an execution identified only by its storage key. */
+    /** Locks the region-qualified domain an execution already knows it belongs to. */
+    private Object domainLock(SwfWorkflowExecution execution) {
+        return domainLock(execution.getRegion(), execution.getDomain());
+    }
+
+    /**
+     * Locks the domain of an execution identified only by its storage key. The key is
+     * {@code <region>:<domain>/<workflowId>/<runId>}, so the segment before the first
+     * {@code /} is the region-qualified domain — which is the right lock scope now that the
+     * same domain name can exist in more than one region.
+     */
     private Object domainLockForKey(String executionKey) {
         int separator = executionKey.indexOf('/');
-        return domainLock(separator < 0 ? executionKey : executionKey.substring(0, separator));
+        String qualifiedDomain = separator < 0 ? executionKey : executionKey.substring(0, separator);
+        return domainLocks.computeIfAbsent(qualifiedDomain, k -> new Object());
     }
 
     private double now() {
@@ -1863,16 +1889,25 @@ public class SwfService implements Resettable {
         return domain.getArn() != null ? domain.getArn() : domainArn(domain.getName(), region);
     }
 
-    private static String typeKey(String domain, String name, String version) {
-        return domain + "/" + name + "/" + version;
+    /**
+     * Storage keys are region-scoped: SWF names are unique per region, so the same domain
+     * (and its types and executions) can exist independently in two regions.
+     */
+    private static String domainKey(String region, String domain) {
+        return region + ":" + domain;
+    }
+
+    private static String typeKey(String region, String domain, String name, String version) {
+        return region + ":" + domain + "/" + name + "/" + version;
     }
 
     private static String executionKey(SwfWorkflowExecution execution) {
-        return executionKey(execution.getDomain(), execution.getWorkflowId(), execution.getRunId());
+        return executionKey(execution.getRegion(), execution.getDomain(),
+                execution.getWorkflowId(), execution.getRunId());
     }
 
-    private static String executionKey(String domain, String workflowId, String runId) {
-        return domain + "/" + workflowId + "/" + runId;
+    private static String executionKey(String region, String domain, String workflowId, String runId) {
+        return region + ":" + domain + "/" + workflowId + "/" + runId;
     }
 
     private static void requireName(String value, String field) {
@@ -1956,6 +1991,7 @@ public class SwfService implements Resettable {
 
     /** Fields StartWorkflowExecution accepts, before type defaults are resolved. */
     public record StartWorkflowExecutionRequest(
+            String region,
             String domain,
             String workflowId,
             String typeName,

@@ -124,6 +124,15 @@ A decision with no `input` delivers `{}` to the handler, and reusing an `id` is 
 SWF does not report `ID_ALREADY_IN_USE` for Lambda invocations the way it does for activity
 ids. Every outcome schedules a fresh decision task so the decider can react.
 
+## Regions
+
+SWF names are unique per region, so all state is region-scoped: registering `orders` in
+`us-east-1` and again in `eu-west-1` creates two independent domains, each with its own
+description, retention period, and ARN. Types, executions, and task tokens follow the same
+rule — a `runId` from one region does not resolve in another, `ListDomains` and the type
+listings only report the caller's region, and a decision or activity task is only handed to a
+poller in the region that owns it.
+
 ## Configuration
 
 ```yaml
@@ -237,5 +246,7 @@ Faults use the AWS codes and messages, so SDK error handling works unchanged:
   storage modes, matching the fact that SWF tokens are not durable handles.
 - **Retention.** `workflowExecutionRetentionPeriodInDays` is stored and returned but
   closed executions are not pruned.
-- **Pagination.** `maximumPageSize` and `nextPageToken` are honored; tokens are opaque
-  offsets and are not interchangeable with real SWF tokens.
+- **Pagination.** `maximumPageSize` and `nextPageToken` are honored on the history,
+  execution-list, and registration-list (`ListDomains`, `ListWorkflowTypes`,
+  `ListActivityTypes`) operations; tokens are opaque offsets and are not interchangeable with
+  real SWF tokens.

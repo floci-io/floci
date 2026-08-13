@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.swf.SwfService.StartWorkflowExecution
 import io.github.hectorvent.floci.services.swf.model.SwfActivityTask;
 import io.github.hectorvent.floci.services.swf.model.SwfActivityType;
 import io.github.hectorvent.floci.services.swf.model.SwfDecisionTask;
+import io.github.hectorvent.floci.services.swf.model.SwfDomain;
 import io.github.hectorvent.floci.services.swf.model.SwfHistoryEvent;
 import io.github.hectorvent.floci.services.swf.model.SwfWorkflowExecution;
 import io.github.hectorvent.floci.services.swf.model.SwfWorkflowType;
@@ -36,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -50,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class SwfServiceTest {
 
+    private static final String REGION = "us-east-1";
     private static final String DOMAIN = "unit-domain";
 
     private MutableClock clock;
@@ -67,9 +70,9 @@ class SwfServiceTest {
         service = new SwfService(new InMemoryStorageFactory(),
                 new RegionResolver("us-east-1", "000000000000"), clock, recordingLambdaInvoker());
 
-        service.registerDomain(DOMAIN, "unit test domain", "7", Map.of(), "us-east-1");
-        service.registerWorkflowType(DOMAIN, workflowType("W", "1"));
-        service.registerActivityType(DOMAIN, activityType("A", "1"));
+        service.registerDomain(DOMAIN, "unit test domain", "7", Map.of(), REGION);
+        service.registerWorkflowType(REGION, DOMAIN, workflowType("W", "1"));
+        service.registerActivityType(REGION, DOMAIN, activityType("A", "1"));
     }
 
     /**
@@ -92,7 +95,7 @@ class SwfServiceTest {
     void startWorkflowExecution_seedsStartedAndDecisionTaskScheduledEvents() {
         String runId = start("wf-1");
 
-        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(DOMAIN, "wf-1", runId, false);
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-1", runId, false);
         assertEquals(2, events.size());
         assertEquals(1, events.get(0).getEventId());
         assertEquals("WorkflowExecutionStarted", events.get(0).getEventType());
@@ -103,7 +106,7 @@ class SwfServiceTest {
     @Test
     void startWorkflowExecution_resolvesUnsetFieldsFromTheWorkflowTypeDefaults() {
         String runId = start("wf-defaults");
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-defaults", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-defaults", runId);
 
         assertEquals("tl", execution.getTaskList());
         assertEquals("300", execution.getExecutionStartToCloseTimeout());
@@ -116,10 +119,10 @@ class SwfServiceTest {
         SwfWorkflowType bare = new SwfWorkflowType();
         bare.setName("Bare");
         bare.setVersion("1");
-        service.registerWorkflowType(DOMAIN, bare);
+        service.registerWorkflowType(REGION, DOMAIN, bare);
 
         AwsException thrown = assertThrows(AwsException.class, () -> service.startWorkflowExecution(
-                new StartWorkflowExecutionRequest(DOMAIN, "wf-bare", "Bare", "1",
+                new StartWorkflowExecutionRequest(REGION, DOMAIN, "wf-bare", "Bare", "1",
                         null, null, null, null, null, null, null, null)));
         assertEquals("DefaultUndefinedFault", thrown.getErrorCode());
         assertEquals("com.amazonaws.swf.base.model#DefaultUndefinedFault", thrown.jsonType());
@@ -127,7 +130,7 @@ class SwfServiceTest {
 
     @Test
     void faults_reportBareErrorCodeAndNamespacedJsonType() {
-        AwsException thrown = assertThrows(AwsException.class, () -> service.describeDomain("no-such"));
+        AwsException thrown = assertThrows(AwsException.class, () -> service.describeDomain(REGION, "no-such"));
 
         // botocore prefers the header (error code) over the body's __type, so the bare name
         // has to stay on the code for the CLI to print UnknownResourceFault.
@@ -141,22 +144,22 @@ class SwfServiceTest {
     void pollForDecisionTask_handsOutOnlyOneTaskPerExecutionAtATime() {
         start("wf-single");
 
-        assertTrue(service.pollForDecisionTask(DOMAIN, "tl", "d1").isPresent());
-        assertTrue(service.pollForDecisionTask(DOMAIN, "tl", "d2").isEmpty(),
+        assertTrue(service.pollForDecisionTask(REGION, DOMAIN, "tl", "d1").isPresent());
+        assertTrue(service.pollForDecisionTask(REGION, DOMAIN, "tl", "d2").isEmpty(),
                 "a second decider must not receive the same execution's task");
     }
 
     @Test
     void signalWhileDecisionOutstanding_defersTheNextTaskUntilTheCurrentOneCompletes() {
         String runId = start("wf-defer");
-        SwfDecisionTask first = service.pollForDecisionTask(DOMAIN, "tl", "d1").orElseThrow();
+        SwfDecisionTask first = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d1").orElseThrow();
 
-        service.signalWorkflowExecution(DOMAIN, "wf-defer", runId, "poke", null);
-        assertTrue(service.pollForDecisionTask(DOMAIN, "tl", "d2").isEmpty(),
+        service.signalWorkflowExecution(REGION, DOMAIN, "wf-defer", runId, "poke", null);
+        assertTrue(service.pollForDecisionTask(REGION, DOMAIN, "tl", "d2").isEmpty(),
                 "the signal must not create a concurrent decision task");
 
         service.respondDecisionTaskCompleted(first.getTaskToken(), List.of(), null);
-        assertTrue(service.pollForDecisionTask(DOMAIN, "tl", "d3").isPresent(),
+        assertTrue(service.pollForDecisionTask(REGION, DOMAIN, "tl", "d3").isPresent(),
                 "completing the outstanding task must release the deferred one");
     }
 
@@ -170,7 +173,7 @@ class SwfServiceTest {
     @Test
     void respondDecisionTaskCompleted_rejectsABatchWhoseClosingDecisionIsNotLast() {
         String runId = start("wf-after-close");
-        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
 
         // The live service rejects the whole batch rather than applying the prefix.
         AwsException thrown = assertThrows(AwsException.class,
@@ -184,7 +187,7 @@ class SwfServiceTest {
         assertEquals("com.amazon.coral.validate#ValidationException", thrown.jsonType());
 
         // Nothing was applied and the task is still outstanding, so the decider can retry.
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-after-close", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-after-close", runId);
         assertEquals("OPEN", execution.getExecutionStatus());
         assertTrue(execution.getActivities().isEmpty());
         assertNull(lastAttribute(execution, "DecisionTaskCompleted", "scheduledEventId"),
@@ -193,19 +196,19 @@ class SwfServiceTest {
         service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
                 new Decision("CompleteWorkflowExecution", Map.of("result", "done"))), null);
         assertEquals("COMPLETED",
-                service.describeWorkflowExecution(DOMAIN, "wf-after-close", runId).getCloseStatus());
+                service.describeWorkflowExecution(REGION, DOMAIN, "wf-after-close", runId).getCloseStatus());
     }
 
     @Test
     void respondDecisionTaskCompleted_acceptsAClosingDecisionInFinalPosition() {
         String runId = start("wf-close-last");
-        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
 
         service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
                 new Decision("RecordMarker", Map.of("markerName", "m-1")),
                 new Decision("CompleteWorkflowExecution", Map.of("result", "done"))), null);
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-close-last", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-close-last", runId);
         assertEquals("m-1", lastAttribute(execution, "MarkerRecorded", "markerName"));
         assertEquals("COMPLETED", execution.getCloseStatus());
     }
@@ -219,7 +222,7 @@ class SwfServiceTest {
         service.respondDecisionTaskCompleted(task.getTaskToken(),
                 List.of(new Decision("CompleteWorkflowExecution", Map.of())), null);
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-unhandled", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-unhandled", runId);
         assertEquals("OPEN", execution.getExecutionStatus());
         assertEquals("UNHANDLED_DECISION",
                 lastAttribute(execution, "CompleteWorkflowExecutionFailed", "cause"));
@@ -233,12 +236,12 @@ class SwfServiceTest {
         clock.advance(Duration.ofSeconds(31));
         service.sweep();
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-s2s", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-s2s", runId);
         assertEquals("SCHEDULE_TO_START", lastAttribute(execution, "ActivityTaskTimedOut", "timeoutType"));
         // Never started, so the live service reports startedEventId 0 rather than omitting it.
         assertEquals(0L, lastAttribute(execution, "ActivityTaskTimedOut", "startedEventId"));
         assertEquals(0, service.openActivityCount(execution));
-        assertTrue(service.pollForDecisionTask(DOMAIN, "tl", "d").isPresent(),
+        assertTrue(service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").isPresent(),
                 "the timeout must schedule a decision task");
     }
 
@@ -246,13 +249,13 @@ class SwfServiceTest {
     void activityStartToCloseTimeout_expiresAStartedTask() {
         start("wf-s2c");
         scheduleActivity("wf-s2c", "act-s2c");
-        SwfActivityTask task = service.pollForActivityTask(DOMAIN, "act-tl", "w").orElseThrow();
+        SwfActivityTask task = service.pollForActivityTask(REGION, DOMAIN, "act-tl", "w").orElseThrow();
         assertEquals("act-s2c", task.getActivityId());
 
         clock.advance(Duration.ofSeconds(61));
         service.sweep();
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-s2c", null);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-s2c", null);
         assertEquals("START_TO_CLOSE", lastAttribute(execution, "ActivityTaskTimedOut", "timeoutType"));
         assertThrows(AwsException.class,
                 () -> service.respondActivityTaskCompleted(task.getTaskToken(), "too late"),
@@ -264,45 +267,45 @@ class SwfServiceTest {
         SwfActivityType heartbeating = activityType("HB", "1");
         heartbeating.setDefaultTaskHeartbeatTimeout("10");
         heartbeating.setDefaultTaskStartToCloseTimeout("600");
-        service.registerActivityType(DOMAIN, heartbeating);
+        service.registerActivityType(REGION, DOMAIN, heartbeating);
 
         start("wf-hb");
-        SwfDecisionTask decision = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask decision = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
         service.respondDecisionTaskCompleted(decision.getTaskToken(), List.of(
                 new Decision("ScheduleActivityTask", Map.of(
                         "activityId", "act-hb",
                         "activityType", Map.of("name", "HB", "version", "1")))), null);
-        SwfActivityTask task = service.pollForActivityTask(DOMAIN, "act-tl", "w").orElseThrow();
+        SwfActivityTask task = service.pollForActivityTask(REGION, DOMAIN, "act-tl", "w").orElseThrow();
 
         // A heartbeat resets the window, so the task survives the first advance.
         clock.advance(Duration.ofSeconds(8));
         assertFalse(service.recordActivityTaskHeartbeat(task.getTaskToken(), "alive"));
         clock.advance(Duration.ofSeconds(8));
         service.sweep();
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-hb", null);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-hb", null);
         assertNull(lastAttribute(execution, "ActivityTaskTimedOut", "timeoutType"),
                 "a heartbeat within the window must keep the task alive");
 
         clock.advance(Duration.ofSeconds(11));
         service.sweep();
-        execution = service.describeWorkflowExecution(DOMAIN, "wf-hb", null);
+        execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-hb", null);
         assertEquals("HEARTBEAT", lastAttribute(execution, "ActivityTaskTimedOut", "timeoutType"));
     }
 
     @Test
     void decisionTaskStartToCloseTimeout_reschedulesTheTaskForAnotherDecider() {
         String runId = start("wf-dt-timeout");
-        SwfDecisionTask abandoned = service.pollForDecisionTask(DOMAIN, "tl", "dead").orElseThrow();
+        SwfDecisionTask abandoned = service.pollForDecisionTask(REGION, DOMAIN, "tl", "dead").orElseThrow();
 
         clock.advance(Duration.ofSeconds(11));
         service.sweep();
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-dt-timeout", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-dt-timeout", runId);
         assertEquals("START_TO_CLOSE", lastAttribute(execution, "DecisionTaskTimedOut", "timeoutType"));
         assertThrows(AwsException.class,
                 () -> service.respondDecisionTaskCompleted(abandoned.getTaskToken(), List.of(), null));
 
-        SwfDecisionTask replacement = service.pollForDecisionTask(DOMAIN, "tl", "fresh").orElseThrow();
+        SwfDecisionTask replacement = service.pollForDecisionTask(REGION, DOMAIN, "tl", "fresh").orElseThrow();
         assertEquals(abandoned.getStartedEventId(), replacement.getPreviousStartedEventId());
     }
 
@@ -313,7 +316,7 @@ class SwfServiceTest {
         clock.advance(Duration.ofSeconds(301));
         service.sweep();
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-exec-timeout", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-exec-timeout", runId);
         assertEquals("CLOSED", execution.getExecutionStatus());
         assertEquals("TIMED_OUT", execution.getCloseStatus());
         assertEquals("START_TO_CLOSE", lastAttribute(execution, "WorkflowExecutionTimedOut", "timeoutType"));
@@ -322,18 +325,18 @@ class SwfServiceTest {
     @Test
     void timerFires_onceItsStartToFireTimeoutElapses() {
         String runId = start("wf-timer");
-        SwfDecisionTask decision = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask decision = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
         service.respondDecisionTaskCompleted(decision.getTaskToken(), List.of(
                 new Decision("StartTimer", Map.of("timerId", "t-1", "startToFireTimeout", "30"))), null);
 
         service.sweep();
         assertEquals(1, service.openTimerCount(
-                service.describeWorkflowExecution(DOMAIN, "wf-timer", runId)));
+                service.describeWorkflowExecution(REGION, DOMAIN, "wf-timer", runId)));
 
         clock.advance(Duration.ofSeconds(31));
         service.sweep();
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-timer", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-timer", runId);
         assertEquals("t-1", lastAttribute(execution, "TimerFired", "timerId"));
         assertEquals(0, service.openTimerCount(execution));
     }
@@ -341,16 +344,16 @@ class SwfServiceTest {
     @Test
     void timeoutSweep_neverTouchesClosedExecutions() {
         String runId = start("wf-closed");
-        SwfDecisionTask decision = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask decision = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
         service.respondDecisionTaskCompleted(decision.getTaskToken(),
                 List.of(new Decision("CompleteWorkflowExecution", Map.of("result", "ok"))), null);
-        int eventCount = service.getWorkflowExecutionHistory(DOMAIN, "wf-closed", runId, false).size();
+        int eventCount = service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-closed", runId, false).size();
 
         clock.advance(Duration.ofHours(2));
         service.sweep();
 
         assertEquals(eventCount,
-                service.getWorkflowExecutionHistory(DOMAIN, "wf-closed", runId, false).size(),
+                service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-closed", runId, false).size(),
                 "a closed execution must not accrue timeout events");
     }
 
@@ -365,7 +368,7 @@ class SwfServiceTest {
                 attempts.add(pool.submit(() -> {
                     releaseAll.await();
                     return service.startWorkflowExecution(new StartWorkflowExecutionRequest(
-                            DOMAIN, "wf-race", "W", "1", null, null, null, null, null, null, null, null));
+                            REGION, DOMAIN, "wf-race", "W", "1", null, null, null, null, null, null, null, null));
                 }));
             }
             releaseAll.countDown();
@@ -388,7 +391,7 @@ class SwfServiceTest {
             // than each persisting their own run key.
             assertEquals(1, started, "exactly one start may succeed");
             assertEquals(threads - 1, rejected);
-            assertEquals(1, service.listExecutions(DOMAIN, ExecutionFilter.all(), false).stream()
+            assertEquals(1, service.listExecutions(REGION, DOMAIN, ExecutionFilter.all(), false).stream()
                     .filter(e -> "wf-race".equals(e.getWorkflowId()))
                     .count());
         } finally {
@@ -433,7 +436,7 @@ class SwfServiceTest {
             pool.shutdownNow();
         }
 
-        SwfWorkflowExecution parent = service.describeWorkflowExecution(DOMAIN, "wf-cc-parent", parentRunId);
+        SwfWorkflowExecution parent = service.describeWorkflowExecution(REGION, DOMAIN, "wf-cc-parent", parentRunId);
         List<SwfHistoryEvent> events = parent.getEvents();
 
         // Event ids must stay a contiguous 1..n with no duplicates.
@@ -459,11 +462,11 @@ class SwfServiceTest {
     @Test
     void scheduleLambdaFunction_invokesTheFunctionAndRecordsCompletion() {
         // A lambdaRole is required for SWF to invoke at all.
-        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
                 "arn:aws:iam::000000000000:role/swf-lambda"));
         String runId = startLambdaWf("wf-lam", "LW");
 
-        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
         lambdaResponse = new LambdaInvocationResult("{\"echoed\":{\"hello\":\"swf\"}}", null);
         service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
                 scheduleLambda("lam-1", "my-fn", "{\"hello\":\"swf\"}", "ctl", "30")), null);
@@ -471,7 +474,7 @@ class SwfServiceTest {
         assertEquals(1, lambdaInvocations.size(), "the function must actually be invoked");
         assertEquals("us-east-1|my-fn|{\"hello\":\"swf\"}", lambdaInvocations.get(0));
 
-        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(DOMAIN, "wf-lam", runId, false);
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-lam", runId, false);
         SwfHistoryEvent scheduled = eventOfType(events, "LambdaFunctionScheduled");
         SwfHistoryEvent started = eventOfType(events, "LambdaFunctionStarted");
         SwfHistoryEvent completed = eventOfType(events, "LambdaFunctionCompleted");
@@ -491,10 +494,10 @@ class SwfServiceTest {
 
     @Test
     void scheduleLambdaFunction_withNoInput_passesAnEmptyJsonObject() {
-        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
                 "arn:aws:iam::000000000000:role/swf-lambda"));
         startLambdaWf("wf-lam-empty", "LW");
-        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
 
         service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
                 scheduleLambda("lam-1", "my-fn", null, null, null)), null);
@@ -504,17 +507,17 @@ class SwfServiceTest {
 
     @Test
     void scheduleLambdaFunction_whenTheFunctionIsMissing_recordsFailedWithTheAwsErrorCode() {
-        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
                 "arn:aws:iam::000000000000:role/swf-lambda"));
         String runId = startLambdaWf("wf-lam-missing", "LW");
-        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
 
         lambdaFailure = new AwsException("ResourceNotFoundException",
                 "Function not found: arn:aws:lambda:us-east-1:000000000000:function:gone", 404);
         service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
                 scheduleLambda("lam-1", "gone", null, null, null)), null);
 
-        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(DOMAIN, "wf-lam-missing", runId, false);
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-lam-missing", runId, false);
         // The live service still reports Started before Failed for an unresolvable function.
         SwfHistoryEvent started = eventOfType(events, "LambdaFunctionStarted");
         SwfHistoryEvent failed = eventOfType(events, "LambdaFunctionFailed");
@@ -525,17 +528,17 @@ class SwfServiceTest {
 
     @Test
     void scheduleLambdaFunction_whenTheHandlerErrors_recordsFailedWithTheFunctionError() {
-        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
                 "arn:aws:iam::000000000000:role/swf-lambda"));
         String runId = startLambdaWf("wf-lam-err", "LW");
-        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
 
         lambdaResponse = new LambdaInvocationResult("{\"errorMessage\":\"boom\"}", "Unhandled");
         service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
                 scheduleLambda("lam-1", "my-fn", null, null, null)), null);
 
         SwfHistoryEvent failed = eventOfType(
-                service.getWorkflowExecutionHistory(DOMAIN, "wf-lam-err", runId, false), "LambdaFunctionFailed");
+                service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-lam-err", runId, false), "LambdaFunctionFailed");
         assertEquals("Unhandled", failed.getAttributes().get("reason"));
         assertEquals("{\"errorMessage\":\"boom\"}", failed.getAttributes().get("details"));
     }
@@ -544,14 +547,14 @@ class SwfServiceTest {
     void scheduleLambdaFunction_withoutALambdaRole_neverStartsAndReportsAssumeRoleFailed() {
         // The workflow type registered in setUp() has no defaultLambdaRole.
         String runId = start("wf-lam-norole");
-        SwfDecisionTask task = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
 
         service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
                 scheduleLambda("lam-1", "my-fn", null, null, null)), null);
 
         assertTrue(lambdaInvocations.isEmpty(), "no role means the function is never invoked");
 
-        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(DOMAIN, "wf-lam-norole", runId, false);
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-lam-norole", runId, false);
         SwfHistoryEvent scheduled = eventOfType(events, "LambdaFunctionScheduled");
         SwfHistoryEvent failed = eventOfType(events, "StartLambdaFunctionFailed");
         assertEquals("ASSUME_ROLE_FAILED", failed.getAttributes().get("cause"));
@@ -564,18 +567,96 @@ class SwfServiceTest {
 
     @Test
     void startWorkflowExecution_resolvesLambdaRoleFromTheTypeDefaultAndAcceptsAnOverride() {
-        service.registerWorkflowType(DOMAIN, lambdaWorkflowType("LW", "1",
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
                 "arn:aws:iam::000000000000:role/type-default"));
 
         String inherited = startLambdaWf("wf-inherit", "LW");
         assertEquals("arn:aws:iam::000000000000:role/type-default",
-                service.describeWorkflowExecution(DOMAIN, "wf-inherit", inherited).getLambdaRole());
+                service.describeWorkflowExecution(REGION, DOMAIN, "wf-inherit", inherited).getLambdaRole());
 
         String overridden = service.startWorkflowExecution(new StartWorkflowExecutionRequest(
-                DOMAIN, "wf-override", "LW", "1", null, null, null, null, null, null, null,
+                REGION, DOMAIN, "wf-override", "LW", "1", null, null, null, null, null, null, null,
                 "arn:aws:iam::000000000000:role/per-execution"));
         assertEquals("arn:aws:iam::000000000000:role/per-execution",
-                service.describeWorkflowExecution(DOMAIN, "wf-override", overridden).getLambdaRole());
+                service.describeWorkflowExecution(REGION, DOMAIN, "wf-override", overridden).getLambdaRole());
+    }
+
+    @Test
+    void domainsAreScopedByRegion_soTheSameNameCanExistInTwoRegions() {
+        // us-east-1 already has DOMAIN from setUp(); registering it in eu-west-1 must succeed
+        // rather than reporting DomainAlreadyExistsFault, because SWF names are per-region.
+        service.registerDomain(DOMAIN, "west copy", "3", Map.of(), "eu-west-1");
+
+        assertEquals("unit test domain", service.describeDomain(REGION, DOMAIN).getDescription());
+        assertEquals("west copy", service.describeDomain("eu-west-1", DOMAIN).getDescription());
+        assertEquals("7", service.describeDomain(REGION, DOMAIN)
+                .getWorkflowExecutionRetentionPeriodInDays());
+        assertEquals("3", service.describeDomain("eu-west-1", DOMAIN)
+                .getWorkflowExecutionRetentionPeriodInDays());
+
+        // Each domain's ARN names its own region.
+        assertTrue(service.describeDomain(REGION, DOMAIN).getArn().contains(":" + REGION + ":"),
+                service.describeDomain(REGION, DOMAIN).getArn());
+        assertTrue(service.describeDomain("eu-west-1", DOMAIN).getArn().contains(":eu-west-1:"),
+                service.describeDomain("eu-west-1", DOMAIN).getArn());
+
+        // Re-registering in a region that already has it is still a duplicate.
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.registerDomain(DOMAIN, "again", "1", Map.of(), REGION));
+        assertEquals("DomainAlreadyExistsFault", duplicate.getErrorCode());
+
+        // ListDomains only reports the caller's region.
+        assertEquals(List.of(DOMAIN), service.listDomains("eu-west-1", "REGISTERED").stream()
+                .map(SwfDomain::getName).toList());
+    }
+
+    @Test
+    void typesAndExecutionsAreScopedByRegion() {
+        service.registerDomain(DOMAIN, "west copy", "3", Map.of(), "eu-west-1");
+
+        // A type registered only in us-east-1 must be invisible from eu-west-1.
+        assertEquals(List.of("W"), service.listWorkflowTypes(REGION, DOMAIN, null, "REGISTERED", false)
+                .stream().map(SwfWorkflowType::getName).toList());
+        assertEquals(List.of(), service.listWorkflowTypes("eu-west-1", DOMAIN, null, "REGISTERED", false));
+        AwsException unknownType = assertThrows(AwsException.class,
+                () -> service.describeWorkflowType("eu-west-1", DOMAIN, "W", "1"));
+        assertEquals("UnknownResourceFault", unknownType.getErrorCode());
+
+        // The same workflowId can run independently in each region.
+        service.registerWorkflowType("eu-west-1", DOMAIN, workflowType("W", "1"));
+        String eastRun = start("wf-shared");
+        String westRun = service.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                "eu-west-1", DOMAIN, "wf-shared", "W", "1",
+                null, null, null, null, null, null, null, null));
+        assertNotEquals(eastRun, westRun);
+
+        assertEquals(eastRun, service.describeWorkflowExecution(REGION, DOMAIN, "wf-shared", null).getRunId());
+        assertEquals(westRun, service.describeWorkflowExecution("eu-west-1", DOMAIN, "wf-shared", null).getRunId());
+
+        // A runId from one region must not resolve in the other.
+        AwsException crossRegion = assertThrows(AwsException.class,
+                () -> service.describeWorkflowExecution("eu-west-1", DOMAIN, "wf-shared", eastRun));
+        assertEquals("UnknownResourceFault", crossRegion.getErrorCode());
+
+        // Each region hands out only its own decision tasks.
+        SwfDecisionTask east = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
+        assertEquals(eastRun, east.getRunId());
+        SwfDecisionTask west = service.pollForDecisionTask("eu-west-1", DOMAIN, "tl", "d").orElseThrow();
+        assertEquals(westRun, west.getRunId());
+    }
+
+    @Test
+    void registrationPageSize_matchesTheLiveServiceLimits() {
+        // Absent or zero means "no caller limit"; above the 1000 cap is rejected, not clamped.
+        assertEquals(1000, service.registrationPageSize(null));
+        assertEquals(1000, service.registrationPageSize(0));
+        assertEquals(25, service.registrationPageSize(25));
+        assertEquals(1000, service.registrationPageSize(1000));
+
+        AwsException tooBig = assertThrows(AwsException.class, () -> service.registrationPageSize(1001));
+        assertEquals("ValidationException", tooBig.getErrorCode());
+        assertTrue(tooBig.getMessage().contains("less than or equal to 1000"), tooBig.getMessage());
+        assertThrows(AwsException.class, () -> service.registrationPageSize(-1));
     }
 
     @Test
@@ -586,8 +667,8 @@ class SwfServiceTest {
         service.respondDecisionTaskCompleted(decision.getTaskToken(),
                 List.of(new Decision("CompleteWorkflowExecution", Map.of())), null);
 
-        List<SwfWorkflowExecution> open = service.listExecutions(DOMAIN, ExecutionFilter.all(), false);
-        List<SwfWorkflowExecution> closed = service.listExecutions(DOMAIN, ExecutionFilter.all(), true);
+        List<SwfWorkflowExecution> open = service.listExecutions(REGION, DOMAIN, ExecutionFilter.all(), false);
+        List<SwfWorkflowExecution> closed = service.listExecutions(REGION, DOMAIN, ExecutionFilter.all(), true);
 
         assertTrue(open.stream().anyMatch(e -> "wf-open".equals(e.getWorkflowId())));
         assertFalse(open.stream().anyMatch(e -> "wf-done".equals(e.getWorkflowId())));
@@ -597,25 +678,25 @@ class SwfServiceTest {
 
     @Test
     void deprecatedType_cannotStartAnExecutionButRemainsDescribable() {
-        service.deprecateWorkflowType(DOMAIN, "W", "1");
+        service.deprecateWorkflowType(REGION, DOMAIN, "W", "1");
 
         AwsException thrown = assertThrows(AwsException.class, () -> start("wf-dep"));
         assertEquals("TypeDeprecatedFault", thrown.getErrorCode());
-        assertNotNull(service.describeWorkflowType(DOMAIN, "W", "1"));
+        assertNotNull(service.describeWorkflowType(REGION, DOMAIN, "W", "1"));
 
-        service.undeprecateWorkflowType(DOMAIN, "W", "1");
+        service.undeprecateWorkflowType(REGION, DOMAIN, "W", "1");
         assertNotNull(start("wf-dep"));
     }
 
     @Test
     void deleteWorkflowType_requiresPriorDeprecation() {
         AwsException thrown = assertThrows(AwsException.class,
-                () -> service.deleteWorkflowType(DOMAIN, "W", "1"));
+                () -> service.deleteWorkflowType(REGION, DOMAIN, "W", "1"));
         assertEquals("TypeNotDeprecatedFault", thrown.getErrorCode());
 
-        service.deprecateWorkflowType(DOMAIN, "W", "1");
-        service.deleteWorkflowType(DOMAIN, "W", "1");
-        assertThrows(AwsException.class, () -> service.describeWorkflowType(DOMAIN, "W", "1"));
+        service.deprecateWorkflowType(REGION, DOMAIN, "W", "1");
+        service.deleteWorkflowType(REGION, DOMAIN, "W", "1");
+        assertThrows(AwsException.class, () -> service.describeWorkflowType(REGION, DOMAIN, "W", "1"));
     }
 
     @Test
@@ -627,13 +708,13 @@ class SwfServiceTest {
                         "workflowId", "wf-child",
                         "workflowType", Map.of("name", "W", "version", "1")))), null);
 
-        SwfWorkflowExecution child = service.describeWorkflowExecution(DOMAIN, "wf-child", null);
+        SwfWorkflowExecution child = service.describeWorkflowExecution(REGION, DOMAIN, "wf-child", null);
         assertEquals("OPEN", child.getExecutionStatus());
         assertEquals("wf-parent", child.getParentWorkflowId());
 
-        service.terminateWorkflowExecution(DOMAIN, "wf-parent", parentRunId, "stop", null, null);
+        service.terminateWorkflowExecution(REGION, DOMAIN, "wf-parent", parentRunId, "stop", null, null);
 
-        child = service.describeWorkflowExecution(DOMAIN, "wf-child", child.getRunId());
+        child = service.describeWorkflowExecution(REGION, DOMAIN, "wf-child", child.getRunId());
         assertEquals("CLOSED", child.getExecutionStatus());
         assertEquals("TERMINATED", child.getCloseStatus());
         assertEquals("CHILD_POLICY_APPLIED", lastAttribute(child, "WorkflowExecutionTerminated", "cause"));
@@ -643,19 +724,19 @@ class SwfServiceTest {
     void abandonChildPolicy_leavesChildrenRunning() {
         SwfWorkflowType abandoning = workflowType("Abandon", "1");
         abandoning.setDefaultChildPolicy("ABANDON");
-        service.registerWorkflowType(DOMAIN, abandoning);
+        service.registerWorkflowType(REGION, DOMAIN, abandoning);
 
         String parentRunId = service.startWorkflowExecution(new StartWorkflowExecutionRequest(
-                DOMAIN, "wf-abandon", "Abandon", "1", null, null, null, null, null, null, null, null));
+                REGION, DOMAIN, "wf-abandon", "Abandon", "1", null, null, null, null, null, null, null, null));
         SwfDecisionTask decision = pollFor("wf-abandon");
         service.respondDecisionTaskCompleted(decision.getTaskToken(), List.of(
                 new Decision("StartChildWorkflowExecution", Map.of(
                         "workflowId", "wf-abandoned-child",
                         "workflowType", Map.of("name", "W", "version", "1")))), null);
 
-        service.terminateWorkflowExecution(DOMAIN, "wf-abandon", parentRunId, null, null, null);
+        service.terminateWorkflowExecution(REGION, DOMAIN, "wf-abandon", parentRunId, null, null, null);
 
-        assertEquals("OPEN", service.describeWorkflowExecution(DOMAIN, "wf-abandoned-child", null)
+        assertEquals("OPEN", service.describeWorkflowExecution(REGION, DOMAIN, "wf-abandoned-child", null)
                 .getExecutionStatus());
     }
 
@@ -668,7 +749,7 @@ class SwfServiceTest {
         service.respondDecisionTaskCompleted(decision.getTaskToken(), List.of(
                 new Decision("RequestCancelActivityTask", Map.of("activityId", "act-cancel"))), null);
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-cancel-act", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-cancel-act", runId);
         assertNotNull(lastAttribute(execution, "ActivityTaskCancelRequested", "activityId"));
         // No worker holds the task, so there is nothing to observe the request: SWF cancels it.
         assertNotNull(lastAttribute(execution, "ActivityTaskCanceled", "scheduledEventId"));
@@ -679,7 +760,7 @@ class SwfServiceTest {
     void activityTokenOnAClosedTask_reportsUnknownActivityWithItsScheduledEventId() {
         start("wf-stale-activity");
         scheduleActivity("wf-stale-activity", "act-stale");
-        SwfActivityTask task = service.pollForActivityTask(DOMAIN, "act-tl", "w").orElseThrow();
+        SwfActivityTask task = service.pollForActivityTask(REGION, DOMAIN, "act-tl", "w").orElseThrow();
         service.respondActivityTaskCompleted(task.getTaskToken(), "done");
 
         // The token is genuine, so the live service names the scheduled event rather than
@@ -700,7 +781,7 @@ class SwfServiceTest {
     void heartbeatReportsCancelRequested_afterTheDeciderAsksToCancelAStartedTask() {
         start("wf-cancel-started");
         scheduleActivity("wf-cancel-started", "act-running");
-        SwfActivityTask task = service.pollForActivityTask(DOMAIN, "act-tl", "w").orElseThrow();
+        SwfActivityTask task = service.pollForActivityTask(REGION, DOMAIN, "act-tl", "w").orElseThrow();
 
         SwfDecisionTask decision = pokeForDecision("wf-cancel-started");
         service.respondDecisionTaskCompleted(decision.getTaskToken(), List.of(
@@ -710,25 +791,25 @@ class SwfServiceTest {
                 "the worker learns about the cancellation through its heartbeat");
         service.respondActivityTaskCanceled(task.getTaskToken(), "stopped");
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-cancel-started", null);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-cancel-started", null);
         assertEquals("stopped", lastAttribute(execution, "ActivityTaskCanceled", "details"));
     }
 
     @Test
     void scheduleActivityTask_withUnknownType_recordsFailureAndKeepsTheExecutionOpen() {
         String runId = start("wf-bad-type");
-        SwfDecisionTask decision = service.pollForDecisionTask(DOMAIN, "tl", "d").orElseThrow();
+        SwfDecisionTask decision = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
 
         service.respondDecisionTaskCompleted(decision.getTaskToken(), List.of(
                 new Decision("ScheduleActivityTask", Map.of(
                         "activityId", "nope",
                         "activityType", Map.of("name", "Missing", "version", "9")))), null);
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-bad-type", runId);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-bad-type", runId);
         assertEquals("ACTIVITY_TYPE_DOES_NOT_EXIST",
                 lastAttribute(execution, "ScheduleActivityTaskFailed", "cause"));
         assertEquals("OPEN", execution.getExecutionStatus());
-        assertTrue(service.pollForDecisionTask(DOMAIN, "tl", "d2").isPresent(),
+        assertTrue(service.pollForDecisionTask(REGION, DOMAIN, "tl", "d2").isPresent(),
                 "a failed decision must give the decider another chance");
     }
 
@@ -739,12 +820,12 @@ class SwfServiceTest {
         service.respondDecisionTaskCompleted(decision.getTaskToken(), List.of(
                 new Decision("ContinueAsNewWorkflowExecution", Map.of("input", "gen-2"))), null);
 
-        SwfWorkflowExecution closed = service.describeWorkflowExecution(DOMAIN, "wf-can", firstRunId);
+        SwfWorkflowExecution closed = service.describeWorkflowExecution(REGION, DOMAIN, "wf-can", firstRunId);
         assertEquals("CONTINUED_AS_NEW", closed.getCloseStatus());
 
         String newRunId = (String) lastAttribute(closed, "WorkflowExecutionContinuedAsNew", "newExecutionRunId");
         assertNotNull(newRunId);
-        SwfWorkflowExecution successor = service.describeWorkflowExecution(DOMAIN, "wf-can", newRunId);
+        SwfWorkflowExecution successor = service.describeWorkflowExecution(REGION, DOMAIN, "wf-can", newRunId);
         assertEquals("OPEN", successor.getExecutionStatus());
         assertEquals(firstRunId, successor.getContinuedExecutionRunId());
         assertEquals("gen-2", successor.getInput());
@@ -760,11 +841,11 @@ class SwfServiceTest {
                 new Decision("SignalExternalWorkflowExecution", Map.of(
                         "workflowId", "wf-receiver", "signalName", "ping", "input", "hello"))), null);
 
-        SwfWorkflowExecution receiver = service.describeWorkflowExecution(DOMAIN, "wf-receiver", null);
+        SwfWorkflowExecution receiver = service.describeWorkflowExecution(REGION, DOMAIN, "wf-receiver", null);
         assertEquals("ping", lastAttribute(receiver, "WorkflowExecutionSignaled", "signalName"));
         assertEquals("hello", lastAttribute(receiver, "WorkflowExecutionSignaled", "input"));
 
-        SwfWorkflowExecution sender = service.describeWorkflowExecution(DOMAIN, "wf-sender", null);
+        SwfWorkflowExecution sender = service.describeWorkflowExecution(REGION, DOMAIN, "wf-sender", null);
         assertNotNull(lastAttribute(sender, "ExternalWorkflowExecutionSignaled", "initiatedEventId"));
     }
 
@@ -777,7 +858,7 @@ class SwfServiceTest {
                 new Decision("SignalExternalWorkflowExecution", Map.of(
                         "workflowId", "not-there", "signalName", "ping"))), null);
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(DOMAIN, "wf-lonely", null);
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-lonely", null);
         assertEquals("UNKNOWN_EXTERNAL_WORKFLOW_EXECUTION",
                 lastAttribute(execution, "SignalExternalWorkflowExecutionFailed", "cause"));
     }
@@ -789,14 +870,14 @@ class SwfServiceTest {
         assertEquals("ValidationException", thrown.getErrorCode());
 
         // NONE is the documented sentinel for "keep forever" and must be accepted.
-        service.registerDomain("no-retention", null, "NONE", Map.of(), "us-east-1");
-        assertEquals("NONE", service.describeDomain("no-retention")
+        service.registerDomain("no-retention", null, "NONE", Map.of(), REGION);
+        assertEquals("NONE", service.describeDomain(REGION, "no-retention")
                 .getWorkflowExecutionRetentionPeriodInDays());
     }
 
     @Test
     void tagResource_roundTripsThroughTheDomainArn() {
-        String arn = service.domainArnFor(service.describeDomain(DOMAIN), "us-east-1");
+        String arn = service.domainArnFor(service.describeDomain(REGION, DOMAIN), "us-east-1");
         assertEquals("arn:aws:swf:us-east-1:000000000000:/domain/" + DOMAIN, arn);
 
         service.tagResource(arn, Map.of("env", "unit"));
@@ -810,7 +891,7 @@ class SwfServiceTest {
 
     private String start(String workflowId) {
         return service.startWorkflowExecution(new StartWorkflowExecutionRequest(
-                DOMAIN, workflowId, "W", "1", null, null, null, null, null, null, null, null));
+                REGION, DOMAIN, workflowId, "W", "1", null, null, null, null, null, null, null, null));
     }
 
     /**
@@ -830,7 +911,7 @@ class SwfServiceTest {
 
     /** Signals the execution so a decision task is scheduled, then claims it. */
     private SwfDecisionTask pokeForDecision(String workflowId) {
-        service.signalWorkflowExecution(DOMAIN, workflowId, null, "poke", null);
+        service.signalWorkflowExecution(REGION, DOMAIN, workflowId, null, "poke", null);
         return pollFor(workflowId);
     }
 
@@ -843,7 +924,7 @@ class SwfServiceTest {
      */
     private SwfDecisionTask pollFor(String workflowId) {
         for (int attempt = 0; attempt < 200; attempt++) {
-            Optional<SwfDecisionTask> claimed = service.pollForDecisionTask(DOMAIN, "tl", "d");
+            Optional<SwfDecisionTask> claimed = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d");
             if (claimed.isPresent()) {
                 SwfDecisionTask task = claimed.get();
                 if (workflowId.equals(task.getWorkflowId())) {
@@ -905,7 +986,7 @@ class SwfServiceTest {
 
     private String startLambdaWf(String workflowId, String typeName) {
         return service.startWorkflowExecution(new StartWorkflowExecutionRequest(
-                DOMAIN, workflowId, typeName, "1", null, null, null, null, null, null, null, null));
+                REGION, DOMAIN, workflowId, typeName, "1", null, null, null, null, null, null, null, null));
     }
 
     private static Decision scheduleLambda(String id, String name, String input,

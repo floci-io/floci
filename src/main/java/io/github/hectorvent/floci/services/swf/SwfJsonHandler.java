@@ -22,6 +22,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.function.Function;
 import java.util.Map;
 import java.util.Optional;
 
@@ -56,50 +57,50 @@ public class SwfJsonHandler {
             case "RegisterDomain" -> registerDomain(request, region);
             case "DescribeDomain" -> describeDomain(request, region);
             case "ListDomains" -> listDomains(request, region);
-            case "DeprecateDomain" -> voidResponse(() -> service.deprecateDomain(text(request, "name")));
-            case "UndeprecateDomain" -> voidResponse(() -> service.undeprecateDomain(text(request, "name")));
+            case "DeprecateDomain" -> voidResponse(() -> service.deprecateDomain(region, text(request, "name")));
+            case "UndeprecateDomain" -> voidResponse(() -> service.undeprecateDomain(region, text(request, "name")));
 
-            case "RegisterWorkflowType" -> registerWorkflowType(request);
-            case "DescribeWorkflowType" -> describeWorkflowType(request);
-            case "ListWorkflowTypes" -> listWorkflowTypes(request);
-            case "DeprecateWorkflowType" -> voidResponse(() -> service.deprecateWorkflowType(
+            case "RegisterWorkflowType" -> registerWorkflowType(request, region);
+            case "DescribeWorkflowType" -> describeWorkflowType(request, region);
+            case "ListWorkflowTypes" -> listWorkflowTypes(request, region);
+            case "DeprecateWorkflowType" -> voidResponse(() -> service.deprecateWorkflowType(region,
                     text(request, "domain"), nested(request, "workflowType", "name"),
                     nested(request, "workflowType", "version")));
-            case "UndeprecateWorkflowType" -> voidResponse(() -> service.undeprecateWorkflowType(
+            case "UndeprecateWorkflowType" -> voidResponse(() -> service.undeprecateWorkflowType(region,
                     text(request, "domain"), nested(request, "workflowType", "name"),
                     nested(request, "workflowType", "version")));
-            case "DeleteWorkflowType" -> voidResponse(() -> service.deleteWorkflowType(
+            case "DeleteWorkflowType" -> voidResponse(() -> service.deleteWorkflowType(region,
                     text(request, "domain"), nested(request, "workflowType", "name"),
                     nested(request, "workflowType", "version")));
 
-            case "RegisterActivityType" -> registerActivityType(request);
-            case "DescribeActivityType" -> describeActivityType(request);
-            case "ListActivityTypes" -> listActivityTypes(request);
-            case "DeprecateActivityType" -> voidResponse(() -> service.deprecateActivityType(
+            case "RegisterActivityType" -> registerActivityType(request, region);
+            case "DescribeActivityType" -> describeActivityType(request, region);
+            case "ListActivityTypes" -> listActivityTypes(request, region);
+            case "DeprecateActivityType" -> voidResponse(() -> service.deprecateActivityType(region,
                     text(request, "domain"), nested(request, "activityType", "name"),
                     nested(request, "activityType", "version")));
-            case "UndeprecateActivityType" -> voidResponse(() -> service.undeprecateActivityType(
+            case "UndeprecateActivityType" -> voidResponse(() -> service.undeprecateActivityType(region,
                     text(request, "domain"), nested(request, "activityType", "name"),
                     nested(request, "activityType", "version")));
-            case "DeleteActivityType" -> voidResponse(() -> service.deleteActivityType(
+            case "DeleteActivityType" -> voidResponse(() -> service.deleteActivityType(region,
                     text(request, "domain"), nested(request, "activityType", "name"),
                     nested(request, "activityType", "version")));
 
-            case "StartWorkflowExecution" -> startWorkflowExecution(request);
-            case "DescribeWorkflowExecution" -> describeWorkflowExecution(request);
-            case "GetWorkflowExecutionHistory" -> getWorkflowExecutionHistory(request);
-            case "ListOpenWorkflowExecutions" -> listExecutions(request, false);
-            case "ListClosedWorkflowExecutions" -> listExecutions(request, true);
-            case "CountOpenWorkflowExecutions" -> countExecutions(request, false);
-            case "CountClosedWorkflowExecutions" -> countExecutions(request, true);
-            case "CountPendingActivityTasks" -> count(service.countPendingActivityTasks(
+            case "StartWorkflowExecution" -> startWorkflowExecution(request, region);
+            case "DescribeWorkflowExecution" -> describeWorkflowExecution(request, region);
+            case "GetWorkflowExecutionHistory" -> getWorkflowExecutionHistory(request, region);
+            case "ListOpenWorkflowExecutions" -> listExecutions(request, region, false);
+            case "ListClosedWorkflowExecutions" -> listExecutions(request, region, true);
+            case "CountOpenWorkflowExecutions" -> countExecutions(request, region, false);
+            case "CountClosedWorkflowExecutions" -> countExecutions(request, region, true);
+            case "CountPendingActivityTasks" -> count(service.countPendingActivityTasks(region,
                     text(request, "domain"), nested(request, "taskList", "name")));
-            case "CountPendingDecisionTasks" -> count(service.countPendingDecisionTasks(
+            case "CountPendingDecisionTasks" -> count(service.countPendingDecisionTasks(region,
                     text(request, "domain"), nested(request, "taskList", "name")));
 
-            case "PollForDecisionTask" -> pollForDecisionTask(request);
+            case "PollForDecisionTask" -> pollForDecisionTask(request, region);
             case "RespondDecisionTaskCompleted" -> respondDecisionTaskCompleted(request);
-            case "PollForActivityTask" -> pollForActivityTask(request);
+            case "PollForActivityTask" -> pollForActivityTask(request, region);
             case "RecordActivityTaskHeartbeat" -> recordActivityTaskHeartbeat(request);
             case "RespondActivityTaskCompleted" -> voidResponse(() -> service.respondActivityTaskCompleted(
                     text(request, "taskToken"), text(request, "result")));
@@ -108,12 +109,12 @@ public class SwfJsonHandler {
             case "RespondActivityTaskCanceled" -> voidResponse(() -> service.respondActivityTaskCanceled(
                     text(request, "taskToken"), text(request, "details")));
 
-            case "SignalWorkflowExecution" -> voidResponse(() -> service.signalWorkflowExecution(
+            case "SignalWorkflowExecution" -> voidResponse(() -> service.signalWorkflowExecution(region,
                     text(request, "domain"), text(request, "workflowId"), text(request, "runId"),
                     text(request, "signalName"), text(request, "input")));
-            case "RequestCancelWorkflowExecution" -> voidResponse(() -> service.requestCancelWorkflowExecution(
+            case "RequestCancelWorkflowExecution" -> voidResponse(() -> service.requestCancelWorkflowExecution(region,
                     text(request, "domain"), text(request, "workflowId"), text(request, "runId")));
-            case "TerminateWorkflowExecution" -> voidResponse(() -> service.terminateWorkflowExecution(
+            case "TerminateWorkflowExecution" -> voidResponse(() -> service.terminateWorkflowExecution(region,
                     text(request, "domain"), text(request, "workflowId"), text(request, "runId"),
                     text(request, "reason"), text(request, "details"), text(request, "childPolicy")));
 
@@ -140,7 +141,7 @@ public class SwfJsonHandler {
     }
 
     private Response describeDomain(JsonNode request, String region) {
-        SwfDomain domain = service.describeDomain(text(request, "name"));
+        SwfDomain domain = service.describeDomain(region, text(request, "name"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("domainInfo", domainInfo(domain, region));
         response.putObject("configuration")
@@ -149,17 +150,12 @@ public class SwfJsonHandler {
     }
 
     private Response listDomains(JsonNode request, String region) {
-        List<SwfDomain> domains = service.listDomains(text(request, "registrationStatus"));
+        List<SwfDomain> domains = service.listDomains(region, text(request, "registrationStatus"));
         if (request.path("reverseOrder").asBoolean(false)) {
             domains = new ArrayList<>(domains);
             java.util.Collections.reverse(domains);
         }
-        ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode infos = response.putArray("domainInfos");
-        for (SwfDomain domain : domains) {
-            infos.add(domainInfo(domain, region));
-        }
-        return Response.ok(response).build();
+        return pagedList(request, "domainInfos", domains, domain -> domainInfo(domain, region));
     }
 
     private ObjectNode domainInfo(SwfDomain domain, String region) {
@@ -173,7 +169,7 @@ public class SwfJsonHandler {
 
     // ───────────────────────────── Workflow types ────────────────────────────
 
-    private Response registerWorkflowType(JsonNode request) {
+    private Response registerWorkflowType(JsonNode request, String region) {
         SwfWorkflowType type = new SwfWorkflowType();
         type.setName(text(request, "name"));
         type.setVersion(text(request, "version"));
@@ -184,12 +180,12 @@ public class SwfJsonHandler {
         type.setDefaultTaskPriority(text(request, "defaultTaskPriority"));
         type.setDefaultChildPolicy(text(request, "defaultChildPolicy"));
         type.setDefaultLambdaRole(text(request, "defaultLambdaRole"));
-        service.registerWorkflowType(text(request, "domain"), type);
+        service.registerWorkflowType(region, text(request, "domain"), type);
         return empty();
     }
 
-    private Response describeWorkflowType(JsonNode request) {
-        SwfWorkflowType type = service.describeWorkflowType(text(request, "domain"),
+    private Response describeWorkflowType(JsonNode request, String region) {
+        SwfWorkflowType type = service.describeWorkflowType(region, text(request, "domain"),
                 nested(request, "workflowType", "name"), nested(request, "workflowType", "version"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("typeInfo", workflowTypeInfo(type));
@@ -205,15 +201,10 @@ public class SwfJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response listWorkflowTypes(JsonNode request) {
-        List<SwfWorkflowType> types = service.listWorkflowTypes(text(request, "domain"), text(request, "name"),
+    private Response listWorkflowTypes(JsonNode request, String region) {
+        List<SwfWorkflowType> types = service.listWorkflowTypes(region, text(request, "domain"), text(request, "name"),
                 text(request, "registrationStatus"), request.path("reverseOrder").asBoolean(false));
-        ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode infos = response.putArray("typeInfos");
-        for (SwfWorkflowType type : types) {
-            infos.add(workflowTypeInfo(type));
-        }
-        return Response.ok(response).build();
+        return pagedList(request, "typeInfos", types, this::workflowTypeInfo);
     }
 
     private ObjectNode workflowTypeInfo(SwfWorkflowType type) {
@@ -230,7 +221,7 @@ public class SwfJsonHandler {
 
     // ───────────────────────────── Activity types ────────────────────────────
 
-    private Response registerActivityType(JsonNode request) {
+    private Response registerActivityType(JsonNode request, String region) {
         SwfActivityType type = new SwfActivityType();
         type.setName(text(request, "name"));
         type.setVersion(text(request, "version"));
@@ -241,12 +232,12 @@ public class SwfJsonHandler {
         type.setDefaultTaskPriority(text(request, "defaultTaskPriority"));
         type.setDefaultTaskScheduleToStartTimeout(text(request, "defaultTaskScheduleToStartTimeout"));
         type.setDefaultTaskScheduleToCloseTimeout(text(request, "defaultTaskScheduleToCloseTimeout"));
-        service.registerActivityType(text(request, "domain"), type);
+        service.registerActivityType(region, text(request, "domain"), type);
         return empty();
     }
 
-    private Response describeActivityType(JsonNode request) {
-        SwfActivityType type = service.describeActivityType(text(request, "domain"),
+    private Response describeActivityType(JsonNode request, String region) {
+        SwfActivityType type = service.describeActivityType(region, text(request, "domain"),
                 nested(request, "activityType", "name"), nested(request, "activityType", "version"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("typeInfo", activityTypeInfo(type));
@@ -263,15 +254,10 @@ public class SwfJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response listActivityTypes(JsonNode request) {
-        List<SwfActivityType> types = service.listActivityTypes(text(request, "domain"), text(request, "name"),
+    private Response listActivityTypes(JsonNode request, String region) {
+        List<SwfActivityType> types = service.listActivityTypes(region, text(request, "domain"), text(request, "name"),
                 text(request, "registrationStatus"), request.path("reverseOrder").asBoolean(false));
-        ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode infos = response.putArray("typeInfos");
-        for (SwfActivityType type : types) {
-            infos.add(activityTypeInfo(type));
-        }
-        return Response.ok(response).build();
+        return pagedList(request, "typeInfos", types, this::activityTypeInfo);
     }
 
     private ObjectNode activityTypeInfo(SwfActivityType type) {
@@ -288,8 +274,9 @@ public class SwfJsonHandler {
 
     // ─────────────────────────────── Executions ──────────────────────────────
 
-    private Response startWorkflowExecution(JsonNode request) {
+    private Response startWorkflowExecution(JsonNode request, String region) {
         String runId = service.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                region,
                 text(request, "domain"),
                 text(request, "workflowId"),
                 nested(request, "workflowType", "name"),
@@ -307,8 +294,8 @@ public class SwfJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response describeWorkflowExecution(JsonNode request) {
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(text(request, "domain"),
+    private Response describeWorkflowExecution(JsonNode request, String region) {
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(region, text(request, "domain"),
                 nested(request, "execution", "workflowId"), nested(request, "execution", "runId"));
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -336,9 +323,37 @@ public class SwfJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response getWorkflowExecutionHistory(JsonNode request) {
+    /**
+     * Applies {@code maximumPageSize} and {@code nextPageToken} to an already-ordered list,
+     * appending each item on the page via {@code render} and setting {@code nextPageToken}
+     * only when more items remain.
+     *
+     * <p>Measured against the live service: the token is absent on the final page even when
+     * that page is exactly full; a {@code maximumPageSize} of 0 (or absent) means "no caller
+     * limit"; above 1000 is a ValidationException; and an unparseable token is rejected rather
+     * than silently restarting from the beginning.
+     */
+    private <T> Response pagedList(JsonNode request, String itemsField, List<T> items,
+                                   Function<T, ObjectNode> render) {
+        int pageSize = service.registrationPageSize(optionalInt(request, "maximumPageSize"));
+        int offset = requirePageToken(text(request, "nextPageToken"));
+        int from = Math.min(offset, items.size());
+        int to = Math.min(from + pageSize, items.size());
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray(itemsField);
+        for (T item : items.subList(from, to)) {
+            array.add(render.apply(item));
+        }
+        if (to < items.size()) {
+            response.put("nextPageToken", encodePageToken(to));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response getWorkflowExecutionHistory(JsonNode request, String region) {
         boolean reverseOrder = request.path("reverseOrder").asBoolean(false);
-        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(text(request, "domain"),
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(region, text(request, "domain"),
                 nested(request, "execution", "workflowId"), nested(request, "execution", "runId"), reverseOrder);
 
         int pageSize = service.historyPageSize(optionalInt(request, "maximumPageSize"));
@@ -356,8 +371,8 @@ public class SwfJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response listExecutions(JsonNode request, boolean closed) {
-        List<SwfWorkflowExecution> executions = service.listExecutions(text(request, "domain"),
+    private Response listExecutions(JsonNode request, String region, boolean closed) {
+        List<SwfWorkflowExecution> executions = service.listExecutions(region, text(request, "domain"),
                 buildFilter(request, closed), closed);
         if (request.path("reverseOrder").asBoolean(false)) {
             executions = new ArrayList<>(executions);
@@ -379,8 +394,8 @@ public class SwfJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response countExecutions(JsonNode request, boolean closed) {
-        List<SwfWorkflowExecution> executions = service.listExecutions(text(request, "domain"),
+    private Response countExecutions(JsonNode request, String region, boolean closed) {
+        List<SwfWorkflowExecution> executions = service.listExecutions(region, text(request, "domain"),
                 buildFilter(request, closed), closed);
         return count(executions.size());
     }
@@ -472,8 +487,8 @@ public class SwfJsonHandler {
 
     // ─────────────────────────────── Task polling ────────────────────────────
 
-    private Response pollForDecisionTask(JsonNode request) {
-        Optional<SwfDecisionTask> maybeTask = service.pollForDecisionTask(text(request, "domain"),
+    private Response pollForDecisionTask(JsonNode request, String region) {
+        Optional<SwfDecisionTask> maybeTask = service.pollForDecisionTask(region, text(request, "domain"),
                 nested(request, "taskList", "name"), text(request, "identity"));
         if (maybeTask.isEmpty()) {
             return Response.ok(emptyPollResponse()).build();
@@ -481,7 +496,7 @@ public class SwfJsonHandler {
 
         SwfDecisionTask task = maybeTask.get();
         boolean reverseOrder = request.path("reverseOrder").asBoolean(false);
-        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(task.getDomain(),
+        List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(region, task.getDomain(),
                 task.getWorkflowId(), task.getRunId(), reverseOrder);
 
         int pageSize = service.historyPageSize(optionalInt(request, "maximumPageSize"));
@@ -501,7 +516,7 @@ public class SwfJsonHandler {
             response.put("nextPageToken", encodePageToken(end));
         }
 
-        SwfWorkflowExecution execution = service.describeWorkflowExecution(task.getDomain(),
+        SwfWorkflowExecution execution = service.describeWorkflowExecution(region, task.getDomain(),
                 task.getWorkflowId(), task.getRunId());
         response.set("workflowType", typeNode(execution.getWorkflowTypeName(),
                 execution.getWorkflowTypeVersion()));
@@ -520,8 +535,8 @@ public class SwfJsonHandler {
         return response;
     }
 
-    private Response pollForActivityTask(JsonNode request) {
-        Optional<SwfActivityTask> maybeTask = service.pollForActivityTask(text(request, "domain"),
+    private Response pollForActivityTask(JsonNode request, String region) {
+        Optional<SwfActivityTask> maybeTask = service.pollForActivityTask(region, text(request, "domain"),
                 nested(request, "taskList", "name"), text(request, "identity"));
         if (maybeTask.isEmpty()) {
             ObjectNode response = objectMapper.createObjectNode();
@@ -725,6 +740,31 @@ public class SwfJsonHandler {
             return Integer.parseInt(decoded.substring("offset=".length()));
         } catch (IllegalArgumentException | IndexOutOfBoundsException e) {
             return 0;
+        }
+    }
+
+    /**
+     * Like {@link #decodePageToken(String)} but rejects a token it cannot read. The live
+     * service answers a corrupt token with {@code ValidationException: Invalid token} rather
+     * than quietly returning the first page, which would make a paging loop repeat forever.
+     */
+    private static int requirePageToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return 0;
+        }
+        try {
+            String decoded = new String(java.util.Base64.getDecoder().decode(token),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            if (!decoded.startsWith("offset=")) {
+                throw SwfFaults.invalidPageToken();
+            }
+            int offset = Integer.parseInt(decoded.substring("offset=".length()));
+            if (offset < 0) {
+                throw SwfFaults.invalidPageToken();
+            }
+            return offset;
+        } catch (IllegalArgumentException | IndexOutOfBoundsException e) {
+            throw SwfFaults.invalidPageToken();
         }
     }
 }

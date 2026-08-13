@@ -582,9 +582,17 @@ public final class TestFixtures {
     }
 
     public static SwfClient swfClient() {
+        return swfClient(REGION);
+    }
+
+    /**
+     * SWF names are unique per region, so cross-region tests need two clients pointed at the
+     * same emulator with different regions.
+     */
+    public static SwfClient swfClient(Region region) {
         return SwfClient.builder()
                 .endpointOverride(ENDPOINT)
-                .region(REGION)
+                .region(region)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }

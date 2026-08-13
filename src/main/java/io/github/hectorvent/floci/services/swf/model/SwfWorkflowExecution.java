@@ -16,6 +16,12 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class SwfWorkflowExecution {
 
+    /**
+     * The region this execution lives in. SWF names are unique per region, so the region is
+     * part of the execution's identity — it is what lets the same domain and workflowId exist
+     * independently in two regions, and it is how Lambda invocations reach the right region.
+     */
+    private String region;
     private String domain;
     private String workflowId;
     private String runId;
@@ -66,6 +72,14 @@ public class SwfWorkflowExecution {
 
     private Double latestActivityTaskTimestamp;
     private String latestExecutionContext;
+
+    public String getRegion() {
+        return region;
+    }
+
+    public void setRegion(String region) {
+        this.region = region;
+    }
 
     public String getDomain() {
         return domain;

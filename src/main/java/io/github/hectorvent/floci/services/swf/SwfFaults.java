@@ -104,6 +104,14 @@ final class SwfFaults {
         return fault(SwfConstants.DEFAULT_UNDEFINED, field);
     }
 
+    /**
+     * The live service rejects a corrupt {@code nextPageToken} with this exact message rather
+     * than returning the first page.
+     */
+    static AwsException invalidPageToken() {
+        return validation("Invalid token");
+    }
+
     static AwsException validation(String message) {
         return new SwfException(SwfConstants.VALIDATION,
                 SwfConstants.VALIDATION_NAMESPACE + SwfConstants.VALIDATION, message, 400);
