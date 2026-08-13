@@ -306,4 +306,32 @@ class AppConfigTest {
             } catch (Exception ignored) {}
         }
     }
+
+    @Test
+    @Order(51)
+    @DisplayName("TagResource / ListTagsForResource - deploymentstrategy ARN (top-level, not nested under application/)")
+    void tagDeploymentStrategyViaSdk() {
+        // deploymentstrategy/extension/extensionassociation ARNs don't nest under application/
+        // like every other AppConfig resource tested above - a naive ARN parser can end up
+        // hardcoding the application/ prefix and rejecting these as invalid, even though AWS
+        // documents all three as taggable (see e.g. AWS::AppConfig::DeploymentStrategy's Tags
+        // property). This asserts the SDK call succeeds end-to-end, not just that some ARN shape
+        // is accepted internally.
+        String tagStrategyId = appConfig.createDeploymentStrategy(CreateDeploymentStrategyRequest.builder()
+                .name("tag-roundtrip-strategy")
+                .deploymentDurationInMinutes(0)
+                .growthFactor(100f)
+                .finalBakeTimeInMinutes(0)
+                .build()).id();
+        String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + tagStrategyId;
+
+        appConfig.tagResource(TagResourceRequest.builder()
+                .resourceArn(arn)
+                .tags(java.util.Map.of("env", "prod"))
+                .build());
+
+        ListTagsForResourceResponse listed = appConfig.listTagsForResource(
+                ListTagsForResourceRequest.builder().resourceArn(arn).build());
+        assertThat(listed.tags()).isNotNull();
+    }
 }
