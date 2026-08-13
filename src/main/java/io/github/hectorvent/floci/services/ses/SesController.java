@@ -1873,12 +1873,14 @@ public class SesController {
             }
             return false;
         }
-        String value = node.asText();
-        if ("ENABLED".equals(value)) {
-            return true;
-        }
-        if ("DISABLED".equals(value)) {
-            return false;
+        if (node.isTextual()) {
+            String value = node.asText();
+            if ("ENABLED".equals(value)) {
+                return true;
+            }
+            if ("DISABLED".equals(value)) {
+                return false;
+            }
         }
         throw new AwsException("BadRequestException",
                 "1 validation error detected: Value at '" + path

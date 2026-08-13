@@ -87,6 +87,15 @@ class SesAccountVdmV2IntegrationTest {
 
     @Test
     @Order(6)
+    void putVdm_nonStringVdmEnabled_returnsBadRequest() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"VdmAttributes\":{\"VdmEnabled\":true}}")
+        .when().put("/v2/email/account/vdm").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(7)
     void putVdm_optionalAttributesDefaultToDisabled() {
         // Only VdmEnabled is supplied; the optional dashboard/guardian members default to DISABLED.
         // Also restores this region's VDM state to DISABLED.
