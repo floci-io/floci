@@ -544,6 +544,112 @@ class CloudHsmV2IntegrationTest {
             .body("Clusters[0].Hsms.size()", equalTo(0));
     }
 
+    @Test
+    @Order(43)
+    void deleteHsmByEniIdSuccess() {
+        // Create an HSM
+        String hsmId = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateHsm")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ClusterId": "%s",
+                    "AvailabilityZone": "us-east-1a"
+                }
+                """.formatted(createdClusterId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Hsm.HsmId");
+
+        // Get its EniId
+        String eniId = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeClusters")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": {
+                        "clusterIds": ["%s"]
+                    }
+                }
+                """.formatted(createdClusterId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Clusters[0].Hsms.find { it.HsmId == '%s' }.EniId".formatted(hsmId));
+
+        // Delete by EniId
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteHsm")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ClusterId": "%s",
+                    "EniId": "%s"
+                }
+                """.formatted(createdClusterId, eniId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("HsmId", equalTo(hsmId));
+    }
+
+    @Test
+    @Order(44)
+    void deleteHsmByEniIpSuccess() {
+        // Create an HSM
+        String hsmId = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateHsm")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ClusterId": "%s",
+                    "AvailabilityZone": "us-east-1a"
+                }
+                """.formatted(createdClusterId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Hsm.HsmId");
+
+        // Get its EniIp
+        String eniIp = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeClusters")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": {
+                        "clusterIds": ["%s"]
+                    }
+                }
+                """.formatted(createdClusterId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Clusters[0].Hsms.find { it.HsmId == '%s' }.EniIp".formatted(hsmId));
+
+        // Delete by EniIp
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteHsm")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ClusterId": "%s",
+                    "EniIp": "%s"
+                }
+                """.formatted(createdClusterId, eniIp))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("HsmId", equalTo(hsmId));
+    }
+
     // ──────────────────────────── Error Responses ────────────────────────────
 
     @Test
@@ -579,8 +685,46 @@ class CloudHsmV2IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404)
+            .statusCode(400)
             .body("__type", equalTo("CloudHsmResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(52)
+    void deleteHsmMissingSelectorFails() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteHsm")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ClusterId": "%s"
+                }
+                """.formatted(createdClusterId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("CloudHsmInvalidRequestException"));
+    }
+
+    @Test
+    @Order(53)
+    void deleteHsmMultipleSelectorsFails() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteHsm")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ClusterId": "%s",
+                    "HsmId": "hsm-abc",
+                    "EniId": "eni-xyz"
+                }
+                """.formatted(createdClusterId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("CloudHsmInvalidRequestException"));
     }
 
     @Test

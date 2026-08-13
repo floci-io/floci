@@ -138,8 +138,10 @@ public class CloudHsmV2JsonHandler {
     private Response handleDeleteHsm(JsonNode request, String region) {
         String clusterId = text(request, "ClusterId");
         String hsmId = text(request, "HsmId");
+        String eniId = text(request, "EniId");
+        String eniIp = text(request, "EniIp");
 
-        Hsm hsm = service.deleteHsm(clusterId, hsmId, region);
+        Hsm hsm = service.deleteHsm(clusterId, hsmId, eniId, eniIp, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("HsmId", hsm.getHsmId());
