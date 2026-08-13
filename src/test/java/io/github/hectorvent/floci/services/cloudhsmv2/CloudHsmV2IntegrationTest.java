@@ -706,7 +706,7 @@ class CloudHsmV2IntegrationTest {
     }
 
     @Test
-    @Order(53)
+    @Order(54)
     void deleteClusterWithHsmsFails() {
         // Create a cluster, add an HSM, then try to delete the cluster
         String tempClusterId = given()

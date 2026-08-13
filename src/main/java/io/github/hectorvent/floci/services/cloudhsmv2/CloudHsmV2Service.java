@@ -102,7 +102,7 @@ public class CloudHsmV2Service {
 
         Backup sourceBackup = null;
         if (sourceBackupId != null && !sourceBackupId.isEmpty()) {
-            sourceBackup = getBackup(sourceBackupId, region);
+            sourceBackup = getBackup(extractId(sourceBackupId), region);
             if (mode == null && sourceBackup.getMode() != null) {
                 mode = sourceBackup.getMode();
             }
@@ -228,16 +228,28 @@ public class CloudHsmV2Service {
         X509CertificateHolder signedCertHolder = parsePemCertificate(signedCert, "SignedCert");
         X509CertificateHolder trustAnchorHolder = parsePemCertificate(trustAnchor, "TrustAnchor");
 
-        // Verify TrustAnchor is self-signed
-        if (!trustAnchorHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
-            throw new AwsException("CloudHsmInvalidRequestException",
-                    "TrustAnchor must be a self-signed certificate.", 400);
-        }
+        // Verify TrustAnchor is self-signed and SignedCert is issued by TrustAnchor
+        try {
+            JcaX509CertificateConverter converter = new JcaX509CertificateConverter().setProvider(new BouncyCastleProvider());
+            java.security.cert.X509Certificate trustAnchorCert = converter.getCertificate(trustAnchorHolder);
+            java.security.cert.X509Certificate signedCertObj = converter.getCertificate(signedCertHolder);
 
-        // Verify SignedCert was issued by TrustAnchor
-        if (!signedCertHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
+            if (!trustAnchorHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
+                throw new AwsException("CloudHsmInvalidRequestException",
+                        "TrustAnchor must be a self-signed certificate.", 400);
+            }
+            trustAnchorCert.verify(trustAnchorCert.getPublicKey());
+
+            if (!signedCertHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
+                throw new AwsException("CloudHsmInvalidRequestException",
+                        "SignedCert must be issued by the provided TrustAnchor.", 400);
+            }
+            signedCertObj.verify(trustAnchorCert.getPublicKey());
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
             throw new AwsException("CloudHsmInvalidRequestException",
-                    "SignedCert must be issued by the provided TrustAnchor.", 400);
+                    "Certificate signature verification failed: " + e.getMessage(), 400);
         }
 
         // Verify SignedCert matches the cluster CSR
@@ -391,6 +403,9 @@ public class CloudHsmV2Service {
     // ──────────────────────────── TagResource ────────────────────────────
 
     public void tagResource(String resourceId, Map<String, String> tags, String region) {
+        if (tags == null || tags.isEmpty() || tags.size() > 50) {
+            throw new AwsException("CloudHsmInvalidRequestException", "TagList must have length between 1 and 50", 400);
+        }
         if (resourceId.startsWith("backup-")) {
             Backup backup = getBackup(resourceId, region);
             if (tags != null && !tags.isEmpty()) {
@@ -407,6 +422,9 @@ public class CloudHsmV2Service {
     }
 
     public void untagResource(String resourceId, List<String> tagKeys, String region) {
+        if (tagKeys == null || tagKeys.isEmpty() || tagKeys.size() > 50) {
+            throw new AwsException("CloudHsmInvalidRequestException", "TagKeyList must have length between 1 and 50", 400);
+        }
         if (resourceId.startsWith("backup-")) {
             Backup backup = getBackup(resourceId, region);
             tagKeys.forEach(backup.getTagList()::remove);
@@ -443,8 +461,9 @@ public class CloudHsmV2Service {
 
     private String generateShortId() {
         String alphabet = "234567abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        StringBuilder sb = new StringBuilder(17);
-        for (int i = 0; i < 17; i++) {
+        int length = 11 + SECURE_RANDOM.nextInt(6);
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
             sb.append(alphabet.charAt(SECURE_RANDOM.nextInt(alphabet.length())));
         }
         return sb.toString();
@@ -575,12 +594,10 @@ public class CloudHsmV2Service {
             boolean matchCluster = filterClusterIds == null || filterClusterIds.isEmpty() || filterClusterIds.contains(b.getClusterId());
             boolean matchState = filterStates == null || filterStates.isEmpty() || filterStates.contains(b.getBackupState());
             boolean matchSourceBackup = filterSourceBackupIds == null || filterSourceBackupIds.isEmpty() || filterSourceBackupIds.contains(b.getSourceBackup());
-            boolean matchNeverExpires = filterNeverExpires == null || filterNeverExpires.isEmpty() || filterNeverExpires.contains(b.getNeverExpires() == null ? "False" : b.getNeverExpires());
+            boolean matchNeverExpires = filterNeverExpires == null || filterNeverExpires.isEmpty() || 
+                filterNeverExpires.stream().anyMatch(f -> f.equalsIgnoreCase(b.getNeverExpires() == null ? "False" : b.getNeverExpires()));
 
             if (matchId && matchCluster && matchState && matchSourceBackup && matchNeverExpires) {
-                if (Boolean.TRUE.equals(shared)) {
-                    continue; // Floci does not currently support cross-account sharing, so shared is always empty
-                }
                 filtered.add(b);
             }
         }

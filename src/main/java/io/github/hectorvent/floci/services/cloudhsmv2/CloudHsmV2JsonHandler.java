@@ -457,10 +457,12 @@ public class CloudHsmV2JsonHandler {
 
     private Response handleDeleteResourcePolicy(JsonNode request, String region) {
         String resourceArn = text(request, "ResourceArn");
-        service.deleteResourcePolicy(resourceArn, region);
+        String oldPolicy = service.deleteResourcePolicy(resourceArn, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ResourceArn", resourceArn);
-        response.put("Policy", "DELETED");
+        if (oldPolicy != null) {
+            response.put("Policy", oldPolicy);
+        }
         return Response.ok(response).build();
     }
 
@@ -517,14 +519,14 @@ public class CloudHsmV2JsonHandler {
         return node.isMissingNode() || node.isNull() ? null : node.asText(null);
     }
 
-    private int parseMaxResults(JsonNode request, int defaultVal) {
+    private int parseMaxResults(JsonNode request, int maxAllowed) {
         if (request.path("MaxResults").isMissingNode() || request.path("MaxResults").isNull()) {
-            return defaultVal;
+            return maxAllowed;
         }
         try {
             int max = Integer.parseInt(request.path("MaxResults").asText());
-            if (max <= 0) {
-                throw new AwsException("CloudHsmInvalidRequestException", "MaxResults must be greater than 0.", 400);
+            if (max <= 0 || max > maxAllowed) {
+                throw new AwsException("CloudHsmInvalidRequestException", "MaxResults must be between 1 and " + maxAllowed + ".", 400);
             }
             return max;
         } catch (NumberFormatException e) {
@@ -538,7 +540,11 @@ public class CloudHsmV2JsonHandler {
             return 0;
         }
         try {
-            return Integer.parseInt(token);
+            int val = Integer.parseInt(token);
+            if (val < 0) {
+                throw new AwsException("CloudHsmInvalidRequestException", "NextToken is invalid.", 400);
+            }
+            return val;
         } catch (NumberFormatException e) {
             throw new AwsException("CloudHsmInvalidRequestException", "NextToken is invalid.", 400);
         }
