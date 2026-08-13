@@ -638,6 +638,7 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+        NetworkFirewallServiceConfig networkfirewall();
     }
 
     interface IotServiceConfig {
@@ -677,6 +678,11 @@ public interface EmulatorConfig {
     }
 
     interface EmrServerlessServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface NetworkFirewallServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
