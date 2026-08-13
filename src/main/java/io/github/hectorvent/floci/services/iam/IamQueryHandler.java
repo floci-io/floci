@@ -464,6 +464,18 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeletePolicy", AwsNamespaces.IAM)).build();
     }
 
+    // ListPolicies carries no Tags — policyXml is called with includeTags=false. The IAM
+    // API reference is explicit: "this operation does not return tags, even though they
+    // are an attribute of the returned object. To view all of the information for a
+    // customer managed policy, see GetPolicy." Callers that need tags per listed ARN use
+    // ListPolicyTags or GetPolicy, both of which serve them.
+    //
+    // Do not add Tags here to make a tag-reading client work. The AWS Terraform provider's
+    // aws_iam_policy list resource reads tags straight off the ListPolicies entry
+    // (resourcePolicyFlatten -> setTagsOut), which pre-empts the per-identifier
+    // ListPolicyTags fallback in ListResourceWithSDKv2Tags.SetTags, so it reports empty
+    // tags against real AWS exactly as it does here. Its aws_iam_user counterpart leaves
+    // tags unset and does reach ListUserTags, which is why that one comes back tagged.
     private Response handleListPolicies(MultivaluedMap<String, String> params) {
         List<IamPolicy> policyList = iamService.listPolicies(
                 getParam(params, "Scope"), getParam(params, "PathPrefix"));
