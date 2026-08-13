@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -54,6 +56,24 @@ class EventBridgeUpdateEventBusIntegrationTest {
     }
 
     @Test
+    void emptyDescriptionClearsIt() {
+        String bus = "update-test-bus-clear-description";
+        createBus(bus);
+
+        given().contentType(CT).header("X-Amz-Target", UPDATE)
+                .body("{\"Name\":\"" + bus + "\",\"Description\":\"set\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Description", equalTo("set"));
+
+        given().contentType(CT).header("X-Amz-Target", UPDATE)
+                .body("{\"Name\":\"" + bus + "\",\"Description\":\"\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Description", equalTo(""));
+    }
+
+    @Test
     void updateDefaultBus_nameOmitted() {
         given().contentType(CT).header("X-Amz-Target", UPDATE)
                 .body("{\"Description\":\"default updated 1\"}")
@@ -91,12 +111,31 @@ class EventBridgeUpdateEventBusIntegrationTest {
     }
 
     @Test
-    void updateNonExistentCustomBus_returns404() {
+    void updateNonExistentCustomBusReturnsAws400() {
         given().contentType(CT).header("X-Amz-Target", UPDATE)
                 .body("{\"Name\":\"this-bus-was-never-created\",\"Description\":\"x\"}")
                 .when().post("/")
-                .then().statusCode(404)
+                .then().statusCode(400)
                 .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "contains space", "contains*star"})
+    void updateRejectsInvalidExplicitName(String name) {
+        given().contentType(CT).header("X-Amz-Target", UPDATE)
+                .body("{\"Name\":\"" + name + "\",\"Description\":\"x\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void updateRejectsNameLongerThan256Characters() {
+        given().contentType(CT).header("X-Amz-Target", UPDATE)
+                .body("{\"Name\":\"" + "n".repeat(257) + "\",\"Description\":\"x\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"));
     }
 
     @Test

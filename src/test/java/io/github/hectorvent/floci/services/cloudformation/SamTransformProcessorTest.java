@@ -137,6 +137,46 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_functionWithFileSystemConfig() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});",
+                    "VpcConfig": {
+                      "SubnetIds": ["subnet-0123456789abcdef0"],
+                      "SecurityGroupIds": ["sg-0123456789abcdef0"]
+                    },
+                    "FileSystemConfigs": [{
+                      "Arn": "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                      "LocalMountPath": "/mnt/shared"
+                    }]
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode lambdaProps = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties");
+
+        assertEquals("subnet-0123456789abcdef0",
+                lambdaProps.path("VpcConfig").path("SubnetIds").get(0).asText());
+        assertEquals("sg-0123456789abcdef0",
+                lambdaProps.path("VpcConfig").path("SecurityGroupIds").get(0).asText());
+        assertEquals("arn:aws:elasticfilesystem:us-east-1:000000000000:"
+                        + "access-point/fsap-0123456789abcdef0",
+                lambdaProps.path("FileSystemConfigs").get(0).path("Arn").asText());
+        assertEquals("/mnt/shared",
+                lambdaProps.path("FileSystemConfigs").get(0).path("LocalMountPath").asText());
+    }
+
+    @Test
     void expandSamTemplate_functionWithImageConfig() throws Exception {
         // ImageConfig (EntryPoint/Command/WorkingDirectory overrides for a container-image
         // function) must also be carried through: CloudFormationResourceProvisioner.provisionLambda

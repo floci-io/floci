@@ -41,6 +41,7 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -72,6 +73,19 @@ public class S3Service implements Resettable {
     private final Path dataRoot;
     private final boolean inMemory;
     private final ConcurrentHashMap<String, byte[]> memoryDataStore = new ConcurrentHashMap<>();
+    // Guards disk writes/deletes against a racing legacy migration for the same path (see
+    // copyLegacyFileIfPresent()). Fixed-size stripes keep memory bounded, unlike a per-path
+    // map that would need reference counting to ever shrink safely.
+    private static final int DISK_FILE_LOCK_STRIPES = 256;
+    private final ReentrantLock[] diskFileLocks = newLockStripes(DISK_FILE_LOCK_STRIPES);
+
+    private static ReentrantLock[] newLockStripes(int count) {
+        ReentrantLock[] locks = new ReentrantLock[count];
+        for (int i = 0; i < count; i++) {
+            locks[i] = new ReentrantLock();
+        }
+        return locks;
+    }
     private final ConcurrentHashMap<String, Map<Integer, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
 
@@ -184,6 +198,12 @@ public class S3Service implements Resettable {
     }
 
     public Bucket createBucket(String bucketName, String region) {
+        if (ACCOUNT_STORAGE_ROOT.equals(bucketName)) {
+            // Floci doesn't otherwise validate bucket name format, but this name must stay
+            // unavailable — it's the root every account's disk storage lives under.
+            throw new AwsException("InvalidBucketName",
+                    "The specified bucket is not valid.", 400);
+        }
         var existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
             Bucket bucket = existing.get();
@@ -218,10 +238,10 @@ public class S3Service implements Resettable {
 
         bucketStore.delete(bucketName);
         if (inMemory) {
-            String prefix = bucketName + "/";
+            String prefix = ownerId() + "/" + bucketName + "/";
             memoryDataStore.keySet().removeIf(k -> k.startsWith(prefix));
         } else {
-            deleteDirectory(dataRoot.resolve(bucketName));
+            deleteDirectory(dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(bucketName));
         }
         LOG.infov("Deleted bucket: {0}", bucketName);
     }
@@ -750,8 +770,8 @@ public class S3Service implements Resettable {
         getObjectMetadata(bucketName, key, versionId);
         if (inMemory) {
             byte[] data = versionId != null
-                    ? memoryDataStore.get(versionedKey(bucketName, key, versionId))
-                    : memoryDataStore.get(objectKey(bucketName, key));
+                    ? memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId))
+                    : memoryDataStore.get(physicalKey(bucketName, key));
             if (data == null) {
                 throw new IllegalStateException("S3 object data is missing for " + bucketName + "/" + key);
             }
@@ -759,8 +779,8 @@ public class S3Service implements Resettable {
         }
         try {
             Path path = versionId != null
-                    ? resolveVersionedPath(bucketName, key, versionId)
-                    : resolveObjectPath(bucketName, key);
+                    ? resolveVersionedPathForRead(bucketName, key, versionId)
+                    : resolveObjectPathForRead(bucketName, key);
             return Files.newInputStream(path);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to open S3 object stream", e);
@@ -2655,14 +2675,29 @@ public class S3Service implements Resettable {
 
     private static final String DATA_SUFFIX = ".s3data";
 
+    // A 12-digit bucket name is valid on S3 and would otherwise collide with an account ID,
+    // making dataRoot/<accountId>/... indistinguishable from the legacy dataRoot/<bucket>/...
+    // layout. A leading "." keeps this namespace unreachable by any real bucket name.
+    private static final String ACCOUNT_STORAGE_ROOT = ".accounts";
+
+    // Unlike bucketStore/objectStore, object bytes get no automatic account prefixing — two
+    // accounts can own a bucket named "orders" and would collide here without this scoping.
+    private String physicalKey(String bucketName, String key) {
+        return ownerId() + "/" + objectKey(bucketName, key);
+    }
+
+    private String physicalVersionedKey(String bucketName, String key, String versionId) {
+        return ownerId() + "/" + versionedKey(bucketName, key, versionId);
+    }
+
     private Path resolveObjectPath(String bucketName, String key) {
-        Path bucketDir = dataRoot.resolve(bucketName).normalize();
-        
+        Path bucketDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(bucketName).normalize();
+
         String safeKey = key;
         while (safeKey.startsWith("/")) {
             safeKey = safeKey.substring(1);
         }
-        
+
         Path resolved = bucketDir.resolve(safeKey + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(bucketDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
@@ -2670,14 +2705,35 @@ public class S3Service implements Resettable {
         return resolved;
     }
 
-    private Path resolveVersionedPath(String bucketName, String key, String versionId) {
-        Path baseDir = dataRoot.resolve(".versions").resolve(bucketName).normalize();
-        
+    private Path legacyObjectPath(String bucketName, String key) {
         String safeKey = key;
         while (safeKey.startsWith("/")) {
             safeKey = safeKey.substring(1);
         }
-        
+        return dataRoot.resolve(bucketName).normalize().resolve(safeKey + DATA_SUFFIX);
+    }
+
+    /**
+     * Resolves the path for a read, copying in a legacy-layout file if present. Reads only —
+     * a write/delete ({@link #resolveObjectPath}) must never touch legacy data, since it isn't
+     * known to belong to any one account and two accounts can share a bucket name. Copying
+     * (not moving) leaves the ambiguous source in place so every account that reads it gets
+     * its own copy.
+     */
+    private Path resolveObjectPathForRead(String bucketName, String key) {
+        Path resolved = resolveObjectPath(bucketName, key);
+        copyLegacyFileIfPresent(legacyObjectPath(bucketName, key), resolved);
+        return resolved;
+    }
+
+    private Path resolveVersionedPath(String bucketName, String key, String versionId) {
+        Path baseDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(".versions").resolve(bucketName).normalize();
+
+        String safeKey = key;
+        while (safeKey.startsWith("/")) {
+            safeKey = safeKey.substring(1);
+        }
+
         Path resolved = baseDir.resolve(safeKey).resolve(versionId + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(baseDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
@@ -2685,26 +2741,86 @@ public class S3Service implements Resettable {
         return resolved;
     }
 
-    private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {
-        if (inMemory) {
-            memoryDataStore.put(versionedKey(bucketName, key, versionId), data);
+    private Path legacyVersionedPath(String bucketName, String key, String versionId) {
+        String safeKey = key;
+        while (safeKey.startsWith("/")) {
+            safeKey = safeKey.substring(1);
+        }
+        return dataRoot.resolve(".versions").resolve(bucketName).normalize()
+                .resolve(safeKey).resolve(versionId + DATA_SUFFIX);
+    }
+
+    /** Read-only counterpart of {@link #resolveObjectPathForRead} for versioned objects. */
+    private Path resolveVersionedPathForRead(String bucketName, String key, String versionId) {
+        Path resolved = resolveVersionedPath(bucketName, key, versionId);
+        copyLegacyFileIfPresent(legacyVersionedPath(bucketName, key, versionId), resolved);
+        return resolved;
+    }
+
+    private ReentrantLock diskFileLock(Path path) {
+        // A stripe collision just serializes unrelated paths — safe, unlike a map entry.
+        return diskFileLocks[Math.floorMod(path.hashCode(), diskFileLocks.length)];
+    }
+
+    /**
+     * Copies in a legacy file for {@code newPath}, under the same lock {@link #writeFile}/
+     * {@link #deleteFile} hold for that path — otherwise a concurrent write could land its
+     * real content and then be silently clobbered by a racing legacy copy.
+     */
+    private void copyLegacyFileIfPresent(Path legacyPath, Path newPath) {
+        if (!Files.exists(legacyPath)) {
             return;
         }
+        ReentrantLock lock = diskFileLock(newPath);
+        lock.lock();
         try {
-            Path filePath = resolveVersionedPath(bucketName, key, versionId);
+            if (Files.exists(newPath)) {
+                return;
+            }
+            Files.createDirectories(newPath.getParent());
+            Files.copy(legacyPath, newPath);
+        } catch (IOException e) {
+            // A failed copy can leave newPath truncated, which would wrongly look
+            // "already migrated" on a later retry — clean it up before rethrowing.
+            deleteQuietly(newPath, "partially-copied legacy S3 object file, so a later read can retry migration");
+            throw new UncheckedIOException("Failed to copy legacy S3 object file to account-scoped layout", e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void deleteQuietly(Path path, String reason) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException e) {
+            LOG.warnv(e, "Failed to delete {0} ({1})", path, reason);
+        }
+    }
+
+    private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {
+        if (inMemory) {
+            memoryDataStore.put(physicalVersionedKey(bucketName, key, versionId), data);
+            return;
+        }
+        Path filePath = resolveVersionedPath(bucketName, key, versionId);
+        ReentrantLock lock = diskFileLock(filePath);
+        lock.lock();
+        try {
             Files.createDirectories(filePath.getParent());
             Files.write(filePath, data);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write versioned S3 object file", e);
+        } finally {
+            lock.unlock();
         }
     }
 
     private byte[] readVersionedFile(String bucketName, String key, String versionId) {
         if (inMemory) {
-            return memoryDataStore.get(versionedKey(bucketName, key, versionId));
+            return memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId));
         }
         try {
-            return Files.readAllBytes(resolveVersionedPath(bucketName, key, versionId));
+            return Files.readAllBytes(resolveVersionedPathForRead(bucketName, key, versionId));
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read versioned S3 object file", e);
         }
@@ -2712,24 +2828,28 @@ public class S3Service implements Resettable {
 
     private void writeFile(String bucketName, String key, byte[] data) {
         if (inMemory) {
-            memoryDataStore.put(objectKey(bucketName, key), data);
+            memoryDataStore.put(physicalKey(bucketName, key), data);
             return;
         }
+        Path filePath = resolveObjectPath(bucketName, key);
+        ReentrantLock lock = diskFileLock(filePath);
+        lock.lock();
         try {
-            Path filePath = resolveObjectPath(bucketName, key);
             Files.createDirectories(filePath.getParent());
             Files.write(filePath, data);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write S3 object file", e);
+        } finally {
+            lock.unlock();
         }
     }
 
     private byte[] readFile(String bucketName, String key) {
         if (inMemory) {
-            return memoryDataStore.get(objectKey(bucketName, key));
+            return memoryDataStore.get(physicalKey(bucketName, key));
         }
         try {
-            return Files.readAllBytes(resolveObjectPath(bucketName, key));
+            return Files.readAllBytes(resolveObjectPathForRead(bucketName, key));
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read S3 object file", e);
         }
@@ -2737,25 +2857,35 @@ public class S3Service implements Resettable {
 
     private void deleteFile(String bucketName, String key) {
         if (inMemory) {
-            memoryDataStore.remove(objectKey(bucketName, key));
+            memoryDataStore.remove(physicalKey(bucketName, key));
             return;
         }
+        Path filePath = resolveObjectPath(bucketName, key);
+        ReentrantLock lock = diskFileLock(filePath);
+        lock.lock();
         try {
-            Files.deleteIfExists(resolveObjectPath(bucketName, key));
+            Files.deleteIfExists(filePath);
         } catch (IOException e) {
             LOG.errorv(e, "Failed to delete S3 object file: {0}/{1}", bucketName, key);
+        } finally {
+            lock.unlock();
         }
     }
 
     private void deleteVersionedFile(String bucketName, String key, String versionId) {
         if (inMemory) {
-            memoryDataStore.remove(versionedKey(bucketName, key, versionId));
+            memoryDataStore.remove(physicalVersionedKey(bucketName, key, versionId));
             return;
         }
+        Path filePath = resolveVersionedPath(bucketName, key, versionId);
+        ReentrantLock lock = diskFileLock(filePath);
+        lock.lock();
         try {
-            Files.deleteIfExists(resolveVersionedPath(bucketName, key, versionId));
+            Files.deleteIfExists(filePath);
         } catch (IOException e) {
             LOG.errorv(e, "Failed to delete versioned S3 object file: {0}/{1} v={2}", bucketName, key, versionId);
+        } finally {
+            lock.unlock();
         }
     }
 

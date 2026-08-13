@@ -436,3 +436,25 @@ resource "aws_ses_active_receipt_rule_set" "compat" {
 output "ses_rule_set_name" {
   value = aws_ses_receipt_rule_set.compat.rule_set_name
 }
+
+# -- IAM managed-policy attachment ---------------------------------------------
+# These policies sit outside the small curated set Floci used to ship, so the
+# attachments below only succeed once the full AWS managed-policy catalog is seeded.
+resource "aws_iam_role" "managed_policy_attach" {
+  name               = "floci-compat-managed-policy-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_read_only" {
+  role       = aws_iam_role.managed_policy_attach.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "emr_service_role" {
+  role       = aws_iam_role.managed_policy_attach.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole"
+}
+
+output "managed_policy_role_arn" {
+  value = aws_iam_role.managed_policy_attach.arn
+}
