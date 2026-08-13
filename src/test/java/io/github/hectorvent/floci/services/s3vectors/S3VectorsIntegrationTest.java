@@ -409,4 +409,159 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(404);
     }
+
+    // Self-contained: each test below creates its own bucket/index so it doesn't depend on the
+    // ordered setup/teardown sequence above.
+
+    @Test
+    @Order(16)
+    void listVectorsByIndexArnOnly() {
+        String bucketName = "arn-list-vectors-bucket";
+        String indexName = "arn-idx";
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "vectorBucketName": "%s" }
+                """.formatted(bucketName))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(200);
+
+        String indexArn =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "dimension": 2,
+                        "distanceMetric": "cosine",
+                        "dataType": "float32"
+                    }
+                    """.formatted(bucketName, indexName))
+            .when()
+                .post("/CreateIndex")
+            .then()
+                .statusCode(200)
+            .extract().path("indexArn");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "vectors": [{"key": "only", "data": {"float32": [1.0, 0.0]}}]
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/PutVectors")
+        .then()
+            .statusCode(200);
+
+        // ListVectors identified by indexArn alone (no vectorBucketName/indexName) must resolve
+        // to the same index rather than looking up a null bucket name.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "indexArn": "%s" }
+                """.formatted(indexArn))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("only"));
+    }
+
+    @Test
+    @Order(17)
+    void listVectorsPaginationRoundTripsKeysWithQuotes() {
+        String bucketName = "quote-key-vector-bucket";
+        String indexName = "quote-idx";
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "vectorBucketName": "%s" }
+                """.formatted(bucketName))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "dimension": 2,
+                    "distanceMetric": "cosine",
+                    "dataType": "float32"
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/CreateIndex")
+        .then()
+            .statusCode(200);
+
+        // One key contains a double quote — the pagination cursor must round-trip it intact
+        // rather than truncating at the quote.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "vectors": [
+                        {"key": "a\\"b", "data": {"float32": [1.0, 0.0]}},
+                        {"key": "c", "data": {"float32": [0.0, 1.0]}}
+                    ]
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/PutVectors")
+        .then()
+            .statusCode(200);
+
+        String firstPageNextToken =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "maxResults": 1
+                    }
+                    """.formatted(bucketName, indexName))
+            .when()
+                .post("/ListVectors")
+            .then()
+                .statusCode(200)
+                .body("vectors", hasSize(1))
+                .body("vectors[0].key", equalTo("a\"b"))
+                .body("nextToken", notNullValue())
+            .extract().path("nextToken");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "maxResults": 1,
+                    "nextToken": "%s"
+                }
+                """.formatted(bucketName, indexName, firstPageNextToken))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("c"))
+            .body("nextToken", nullValue());
+    }
 }
