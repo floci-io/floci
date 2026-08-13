@@ -1739,7 +1739,9 @@ public class Ec2Service implements ContainerTeardown {
      * not check that a referenced group exists, for ids either.
      */
     private void resolveGroupReferences(String region, String vpcId, IpPermission perm) {
-        if (perm.getUserIdGroupPairs() == null) return;
+        if (perm.getUserIdGroupPairs() == null) {
+            return;
+        }
         for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
             if (pair.getUserId() == null) {
                 pair.setUserId(accountId);

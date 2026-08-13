@@ -351,7 +351,9 @@ public class Ec2QueryHandler {
             }
             for (int j = 1; ; j++) {
                 String cidr = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".CidrIpv6");
-                if (cidr == null) break;
+                if (cidr == null) {
+                    break;
+                }
                 String desc = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".Description");
                 perm.getIpv6Ranges().add(new Ipv6Range(cidr, desc));
             }
@@ -363,7 +365,9 @@ public class Ec2QueryHandler {
                 String desc = p.getFirst(base + ".Description");
                 // A default-VPC caller may reference a group by name alone, so the loop cannot end
                 // on a missing GroupId.
-                if (groupId == null && groupName == null && userId == null && desc == null) break;
+                if (groupId == null && groupName == null && userId == null && desc == null) {
+                    break;
+                }
                 UserIdGroupPair pair = new UserIdGroupPair();
                 pair.setGroupId(groupId);
                 pair.setGroupName(groupName);
