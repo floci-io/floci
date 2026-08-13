@@ -141,6 +141,8 @@ public class CloudFormationResourceProvisioner {
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
+    private static final int GENERATED_NAME_SUFFIX_LENGTH = 12;
+    private static final int STEP_FUNCTIONS_NAME_MAX_LENGTH = 80;
     private static final String LOG_GROUP_NAME_MODE_ATTR = "FlociLogGroupNameMode";
     private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
     private static final String SECRET_TARGET_OWNER_ATTR = "__FlociSecretTargetOwner";
@@ -3612,7 +3614,8 @@ public class CloudFormationResourceProvisioner {
         } else if (existing != null && !nameModeReplacement && !typeReplacement) {
             name = existing.getName();
         } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 80, false);
+            name = generatePhysicalName(
+                    stackName, r.getLogicalId(), STEP_FUNCTIONS_NAME_MAX_LENGTH, false);
         }
         String desiredArn = AwsArnUtils.Arn.of(
                 "states", region, accountId, "stateMachine:" + name).toString();
@@ -3704,10 +3707,21 @@ public class CloudFormationResourceProvisioner {
 
     private String inferStepFunctionsNameMode(
             StateMachine existing, String stackName, String logicalId) {
-        String generatedPrefix = stackName + "-" + logicalId + "-";
-        String truncatedPrefix = generatedPrefix.substring(
-                0, Math.min(generatedPrefix.length(), 80));
-        return existing.getName() != null && existing.getName().startsWith(truncatedPrefix)
+        String base = stackName + "-" + logicalId;
+        int keep = STEP_FUNCTIONS_NAME_MAX_LENGTH - GENERATED_NAME_SUFFIX_LENGTH - 1;
+        String prefix = base.substring(0, Math.min(base.length(), keep));
+        while (prefix.endsWith("-")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        String generatedPrefix = prefix.isEmpty() ? "" : prefix + "-";
+        String name = existing.getName();
+        if (name == null || !name.startsWith(generatedPrefix)) {
+            return NAME_MODE_EXPLICIT;
+        }
+        String suffix = name.substring(generatedPrefix.length());
+        boolean generatedSuffix = suffix.length() == GENERATED_NAME_SUFFIX_LENGTH
+                && suffix.chars().allMatch(c -> c >= '0' && c <= '9' || c >= 'a' && c <= 'f');
+        return generatedSuffix
                 ? NAME_MODE_GENERATED
                 : NAME_MODE_EXPLICIT;
     }
@@ -6111,7 +6125,8 @@ public class CloudFormationResourceProvisioner {
      * Mirrors the naming pattern AWS CloudFormation uses when no explicit name is provided.
      */
     private String generatePhysicalName(String stackName, String logicalId, int maxLength, boolean lowercase) {
-        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String suffix = UUID.randomUUID().toString().replace("-", "")
+                .substring(0, GENERATED_NAME_SUFFIX_LENGTH);
         String base = stackName + "-" + logicalId;
         if (lowercase) {
             base = base.toLowerCase();

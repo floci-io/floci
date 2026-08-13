@@ -46,6 +46,9 @@ class CloudFormationIntegrationTest {
     @Inject
     MutableClock clock;
 
+    @Inject
+    CloudFormationService cloudFormationService;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -8293,6 +8296,78 @@ class CloudFormationIntegrationTest {
             .then()
                 .statusCode(200);
         }
+    }
+
+    @Test
+    void updateStack_longGeneratedStepFunctionsNameWithoutModeRemainsInPlace() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-legacy-generated-" + "x".repeat(55) + suffix;
+        String template = """
+            {
+              "Resources": {
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-generated-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"End\\":true}}}"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String oldArn = physicalIdByLogicalId(given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString(), "MyStateMachine");
+
+        var stack = cloudFormationService.describeStacks(stackName, "us-east-1").getFirst();
+        stack.getResources().get("MyStateMachine").getAttributes().remove("FlociStepFunctionsNameMode");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String newArn = physicalIdByLogicalId(given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString(), "MyStateMachine");
+        assertEquals(oldArn, newArn);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
