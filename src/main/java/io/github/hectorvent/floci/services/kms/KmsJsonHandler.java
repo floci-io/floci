@@ -154,6 +154,12 @@ public class KmsJsonHandler {
             entry.put("KeyId", (String) grant.get("KeyId"));
             entry.put("GranteePrincipal", (String) grant.get("GranteePrincipal"));
             entry.put("CreationDate", ((Number) grant.get("CreationDate")).longValue());
+            if (grant.get("Name") != null) {
+                entry.put("Name", (String) grant.get("Name"));
+            }
+            if (grant.get("Constraints") != null) {
+                entry.set("Constraints", objectMapper.valueToTree(grant.get("Constraints")));
+            }
             ArrayNode operations = entry.putArray("Operations");
             @SuppressWarnings("unchecked")
             List<String> operationValues = (List<String>) grant.get("Operations");
@@ -186,6 +192,12 @@ public class KmsJsonHandler {
             entry.put("KeyId", (String) grant.get("KeyId"));
             entry.put("GranteePrincipal", (String) grant.get("GranteePrincipal"));
             entry.put("CreationDate", ((Number) grant.get("CreationDate")).longValue());
+            if (grant.get("Name") != null) {
+                entry.put("Name", (String) grant.get("Name"));
+            }
+            if (grant.get("Constraints") != null) {
+                entry.set("Constraints", objectMapper.valueToTree(grant.get("Constraints")));
+            }
             ArrayNode operations = entry.putArray("Operations");
             @SuppressWarnings("unchecked")
             List<String> operationValues = (List<String>) grant.get("Operations");
@@ -208,8 +220,13 @@ public class KmsJsonHandler {
         request.path("Operations").forEach(operation -> operations.add(operation.asText()));
         String retiringPrincipal = request.path("RetiringPrincipal").isMissingNode()
                 ? null : request.path("RetiringPrincipal").asText(null);
+        String name = request.path("Name").isMissingNode() ? null : request.path("Name").asText(null);
+        Map<String, Object> constraints = request.path("Constraints").isObject()
+                ? objectMapper.convertValue(request.path("Constraints"), Map.class)
+                : null;
 
-        KmsGrant grant = service.createGrant(keyId, granteePrincipal, operations, retiringPrincipal, region);
+        KmsGrant grant = service.createGrant(
+                keyId, granteePrincipal, operations, retiringPrincipal, name, constraints, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("GrantId", grant.getGrantId());
         response.put("GrantToken", grant.getGrantToken());

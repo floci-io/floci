@@ -563,6 +563,8 @@ class KmsIntegrationTest {
                         {
                             "KeyId": "%s",
                             "GranteePrincipal": "arn:aws:iam::000000000000:user/grantee",
+                            "Name": "vellum-tenant-round-trip",
+                            "Constraints": {"EncryptionContextEquals": {"tenant_id": "tenant-001"}},
                             "Operations": ["Encrypt", "Decrypt"]
                         }
                         """.formatted(keyId))
@@ -587,6 +589,8 @@ class KmsIntegrationTest {
                 .body("Grants[0].GrantId", equalTo(grantId))
                 .body("Grants[0].KeyId", startsWith("arn:aws:kms:"))
                 .body("Grants[0].GranteePrincipal", equalTo("arn:aws:iam::000000000000:user/grantee"))
+                .body("Grants[0].Name", equalTo("vellum-tenant-round-trip"))
+                .body("Grants[0].Constraints.EncryptionContextEquals.tenant_id", equalTo("tenant-001"))
                 .body("Grants[0].Operations[0]", equalTo("Encrypt"))
                 .body("Grants[0].Operations[1]", equalTo("Decrypt"))
                 .body("Truncated", equalTo(false));
