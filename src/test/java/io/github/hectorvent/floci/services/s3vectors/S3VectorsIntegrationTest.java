@@ -248,6 +248,75 @@ class S3VectorsIntegrationTest {
 
     @Test
     @Order(11)
+    void listVectors() {
+        // Reproduces #2161: ListVectors previously had no route and fell through to the S3
+        // REST-XML controller, returning an S3 <Error>InvalidArgument</Error> instead of a
+        // ListVectors response.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "returnData": true,
+                    "returnMetadata": true
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .contentType(JSON_CONTENT_TYPE)
+            .statusCode(200)
+            .body("vectors", hasSize(2))
+            .body("vectors.find { it.key == 'v1' }.data.float32", contains(1.0f, 0.0f, 0.0f))
+            .body("vectors.find { it.key == 'v1' }.metadata.label", equalTo("first"))
+            .body("vectors.find { it.key == 'v2' }.metadata.label", equalTo("second"))
+            .body("nextToken", nullValue());
+    }
+
+    @Test
+    @Order(12)
+    void listVectorsPaginatesWithMaxResultsAndNextToken() {
+        String firstPageNextToken =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "maxResults": 1
+                    }
+                    """.formatted(BUCKET_NAME, INDEX_NAME))
+            .when()
+                .post("/ListVectors")
+            .then()
+                .statusCode(200)
+                .body("vectors", hasSize(1))
+                .body("vectors[0].key", equalTo("v1"))
+                .body("nextToken", notNullValue())
+            .extract().path("nextToken");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "maxResults": 1,
+                    "nextToken": "%s"
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME, firstPageNextToken))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("v2"))
+            .body("nextToken", nullValue());
+    }
+
+    @Test
+    @Order(13)
     void deleteVectors() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -282,7 +351,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(14)
     void deleteIndex() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -313,7 +382,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(15)
     void deleteVectorBucket() {
         given()
             .contentType(JSON_CONTENT_TYPE)
