@@ -30,16 +30,19 @@ final class DynamoDbAccessPathValidator {
 
     private DynamoDbAccessPathValidator() {}
 
-    static void validateQuery(DynamoDbAccessPath accessPath, JsonNode keyConditions,
-                              String keyConditionExpression, String filterExpression,
-                              JsonNode queryFilter, JsonNode expressionAttributeNames) {
+    static String validateQuery(DynamoDbAccessPath accessPath, JsonNode keyConditions,
+                                String keyConditionExpression, String filterExpression,
+                                JsonNode queryFilter, JsonNode expressionAttributeNames) {
+        String partitionKeyValuePlaceholder = null;
         if (keyConditionExpression != null) {
-            validateKeyConditionExpression(accessPath, keyConditionExpression, expressionAttributeNames);
+            partitionKeyValuePlaceholder = validateKeyConditionExpression(
+                    accessPath, keyConditionExpression, expressionAttributeNames);
         } else {
             validateLegacyKeyConditions(accessPath, keyConditions);
         }
         validateFilterExpression(accessPath, filterExpression, expressionAttributeNames);
         validateLegacyQueryFilter(accessPath, queryFilter);
+        return partitionKeyValuePlaceholder;
     }
 
     static void validateSelection(TableDefinition table, DynamoDbAccessPath accessPath,
@@ -75,24 +78,21 @@ final class DynamoDbAccessPathValidator {
         requestedAttributes.removeAll(projectedAttributes);
         if (!requestedAttributes.isEmpty()) {
             throw validationException("One or more parameter values were invalid: Global secondary index "
-                    + accessPath.indexName() + " does not project " + String.join(", ", requestedAttributes));
+                    + accessPath.indexName() + " does not project "
+                    + String.join(", ", requestedAttributes.stream().sorted().toList()));
         }
     }
 
-    private static void validateKeyConditionExpression(DynamoDbAccessPath accessPath,
-                                                       String expression, JsonNode names) {
-        Expr root;
-        try {
-            root = ExpressionEvaluator.parse(expression);
-        } catch (IllegalArgumentException e) {
-            return;
-        }
+    private static String validateKeyConditionExpression(DynamoDbAccessPath accessPath,
+                                                         String expression, JsonNode names) {
+        Expr root = parseExpression(expression, "KeyConditionExpression");
 
         List<Expr> conditions = root instanceof AndExpr and
                 ? and.operands() : List.of(root);
         String partitionKey = accessPath.partitionKeyName();
         Set<String> sortKeys = Set.copyOf(accessPath.sortKeyNames());
         int partitionConditions = 0;
+        String partitionKeyValuePlaceholder = null;
         Set<String> conditionedAttributes = new HashSet<>();
 
         for (Expr condition : conditions) {
@@ -106,6 +106,7 @@ final class DynamoDbAccessPathValidator {
                 if (!isPartitionKeyEquality(condition)) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);
                 }
+                partitionKeyValuePlaceholder = ((PlaceholderOperand) ((CompareExpr) condition).right()).name();
             } else if (attribute != null && sortKeys.contains(attribute)) {
                 if (!isSupportedSortKeyCondition(condition)) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);
@@ -123,6 +124,7 @@ final class DynamoDbAccessPathValidator {
             throw new AwsException("ValidationException",
                     "KeyConditionExpressions must only contain one condition per key", 400);
         }
+        return partitionKeyValuePlaceholder;
     }
 
     private static boolean isPartitionKeyEquality(Expr condition) {
@@ -191,12 +193,7 @@ final class DynamoDbAccessPathValidator {
         if (expression == null) {
             return;
         }
-        Expr root;
-        try {
-            root = ExpressionEvaluator.parse(expression);
-        } catch (IllegalArgumentException e) {
-            return;
-        }
+        Expr root = parseExpression(expression, "FilterExpression");
 
         Set<String> referenced = new HashSet<>();
         collectAttributes(root, names, referenced);
@@ -263,6 +260,19 @@ final class DynamoDbAccessPathValidator {
             return names.get(segment).asText();
         }
         return segment;
+    }
+
+    private static Expr parseExpression(String expression, String expressionType) {
+        try {
+            return ExpressionEvaluator.parse(expression);
+        } catch (IllegalArgumentException e) {
+            String detail = e.getMessage();
+            String message = "Invalid " + expressionType + ": Syntax error";
+            if (detail != null && detail.startsWith("token:")) {
+                message += "; " + detail;
+            }
+            throw validationException(message);
+        }
     }
 
     private static AwsException validationException(String message) {

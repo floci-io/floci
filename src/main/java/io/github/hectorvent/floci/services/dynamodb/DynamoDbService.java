@@ -666,8 +666,8 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
-        DynamoDbAccessPathValidator.validateQuery(accessPath, keyConditions, keyConditionExpression,
-                filterExpression, null, exprAttrNames);
+        String partitionKeyValuePlaceholder = DynamoDbAccessPathValidator.validateQuery(
+                accessPath, keyConditions, keyConditionExpression, filterExpression, null, exprAttrNames);
         String pkName = accessPath.partitionKeyName();
         String skName = accessPath.sortKeyName();
         List<String> sortKeyNames = accessPath.sortKeyNames();
@@ -696,8 +696,8 @@ public class DynamoDbService {
                 }
             }
         } else if (keyConditionExpression != null) {
-            results = queryWithExpression(items, keyConditionExpression,
-                    expressionAttrValues, exprAttrNames);
+            results = queryWithExpression(items, pkName, partitionKeyValuePlaceholder,
+                    keyConditionExpression, expressionAttrValues, exprAttrNames);
         }
 
         // Filter out items without GSI key attributes (sparse index behavior).
@@ -2617,11 +2617,20 @@ public class DynamoDbService {
     }
 
     private List<JsonNode> queryWithExpression(ConcurrentSkipListMap<String, JsonNode> items,
+                                                String partitionKeyName,
+                                                String partitionKeyValuePlaceholder,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
                                                 JsonNode exprAttrNames) {
         List<JsonNode> results = new ArrayList<>();
+        String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
+                ? extractScalarValue(expressionAttrValues.get(partitionKeyValuePlaceholder))
+                : null;
         for (JsonNode item : items.values()) {
+            if (partitionKeyValue != null
+                    && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
+                continue;
+            }
             if (ExpressionEvaluator.matches(expression, item, exprAttrNames, expressionAttrValues)) {
                 results.add(item);
             }

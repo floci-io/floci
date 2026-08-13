@@ -69,7 +69,7 @@ class DynamoDbAccessPathValidatorTest {
         ObjectNode names = mapper.createObjectNode();
         names.put("#status", "status");
 
-        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateQuery(
+        assertEquals(":status", DynamoDbAccessPathValidator.validateQuery(
                 gsiPath, null, "#status = :status AND createdAt BETWEEN :start AND :end",
                 null, null, names));
     }
@@ -104,6 +104,18 @@ class DynamoDbAccessPathValidatorTest {
                 tablePath, "pk = :pk AND sk > :start AND sk < :end"));
         assertThrows(AwsException.class, () -> validateExpression(
                 tablePath, "pk.value = :pk"));
+    }
+
+    @Test
+    void rejectsMalformedKeyAndFilterExpressions() {
+        AwsException keyError = assertThrows(AwsException.class,
+                () -> validateExpression(tablePath, "pk ="));
+        assertEquals("Invalid KeyConditionExpression: Syntax error", keyError.getMessage());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        tablePath, null, "pk = :pk", "status =", null, null));
+        assertEquals("Invalid FilterExpression: Syntax error", filterError.getMessage());
     }
 
     @Test
@@ -144,9 +156,12 @@ class DynamoDbAccessPathValidatorTest {
         assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateSelection(
                 table, gsiPath, "SPECIFIC_ATTRIBUTES", "pk, status, #summary",
                 null, names));
-        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateSelection(
-                table, gsiPath, "SPECIFIC_ATTRIBUTES", "details",
-                null, null));
+        AwsException projectionError = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, gsiPath, "SPECIFIC_ATTRIBUTES", "zeta, details",
+                        null, null));
+        assertEquals("One or more parameter values were invalid: Global secondary index "
+                + "status-index does not project details, zeta", projectionError.getMessage());
         assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateSelection(
                 table, gsiPath, "ALL_ATTRIBUTES", null, null, null));
         assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateSelection(
