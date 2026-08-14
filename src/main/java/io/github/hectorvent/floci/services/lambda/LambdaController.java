@@ -250,7 +250,7 @@ public class LambdaController {
         if (result.getLogResult() != null) {
             builder.header("X-Amz-Log-Result", result.getLogResult());
         }
-        builder.header("X-Amz-Executed-Version", "$LATEST");
+        builder.header("X-Amz-Executed-Version", result.getExecutedVersion());
         builder.header("X-Amz-Request-Id", result.getRequestId());
 
         if (result.getPayload() != null && result.getPayload().length > 0) {
@@ -479,12 +479,13 @@ public class LambdaController {
     @Path("/functions/{functionName}/policy")
     public Response addPermission(@Context HttpHeaders headers,
                                   @PathParam("functionName") String functionName,
+                                  @QueryParam("Qualifier") String qualifier,
                                   String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
-            Map<String, Object> statement = lambdaService.addPermission(region, functionName, request);
+            Map<String, Object> statement = lambdaService.addPermission(region, functionName, qualifier, request);
             String statementJson = objectMapper.writeValueAsString(statement);
             ObjectNode root = objectMapper.createObjectNode();
             root.put("Statement", statementJson);
@@ -499,10 +500,11 @@ public class LambdaController {
     @GET
     @Path("/functions/{functionName}/policy")
     public Response getPolicy(@Context HttpHeaders headers,
-                              @PathParam("functionName") String functionName) {
+                              @PathParam("functionName") String functionName,
+                              @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            Map<String, Object> data = lambdaService.getPolicy(region, functionName);
+            Map<String, Object> data = lambdaService.getPolicy(region, functionName, qualifier);
             @SuppressWarnings("unchecked")
             Map<String, Object> policy = (Map<String, Object>) data.get("policy");
             String policyJson = objectMapper.writeValueAsString(policy);
@@ -521,9 +523,10 @@ public class LambdaController {
     @Path("/functions/{functionName}/policy/{statementId}")
     public Response removePermission(@Context HttpHeaders headers,
                                      @PathParam("functionName") String functionName,
-                                     @PathParam("statementId") String statementId) {
+                                     @PathParam("statementId") String statementId,
+                                     @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        lambdaService.removePermission(region, functionName, statementId);
+        lambdaService.removePermission(region, functionName, qualifier, statementId);
         return Response.noContent().build();
     }
 
@@ -621,6 +624,13 @@ public class LambdaController {
         // KMSKeyArn — only when set
         if (fn.getKmsKeyArn() != null) {
             node.put("KMSKeyArn", fn.getKmsKeyArn());
+        }
+
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            ArrayNode fileSystems = node.putArray("FileSystemConfigs");
+            fn.getFileSystemConfigs().forEach(fileSystem -> fileSystems.addObject()
+                    .put("Arn", fileSystem.getArn())
+                    .put("LocalMountPath", fileSystem.getLocalMountPath()));
         }
 
         // Environment — always present (SDK expects it even when empty)

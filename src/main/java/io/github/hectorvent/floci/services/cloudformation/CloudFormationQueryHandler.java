@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackInstance;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperation;
+import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -59,6 +60,7 @@ public class CloudFormationQueryHandler {
             case "DescribeStackResources" -> describeStackResources(params, region);
             case "ListStackResources" -> listStackResources(params, region);
             case "GetTemplate" -> getTemplate(params, region);
+            case "GetTemplateSummary" -> getTemplateSummary(params, region);
             case "ValidateTemplate" -> validateTemplate(params);
             case "ListStacks" -> listStacks(params, region);
             case "ListExports" -> listExports(params, region);
@@ -438,6 +440,65 @@ public class CloudFormationQueryHandler {
         }
     }
 
+    // ── GetTemplateSummary ────────────────────────────────────────────────────
+
+    private Response getTemplateSummary(MultivaluedMap<String, String> params, String region) {
+        String stackName = params.getFirst("StackName");
+        String templateBody = params.getFirst("TemplateBody");
+        String templateUrl = params.getFirst("TemplateURL");
+        try {
+            TemplateSummary summary = cfnService.getTemplateSummary(stackName, templateBody, templateUrl, region);
+
+            var xml = new XmlBuilder()
+                    .start("GetTemplateSummaryResponse", CF_NS)
+                    .start("GetTemplateSummaryResult");
+
+            xml.start("ResourceTypes");
+            for (String type : summary.resourceTypes()) {
+                xml.elem("member", type);
+            }
+            xml.end("ResourceTypes");
+
+            xml.elem("Version", summary.version());
+            xml.elem("Description", summary.description());
+
+            xml.start("Parameters");
+            for (TemplateSummary.ParameterDeclaration p : summary.parameters()) {
+                xml.start("member")
+                   .elem("ParameterKey", p.parameterKey())
+                   .elem("DefaultValue", p.defaultValue())
+                   .elem("NoEcho", p.noEcho())
+                   .elem("Description", p.description())
+                   .elem("ParameterType", p.parameterType())
+                   .end("member");
+            }
+            xml.end("Parameters");
+
+            xml.start("Capabilities");
+            for (String capability : summary.capabilities()) {
+                xml.elem("member", capability);
+            }
+            xml.end("Capabilities");
+            xml.elem("CapabilitiesReason", summary.capabilitiesReason());
+
+            xml.start("DeclaredTransforms");
+            for (String transform : summary.declaredTransforms()) {
+                xml.elem("member", transform);
+            }
+            xml.end("DeclaredTransforms");
+
+            xml.start("ResourceIdentifierSummaries").end("ResourceIdentifierSummaries");
+            xml.elem("Metadata", summary.metadata());
+
+            xml.end("GetTemplateSummaryResult")
+               .raw(AwsQueryResponse.responseMetadata())
+               .end("GetTemplateSummaryResponse");
+            return Response.ok(xml.build()).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
     // ── ValidateTemplate ──────────────────────────────────────────────────────
 
     private Response validateTemplate(MultivaluedMap<String, String> params) {
@@ -455,7 +516,10 @@ public class CloudFormationQueryHandler {
     // ── ListStacks ────────────────────────────────────────────────────────────
 
     private Response listStacks(MultivaluedMap<String, String> params, String region) {
-        List<Stack> stacks = cfnService.listStacks(region);
+        List<String> statusFilter = extractList(params, "StackStatusFilter.member.");
+        List<Stack> stacks = cfnService.listStacks(region).stream()
+                .filter(stack -> statusFilter.isEmpty() || statusFilter.contains(stack.getStatus()))
+                .toList();
         XmlBuilder xml = new XmlBuilder()
                 .start("ListStacksResponse", CF_NS)
                 .start("ListStacksResult")

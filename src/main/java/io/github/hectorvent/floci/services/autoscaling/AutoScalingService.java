@@ -74,7 +74,7 @@ public class AutoScalingService {
                                                           String imageId, String instanceType, String keyName,
                                                           List<String> securityGroups, String userData,
                                                           String iamInstanceProfile,
-                                                          boolean associatePublicIpAddress) {
+                                                          Boolean associatePublicIpAddress) {
         String key = lcKey(region, name);
         if (launchConfigs.containsKey(key)) {
             throw new AwsException("AlreadyExists",
