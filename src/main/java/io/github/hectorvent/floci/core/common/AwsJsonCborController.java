@@ -184,15 +184,7 @@ public class AwsJsonCborController {
         LOG.debugv("Smithy RPC v2 CBOR: service={0}, operation={1}", serviceId, operation);
 
         try {
-            JsonNode request;
-            if (body != null && body.length > 0) {
-                if( httpHeaders.getRequestHeader("Content-encoding") != null && httpHeaders.getRequestHeader("Content-Encoding").contains("gzip")) {
-                    body = decodeBody(body);
-                }
-                request = CBOR_MAPPER.readTree(body);
-            } else {
-                request = objectMapper.createObjectNode();
-            }
+            JsonNode request = bodyToJson(httpHeaders, body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = dispatchCbor(serviceId, operation, request, region);
@@ -216,6 +208,19 @@ public class AwsJsonCborController {
             LOG.error("Error processing Smithy CBOR request: " + serviceId + "." + operation, e);
             return Response.status(500).build();
         }
+    }
+
+    private JsonNode bodyToJson(HttpHeaders httpHeaders, byte[] body) throws IOException {
+        JsonNode request;
+        if (body != null && body.length > 0) {
+            if( httpHeaders.getRequestHeader("Content-encoding") != null && httpHeaders.getRequestHeader("Content-encoding").contains("gzip")) {
+                body = decodeBody(body);
+            }
+            request = CBOR_MAPPER.readTree(body);
+        } else {
+            request = objectMapper.createObjectNode();
+        }
+        return request;
     }
 
     /**
@@ -248,9 +253,7 @@ public class AwsJsonCborController {
         LOG.debugv("{0} CBOR action: {1}", serviceKey, action);
 
         try {
-            JsonNode request = (body != null && body.length > 0)
-                    ? CBOR_MAPPER.readTree(body)
-                    : objectMapper.createObjectNode();
+            JsonNode request = bodyToJson(httpHeaders, body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {
