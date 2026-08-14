@@ -18,6 +18,10 @@ public class Ipam {
     private String publicDefaultScopeId;
     private String privateDefaultScopeId;
     private String state;
+    private Boolean enablePrivateGua;
+    private String meteredAccount;
+    private String tier;
+    private String clientToken;
     private List<String> operatingRegions = new ArrayList<>();
     private List<IpamScope> scopes = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
@@ -47,6 +51,18 @@ public class Ipam {
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
+
+    public Boolean getEnablePrivateGua() { return enablePrivateGua; }
+    public void setEnablePrivateGua(Boolean enablePrivateGua) { this.enablePrivateGua = enablePrivateGua; }
+
+    public String getMeteredAccount() { return meteredAccount; }
+    public void setMeteredAccount(String meteredAccount) { this.meteredAccount = meteredAccount; }
+
+    public String getTier() { return tier; }
+    public void setTier(String tier) { this.tier = tier; }
+
+    public String getClientToken() { return clientToken; }
+    public void setClientToken(String clientToken) { this.clientToken = clientToken; }
 
     public List<String> getOperatingRegions() { return operatingRegions; }
     public void setOperatingRegions(List<String> operatingRegions) { this.operatingRegions = operatingRegions; }

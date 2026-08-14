@@ -231,9 +231,13 @@ public class Ec2QueryHandler {
                 case "CreateIpam" -> handleCreateIpam(params, region);
                 case "DescribeIpams" -> handleDescribeIpams(params, region);
                 case "DeleteIpam" -> handleDeleteIpam(params, region);
+                case "ModifyIpam" -> handleModifyIpam(params, region);
                 case "CreateIpamPool" -> handleCreateIpamPool(params, region);
                 case "DescribeIpamPools" -> handleDescribeIpamPools(params, region);
                 case "DeleteIpamPool" -> handleDeleteIpamPool(params, region);
+                case "AssociateIpamByoasn" -> handleAssociateIpamByoasn(params, region);
+                case "DescribeIpamByoasn" -> handleDescribeIpamByoasn(params, region);
+                case "DisassociateIpamByoasn" -> handleDisassociateIpamByoasn(params, region);
                 case "ProvisionIpamPoolCidr" -> handleProvisionIpamPoolCidr(params, region);
                 case "GetIpamPoolCidrs" -> handleGetIpamPoolCidrs(params, region);
                 case "AllocateIpamPoolCidr" -> handleAllocateIpamPoolCidr(params, region);
@@ -1140,7 +1144,12 @@ public class Ec2QueryHandler {
         if (operatingRegions.isEmpty()) {
             operatingRegions.add(region);
         }
-        Ipam ipam = ipamService.createIpam(region, p.getFirst("Description"), operatingRegions);
+        checkDryRun(p);
+        Ipam ipam = ipamService.createIpam(region, p.getFirst("Description"), operatingRegions,
+                config.defaultAccountId(),
+                p.getFirst("EnablePrivateGua") == null ? false : Boolean.parseBoolean(p.getFirst("EnablePrivateGua")),
+                p.getFirst("MeteredAccount"), p.getFirst("Tier"), p.getFirst("ClientToken"),
+                parseTagsForResource(p, "ipam"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateIpamResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
@@ -1150,6 +1159,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeIpams(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<String> ids = getList(p, "IpamId");
         if (ids.isEmpty()) {
             ids = getList(p, "IpamIds.member");
@@ -1166,6 +1176,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteIpam(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         Ipam ipam = ipamService.deleteIpam(region, p.getFirst("IpamId"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteIpamResponse", AwsNamespaces.EC2)
@@ -1175,7 +1186,92 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleAssociateIpamByoasn(MultivaluedMap<String, String> params, String region) {
+        checkDryRun(params);
+        AsnAssociation association = ipamService.associateIpamByoasn(region, params.getFirst("Asn"), params.getFirst("Cidr"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AssociateIpamByoasnResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("asnAssociation")
+                .elem("asn", association.getAsn())
+                .elem("cidr", association.getCidr())
+                .elem("state", association.getState())
+                .elem("statusMessage", association.getStatusMessage())
+                .end("asnAssociation")
+                .end("AssociateIpamByoasnResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIpamByoasn(MultivaluedMap<String, String> params, String region) {
+        checkDryRun(params);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIpamByoasnResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("byoasnSet");
+        for (AsnAssociation association : ipamService.describeIpamByoasn(region)) {
+            xml.start("item")
+                    .elem("asn", association.getAsn())
+                    .elem("ipamId", association.getIpamId())
+                    .elem("state", association.getState())
+                    .elem("statusMessage", association.getStatusMessage())
+                    .end("item");
+        }
+        xml.end("byoasnSet").end("DescribeIpamByoasnResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDisassociateIpamByoasn(MultivaluedMap<String, String> params, String region) {
+        checkDryRun(params);
+        AsnAssociation association = ipamService.disassociateIpamByoasn(
+                region, params.getFirst("Asn"), params.getFirst("Cidr"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DisassociateIpamByoasnResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("asnAssociation")
+                .elem("asn", association.getAsn())
+                .elem("cidr", association.getCidr())
+                .elem("state", association.getState())
+                .elem("statusMessage", association.getStatusMessage())
+                .end("asnAssociation")
+                .end("DisassociateIpamByoasnResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private void checkDryRun(MultivaluedMap<String, String> params) {
+        if (Boolean.parseBoolean(params.getFirst("DryRun"))) {
+            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+        }
+    }
+
+    private Response handleModifyIpam(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        List<String> addOperatingRegions = new ArrayList<>();
+        for (int i = 1; p.getFirst("AddOperatingRegion." + i + ".RegionName") != null; i++) {
+            addOperatingRegions.add(p.getFirst("AddOperatingRegion." + i + ".RegionName"));
+        }
+        List<String> removeOperatingRegions = new ArrayList<>();
+        for (int i = 1; p.getFirst("RemoveOperatingRegion." + i + ".RegionName") != null; i++) {
+            removeOperatingRegions.add(p.getFirst("RemoveOperatingRegion." + i + ".RegionName"));
+        }
+        Ipam ipam = ipamService.modifyIpam(
+                region,
+                p.getFirst("IpamId"),
+                p.getFirst("Description"),
+                addOperatingRegions,
+                removeOperatingRegions,
+                p.getFirst("EnablePrivateGua") == null ? null : Boolean.parseBoolean(p.getFirst("EnablePrivateGua")),
+                p.getFirst("MeteredAccount"),
+                p.getFirst("Tier"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyIpamResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpam(xml, "ipam", ipam);
+        xml.end("ModifyIpamResponse");
+        return xmlResponse(xml.build());
+    }
+
     private Response handleCreateIpamPool(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         IpamPool pool = ipamService.createIpamPool(region,
                 p.getFirst("IpamScopeId"),
                 p.getFirst("Locale"),
@@ -1191,6 +1287,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeIpamPools(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<String> ids = getList(p, "IpamPoolId");
         if (ids.isEmpty()) {
             ids = getList(p, "IpamPoolIds.member");
@@ -1207,6 +1304,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteIpamPool(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         IpamPool pool = ipamService.deleteIpamPool(region, p.getFirst("IpamPoolId"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteIpamPoolResponse", AwsNamespaces.EC2)
@@ -1295,7 +1393,10 @@ public class Ec2QueryHandler {
                 .elem("publicDefaultScopeId", ipam.getPublicDefaultScopeId())
                 .elem("privateDefaultScopeId", ipam.getPrivateDefaultScopeId())
                 .elem("scopeCount", String.valueOf(ipam.getScopes().size()))
-                .elem("state", ipam.getState());
+                .elem("state", ipam.getState())
+                .elem("enablePrivateGua", String.valueOf(Boolean.TRUE.equals(ipam.getEnablePrivateGua())))
+                .elem("meteredAccount", ipam.getMeteredAccount())
+                .elem("tier", ipam.getTier());
         if (ipam.getDescription() != null) {
             xml.elem("description", ipam.getDescription());
         }
@@ -1303,7 +1404,9 @@ public class Ec2QueryHandler {
         for (String operatingRegion : ipam.getOperatingRegions()) {
             xml.start("item").elem("regionName", operatingRegion).end("item");
         }
-        xml.end("operatingRegionSet").end(wrapper);
+        xml.end("operatingRegionSet")
+                .raw(tagSetXml(ipam.getTags()))
+                .end(wrapper);
     }
 
     private void writeIpamPool(XmlBuilder xml, String wrapper, IpamPool pool) {

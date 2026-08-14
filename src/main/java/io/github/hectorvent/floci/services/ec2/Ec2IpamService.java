@@ -10,6 +10,9 @@ import io.github.hectorvent.floci.services.ec2.model.IpamPool;
 import io.github.hectorvent.floci.services.ec2.model.IpamPoolAllocation;
 import io.github.hectorvent.floci.services.ec2.model.IpamPoolCidr;
 import io.github.hectorvent.floci.services.ec2.model.IpamScope;
+import io.github.hectorvent.floci.services.ec2.model.AsnAssociation;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
+
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -46,24 +49,29 @@ public class Ec2IpamService {
     private final StorageBackend<String, IpamPool> pools;
     // org-wide settings, e.g. the delegated admin account
     private final StorageBackend<String, String> settings;
+    private final StorageBackend<String, AsnAssociation> asnAssociations;
+
 
     @Inject
     public Ec2IpamService(EmulatorConfig config, StorageFactory storageFactory) {
         this(config,
                 storageFactory.create("ec2", "ec2-ipams.json", new TypeReference<Map<String, Ipam>>() {}),
                 storageFactory.create("ec2", "ec2-ipam-pools.json", new TypeReference<Map<String, IpamPool>>() {}),
-                storageFactory.create("ec2", "ec2-ipam-settings.json", new TypeReference<Map<String, String>>() {}));
+                storageFactory.create("ec2", "ec2-ipam-settings.json", new TypeReference<Map<String, String>>() {}),
+                storageFactory.create("ec2", "ec2-ipam-asn-associations.json", new TypeReference<Map<String, AsnAssociation>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory StorageBackends directly).
     Ec2IpamService(EmulatorConfig config,
                    StorageBackend<String, Ipam> ipams,
                    StorageBackend<String, IpamPool> pools,
-                   StorageBackend<String, String> settings) {
+                   StorageBackend<String, String> settings,
+                   StorageBackend<String, AsnAssociation> asnAssociations) {
         this.config = config;
         this.ipams = ipams;
         this.pools = pools;
         this.settings = settings;
+        this.asnAssociations = asnAssociations;
     }
 
     // ─── Organization admin delegation ──────────────────────────────────────
@@ -100,7 +108,28 @@ public class Ec2IpamService {
     // ─── IPAMs + default scopes ─────────────────────────────────────────────
 
     public Ipam createIpam(String region, String description, List<String> operatingRegions) {
-        String ownerId = config.defaultAccountId();
+        return createIpam(region, description, operatingRegions, config.defaultAccountId());
+    }
+
+    /** Overload for callers (e.g. CloudFormation provisioning) that already have the real
+     *  owning account resolved, instead of falling back to this service's ambient default. */
+    public Ipam createIpam(String region, String description, List<String> operatingRegions,
+                           String ownerId) {
+        return createIpam(region, description, operatingRegions, ownerId,
+                false, "ipam-owner", "free", null, List.of());
+    }
+
+    public Ipam createIpam(String region, String description, List<String> operatingRegions,
+                           String ownerId, Boolean enablePrivateGua, String meteredAccount,
+                           String tier, String clientToken, List<Tag> tags) {
+        if (clientToken != null && !clientToken.isBlank()) {
+            for (Ipam existing : ipams.scan(k -> true)) {
+                if (region.equals(existing.getRegion())
+                        && clientToken.equals(existing.getClientToken())) {
+                    return existing;
+                }
+            }
+        }
         Ipam ipam = new Ipam();
         ipam.setIpamId("ipam-" + randomHex(17));
         ipam.setIpamArn("arn:aws:ec2::" + ownerId + ":ipam/" + ipam.getIpamId());
@@ -108,6 +137,11 @@ public class Ec2IpamService {
         ipam.setRegion(region);
         ipam.setDescription(description);
         ipam.setState("create-complete");
+        ipam.setEnablePrivateGua(enablePrivateGua != null ? enablePrivateGua : false);
+        ipam.setMeteredAccount(meteredAccount != null ? meteredAccount : "ipam-owner");
+        ipam.setTier(tier != null ? tier : "free");
+        ipam.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
+        ipam.setTags(tags != null ? new ArrayList<>(tags) : new ArrayList<>());
         ipam.setOperatingRegions(operatingRegions != null ? new ArrayList<>(operatingRegions) : new ArrayList<>());
         ipam.getScopes().add(defaultScope(ipam, ownerId, "private"));
         ipam.getScopes().add(defaultScope(ipam, ownerId, "public"));
@@ -143,6 +177,58 @@ public class Ec2IpamService {
         return result;
     }
 
+    public AsnAssociation associateIpamByoasn(String region, String asn, String cidr) {
+        if (asn == null || asn.isBlank()) {
+            throw new AwsException("MissingParameter", "Asn is required.", 400);
+        }
+        if (cidr == null || cidr.isBlank()) {
+            throw new AwsException("MissingParameter", "Cidr is required.", 400);
+        }
+        String key = key(region, asn + "|" + cidr);
+        String ipamId = null;
+        for (Ipam ipam : ipams.scan(k -> true)) {
+            if (region != null && ipam.getRegion() != null && region.equals(ipam.getRegion())) {
+                ipamId = ipam.getIpamId();
+                break;
+            }
+        }
+        AsnAssociation association = new AsnAssociation();
+        association.setAsn(asn);
+        association.setCidr(cidr);
+        association.setIpamId(ipamId);
+        association.setState("associated");
+        association.setStatusMessage("");
+        asnAssociations.put(key, association);
+        return association;
+    }
+
+    public boolean hasAsnAssociation(String region, String asn, String cidr) {
+        String key = key(region, asn + "|" + cidr);
+        return asnAssociations.get(key).isPresent();
+    }
+
+    public List<AsnAssociation> describeIpamByoasn(String region) {
+        List<AsnAssociation> result = new ArrayList<>();
+        String prefix = region + "|";
+        result.addAll(asnAssociations.scan(k -> k.startsWith(prefix)));
+        return result;
+    }
+
+    public AsnAssociation disassociateIpamByoasn(String region, String asn, String cidr) {
+        if (asn == null || asn.isBlank()) {
+            throw new AwsException("MissingParameter", "Asn is required.", 400);
+        }
+        if (cidr == null || cidr.isBlank()) {
+            throw new AwsException("MissingParameter", "Cidr is required.", 400);
+        }
+        String storageKey = key(region, asn + "|" + cidr);
+        AsnAssociation association = asnAssociations.get(storageKey)
+                .orElseThrow(() -> new AwsException("InvalidParameterValue", "BYOASN association was not found.", 400));
+        asnAssociations.delete(storageKey);
+        association.setState("disassociated");
+        return association;
+    }
+
     public Ipam deleteIpam(String region, String ipamId) {
         Ipam ipam = requireIpam(region, ipamId);
         ipams.delete(key(ipam.getRegion(), ipam.getIpamId()));
@@ -153,6 +239,44 @@ public class Ec2IpamService {
             }
         }
         ipam.setState("delete-complete");
+        return ipam;
+    }
+
+    public Ipam modifyIpam(String region, String ipamId, String description,
+                           List<String> addOperatingRegions, List<String> removeOperatingRegions) {
+        return modifyIpam(region, ipamId, description, addOperatingRegions, removeOperatingRegions,
+                null, null, null);
+    }
+
+    public Ipam modifyIpam(String region, String ipamId, String description,
+                           List<String> addOperatingRegions, List<String> removeOperatingRegions,
+                           Boolean enablePrivateGua, String meteredAccount, String tier) {
+        Ipam ipam = requireIpam(region, ipamId);
+        if (description != null) {
+            ipam.setDescription(description);
+        }
+        if (enablePrivateGua != null) {
+            ipam.setEnablePrivateGua(enablePrivateGua);
+        }
+        if (meteredAccount != null) {
+            ipam.setMeteredAccount(meteredAccount);
+        }
+        if (tier != null) {
+            ipam.setTier(tier);
+        }
+        if (addOperatingRegions != null) {
+            for (String operatingRegion : addOperatingRegions) {
+                if (operatingRegion != null
+                        && !operatingRegion.isBlank()
+                        && !ipam.getOperatingRegions().contains(operatingRegion)) {
+                    ipam.getOperatingRegions().add(operatingRegion);
+                }
+            }
+        }
+        if (removeOperatingRegions != null) {
+            ipam.getOperatingRegions().removeIf(removeOperatingRegions::contains);
+        }
+        ipams.put(key(ipam.getRegion(), ipam.getIpamId()), ipam);
         return ipam;
     }
 
