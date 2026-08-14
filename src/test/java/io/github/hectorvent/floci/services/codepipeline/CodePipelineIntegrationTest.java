@@ -28,6 +28,139 @@ class CodePipelineIntegrationTest {
     }
 
     @Test
+    void getPipelineReturnsCurrentStructureAndMetadata() {
+        String pipelineName = "get-pipeline-it";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceAction",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Build",
+                    "actions": [{
+                        "name": "BuildAction",
+                        "actionTypeId": {
+                            "category": "Build",
+                            "owner": "AWS",
+                            "provider": "CodeBuild",
+                            "version": "1"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """)).then().statusCode(200);
+
+        post("GetPipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipeline.name", equalTo(pipelineName))
+                .body("pipeline.version", equalTo(1))
+                .body("pipeline.pipelineType", equalTo("V1"))
+                .body("pipeline.executionMode", equalTo("SUPERSEDED"))
+                .body("metadata.pipelineArn", equalTo("arn:aws:codepipeline:us-east-1:000000000000:" + pipelineName))
+                .body("metadata.created", notNullValue())
+                .body("metadata.updated", notNullValue());
+
+        post("GetPipeline", """
+                {"name": "%s", "version": 2}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("PipelineVersionNotFoundException"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void updatePipelineReplacesStructureAndIncrementsVersion() {
+        String pipelineName = "update-pipeline-it";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceAction",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        }
+                    }]
+                },
+                {
+                    "name": "Build",
+                    "actions": [{
+                        "name": "BuildAction",
+                        "actionTypeId": {
+                            "category": "Build",
+                            "owner": "AWS",
+                            "provider": "CodeBuild",
+                            "version": "1"
+                        }
+                    }]
+                }
+                """)).then().statusCode(200);
+
+        post("UpdatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceActionV2",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        }
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "CodeDeploy",
+                            "version": "1"
+                        }
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200)
+                .body("pipeline.name", equalTo(pipelineName))
+                .body("pipeline.version", equalTo(2))
+                .body("pipeline.stages[1].name", equalTo("Deploy"));
+
+        post("GetPipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipeline.version", equalTo(2))
+                .body("pipeline.stages[0].actions[0].name", equalTo("SourceActionV2"))
+                .body("pipeline.stages[1].name", equalTo("Deploy"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
     void pipelineLifecycleExecutesS3SourceAndDeployActions() throws Exception {
         createBucket("codepipeline-source");
         createBucket("codepipeline-destination");
@@ -103,6 +236,25 @@ class CodePipelineIntegrationTest {
                 .body("pipelineExecution.status", equalTo("Succeeded"))
                 .body("pipelineExecution.artifactRevisions", hasSize(1))
                 .body("pipelineExecution.artifactRevisions[0].name", equalTo("SourceObject"));
+
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(1))
+                .body("pipelineExecutionSummaries[0].pipelineExecutionId", equalTo(executionId))
+                .body("pipelineExecutionSummaries[0].status", equalTo("Succeeded"));
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"succeededInStage": {"stageName": "Deploy"}}
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(1));
 
         post("GetPipelineState", """
                 {"name": "%s"}
@@ -253,6 +405,352 @@ class CodePipelineIntegrationTest {
         post("DeleteCustomActionType", """
                 {"category": "Build", "provider": "FlociWorker", "version": "1"}
                 """).then().statusCode(200);
+    }
+
+    @Test
+    void putApprovalResultApprovesAndRejectsManualApprovalActions() throws Exception {
+        String pipelineName = "approval-test-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Approve",
+                    "actions": [{
+                        "name": "ManualApproval",
+                        "actionTypeId": {
+                            "category": "Approval",
+                            "owner": "AWS",
+                            "provider": "Manual",
+                            "version": "1"
+                        },
+                        "configuration": {},
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-artifacts",
+                            "ObjectKey": "placeholder"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        Thread.sleep(100);
+
+        String approvalToken = post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("stageStates[0].actionStates[0].latestExecution.token");
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "%s",
+                    "result": {
+                        "status": "Approved",
+                        "summary": "Approved by test"
+                    }
+                }
+                """.formatted(pipelineName, approvalToken))
+                .then()
+                .statusCode(200)
+                .body("approvedAt", notNullValue());
+
+        Thread.sleep(100);
+
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates[0].actionStates[0].latestExecution.summary", equalTo("Approved by test"));
+
+        String pipelineName2 = "rejection-test-pipeline";
+        post("CreatePipeline", pipeline(pipelineName2, """
+                {
+                    "name": "Approve",
+                    "actions": [{
+                        "name": "ManualApproval",
+                        "actionTypeId": {
+                            "category": "Approval",
+                            "owner": "AWS",
+                            "provider": "Manual",
+                            "version": "1"
+                        },
+                        "configuration": {},
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-artifacts",
+                            "ObjectKey": "placeholder"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        String executionId2 = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName2))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        Thread.sleep(100);
+
+        String approvalToken2 = post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName2))
+                .then()
+                .statusCode(200)
+                .extract().path("stageStates[0].actionStates[0].latestExecution.token");
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "%s",
+                    "result": {
+                        "status": "Rejected",
+                        "summary": "Rejected by test"
+                    }
+                }
+                """.formatted(pipelineName2, approvalToken2))
+                .then()
+                .statusCode(200)
+                .body("approvedAt", notNullValue());
+
+        Thread.sleep(100);
+
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName2))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Failed"))
+                .body("stageStates[0].actionStates[0].latestExecution.summary", equalTo("Rejected by test"));
+    }
+
+    @Test
+    void putApprovalResultValidatesErrors() throws Exception {
+        String pipelineName = "error-test-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Approve",
+                    "actions": [{
+                        "name": "ManualApproval",
+                        "actionTypeId": {
+                            "category": "Approval",
+                            "owner": "AWS",
+                            "provider": "Manual",
+                            "version": "1"
+                        },
+                        "configuration": {},
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-artifacts",
+                            "ObjectKey": "placeholder"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "nonexistent",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": {
+                        "status": "Approved",
+                        "summary": ""
+                    }
+                }
+                """)
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("PipelineNotFoundException"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "NonexistentStage",
+                    "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": {
+                        "status": "Approved",
+                        "summary": ""
+                    }
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("StageNotFoundException"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "NonexistentAction",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": {
+                        "status": "Approved",
+                        "summary": ""
+                    }
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ActionNotFoundException"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": {
+                        "status": "Invalid",
+                        "summary": ""
+                    }
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("result.status must be one of"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": {
+                        "status": "Approved",
+                        "summary": "%s"
+                    }
+                }
+                """.formatted(pipelineName, "a".repeat(513)))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("must not exceed 512 characters"));
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        Thread.sleep(100);
+
+        String approvalToken = post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("stageStates[0].actionStates[0].latestExecution.token");
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": {
+                        "status": "Approved",
+                        "summary": ""
+                    }
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidApprovalTokenException"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "%s",
+                    "result": {
+                        "status": "Approved",
+                        "summary": "First approval"
+                    }
+                }
+                """.formatted(pipelineName, approvalToken))
+                .then()
+                .statusCode(200);
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "%s",
+                    "result": {
+                        "status": "Approved",
+                        "summary": "Second approval attempt"
+                    }
+                }
+                """.formatted(pipelineName, approvalToken))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ApprovalAlreadyCompletedException"));
     }
 
     @Test

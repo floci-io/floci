@@ -322,11 +322,25 @@ public class CodePipelineService {
         String pipelineName = text(request, "pipelineName");
         requirePipeline(account, region, pipelineName);
         List<CodePipelineExecution> executions = executions(account, region, pipelineName);
-        JsonNode filter = request.path("filter");
-        if (filter.hasNonNull("succeededInStage")) {
-            String stage = filter.path("succeededInStage").asText();
+        JsonNode filter = request.get("filter");
+        if (filter != null && !filter.isNull() && !filter.isObject()) {
+            throw new AwsException("ValidationException", "filter must be an object", 400);
+        }
+        JsonNode succeededInStage = filter == null ? null : filter.get("succeededInStage");
+        if (succeededInStage != null && !succeededInStage.isNull()) {
+            if (!succeededInStage.isObject() || !succeededInStage.hasNonNull("stageName")) {
+                throw new AwsException("ValidationException",
+                        "succeededInStage requires stageName", 400);
+            }
+            String stage = succeededInStage.path("stageName").asText();
             executions = executions.stream().filter(e -> actionExecutionsForStage(e, stage).stream()
                     .allMatch(a -> "Succeeded".equals(a.getStatus()))).toList();
+        }
+        if (request.hasNonNull("maxResults")) {
+            int maxResults = request.path("maxResults").asInt(-1);
+            if (maxResults < 1 || maxResults > 100) {
+                throw new AwsException("ValidationException", "maxResults must be between 1 and 100", 400);
+            }
         }
         Page page = page(request, executions.size(), 100);
         ObjectNode response = mapper.createObjectNode();
@@ -414,23 +428,48 @@ public class CodePipelineService {
         String stageName = text(request, "stageName");
         String actionName = text(request, "actionName");
         String token = text(request, "token");
-        String status = request.path("result").path("status").asText();
+        JsonNode resultNode = request.get("result");
+        if (resultNode == null || !resultNode.isObject()) {
+            throw new AwsException("ValidationException", "result is required", 400);
+        }
+        String status = text(resultNode, "status");
+        if (!List.of("Approved", "Rejected").contains(status)) {
+            throw new AwsException("ValidationException",
+                    "result.status must be one of [Approved, Rejected]", 400);
+        }
+        String summary = resultNode.path("summary").asText("");
+        if (summary.length() > 512) {
+            throw new AwsException("ValidationException",
+                    "result.summary must not exceed 512 characters", 400);
+        }
+
+        CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
+        requireStage(pipeline, stageName);
+        requireAction(pipeline, stageName, actionName);
+
         CodePipelineExecution execution = executions(account, region, pipelineName).stream()
                 .filter(e -> e.getActionExecutions().stream()
                         .anyMatch(a -> stageName.equals(a.getStageName())
                                 && actionName.equals(a.getActionName())
-                                && token.equals(a.getToken())
-                                && "InProgress".equals(a.getStatus())))
+                                && token.equals(a.getToken())))
                 .findFirst()
                 .orElseThrow(() -> new AwsException(
                         "InvalidApprovalTokenException", "Approval token is invalid", 400));
+
         ActionExecution approval = execution.getActionExecutions().stream()
                 .filter(a -> stageName.equals(a.getStageName()) && actionName.equals(a.getActionName()))
-                .filter(a -> token.equals(a.getToken()) && "InProgress".equals(a.getStatus()))
+                .filter(a -> token.equals(a.getToken()))
                 .findFirst()
-                .orElseThrow();
+                .orElseThrow(() -> new AwsException(
+                        "InvalidApprovalTokenException", "Approval token is invalid", 400));
+
+        if (!"InProgress".equals(approval.getStatus())) {
+            throw new AwsException("ApprovalAlreadyCompletedException",
+                    "The approval action has already been approved or rejected.", 400);
+        }
+
         approval.setStatus("Approved".equals(status) ? "Succeeded" : "Failed");
-        approval.setSummary(request.path("result").path("summary").asText(status));
+        approval.setSummary(summary);
         approval.setLastUpdateTime(now());
         putExecution(execution);
         return mapper.createObjectNode().put("approvedAt", now());
@@ -1131,6 +1170,20 @@ public class CodePipelineService {
         for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
             if (stageName.equals(stage.path("name").asText())) {
                 return;
+            }
+        }
+        throw new AwsException("StageNotFoundException", "Stage not found: " + stageName, 400);
+    }
+
+    private void requireAction(CodePipelinePipeline pipeline, String stageName, String actionName) {
+        for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
+            if (stageName.equals(stage.path("name").asText())) {
+                for (JsonNode action : stage.path("actions")) {
+                    if (actionName.equals(action.path("name").asText())) {
+                        return;
+                    }
+                }
+                throw new AwsException("ActionNotFoundException", "Action not found: " + actionName, 400);
             }
         }
         throw new AwsException("StageNotFoundException", "Stage not found: " + stageName, 400);
