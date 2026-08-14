@@ -200,10 +200,11 @@ class SesEventPublishingTest {
                                 .bucketARN("arn:aws:s3:::" + firehoseBucket)
                                 .roleARN("arn:aws:iam::000000000000:role/sdk-evt-fh-role")
                                 .prefix(firehoseStreamName + "/")
-                                // AWS minimum interval, so the delivery test waits as little as possible.
+                                // Floci does not enforce AWS's 60s minimum interval, which keeps
+                                // the delivery wait short (would need 60+ against real AWS).
                                 .bufferingHints(BufferingHints.builder()
                                         .sizeInMBs(1)
-                                        .intervalInSeconds(60)
+                                        .intervalInSeconds(5)
                                         .build())
                                 .build())
                         .build())
@@ -505,9 +506,9 @@ class SesEventPublishingTest {
         }
 
         // Two small events stay well below SizeInMBs, so delivery happens on the
-        // stream's IntervalInSeconds (60s) plus the emulator's flush tick.
+        // stream's IntervalInSeconds plus the emulator's flush tick.
         ListObjectsV2Response listed = null;
-        long deadline = System.currentTimeMillis() + 90_000;
+        long deadline = System.currentTimeMillis() + 30_000;
         while (System.currentTimeMillis() < deadline) {
             listed = s3.listObjectsV2(ListObjectsV2Request.builder()
                     .bucket(firehoseBucket)
@@ -516,7 +517,7 @@ class SesEventPublishingTest {
             if (!listed.contents().isEmpty()) {
                 break;
             }
-            Thread.sleep(5_000);
+            Thread.sleep(2_000);
         }
         assertThat(listed.contents())
                 .as("Firehose should deliver the buffered events within IntervalInSeconds")
