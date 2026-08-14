@@ -33,26 +33,31 @@ class FirehoseServiceTest {
     private static final String UUID_REGEX = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
     private FirehoseService firehoseService;
+    private StorageFactory storageFactory;
     private S3Service s3Service;
     private MutableClock clock;
 
     @BeforeEach
     void setUp() {
-        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
         s3Service = Mockito.mock(S3Service.class);
         clock = new MutableClock();
+        firehoseService = newService(0);
+    }
 
+    private FirehoseService newService(int flushRecordCount) {
         EmulatorConfig.FirehoseServiceConfig firehoseCfg = mock(EmulatorConfig.FirehoseServiceConfig.class);
         when(firehoseCfg.enabled()).thenReturn(true);
         when(firehoseCfg.tickIntervalSeconds()).thenReturn(10L);
+        when(firehoseCfg.flushRecordCount()).thenReturn(flushRecordCount);
         EmulatorConfig.ServicesConfig servicesCfg = mock(EmulatorConfig.ServicesConfig.class);
         when(servicesCfg.firehose()).thenReturn(firehoseCfg);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.services()).thenReturn(servicesCfg);
 
-        firehoseService = new FirehoseService(storageFactory, s3Service,
+        return new FirehoseService(storageFactory, s3Service,
                 new RegionResolver("us-east-1", "000000000000"), clock, config);
     }
 
@@ -204,6 +209,32 @@ class FirehoseServiceTest {
         verify(s3Service).putObject(eq("custom-bucket"), anyString(), body.capture(), anyString(), anyMap());
         // Both 512 KiB records, each followed by the newline the flush appends.
         assertEquals(2 * 512 * 1024 + 2, body.getValue().length);
+    }
+
+    /** Emulator-only opt-in: flush-record-count=1 restores LocalStack-style record-at-a-time delivery. */
+    @Test
+    void flushRecordCountOfOneDeliversEachRecordImmediately() {
+        firehoseService = newService(1);
+        firehoseService.createDeliveryStream("eager-stream", null);
+        firehoseService.putRecord("eager-stream", new Record("{\"n\":0}".getBytes(StandardCharsets.UTF_8)));
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(), body.capture(), anyString(), anyMap());
+        assertEquals("{\"n\":0}\n", new String(body.getValue(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void flushRecordCountThresholdDeliversTheWholeBuffer() {
+        firehoseService = newService(3);
+        firehoseService.createDeliveryStream("counted-stream", null);
+        putRecords("counted-stream", 2);
+        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+
+        firehoseService.putRecord("counted-stream", new Record("{\"n\":2}".getBytes(StandardCharsets.UTF_8)));
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(), body.capture(), anyString(), anyMap());
+        assertEquals("{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n", new String(body.getValue(), StandardCharsets.UTF_8));
     }
 
     /** Matches real AWS: DeleteDeliveryStream discards undelivered records instead of flushing them. */

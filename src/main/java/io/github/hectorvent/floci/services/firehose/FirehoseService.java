@@ -44,6 +44,7 @@ public class FirehoseService {
     private final RegionResolver regionResolver;
     private final Clock clock;
     private final long tickIntervalSeconds;
+    private final int flushRecordCount;
     private final boolean flusherEnabled;
     private final ScheduledExecutorService flushExecutor;
 
@@ -56,6 +57,7 @@ public class FirehoseService {
         this.regionResolver = regionResolver;
         this.clock = clock;
         this.tickIntervalSeconds = config.services().firehose().tickIntervalSeconds();
+        this.flushRecordCount = Math.max(0, config.services().firehose().flushRecordCount());
         this.flusherEnabled = config.services().firehose().enabled();
         this.flushExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "firehose-buffer-flusher");
@@ -317,6 +319,7 @@ public class FirehoseService {
         List<byte[]> buffer = buffers.computeIfAbsent(
                 streamName, k -> Collections.synchronizedList(new ArrayList<>()));
         long bufferedBytes = 0;
+        int bufferedCount;
         // Records and their buffering-start timestamp move together under the
         // buffer lock so the flusher never sees one without the other.
         synchronized (buffer) {
@@ -324,11 +327,13 @@ public class FirehoseService {
                 buffer.add(r.getData());
             }
             bufferSince.putIfAbsent(streamName, clock.instant());
+            bufferedCount = buffer.size();
             for (byte[] data : buffer) {
                 bufferedBytes += data.length;
             }
         }
-        if (bufferedBytes >= bufferingSizeLimitBytes(stream)) {
+        if ((flushRecordCount > 0 && bufferedCount >= flushRecordCount)
+                || bufferedBytes >= bufferingSizeLimitBytes(stream)) {
             flush(streamName, stream);
         }
     }

@@ -1074,6 +1074,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("10")
         long tickIntervalSeconds();
+
+        /**
+         * Emulator-only volume trigger: number of buffered records that forces
+         * an immediate flush, complementing the stream's BufferingHints.
+         * Disabled by default (0) so out-of-the-box delivery matches real AWS;
+         * set to 1 for LocalStack-style record-at-a-time delivery in local dev.
+         */
+        @WithDefault("0")
+        int flushRecordCount();
     }
 
     interface KmsServiceConfig {
