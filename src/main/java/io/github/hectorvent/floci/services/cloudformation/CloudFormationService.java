@@ -147,11 +147,29 @@ public class CloudFormationService {
                                      String templateBody, String templateUrl,
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region) {
+        return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
+                parameters, capabilities, tags, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Creates a change set whose condition-dependency preflight is evaluated in {@code accountId}'s
+     * context. This matters for StackSet deployments: {@code createChangeSet} runs in the
+     * administrator request scope, but the instance is executed in the target account, so a
+     * condition using {@code AWS::AccountId} must be preflighted against the same target account the
+     * execution will use. Otherwise a resource that is active in the target account is wrongly seen
+     * as excluded and its dependents fail with a spurious "Unresolved resource dependencies" error.
+     * This parameter changes only the preflight context; change-set and stack identifiers created here
+     * remain scoped to the caller account, and the execution account is supplied separately.
+     */
+    public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
+                                     String templateBody, String templateUrl,
+                                     Map<String, String> parameters, List<String> capabilities,
+                                     Map<String, String> tags, String region, String accountId) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
 
         // Reject an unresolvable condition dependency graph up front, before any stack state is
         // created, so CreateStack/UpdateStack fail synchronously the way real CloudFormation does.
-        validateConditionDependencies(resolvedTemplate, parameters, region);
+        validateConditionDependencies(resolvedTemplate, parameters, region, accountId);
 
         // Detect first creation atomically: the mapping function runs at most once per key, so the
         // flag is only set for the thread that actually creates the stack (no double-recording under
@@ -845,7 +863,7 @@ public class CloudFormationService {
      * Malformed or SAM templates are left for the execution path, which surfaces their own errors.
      */
     private void validateConditionDependencies(String templateBody, Map<String, String> params,
-                                               String region) {
+                                               String region, String accountId) {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
@@ -864,7 +882,7 @@ public class CloudFormationService {
 
         Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
         Map<String, Boolean> conditions =
-                resolveConditions(template, resolvedParams, null, region, regionResolver.getAccountId());
+                resolveConditions(template, resolvedParams, null, region, accountId);
 
         Set<String> allIds = new LinkedHashSet<>();
         resources.fieldNames().forEachRemaining(allIds::add);

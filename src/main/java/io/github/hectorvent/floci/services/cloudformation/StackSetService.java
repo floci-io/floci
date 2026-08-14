@@ -149,6 +149,15 @@ public class StackSetService {
             throw new AwsException("ValidationError",
                     "Accounts and Regions must each contain at least one value", 400);
         }
+        if (accounts.stream().anyMatch(account -> account == null || !account.matches("[0-9]{12}"))) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + accounts
+                            + "' at 'accounts' failed to satisfy constraint: Member must satisfy constraint: "
+                            + "[Member must have length less than or equal to 12, Member must have length "
+                            + "greater than or equal to 12, Member must satisfy regular expression pattern: "
+                            + "^[0-9]{12}$]",
+                    400);
+        }
         List<StackInstance> deployed = new ArrayList<>();
         for (String account : accounts) {
             for (String region : regions) {
@@ -243,8 +252,11 @@ public class StackSetService {
     private StackInstance deployInstance(StackSet ss, String account, String region,
                                          String changeSetName, String changeSetType) {
         String stackName = instanceStackName(ss.getStackSetName(), account);
+        // Preflight the change set in the target account so AWS::AccountId-based conditions are
+        // evaluated against the same account the instance executes in (createChangeSet otherwise runs
+        // in the administrator request scope).
         cfnService.createChangeSet(stackName, changeSetName, changeSetType, ss.getTemplateBody(), null,
-                ss.getParameters(), ss.getCapabilities(), ss.getTags(), region);
+                ss.getParameters(), ss.getCapabilities(), ss.getTags(), region, account);
         await(cfnService.executeChangeSet(stackName, changeSetName, region, account));
 
         StackInstance inst = new StackInstance();

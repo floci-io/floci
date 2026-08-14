@@ -534,6 +534,377 @@ class CloudFormationResourceConditionIntegrationTest {
             .post("/");
     }
 
+    @Test
+    void createStack_failsWhenResourceReferencesConditionFalseResourceViaGetAtt() {
+        // Verified against real AWS: an unguarded Fn::GetAtt to a condition-false resource is
+        // rejected the same way as Ref/Fn::Sub ("Unresolved resource dependencies [SkippedQueue]").
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-getatt-" + suffix;
+        String skippedQueueName = "skipped-getatt-" + suffix;
+        String dependentQueueName = "dependent-getatt-" + suffix;
+
+        String template = """
+                {
+                  "Conditions": {
+                    "IsFalse": { "Fn::Equals": ["a", "b"] }
+                  },
+                  "Resources": {
+                    "SkippedQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Condition": "IsFalse",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "DependentQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {
+                        "QueueName": { "Fn::GetAtt": ["SkippedQueue", "QueueName"] }
+                      }
+                    }
+                  }
+                }
+                """.formatted(skippedQueueName, dependentQueueName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", containsString("Unresolved resource dependencies"))
+            .body("ErrorResponse.Error.Message", containsString("SkippedQueue"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+
+        getQueueUrl(dependentQueueName).then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+    }
+
+    @Test
+    void createStack_failsWhenDependsOnArrayContainsConditionFalseResource() {
+        // The DependsOn array form must be rejected identically to the string form when any listed
+        // target is excluded by a false Condition.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-dep-arr-" + suffix;
+        String presentQueueName = "present-arr-" + suffix;
+        String skippedQueueName = "skipped-arr-" + suffix;
+        String dependentQueueName = "dependent-arr-" + suffix;
+
+        String template = """
+                {
+                  "Conditions": {
+                    "IsFalse": { "Fn::Equals": ["a", "b"] }
+                  },
+                  "Resources": {
+                    "PresentQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "SkippedQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Condition": "IsFalse",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "DependentQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "DependsOn": ["PresentQueue", "SkippedQueue"],
+                      "Properties": { "QueueName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(presentQueueName, skippedQueueName, dependentQueueName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", containsString("Unresolved resource dependencies"))
+            .body("ErrorResponse.Error.Message", containsString("SkippedQueue"));
+
+        // The whole template is rejected before any resource is provisioned.
+        getQueueUrl(presentQueueName).then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+        getQueueUrl(dependentQueueName).then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+    }
+
+    @Test
+    void updateStack_failsWhenResourceDependsOnConditionFalseResourceAndLeavesStackUnchanged() {
+        // The same synchronous validation that guards CreateStack must guard UpdateStack: an invalid
+        // condition-dependency graph is rejected before any stack state is mutated, so the existing
+        // stack and its resources are left intact.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-upd-dep-" + suffix;
+        String keepQueueName = "keep-dep-" + suffix;
+        String skippedQueueName = "skipped-upd-dep-" + suffix;
+        String dependentQueueName = "dependent-upd-dep-" + suffix;
+
+        String initialTemplate = """
+                {
+                  "Resources": {
+                    "KeepQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(keepQueueName);
+        String invalidTemplate = """
+                {
+                  "Conditions": {
+                    "IsFalse": { "Fn::Equals": ["a", "b"] }
+                  },
+                  "Resources": {
+                    "KeepQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "SkippedQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Condition": "IsFalse",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "DependentQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "DependsOn": "SkippedQueue",
+                      "Properties": { "QueueName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(keepQueueName, skippedQueueName, dependentQueueName);
+
+        createStack(stackName, initialTemplate);
+        try {
+            getQueueUrl(keepQueueName).then().statusCode(200).body(containsString(keepQueueName));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "UpdateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", invalidTemplate)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("Unresolved resource dependencies"))
+                .body("ErrorResponse.Error.Message", containsString("SkippedQueue"));
+
+            // The existing stack is untouched: still UPDATE-able, still holding only KeepQueue.
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<LogicalResourceId>KeepQueue</LogicalResourceId>"))
+                .body(not(containsString("<LogicalResourceId>DependentQueue</LogicalResourceId>")))
+                .body(not(containsString("<LogicalResourceId>SkippedQueue</LogicalResourceId>")));
+
+            // The stored template was not replaced by the rejected one.
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetTemplate")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("SkippedQueue")));
+
+            getQueueUrl(keepQueueName).then().statusCode(200).body(containsString(keepQueueName));
+            getQueueUrl(dependentQueueName).then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void updateStack_failsWhenResourceReferencesConditionFalseResourceViaRefAndLeavesStackUnchanged() {
+        // Same as above but through an unguarded Ref/Fn::Sub reference rather than DependsOn.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-upd-ref-" + suffix;
+        String keepQueueName = "keep-ref-" + suffix;
+        String skippedQueueName = "skipped-upd-ref-" + suffix;
+        String dependentQueueName = "dependent-upd-ref-" + suffix;
+
+        String initialTemplate = """
+                {
+                  "Resources": {
+                    "KeepQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(keepQueueName);
+        String invalidTemplate = """
+                {
+                  "Conditions": {
+                    "IsFalse": { "Fn::Equals": ["a", "b"] }
+                  },
+                  "Resources": {
+                    "KeepQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "SkippedQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Condition": "IsFalse",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "DependentQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {
+                        "QueueName": { "Fn::Sub": "${SkippedQueue}-%s" }
+                      }
+                    }
+                  }
+                }
+                """.formatted(keepQueueName, skippedQueueName, dependentQueueName);
+
+        createStack(stackName, initialTemplate);
+        try {
+            getQueueUrl(keepQueueName).then().statusCode(200).body(containsString(keepQueueName));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "UpdateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", invalidTemplate)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("Unresolved resource dependencies"))
+                .body("ErrorResponse.Error.Message", containsString("SkippedQueue"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+            getQueueUrl(keepQueueName).then().statusCode(200).body(containsString(keepQueueName));
+            getQueueUrl(dependentQueueName).then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void deleteStack_afterConditionDeletionFailure_doesNotReclaimUnmanagedResource() {
+        // Codifies Floci's UPDATE_COMPLETE_CLEANUP_IN_PROGRESS-style behavior: when a condition-driven
+        // cleanup delete fails, the resource is dropped from stack management. A later DeleteStack
+        // therefore never reclaims it — it is no longer part of the stack.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-del-orphan-" + suffix;
+        String bucketName = "condition-orphan-" + suffix;
+
+        String enabledTemplate = """
+                {
+                  "Conditions": {
+                    "Enabled": { "Fn::Equals": ["enabled", "enabled"] }
+                  },
+                  "Resources": {
+                    "OptionalBucket": {
+                      "Type": "AWS::S3::Bucket",
+                      "Condition": "Enabled",
+                      "Properties": { "BucketName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(bucketName);
+        String disabledTemplate = """
+                {
+                  "Conditions": {
+                    "Enabled": { "Fn::Equals": ["enabled", "disabled"] }
+                  },
+                  "Resources": {
+                    "OptionalBucket": {
+                      "Type": "AWS::S3::Bucket",
+                      "Condition": "Enabled",
+                      "Properties": { "BucketName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(bucketName);
+
+        createStack(stackName, enabledTemplate);
+        try {
+            given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(200);
+            given()
+                .contentType("text/plain")
+                .body("prevent condition-disabled bucket deletion")
+            .when()
+                .put("/" + bucketName + "/object.txt")
+            .then()
+                .statusCode(200);
+
+            // Cleanup delete fails (bucket non-empty), but the update still completes and the bucket
+            // leaves stack management.
+            updateStack(stackName, disabledTemplate);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+            // DeleteStack now has nothing to reclaim: the orphaned bucket is untracked and survives.
+            deleteStack(stackName);
+            given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(200);
+        } finally {
+            given().header("Host", bucketName + ".localhost").delete("/object.txt");
+            given().header("Host", bucketName + ".localhost").delete("/");
+            deleteStack(stackName);
+        }
+    }
+
     private static void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
