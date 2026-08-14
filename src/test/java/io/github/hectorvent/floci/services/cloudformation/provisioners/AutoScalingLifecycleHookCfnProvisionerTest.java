@@ -16,6 +16,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -79,6 +80,22 @@ class AutoScalingLifecycleHookCfnProvisionerTest {
         assertEquals("my-stack-Hook", r.getPhysicalId().replaceAll("-[0-9a-f]{12}$", ""));
         assertTrue(r.getPhysicalId().length() <= 255);
         verify(autoScaling).putLifecycleHook("us-east-1", "the-asg", r.getPhysicalId(),
+                null, null, null, null, null, null);
+    }
+
+    @Test
+    void anUnnamedHookKeepsTheNameItsFirstExecutionGenerated() {
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode().put("AutoScalingGroupName", "the-asg");
+
+        provisioner.provision(r, props, ctx());
+        String firstName = r.getPhysicalId();
+        provisioner.provision(r, props, ctx());
+
+        // A fresh name on the second pass leaves the first hook on the group, still firing,
+        // with nothing in the stack referencing it.
+        assertEquals(firstName, r.getPhysicalId());
+        verify(autoScaling, times(2)).putLifecycleHook("us-east-1", "the-asg", firstName,
                 null, null, null, null, null, null);
     }
 

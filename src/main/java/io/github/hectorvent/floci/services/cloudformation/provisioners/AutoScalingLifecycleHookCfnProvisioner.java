@@ -31,7 +31,13 @@ public class AutoScalingLifecycleHookCfnProvisioner implements CfnResourceProvis
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         String hookName = ctx.resolveOptional(props, "LifecycleHookName");
         if (hookName == null || hookName.isBlank()) {
-            hookName = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
+            // An unnamed hook keeps the name its first execution generated. Minting a fresh one on
+            // every update leaves the previous hook on the group with nothing referencing it. A
+            // declared name needs no such care, since putLifecycleHook is idempotent on it.
+            String existingName = r.getPhysicalId();
+            hookName = existingName != null && !existingName.isBlank()
+                    ? existingName
+                    : ctx.generatePhysicalName(r.getLogicalId(), 255, false);
         }
         Integer heartbeat = props != null && props.hasNonNull("HeartbeatTimeout")
                 ? props.get("HeartbeatTimeout").asInt() : null;

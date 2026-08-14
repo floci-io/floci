@@ -18,6 +18,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -81,6 +82,35 @@ class Ec2FlowLogCfnProvisionerTest {
         provisioner.provision(resource(), mapper.createObjectNode().put("ResourceId", "vpc-9"), ctx());
 
         verify(flowLogs).createFlowLog("us-east-1", "vpc-9", null, null, null, null, null, 600);
+    }
+
+    @Test
+    void updateReusesTheFlowLogThisStackAlreadyCreated() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc")))
+                .thenReturn(List.of(flowLog("fl-0abc")));
+
+        provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
+
+        // A second flow log here outlives the stack: delete only knows the id recorded last.
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+        assertEquals("fl-0abc", r.getPhysicalId());
+        assertEquals("fl-0abc", r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void updateRecreatesAFlowLogRemovedOutOfBand() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-gone");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-gone"))).thenReturn(List.of());
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt()))
+                .thenReturn(flowLog("fl-new"));
+
+        provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
+
+        assertEquals("fl-new", r.getPhysicalId());
+        assertEquals("fl-new", r.getAttributes().get("Id"));
     }
 
     @Test

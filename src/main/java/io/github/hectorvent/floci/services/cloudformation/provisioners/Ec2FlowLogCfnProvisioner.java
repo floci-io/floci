@@ -34,6 +34,16 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // An update re-invokes provision with the prior physical id. Creating unconditionally
+        // would leave a second flow log on every update and orphan the first, which then outlives
+        // the stack, since delete only knows the id recorded last. Every property except Tags is
+        // createOnly, so there is nothing to modify on the reused log.
+        String existingId = r.getPhysicalId();
+        if (existingId != null && !existingId.isBlank()
+                && !flowLogService.describeFlowLogs(ctx.region(), List.of(existingId)).isEmpty()) {
+            r.getAttributes().put("Id", existingId);
+            return;
+        }
         FlowLog fl = flowLogService.createFlowLog(ctx.region(),
                 ctx.resolveOptional(props, "ResourceId"),
                 ctx.resolveOptional(props, "ResourceType"),
