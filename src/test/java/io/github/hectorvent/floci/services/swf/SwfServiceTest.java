@@ -24,6 +24,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -825,41 +828,112 @@ class SwfServiceTest {
 
     @Test
     void aFailedBatchLeavesNoLambdaWorkForTheNextRequestOnTheSameThread() throws Exception {
-        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
+        // The queue of deferred invocations must be scoped to the request, not the thread. To
+        // reach the window, the store is made to fail *after* a Lambda has been queued and the
+        // history mutated — the point past which a ThreadLocal queue would survive the throw.
+        AtomicBoolean failNextPut = new AtomicBoolean(false);
+        SwfService failing = new SwfService(new FailOnDemandStorageFactory(failNextPut),
+                new RegionResolver("us-east-1", "000000000000"), clock, recordingLambdaInvoker());
+        failing.registerDomain(DOMAIN, "leak test", "7", Map.of(), REGION);
+        failing.registerWorkflowType(REGION, DOMAIN, workflowType("W", "1"));
+        failing.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
                 "arn:aws:iam::000000000000:role/swf-lambda"));
-        service.startWorkflowExecution(new StartWorkflowExecutionRequest(
-                REGION, DOMAIN, "wf-leak", "LW", "1",
-                null, null, null, null, null, null, null,
-                "arn:aws:iam::000000000000:role/swf-lambda"));
-        SwfDecisionTask leaky = pollFor("wf-leak");
 
-        // A batch that queues a Lambda and then fails. `Close must be last` is rejected before
-        // anything is applied, so no invocation should be queued at all...
-        assertThrows(AwsException.class, () -> service.respondDecisionTaskCompleted(
+        failing.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                REGION, DOMAIN, "wf-leak", "LW", "1", null, null, null, null, null, null, null,
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        SwfDecisionTask leaky = failing.pollForDecisionTask(REGION, DOMAIN, "tl", "d")
+                .orElseThrow();
+
+        String plainRun = failing.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                REGION, DOMAIN, "wf-plain", "W", "1", null, null, null, null, null, null, null, null));
+        SwfDecisionTask plain = failing.pollForDecisionTask(REGION, DOMAIN, "tl", "d")
+                .orElseThrow();
+
+        // Queue a Lambda, then fail while persisting the batch.
+        failNextPut.set(true);
+        assertThrows(RuntimeException.class, () -> failing.respondDecisionTaskCompleted(
                 leaky.getTaskToken(),
-                List.of(new Decision("CompleteWorkflowExecution", Map.of("result", "done")),
-                        new Decision("ScheduleLambdaFunction", Map.of("id", "leak-1", "name", "leaked-fn"))),
+                List.of(new Decision("ScheduleLambdaFunction",
+                        Map.of("id", "leak-1", "name", "leaked-fn"))),
                 null));
+        failNextPut.set(false);
         assertTrue(lambdaInvocations.isEmpty(),
-                "a rejected batch must not invoke anything: " + lambdaInvocations);
+                "a request that failed before the drain must not invoke anything: " + lambdaInvocations);
 
-        // ...and a later request on this same thread must not inherit it either. Run the second
-        // request on a single-thread executor twice over, so the thread is definitely reused.
-        ExecutorService pool = Executors.newSingleThreadExecutor();
-        try {
-            String otherRun = start("wf-plain");
-            SwfDecisionTask plain = pollFor("wf-plain");
-            pool.submit(() -> service.respondDecisionTaskCompleted(plain.getTaskToken(),
-                    List.of(new Decision("RecordMarker", Map.of("markerName", "m"))), null))
-                    .get(10, TimeUnit.SECONDS);
+        // A later request on the SAME thread must not inherit that queued invocation.
+        failing.respondDecisionTaskCompleted(plain.getTaskToken(),
+                List.of(new Decision("RecordMarker", Map.of("markerName", "m"))), null);
 
-            assertTrue(lambdaInvocations.isEmpty(),
-                    "a later request must not run a failed request's queued Lambda: " + lambdaInvocations);
-            assertTrue(service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-plain", otherRun, false)
-                            .stream().noneMatch(e -> e.getEventType().startsWith("LambdaFunction")),
-                    "no Lambda event may appear on an unrelated execution");
-        } finally {
-            pool.shutdownNow();
+        assertTrue(lambdaInvocations.isEmpty(),
+                "a later request must not run a failed request's queued Lambda: " + lambdaInvocations);
+        assertTrue(failing.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-plain", plainRun, false)
+                        .stream().noneMatch(e -> e.getEventType().startsWith("LambdaFunction")),
+                "no Lambda event may appear on the unrelated execution");
+    }
+
+    /** Storage whose put() throws once on demand, to fail a request mid-flight. */
+    private static final class FailOnDemandStorageFactory extends StorageFactory {
+
+        private final AtomicBoolean failNextPut;
+
+        private FailOnDemandStorageFactory(AtomicBoolean failNextPut) {
+            super(null, null);
+            this.failNextPut = failNextPut;
+        }
+
+        @Override
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                       TypeReference<Map<String, V>> typeReference) {
+            StorageBackend<String, V> inner = new InMemoryStorage<>();
+            if (!"swf-executions.json".equals(fileName)) {
+                return new AccountAwareStorageBackend<>(inner, null, "000000000000");
+            }
+            StorageBackend<String, V> failing = new StorageBackend<>() {
+                @Override
+                public void put(String key, V value) {
+                    if (failNextPut.get()) {
+                        throw new IllegalStateException("simulated store failure");
+                    }
+                    inner.put(key, value);
+                }
+
+                @Override
+                public Optional<V> get(String key) {
+                    return inner.get(key);
+                }
+
+                @Override
+                public void delete(String key) {
+                    inner.delete(key);
+                }
+
+                @Override
+                public Set<String> keys() {
+                    return inner.keys();
+                }
+
+                @Override
+                public List<V> scan(java.util.function.Predicate<String> keyFilter) {
+                    return inner.scan(keyFilter);
+                }
+
+                @Override
+                public void flush() {
+                    inner.flush();
+                }
+
+                @Override
+                public void load() {
+                    inner.load();
+                }
+
+                @Override
+                public void clear() {
+                    inner.clear();
+                }
+            };
+            return new AccountAwareStorageBackend<>(failing, null, "000000000000");
         }
     }
 
