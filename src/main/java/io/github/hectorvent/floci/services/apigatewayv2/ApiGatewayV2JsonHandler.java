@@ -495,6 +495,7 @@ public class ApiGatewayV2JsonHandler {
         node.put("ProtocolType", api.getProtocolType());
         node.put("ApiEndpoint", api.getApiEndpoint());
         node.put("CreatedDate", api.getCreatedDate() / 1000.0);
+        node.put("DisableExecuteApiEndpoint", api.isDisableExecuteApiEndpoint());
         if (api.getRouteSelectionExpression() != null) {
             node.put("RouteSelectionExpression", api.getRouteSelectionExpression());
         }

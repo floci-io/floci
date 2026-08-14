@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.Deployment;
+import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
@@ -72,7 +74,7 @@ public class EcsService implements ContainerTeardown {
     private Map<String, Integer> latestRevisions = new ConcurrentHashMap<>();
     // taskArn → EcsTask
     private final Map<String, EcsTask> tasks = new ConcurrentHashMap<>();
-    // taskArn → EcsTaskHandle (running containers)
+    // taskArn → EcsTaskHandle (running containers or unresolved log readers)
     private final Map<String, EcsTaskHandle> taskHandles = new ConcurrentHashMap<>();
     // region::clusterName/serviceName → EcsServiceModel
     private Map<String, EcsServiceModel> services = new ConcurrentHashMap<>();
@@ -552,7 +554,11 @@ public class EcsService implements ContainerTeardown {
         Map<String, Integer> exitCodes = Map.of();
         if (dockerMode) {
             EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
-            exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
+            try {
+                exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
+            } finally {
+                retainUnresolvedLogHandle(task.getTaskArn(), handle);
+            }
         }
 
         task.setLastStatus(TaskStatus.STOPPED.name());
@@ -705,6 +711,7 @@ public class EcsService implements ContainerTeardown {
         svc.setNetworkConfiguration(networkConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
+        svc.setLastDeploymentAt(svc.getCreatedAt());
         if (tags != null && !tags.isEmpty()) {
             svc.setTags(new LinkedHashMap<>(tags));
         }
@@ -745,6 +752,7 @@ public class EcsService implements ContainerTeardown {
         if (taskDefinition != null) {
             resolveTaskDefinitionOrThrow(taskDefinition, region);
             svc.setTaskDefinition(taskDefinition);
+            svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, taskDefinition, region);
         }
         services.put(key, svc);
@@ -791,16 +799,43 @@ public class EcsService implements ContainerTeardown {
         return svc;
     }
 
+    /** The services that resolved, plus a {@code MISSING} failure for each reference that did not. */
+    public record DescribeServicesResult(List<EcsServiceModel> services, List<Failure> failures) {}
+
     public List<EcsServiceModel> describeServices(String clusterRef, List<String> serviceIds, String region) {
+        return describeServicesDetailed(clusterRef, serviceIds, region).services();
+    }
+
+    /**
+     * Resolves each reference, reporting the ones that do not exist as {@code MISSING} failures
+     * rather than dropping them. ECS answers a describe for an unknown service with a failure
+     * entry, not an error, and its {@code ServicesStable} waiter fails fast on
+     * {@code failures[].reason == "MISSING"} — so silently returning an empty list leaves the
+     * waiter polling for its full timeout instead of reporting the service does not exist.
+     */
+    public DescribeServicesResult describeServicesDetailed(String clusterRef, List<String> serviceIds,
+                                                           String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         List<EcsServiceModel> result = new ArrayList<>();
+        List<Failure> failures = new ArrayList<>();
         for (String id : serviceIds) {
             EcsServiceModel svc = resolveService(cluster.getClusterName(), id, region);
             if (svc != null) {
                 result.add(svc);
+            } else {
+                failures.add(Failure.missing(missingServiceArn(cluster, id, region)));
             }
         }
-        return result;
+        return new DescribeServicesResult(result, failures);
+    }
+
+    /** Echoes an ARN the caller supplied, otherwise builds the ARN the service would have had. */
+    private String missingServiceArn(EcsCluster cluster, String serviceRef, String region) {
+        if (serviceRef != null && serviceRef.startsWith("arn:")) {
+            return serviceRef;
+        }
+        return regionResolver.buildArn("ecs", region,
+                "service/" + cluster.getClusterName() + "/" + serviceRef);
     }
 
     public List<String> listServices(String clusterRef, String region) {
@@ -1257,6 +1292,64 @@ public class EcsService implements ContainerTeardown {
                 .toList();
     }
 
+    /**
+     * The deployments of a service, derived from its current state rather than tracked as a
+     * rollout. An ACTIVE service always has exactly one PRIMARY deployment: AWS's own
+     * {@code ServicesStable} waiter accepts on
+     * {@code length(services[?!(length(deployments) == `1` && runningCount == desiredCount)]) == `0`},
+     * so reporting none leaves every SDK waiter polling until it times out.
+     *
+     * <p>A task-definition change is applied in place rather than draining a previous
+     * deployment, so there is never a second ACTIVE entry beside the PRIMARY one. An INACTIVE
+     * service has no deployments.
+     */
+    public List<Deployment> deploymentsFor(EcsServiceModel svc) {
+        if (svc == null || !"ACTIVE".equals(svc.getStatus())) {
+            return List.of();
+        }
+
+        String deploymentId = deploymentId(svc);
+        boolean converged = svc.getRunningCount() >= svc.getDesiredCount();
+
+        Deployment d = new Deployment();
+        d.setId(deploymentId);
+        d.setStatus("PRIMARY");
+        d.setTaskDefinition(svc.getTaskDefinition());
+        d.setDesiredCount(svc.getDesiredCount());
+        d.setPendingCount(svc.getPendingCount());
+        d.setRunningCount(svc.getRunningCount());
+        d.setFailedTasks(0);
+        d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
+        d.setRolloutStateReason("ECS deployment " + deploymentId
+                + (converged ? " completed." : " in progress."));
+        d.setLaunchType(svc.getLaunchType());
+        // The deployment's own start time, not the service's: a task-definition change mints a
+        // new deployment id, so reporting service creation here would contradict it. Older
+        // persisted services predate the field and fall back to the service creation time.
+        Instant startedAt = svc.getLastDeploymentAt() != null
+                ? svc.getLastDeploymentAt()
+                : svc.getCreatedAt();
+        d.setCreatedAt(startedAt);
+        d.setUpdatedAt(startedAt);
+        return List.of(d);
+    }
+
+    /**
+     * A stable {@code ecs-svc/<id>} identifier derived from the service ARN and its task
+     * definition. Deployments are derived per request, so a random id would differ on every
+     * {@code DescribeServices} call and read as perpetual drift in clients that persist it.
+     * Deriving it from persisted state keeps it identical across calls and across restarts,
+     * while still rolling over when the task definition changes.
+     */
+    private String deploymentId(EcsServiceModel svc) {
+        String seed = svc.getServiceArn() + ":" + svc.getTaskDefinition();
+        long hash = 0xcbf29ce484222325L;
+        for (int i = 0; i < seed.length(); i++) {
+            hash = (hash ^ seed.charAt(i)) * 0x100000001b3L;
+        }
+        return "ecs-svc/" + Long.toUnsignedString(hash);
+    }
+
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
         String deploymentId = UUID.randomUUID().toString().replace("-", "");
         String deploymentArn = regionResolver.buildArn("ecs", region,
@@ -1322,7 +1415,16 @@ public class EcsService implements ContainerTeardown {
 
     private void reconcileTask(String taskArn) {
         EcsTask task = tasks.get(taskArn);
-        if (task == null || !TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+        if (task == null) {
+            return;
+        }
+
+        if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
+            reconcileStoppedTask(taskArn);
+            return;
+        }
+
+        if (!TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
             return;
         }
 
@@ -1372,6 +1474,27 @@ public class EcsService implements ContainerTeardown {
         }
 
         LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
+    }
+
+    private void reconcileStoppedTask(String taskArn) {
+        EcsTaskHandle claimed = taskHandles.remove(taskArn);
+        if (claimed == null) {
+            return;
+        }
+
+        try {
+            containerManager.stopTaskAndCollectExitCodes(claimed);
+        } finally {
+            // A task can be reported STOPPED even if Docker rejected both teardown attempts.
+            // Keep only the affected log readers and retry their teardown on later reconciliation ticks.
+            retainUnresolvedLogHandle(taskArn, claimed);
+        }
+    }
+
+    private void retainUnresolvedLogHandle(String taskArn, EcsTaskHandle handle) {
+        if (handle != null && handle.hasOpenLogStreams()) {
+            taskHandles.put(taskArn, handle);
+        }
     }
 
     void reconcileServices() {

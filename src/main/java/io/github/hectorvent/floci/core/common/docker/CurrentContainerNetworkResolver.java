@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.Ports;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -11,6 +13,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Resolves the Docker network used by the Floci container itself.
@@ -28,6 +32,7 @@ public class CurrentContainerNetworkResolver {
 
     private final DockerClient dockerClient;
     private final ContainerDetector containerDetector;
+    private final Map<Integer, Integer> cachedPublishedPorts = new ConcurrentHashMap<>();
 
     private volatile Optional<CurrentContainerNetwork> cachedNetwork;
 
@@ -45,6 +50,18 @@ public class CurrentContainerNetworkResolver {
         return resolve().map(CurrentContainerNetwork::ipAddress);
     }
 
+    public OptionalInt resolvePublishedPort(int containerPort) {
+        Integer cachedPublishedPort = cachedPublishedPorts.get(containerPort);
+        if (cachedPublishedPort != null) {
+            return OptionalInt.of(cachedPublishedPort);
+        }
+
+        OptionalInt resolvedPublishedPort = detectPublishedPort(containerPort);
+        resolvedPublishedPort.ifPresent(port -> cachedPublishedPorts.putIfAbsent(containerPort, port));
+        Integer publishedPort = cachedPublishedPorts.get(containerPort);
+        return publishedPort == null ? OptionalInt.empty() : OptionalInt.of(publishedPort);
+    }
+
     Optional<CurrentContainerNetwork> resolve() {
         Optional<CurrentContainerNetwork> cached = cachedNetwork;
         if (cached != null) {
@@ -52,6 +69,46 @@ public class CurrentContainerNetworkResolver {
         }
         cachedNetwork = detect();
         return cachedNetwork;
+    }
+
+    private OptionalInt detectPublishedPort(int containerPort) {
+        if (!containerDetector.isRunningInContainer()) {
+            return OptionalInt.empty();
+        }
+
+        String containerId = currentContainerId();
+        if (containerId.isBlank()) {
+            LOG.debug("Could not determine current Docker container id");
+            return OptionalInt.empty();
+        }
+
+        try {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            Ports ports = inspect.getNetworkSettings().getPorts();
+            if (ports == null || ports.getBindings() == null) {
+                return OptionalInt.empty();
+            }
+
+            Ports.Binding[] bindings = ports.getBindings().get(ExposedPort.tcp(containerPort));
+            if (bindings == null || bindings.length == 0) {
+                return OptionalInt.empty();
+            }
+
+            for (Ports.Binding binding : bindings) {
+                if (binding == null) {
+                    continue;
+                }
+                String hostPort = binding.getHostPortSpec();
+                if (hostPort != null && !hostPort.isBlank()) {
+                    return OptionalInt.of(Integer.parseInt(hostPort));
+                }
+            }
+            return OptionalInt.empty();
+        } catch (Exception e) {
+            LOG.debugv("Could not resolve published port {0} for current Docker container {1}: {2}",
+                    String.valueOf(containerPort), containerId, e.getMessage());
+            return OptionalInt.empty();
+        }
     }
 
     private Optional<CurrentContainerNetwork> detect() {
