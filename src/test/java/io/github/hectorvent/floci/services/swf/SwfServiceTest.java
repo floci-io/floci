@@ -824,6 +824,46 @@ class SwfServiceTest {
     }
 
     @Test
+    void aFailedBatchLeavesNoLambdaWorkForTheNextRequestOnTheSameThread() throws Exception {
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        service.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                REGION, DOMAIN, "wf-leak", "LW", "1",
+                null, null, null, null, null, null, null,
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        SwfDecisionTask leaky = pollFor("wf-leak");
+
+        // A batch that queues a Lambda and then fails. `Close must be last` is rejected before
+        // anything is applied, so no invocation should be queued at all...
+        assertThrows(AwsException.class, () -> service.respondDecisionTaskCompleted(
+                leaky.getTaskToken(),
+                List.of(new Decision("CompleteWorkflowExecution", Map.of("result", "done")),
+                        new Decision("ScheduleLambdaFunction", Map.of("id", "leak-1", "name", "leaked-fn"))),
+                null));
+        assertTrue(lambdaInvocations.isEmpty(),
+                "a rejected batch must not invoke anything: " + lambdaInvocations);
+
+        // ...and a later request on this same thread must not inherit it either. Run the second
+        // request on a single-thread executor twice over, so the thread is definitely reused.
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            String otherRun = start("wf-plain");
+            SwfDecisionTask plain = pollFor("wf-plain");
+            pool.submit(() -> service.respondDecisionTaskCompleted(plain.getTaskToken(),
+                    List.of(new Decision("RecordMarker", Map.of("markerName", "m"))), null))
+                    .get(10, TimeUnit.SECONDS);
+
+            assertTrue(lambdaInvocations.isEmpty(),
+                    "a later request must not run a failed request's queued Lambda: " + lambdaInvocations);
+            assertTrue(service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-plain", otherRun, false)
+                            .stream().noneMatch(e -> e.getEventType().startsWith("LambdaFunction")),
+                    "no Lambda event may appear on an unrelated execution");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void listExecutions_separatesOpenFromClosed() {
         start("wf-open");
         String closedRunId = start("wf-done");

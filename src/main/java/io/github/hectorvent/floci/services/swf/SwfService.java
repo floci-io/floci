@@ -80,13 +80,6 @@ public class SwfService implements Resettable {
     private final Clock clock;
     private final LambdaInvoker lambdaInvoker;
 
-    /**
-     * Lambda invocations a decision batch queued, collected while the domain lock is held and
-     * run after it is released. Per-thread because the queue only spans a single
-     * {@code respondDecisionTaskCompleted} call.
-     */
-    private final ThreadLocal<List<PendingLambda>> pendingLambdas =
-            ThreadLocal.withInitial(ArrayList::new);
 
     @Inject
     public SwfService(StorageFactory storageFactory, RegionResolver regionResolver, Clock clock,
@@ -589,6 +582,9 @@ public class SwfService implements Resettable {
      * the prefix, so this is validated before any state changes.
      */
     public void respondDecisionTaskCompleted(String taskToken, List<Decision> decisions, String executionContext) {
+        // Scoped to this call, not to the thread: a request that throws before the drain must
+        // not leave an invocation for whichever request reuses this pooled thread next.
+        List<PendingLambda> queued = new ArrayList<>();
         SwfWorkflowExecution located = executionForDecisionToken(taskToken);
         synchronized (domainLock(located)) {
             SwfWorkflowExecution execution = executionStore.get(executionKey(located))
@@ -615,7 +611,7 @@ public class SwfService implements Resettable {
                 execution.setLatestExecutionContext(executionContext);
             }
 
-            applyDecisions(execution, decisions, decisionEventId);
+            applyDecisions(execution, decisions, queued, decisionEventId);
 
             if (execution.isOpen() && (execution.isDecisionNeeded() || hasNothingPending(execution))) {
                 execution.setDecisionNeeded(false);
@@ -623,22 +619,9 @@ public class SwfService implements Resettable {
             }
             executionStore.put(executionKey(execution), execution);
         }
-        drainPendingLambdas();
-    }
-
-    /**
-     * Runs whatever Lambda invocations this batch queued, now that the domain lock is released.
-     * Each records its own outcome under the lock again, so an unrelated execution in the same
-     * domain is never blocked for the duration of an invocation.
-     */
-    private void drainPendingLambdas() {
-        List<PendingLambda> queued = pendingLambdas.get();
-        if (queued.isEmpty()) {
-            return;
-        }
-        List<PendingLambda> toRun = new ArrayList<>(queued);
-        queued.clear();
-        toRun.forEach(this::runPendingLambda);
+        // Only reached when the batch was applied and stored: anything thrown above leaves
+        // `queued` unreferenced, so a failed request cannot invoke a function.
+        queued.forEach(this::runPendingLambda);
     }
 
     /**
@@ -687,7 +670,8 @@ public class SwfService implements Resettable {
         }
     }
 
-    private void applyDecisions(SwfWorkflowExecution execution, List<Decision> decisions, long decisionEventId) {
+    private void applyDecisions(SwfWorkflowExecution execution, List<Decision> decisions,
+                                List<PendingLambda> queued, long decisionEventId) {
         if (decisions == null) {
             return;
         }
@@ -697,11 +681,12 @@ public class SwfService implements Resettable {
                         decision.type(), execution.getRunId());
                 return;
             }
-            applyDecision(execution, decision, decisionEventId);
+            applyDecision(execution, decision, queued, decisionEventId);
         }
     }
 
-    private void applyDecision(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+    private void applyDecision(SwfWorkflowExecution execution, Decision decision,
+                               List<PendingLambda> queued, long decisionEventId) {
         switch (decision.type()) {
             case "ScheduleActivityTask" -> scheduleActivityTask(execution, decision, decisionEventId);
             case "RequestCancelActivityTask" -> requestCancelActivityTask(execution, decision, decisionEventId);
@@ -715,7 +700,7 @@ public class SwfService implements Resettable {
             case "SignalExternalWorkflowExecution" -> signalExternal(execution, decision, decisionEventId);
             case "RequestCancelExternalWorkflowExecution" -> cancelExternal(execution, decision, decisionEventId);
             case "StartChildWorkflowExecution" -> startChild(execution, decision, decisionEventId);
-            case "ScheduleLambdaFunction" -> scheduleLambdaFunction(execution, decision, decisionEventId);
+            case "ScheduleLambdaFunction" -> scheduleLambdaFunction(execution, decision, queued, decisionEventId);
             // requireValidBatch has already rejected anything outside DECISION_TYPES.
             default -> throw new IllegalStateException("unvalidated decision type " + decision.type());
         }
@@ -1199,7 +1184,8 @@ public class SwfService implements Resettable {
      * Lambda service runs the function in a container it manages and returns the payload, so
      * the natural place to record Completed/Failed is the same decision that scheduled it.
      */
-    private void scheduleLambdaFunction(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
+    private void scheduleLambdaFunction(SwfWorkflowExecution execution, Decision decision,
+                                        List<PendingLambda> queued, long decisionEventId) {
         String id = nullToEmpty(decision.string("id"));
         String name = decision.string("name");
 
@@ -1232,7 +1218,7 @@ public class SwfService implements Resettable {
 
         // The invocation runs once the domain lock is released: a cold start takes seconds and
         // this lock deliberately covers every execution in the domain.
-        pendingLambdas.get().add(new PendingLambda(executionKey(execution), id, name, payload,
+        queued.add(new PendingLambda(executionKey(execution), id, name, payload,
                 scheduled.getEventId(), started.getEventId()));
     }
 
