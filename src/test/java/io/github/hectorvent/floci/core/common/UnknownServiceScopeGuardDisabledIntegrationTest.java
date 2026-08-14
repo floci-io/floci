@@ -33,6 +33,20 @@ class UnknownServiceScopeGuardDisabledIntegrationTest {
             .body(containsString("<Code>NoSuchBucket</Code>"));
     }
 
+    @Test
+    void knownScopeS3FallthroughAlsoFallsThroughWhenRejectionDisabled() {
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260707/us-east-1/backup"
+                    + "/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef")
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/audit/frameworks")
+        .then()
+            // The switch disables both guards: the S3 wildcard answers again.
+            .contentType(containsString("xml"));
+    }
+
     public static final class GuardDisabledProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
