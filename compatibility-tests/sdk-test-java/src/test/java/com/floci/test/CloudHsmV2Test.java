@@ -48,12 +48,18 @@ public class CloudHsmV2Test {
         String clusterId = cluster.clusterId();
 
         // 2. Initialize Cluster
-        // Since we are mocking, we can just use the generated CSR or dummy certificates
-        String dummyCert = generateDummyCertificate();
+        DescribeClustersResponse initDescribe = client.describeClusters(r -> r
+                .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
+        String csr = initDescribe.clusters().get(0).certificates().clusterCsr();
+        String[] certs;
+        try { certs = generateCerts(csr); } catch (Exception e) { throw new RuntimeException(e); }
+        String signedCert = certs[0];
+        String trustAnchor = certs[1];
+
         InitializeClusterResponse initResp = client.initializeCluster(r -> r
                 .clusterId(clusterId)
-                .signedCert(dummyCert)
-                .trustAnchor(dummyCert)
+                .signedCert(signedCert)
+                .trustAnchor(trustAnchor)
         );
         
         assertThat(initResp.stateAsString()).isEqualTo("INITIALIZED");
@@ -112,8 +118,15 @@ public class CloudHsmV2Test {
                 .subnetIds("subnet-1", "subnet-2")
         );
         String clusterId = createClusterResponse.cluster().clusterId();
-        String dummyCert = generateDummyCertificate();
-        client.initializeCluster(r -> r.clusterId(clusterId).signedCert(dummyCert).trustAnchor(dummyCert));
+        DescribeClustersResponse initDescribe = client.describeClusters(r -> r
+                .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
+        String csr = initDescribe.clusters().get(0).certificates().clusterCsr();
+        String[] certs;
+        try { certs = generateCerts(csr); } catch (Exception e) { throw new RuntimeException(e); }
+        String signedCert = certs[0];
+        String trustAnchor = certs[1];
+
+        client.initializeCluster(r -> r.clusterId(clusterId).signedCert(signedCert).trustAnchor(trustAnchor));
         
         Hsm hsm = client.createHsm(r -> r.clusterId(clusterId).availabilityZone("us-east-1b")).hsm();
         
@@ -132,33 +145,39 @@ public class CloudHsmV2Test {
         assertThat(delResp.hsmId()).isEqualTo(hsm.hsmId());
     }
 
-    private String generateDummyCertificate() {
-        try {
-            KeyPairGenerator keyPairGen = KeyPairGenerator.getInstance("RSA");
-            keyPairGen.initialize(2048);
-            KeyPair keyPair = keyPairGen.generateKeyPair();
-
-            X500Name subject = new X500Name("CN=Dummy");
-            BigInteger serial = BigInteger.valueOf(System.currentTimeMillis());
-            Date notBefore = new Date(System.currentTimeMillis() - 86400000L);
-            Date notAfter = new Date(System.currentTimeMillis() + 86400000L * 365);
-
-            X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                    subject, serial, notBefore, notAfter, subject, keyPair.getPublic());
-
-            ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA")
-                    .build(keyPair.getPrivate());
-
-            X509Certificate cert = new JcaX509CertificateConverter()
-                    .getCertificate(certBuilder.build(signer));
-
-            StringWriter sw = new StringWriter();
-            try (PemWriter pw = new PemWriter(sw)) {
-                pw.writeObject(new PemObject("CERTIFICATE", cert.getEncoded()));
-            }
-            return sw.toString();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to generate dummy certificate", e);
+    private String[] generateCerts(String csrPem) throws Exception {
+        java.security.Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
+        java.security.KeyPairGenerator keyGen = java.security.KeyPairGenerator.getInstance("RSA", "BC");
+        keyGen.initialize(2048, new java.security.SecureRandom());
+        java.security.KeyPair caKeyPair = keyGen.generateKeyPair();
+        org.bouncycastle.asn1.x500.X500Name caName = new org.bouncycastle.asn1.x500.X500Name("CN=Floci Test CA");
+        long now = System.currentTimeMillis();
+        java.util.Date startDate = new java.util.Date(now);
+        java.util.Date endDate = new java.util.Date(now + 365L * 24 * 3600 * 1000);
+        java.math.BigInteger serial = java.math.BigInteger.valueOf(now);
+        org.bouncycastle.cert.X509v3CertificateBuilder caBuilder = new org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+                caName, serial, startDate, endDate, caName, caKeyPair.getPublic());
+        org.bouncycastle.operator.ContentSigner caSigner = new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256WithRSA")
+                .setProvider("BC").build(caKeyPair.getPrivate());
+        org.bouncycastle.cert.X509CertificateHolder caHolder = caBuilder.build(caSigner);
+        java.io.StringWriter caSw = new java.io.StringWriter();
+        try (org.bouncycastle.openssl.jcajce.JcaPEMWriter pw = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(caSw)) {
+            pw.writeObject(caHolder);
         }
+        String trustAnchor = caSw.toString();
+        org.bouncycastle.pkcs.PKCS10CertificationRequest csr;
+        try (org.bouncycastle.openssl.PEMParser parser = new org.bouncycastle.openssl.PEMParser(new java.io.StringReader(csrPem))) {
+            csr = (org.bouncycastle.pkcs.PKCS10CertificationRequest) parser.readObject();
+        }
+        java.security.PublicKey csrPublicKey = new org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter().setProvider("BC").getPublicKey(csr.getSubjectPublicKeyInfo());
+        org.bouncycastle.cert.X509v3CertificateBuilder certBuilder = new org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+                caName, serial.add(java.math.BigInteger.ONE), startDate, endDate, csr.getSubject(), csrPublicKey);
+        org.bouncycastle.cert.X509CertificateHolder certHolder = certBuilder.build(caSigner);
+        java.io.StringWriter certSw = new java.io.StringWriter();
+        try (org.bouncycastle.openssl.jcajce.JcaPEMWriter pw = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(certSw)) {
+            pw.writeObject(certHolder);
+        }
+        String signedCert = certSw.toString();
+        return new String[]{signedCert, trustAnchor};
     }
 }
