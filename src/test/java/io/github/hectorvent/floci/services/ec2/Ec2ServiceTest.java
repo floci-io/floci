@@ -376,6 +376,72 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void deleteKeyPairByNameRemovesItFromTheStore() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "by-name");
+        service.deleteKeyPair("us-east-1", "by-name", null);
+
+        // A deleted key pair is gone for good: describe by name must report NotFound
+        // rather than returning the key that DeleteKeyPair claimed to remove.
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of("by-name"), List.of()));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteKeyPairByNameLeavesOtherKeysAndRegionsIntact() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "target");
+        service.createKeyPair("us-east-1", "bystander");
+        service.createKeyPair("eu-west-1", "target");
+
+        service.deleteKeyPair("us-east-1", "target", null);
+
+        // Deleting resolves through the store key, so it must not take the same-named
+        // key in another region — nor any other key in the same region — with it.
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("bystander"), List.of()).size());
+        assertEquals(1, service.describeKeyPairs("eu-west-1", List.of("target"), List.of()).size());
+    }
+
+    @Test
+    void deleteKeyPairByIdRemovesItFromTheStore() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        String keyPairId = service.createKeyPair("us-east-1", "by-id").getKeyPairId();
+        service.deleteKeyPair("us-east-1", null, keyPairId);
+
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteKeyPairForUnknownNameIsANoOp() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "present-key");
+
+        // Real EC2 DeleteKeyPair is idempotent — deleting a key that does not exist
+        // succeeds rather than raising InvalidKeyPair.NotFound.
+        service.deleteKeyPair("us-east-1", "never-existed", null);
+
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("present-key"), List.of()).size());
+    }
+
+    @Test
     void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

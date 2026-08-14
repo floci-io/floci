@@ -6,10 +6,12 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.ContinuousDeploymentPolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.FieldLevelEncryptionConfig;
@@ -31,8 +33,10 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -126,6 +130,7 @@ public class CloudFrontService {
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
         ensureAliasesAvailable(dist.getConfig(), null);
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
+        validateTrustedKeyGroups(dist.getConfig());
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
@@ -154,6 +159,7 @@ public class CloudFrontService {
         }
         ensureAliasesAvailable(updated.getConfig(), id);
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
+        validateTrustedKeyGroups(updated.getConfig());
         updated.setId(id);
         updated.setArn(existing.getArn());
         updated.setDomainName(existing.getDomainName());
@@ -1139,6 +1145,18 @@ public class CloudFrontService {
     // ── Public Keys ───────────────────────────────────────────────────────────
 
     public synchronized PublicKey createPublicKey(PublicKey key) {
+        validatePublicKey(key);
+        boolean duplicateCallerReference =
+                publicKeyStore.scan(existing -> true).stream()
+                        .anyMatch(existing -> Objects.equals(
+                                existing.getCallerReference(),
+                                key.getCallerReference()));
+        if (duplicateCallerReference) {
+            throw new AwsException(
+                    "PublicKeyAlreadyExists",
+                    "A public key with this caller reference already exists.",
+                    409);
+        }
         key.setId(UUID.randomUUID().toString());
         key.setCreatedTime(Instant.now());
         key.setEtag(UUID.randomUUID().toString());
@@ -1154,8 +1172,22 @@ public class CloudFrontService {
     public synchronized PublicKey updatePublicKey(String id, String ifMatch, PublicKey updated) {
         PublicKey existing = getPublicKey(id);
         if (!existing.getEtag().equals(ifMatch)) {
-            throw new AwsException("InvalidIfMatchVersion",
-                    "The If-Match version is missing or not valid for the resource.", 400);
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
+        }
+        validatePublicKey(updated);
+        if (!Objects.equals(
+                    existing.getCallerReference(),
+                    updated.getCallerReference())
+                || !Objects.equals(existing.getName(), updated.getName())
+                || !Objects.equals(
+                    existing.getEncodedKey(), updated.getEncodedKey())) {
+            throw new AwsException(
+                    "CannotChangeImmutablePublicKeyFields",
+                    "The caller reference, name, and encoded public key cannot be changed.",
+                    400);
         }
         updated.setId(id);
         updated.setCreatedTime(existing.getCreatedTime());
@@ -1167,8 +1199,14 @@ public class CloudFrontService {
     public synchronized void deletePublicKey(String id, String ifMatch) {
         PublicKey existing = getPublicKey(id);
         if (!existing.getEtag().equals(ifMatch)) {
-            throw new AwsException("InvalidIfMatchVersion",
-                    "The If-Match version is missing or not valid for the resource.", 400);
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
+        }
+        if (publicKeyInUse(id)) {
+            throw new AwsException(
+                    "PublicKeyInUse", "The specified public key is in use.", 409);
         }
         publicKeyStore.delete(id);
     }
@@ -1179,9 +1217,56 @@ public class CloudFrontService {
         return paginate(all, marker, maxItems, PublicKey::getId);
     }
 
+    /**
+     * Resolves the PEM public key for a {@code Key-Pair-Id} used to sign a request, but only when that
+     * public key is a member of one of the supplied key groups. Returns {@code null} when the key is
+     * unknown or is not a member of any of those groups — i.e. it is not a trusted signer.
+     */
+    public String trustedPublicKeyPem(String keyPairId, List<String> keyGroupIds) {
+        if (keyPairId == null || keyGroupIds == null || keyGroupIds.isEmpty()) {
+            return null;
+        }
+        boolean trusted = false;
+        for (String keyGroupId : keyGroupIds) {
+            KeyGroup group = keyGroupStore.get(keyGroupId).orElse(null);
+            if (group != null && group.getItems() != null && group.getItems().contains(keyPairId)) {
+                trusted = true;
+                break;
+            }
+        }
+        if (!trusted) {
+            return null;
+        }
+        return publicKeyStore.get(keyPairId).map(PublicKey::getEncodedKey).orElse(null);
+    }
+
+    public List<KeyGroup> activeTrustedKeyGroups(DistributionConfig config) {
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        if (config != null) {
+            DefaultCacheBehavior defaultBehavior = config.getDefaultCacheBehavior();
+            if (defaultBehavior != null
+                    && defaultBehavior.isTrustedKeyGroupsEnabled()
+                    && defaultBehavior.getTrustedKeyGroups() != null) {
+                ids.addAll(defaultBehavior.getTrustedKeyGroups());
+            }
+            if (config.getCacheBehaviors() != null) {
+                for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                    if (behavior != null
+                            && behavior.isTrustedKeyGroupsEnabled()
+                            && behavior.getTrustedKeyGroups() != null) {
+                        ids.addAll(behavior.getTrustedKeyGroups());
+                    }
+                }
+            }
+        }
+        return ids.stream().map(this::getKeyGroup).toList();
+    }
+
     // ── Key Groups ────────────────────────────────────────────────────────────
 
     public synchronized KeyGroup createKeyGroup(KeyGroup group) {
+        validateKeyGroup(group);
+        validateUniqueKeyGroupName(group.getName(), null);
         group.setId(UUID.randomUUID().toString());
         group.setLastModifiedTime(Instant.now());
         group.setEtag(UUID.randomUUID().toString());
@@ -1197,9 +1282,13 @@ public class CloudFrontService {
     public synchronized KeyGroup updateKeyGroup(String id, String ifMatch, KeyGroup updated) {
         KeyGroup existing = getKeyGroup(id);
         if (!existing.getEtag().equals(ifMatch)) {
-            throw new AwsException("InvalidIfMatchVersion",
-                    "The If-Match version is missing or not valid for the resource.", 400);
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
         }
+        validateKeyGroup(updated);
+        validateUniqueKeyGroupName(updated.getName(), id);
         updated.setId(id);
         updated.setLastModifiedTime(Instant.now());
         updated.setEtag(UUID.randomUUID().toString());
@@ -1210,16 +1299,181 @@ public class CloudFrontService {
     public synchronized void deleteKeyGroup(String id, String ifMatch) {
         KeyGroup existing = getKeyGroup(id);
         if (!existing.getEtag().equals(ifMatch)) {
-            throw new AwsException("InvalidIfMatchVersion",
-                    "The If-Match version is missing or not valid for the resource.", 400);
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
+        }
+        if (keyGroupInUse(id)) {
+            throw new AwsException(
+                    "ResourceInUse",
+                    "Cannot delete this resource because it is in use.",
+                    409);
         }
         keyGroupStore.delete(id);
+    }
+
+    private void validateUniqueKeyGroupName(String name, String excludedId) {
+        boolean duplicate = keyGroupStore.scan(group -> true).stream()
+                .anyMatch(group -> !Objects.equals(excludedId, group.getId())
+                        && Objects.equals(name, group.getName()));
+        if (duplicate) {
+            throw new AwsException(
+                    "KeyGroupAlreadyExists",
+                    "A key group with this name already exists.",
+                    409);
+        }
     }
 
     public List<KeyGroup> listKeyGroups(String marker, int maxItems) {
         List<KeyGroup> all = new ArrayList<>(keyGroupStore.scan(k -> true));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
         return paginate(all, marker, maxItems, KeyGroup::getId);
+    }
+
+    private static void validatePublicKey(PublicKey key) {
+        if (key == null
+                || key.getCallerReference() == null
+                || key.getCallerReference().isBlank()
+                || key.getName() == null
+                || key.getName().isBlank()
+                || key.getEncodedKey() == null
+                || key.getEncodedKey().isBlank()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "CallerReference, Name, and EncodedKey are required.",
+                    400);
+        }
+        if (key.getComment() != null && key.getComment().length() > 128) {
+            throw new AwsException(
+                    "InvalidArgument", "The comment must be 128 characters or fewer.", 400);
+        }
+        try {
+            CloudFrontSignatureVerifier.parseSupportedPublicKey(
+                    key.getEncodedKey());
+        } catch (Exception e) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "The encoded public key must be RSA-2048 or ECDSA P-256 in X.509 PEM format.",
+                    400);
+        }
+    }
+
+    private void validateKeyGroup(KeyGroup group) {
+        if (group == null || group.getName() == null || group.getName().isBlank()) {
+            throw new AwsException(
+                    "InvalidArgument", "The parameter Name is required.", 400);
+        }
+        if (group.getComment() != null && group.getComment().length() > 128) {
+            throw new AwsException(
+                    "InvalidArgument", "The comment must be 128 characters or fewer.", 400);
+        }
+        List<String> items = group.getItems();
+        if (items == null || items.isEmpty()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "A key group must contain at least one public key.",
+                    400);
+        }
+        if (items.size() > 5) {
+            throw new AwsException(
+                    "TooManyPublicKeysInKeyGroup",
+                    "A key group can contain at most five public keys.",
+                    400);
+        }
+        if (new LinkedHashSet<>(items).size() != items.size()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "A public key cannot appear more than once in a key group.",
+                    400);
+        }
+        for (String publicKeyId : items) {
+            if (publicKeyId == null
+                    || publicKeyId.isBlank()
+                    || publicKeyStore.get(publicKeyId).isEmpty()) {
+                throw new AwsException(
+                        "InvalidArgument",
+                        "The specified public key does not exist.",
+                        400);
+            }
+        }
+    }
+
+    private void validateTrustedKeyGroups(DistributionConfig config) {
+        if (config == null) {
+            return;
+        }
+        DefaultCacheBehavior defaultBehavior = config.getDefaultCacheBehavior();
+        if (defaultBehavior != null) {
+            validateTrustedKeyGroups(
+                    defaultBehavior.isTrustedKeyGroupsEnabled(),
+                    defaultBehavior.getTrustedKeyGroups());
+        }
+        if (config.getCacheBehaviors() != null) {
+            for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                if (behavior != null) {
+                    validateTrustedKeyGroups(
+                            behavior.isTrustedKeyGroupsEnabled(),
+                            behavior.getTrustedKeyGroups());
+                }
+            }
+        }
+    }
+
+    private void validateTrustedKeyGroups(
+            boolean enabled, List<String> keyGroupIds) {
+        List<String> ids = keyGroupIds != null ? keyGroupIds : List.of();
+        if (enabled && ids.isEmpty()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "TrustedKeyGroups cannot be enabled without a key group.",
+                    400);
+        }
+        for (String keyGroupId : ids) {
+            if (keyGroupId == null
+                    || keyGroupId.isBlank()
+                    || keyGroupStore.get(keyGroupId).isEmpty()) {
+                throw new AwsException(
+                        "TrustedKeyGroupDoesNotExist",
+                        "The specified key group does not exist.",
+                        400);
+            }
+        }
+    }
+
+    private boolean publicKeyInUse(String id) {
+        for (KeyGroup group : keyGroupStore.scan(k -> true)) {
+            if (group.getItems() != null && group.getItems().contains(id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean keyGroupInUse(String id) {
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            DistributionConfig config = distribution.getConfig();
+            if (config == null) {
+                continue;
+            }
+            DefaultCacheBehavior defaultBehavior =
+                    config.getDefaultCacheBehavior();
+            if (defaultBehavior != null
+                    && defaultBehavior.getTrustedKeyGroups() != null
+                    && defaultBehavior.getTrustedKeyGroups().contains(id)) {
+                return true;
+            }
+            if (config.getCacheBehaviors() != null) {
+                for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                    if (behavior != null
+                            && behavior.getTrustedKeyGroups() != null
+                            && behavior.getTrustedKeyGroups().contains(id)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     // ── Realtime Log Configs ──────────────────────────────────────────────────

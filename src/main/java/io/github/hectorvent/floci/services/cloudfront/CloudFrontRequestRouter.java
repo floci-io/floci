@@ -123,6 +123,32 @@ public final class CloudFrontRequestRouter {
     }
 
     /**
+     * Returns the trusted key group IDs of the cache behavior that matches {@code normalizedPath} (the
+     * same ordered-first, default-last resolution as {@link #matchTargetOriginId}). An empty list means
+     * the matched behavior serves public content — no request signature is required.
+     */
+    public static List<String> trustedKeyGroupsFor(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return behavior.isTrustedKeyGroupsEnabled()
+                            && behavior.getTrustedKeyGroups() != null
+                            ? behavior.getTrustedKeyGroups()
+                            : List.of();
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        if (dflt != null
+                && dflt.isTrustedKeyGroupsEnabled()
+                && dflt.getTrustedKeyGroups() != null) {
+            return dflt.getTrustedKeyGroups();
+        }
+        return List.of();
+    }
+
+    /**
      * Returns the viewer HTTP methods accepted by the cache behavior that serves a normalized path.
      * Legacy persisted configurations without an explicit list retain CloudFront's minimum
      * GET/HEAD behavior.

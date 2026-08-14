@@ -220,6 +220,31 @@ class CloudFormationEventBusIntegrationTest {
                 """.formatted(busName);
     }
 
+    private static String eventBusAndNamedRuleTemplate(String busName, String description) {
+        return """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": {
+                        "Name": "%s",
+                        "Description": "%s"
+                      }
+                    },
+                    "Rule": {
+                      "Type": "AWS::Events::Rule",
+                      "Properties": {
+                        "Name": "%s-rule",
+                        "EventBusName": { "Ref": "Bus" },
+                        "EventPattern": { "source": ["com.example.orders"] },
+                        "State": "ENABLED"
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName, description, busName);
+    }
+
     @Test
     void customEventBusIsRegisteredSoRuleReferencingItSucceeds() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -359,7 +384,7 @@ class CloudFormationEventBusIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "update-bus-" + suffix;
         String stackName = "eventbus-update-" + suffix;
-        String originalTemplate = eventBusOnlyTemplate(busName, "before");
+        String originalTemplate = eventBusAndNamedRuleTemplate(busName, "before");
 
         createStack(stackName, originalTemplate);
         assertStackStatus(stackName, "CREATE_COMPLETE");
@@ -367,7 +392,7 @@ class CloudFormationEventBusIntegrationTest {
         updateStack(stackName, originalTemplate);
         assertStackStatus(stackName, "UPDATE_COMPLETE");
 
-        updateStack(stackName, eventBusOnlyTemplate(busName, "after"));
+        updateStack(stackName, eventBusAndNamedRuleTemplate(busName, "after"));
         assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
         given()
@@ -388,6 +413,17 @@ class CloudFormationEventBusIntegrationTest {
 
         deleteStack(stackName);
         awaitStackDeleted(stackName);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EVENTS_AUTH)
+            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("ResourceNotFoundException"));
     }
 
     @Test

@@ -2699,6 +2699,50 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        // DeleteKeyPair always answers 200, so the delete is only proven by a
+        // follow-up describe.
+        given()
+            .formParam("Action", "DescribeKeyPairs")
+            .formParam("KeyPairId.1", keyPairId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
+    }
+
+    @Test
+    @Order(108)
+    void deleteKeyPairByName() {
+        given()
+            .formParam("Action", "CreateKeyPair")
+            .formParam("KeyName", "delete-by-name-key")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteKeyPair")
+            .formParam("KeyName", "delete-by-name-key")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeKeyPairs")
+            .formParam("KeyName.1", "delete-by-name-key")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
     }
 
     @Test
