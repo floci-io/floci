@@ -16,18 +16,16 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * CloudFormation provisioning for the Lambda addressing resources: {@code AWS::Lambda::Permission},
- * {@code AWS::Lambda::Version} and {@code AWS::Lambda::Alias}.
+ * CloudFormation provisioning for {@code AWS::Lambda::Permission}. {@code AWS::Lambda::Version} and
+ * {@code AWS::Lambda::Alias} belong to {@link LambdaVersionAliasCfnProvisioner}.
  *
- * <p>Physical ids double as delete handles, since {@link #delete(String, String, String)} only
- * receives the physical id: a Permission stores {@code <functionName>|<statementId>} ('|' cannot
- * appear in a function name or ARN), a Version stores the version-qualified function ARN (which is
- * also its {@code Ref} value in AWS), and an Alias stores the alias ARN.
+ * <p>The physical id doubles as the delete handle, since {@link #delete(String, String, String)}
+ * only receives the physical id. It stores {@code <functionName>|<statementId>}, and '|' cannot
+ * appear in a function name or ARN.
  *
- * <p>Stack updates re-provision every resource in the template, so each type is idempotent:
- * a Permission replaces its previous statement, a Version keeps the already-published version
- * (version resources are immutable in CloudFormation), and an Alias updates in place — deleting
- * the previously created alias when its name or function changed, as a replacement would.
+ * <p>Stack updates re-provision every resource in the template, so this is idempotent. The previous
+ * statement is captured and removed before the replacement is added, since AddPermission rejects a
+ * duplicate Sid, and it goes back if the replacement is rejected.
  */
 @ApplicationScoped
 public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
@@ -41,47 +39,38 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::Lambda::Permission", "AWS::Lambda::Version", "AWS::Lambda::Alias");
+        return Set.of("AWS::Lambda::Permission");
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        switch (r.getResourceType()) {
-            case "AWS::Lambda::Permission" -> provisionPermission(r, props, ctx);
-            case "AWS::Lambda::Version" -> provisionVersion(r, props, ctx);
-            case "AWS::Lambda::Alias" -> provisionAlias(r, props, ctx);
-            default -> throw new IllegalStateException(
-                    "LambdaAddressingCfnProvisioner cannot handle " + r.getResourceType());
+        if (!"AWS::Lambda::Permission".equals(r.getResourceType())) {
+            throw new IllegalStateException(
+                    "LambdaPermissionCfnProvisioner cannot handle " + r.getResourceType());
         }
+        provisionPermission(r, props, ctx);
     }
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        switch (resourceType) {
-            case "AWS::Lambda::Permission" -> {
-                int sep = physicalId.lastIndexOf('|');
-                if (sep > 0) {
-                    // Null qualifier: this provisioner only ever adds statements on the unqualified
-                    // function, so that is the resource the statement is scoped to.
-                    lambdaService.removePermission(region, physicalId.substring(0, sep), null,
-                            physicalId.substring(sep + 1));
-                }
+        if (!"AWS::Lambda::Permission".equals(resourceType) || physicalId == null) {
+            return;
+        }
+        int sep = physicalId.lastIndexOf('|');
+        if (sep <= 0) {
+            return;
+        }
+        try {
+            // Null qualifier: this provisioner only ever adds statements on the unqualified
+            // function, so that is the resource the statement is scoped to.
+            lambdaService.removePermission(region, physicalId.substring(0, sep), null,
+                    physicalId.substring(sep + 1));
+        } catch (AwsException e) {
+            // The statement or its function is already gone, so a DeleteStack retry must not
+            // fail the resource for work that is already done.
+            if (!"ResourceNotFoundException".equals(e.getErrorCode()) && e.getHttpStatus() != 404) {
+                throw e;
             }
-            case "AWS::Lambda::Version" -> {
-                int sep = physicalId.lastIndexOf(':');
-                if (sep > 0) {
-                    lambdaService.deleteVersion(region, physicalId.substring(0, sep),
-                            physicalId.substring(sep + 1));
-                }
-            }
-            case "AWS::Lambda::Alias" -> {
-                int sep = physicalId.lastIndexOf(':');
-                if (sep > 0) {
-                    lambdaService.deleteAlias(region, physicalId.substring(0, sep),
-                            physicalId.substring(sep + 1));
-                }
-            }
-            default -> { /* not ours */ }
         }
     }
 
@@ -164,108 +153,4 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
         return null;
     }
 
-    private void provisionVersion(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String functionName = ctx.resolveOptional(props, "FunctionName");
-        // Version resources are immutable: on a stack update, keep the version this resource
-        // already published instead of minting a new one (and silently repointing every Ref).
-        String previous = r.getPhysicalId();
-        if (previous != null && existingVersionIsCurrent(ctx.region(), functionName, previous)) {
-            int sep = previous.lastIndexOf(':');
-            r.getAttributes().put("Version", previous.substring(sep + 1));
-            r.getAttributes().put("FunctionArn", previous);
-            return;
-        }
-        LambdaFunction version = lambdaService.publishVersion(ctx.region(), functionName,
-                ctx.resolveOptional(props, "Description"));
-        // Ref on AWS::Lambda::Version is the version-qualified function ARN.
-        r.setPhysicalId(version.getFunctionArn());
-        r.getAttributes().put("Version", version.getVersion());
-        r.getAttributes().put("FunctionArn", version.getFunctionArn());
-    }
-
-    /** True when {@code physicalId} names a still-published version of the function in the template. */
-    private boolean existingVersionIsCurrent(String region, String functionName, String physicalId) {
-        int sep = physicalId.lastIndexOf(':');
-        if (sep <= 0) {
-            return false;
-        }
-        String version = physicalId.substring(sep + 1);
-        String baseArn = physicalId.substring(0, sep);
-        try {
-            LambdaFunction fn = lambdaService.getFunction(region, functionName);
-            if (!baseArn.equals(fn.getFunctionArn().replace(":$LATEST", ""))) {
-                return false; // the FunctionName property now points at a different function
-            }
-            return lambdaService.listVersionsByFunction(region, functionName).stream()
-                    .anyMatch(v -> version.equals(v.getVersion()));
-        } catch (AwsException e) {
-            return false;
-        }
-    }
-
-    private void provisionAlias(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String functionName = ctx.resolveOptional(props, "FunctionName");
-        String aliasName = ctx.resolveOptional(props, "Name");
-        String functionVersion = ctx.resolveOptional(props, "FunctionVersion");
-        if (functionVersion == null) {
-            functionVersion = "$LATEST";
-        }
-        String description = ctx.resolveOptional(props, "Description");
-        Map<String, Double> routingConfig = parseRoutingConfig(props, ctx);
-
-        LambdaAlias alias;
-        if (aliasExists(ctx.region(), functionName, aliasName)) {
-            // Update in place; an absent RoutingConfig clears any previous weights (empty map =
-            // clear in LambdaService#updateAlias, null = keep).
-            alias = lambdaService.updateAlias(ctx.region(), functionName, aliasName, functionVersion,
-                    description, routingConfig != null ? routingConfig : Map.of());
-        } else {
-            alias = lambdaService.createAlias(ctx.region(), functionName, aliasName, functionVersion,
-                    description, routingConfig);
-        }
-        // Renaming the alias (or retargeting its function) is a replacement: remove the alias the
-        // previous update created, mirroring how AWS::Lambda::Function cleans up after itself.
-        String previous = r.getPhysicalId();
-        if (previous != null && !previous.equals(alias.getAliasArn())) {
-            int sep = previous.lastIndexOf(':');
-            if (sep > 0) {
-                try {
-                    lambdaService.deleteAlias(ctx.region(), previous.substring(0, sep),
-                            previous.substring(sep + 1));
-                } catch (AwsException ignored) {
-                    // replaced alias (or its function) already gone
-                }
-            }
-        }
-        r.setPhysicalId(alias.getAliasArn());
-        r.getAttributes().put("AliasArn", alias.getAliasArn());
-    }
-
-    private boolean aliasExists(String region, String functionName, String aliasName) {
-        try {
-            lambdaService.getAlias(region, functionName, aliasName);
-            return true;
-        } catch (AwsException e) {
-            return false;
-        }
-    }
-
-    /**
-     * Parses the CloudFormation {@code RoutingConfig.AdditionalVersionWeights} list
-     * ({@code [{FunctionVersion, FunctionWeight}]}) into the service's version-to-weight map.
-     */
-    private Map<String, Double> parseRoutingConfig(JsonNode props, ProvisionContext ctx) {
-        if (props == null || !props.has("RoutingConfig") || props.get("RoutingConfig").isNull()) {
-            return null;
-        }
-        Map<String, Double> routing = new LinkedHashMap<>();
-        JsonNode weights = props.get("RoutingConfig").path("AdditionalVersionWeights");
-        if (weights.isArray()) {
-            for (JsonNode weight : weights) {
-                String version = ctx.engine().resolve(weight.get("FunctionVersion"));
-                routing.put(version, Double.parseDouble(ctx.engine().resolve(weight.get("FunctionWeight"))));
-            }
-        }
-        return routing;
-    }
 }

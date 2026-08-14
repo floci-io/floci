@@ -1585,12 +1585,17 @@ public class LambdaService {
      * Puts a previously captured policy statement back. Used to compensate when a replacement fails
      * after the original was removed: it takes the stored statement shape rather than an
      * AddPermission request, so what goes back is exactly what came out.
+     *
+     * <p>Scoped to the unqualified function, matching where the captured statement came from. A Sid
+     * is unique only within one resource ARN, so matching on it alone would take out an
+     * identically named statement on an alias or version and leave that one lost.
      */
     public void restorePermissionStatement(String region, String functionName, Map<String, Object> statement) {
         LambdaFunction fn = getFunction(region, functionName);
         String statementId = (String) statement.get("Sid");
+        String resourceArn = policyResourceArn(fn, null);
         if (statementId != null) {
-            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")));
+            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
         }
         fn.getPolicies().add(statement);
         functionStore.save(region, fn);
