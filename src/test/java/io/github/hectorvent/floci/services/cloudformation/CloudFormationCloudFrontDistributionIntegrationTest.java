@@ -2,13 +2,17 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
+import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPairGenerator;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -166,6 +170,84 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         assertEquals(original.getId(), updated.getId());
         assertEquals(original.getDomainName(), updated.getDomainName());
         assertEquals("after-" + suffix, updated.getConfig().getComment());
+    }
+
+    @Test
+    void preservesTrustedKeyGroupsOnDefaultAndOrderedBehaviors() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String alias = "cfn-private-" + suffix + ".example.test";
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        PublicKey publicKey = new PublicKey();
+        publicKey.setCallerReference("cfn-key-reference-" + suffix);
+        publicKey.setName("cfn-key-" + suffix);
+        publicKey.setEncodedKey("-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(
+                        generator.generateKeyPair().getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----");
+        publicKey = cloudFrontService.createPublicKey(publicKey);
+        KeyGroup defaultKeyGroup = createKeyGroup("cfn-default-" + suffix, publicKey.getId());
+        KeyGroup orderedKeyGroupA = createKeyGroup("cfn-ordered-a-" + suffix, publicKey.getId());
+        KeyGroup orderedKeyGroupB = createKeyGroup("cfn-ordered-b-" + suffix, publicKey.getId());
+        String template = """
+                {
+                  "Resources": {
+                    "Dist": {
+                      "Type": "AWS::CloudFront::Distribution",
+                      "Properties": {
+                        "DistributionConfig": {
+                          "Enabled": true,
+                          "Aliases": ["%s"],
+                          "Origins": [{
+                            "Id": "s3-origin",
+                            "DomainName": "private-content.s3.us-east-1.amazonaws.com",
+                            "S3OriginConfig": {"OriginAccessIdentity": ""}
+                          }],
+                          "DefaultCacheBehavior": {
+                            "TargetOriginId": "s3-origin",
+                            "ViewerProtocolPolicy": "allow-all",
+                            "TrustedKeyGroups": ["%s"]
+                          },
+                          "CacheBehaviors": [{
+                            "PathPattern": "/private/*",
+                            "TargetOriginId": "s3-origin",
+                            "ViewerProtocolPolicy": "allow-all",
+                            "TrustedKeyGroups": ["%s", "%s"]
+                          }]
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted(
+                        alias,
+                        defaultKeyGroup.getId(),
+                        orderedKeyGroupA.getId(),
+                        orderedKeyGroupB.getId());
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-cloudfront-private-" + suffix)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        Distribution distribution = distributionsWithAlias(alias).getFirst();
+        assertEquals(List.of(defaultKeyGroup.getId()),
+                distribution.getConfig().getDefaultCacheBehavior().getTrustedKeyGroups());
+        assertEquals(List.of(orderedKeyGroupA.getId(), orderedKeyGroupB.getId()),
+                distribution.getConfig().getCacheBehaviors().getFirst().getTrustedKeyGroups());
+    }
+
+    private KeyGroup createKeyGroup(String name, String publicKeyId) {
+        KeyGroup keyGroup = new KeyGroup();
+        keyGroup.setName(name);
+        keyGroup.setItems(List.of(publicKeyId));
+        return cloudFrontService.createKeyGroup(keyGroup);
     }
 
     private List<Distribution> distributionsWithAlias(String alias) {
