@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
@@ -13,6 +14,7 @@ import java.util.HashMap;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -97,6 +99,23 @@ class Ec2FlowLogCfnProvisionerTest {
         verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
         assertEquals("fl-0abc", r.getPhysicalId());
         assertEquals("fl-0abc", r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void changingACreateOnlyPropertyReportsAnUnsupportedReplacement() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        existing.setTrafficType("ALL");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+
+        // Reusing regardless would report the stack complete while DescribeFlowLogs kept
+        // serving ALL for a template that now asks for REJECT.
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode().put("ResourceId", "vpc-123").put("TrafficType", "REJECT"), ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
     }
 
     @Test

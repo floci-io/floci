@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -97,6 +99,38 @@ class AutoScalingLifecycleHookCfnProvisionerTest {
         assertEquals(firstName, r.getPhysicalId());
         verify(autoScaling, times(2)).putLifecycleHook("us-east-1", "the-asg", firstName,
                 null, null, null, null, null, null);
+    }
+
+    @Test
+    void changingADeclaredHookNameReportsAnUnsupportedReplacement() {
+        StackResource r = resource();
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("AutoScalingGroupName", "the-asg")
+                .put("LifecycleHookName", "first-hook"), ctx());
+
+        // Going through would put second-hook on the group and overwrite the id delete uses,
+        // leaving first-hook behind and still firing.
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode()
+                        .put("AutoScalingGroupName", "the-asg")
+                        .put("LifecycleHookName", "second-hook"), ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("first-hook", r.getPhysicalId());
+    }
+
+    @Test
+    void movingAHookToAnotherGroupReportsAnUnsupportedReplacement() {
+        StackResource r = resource();
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("AutoScalingGroupName", "first-asg")
+                .put("LifecycleHookName", "the-hook"), ctx());
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode()
+                        .put("AutoScalingGroupName", "second-asg")
+                        .put("LifecycleHookName", "the-hook"), ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("first-asg", r.getAttributes().get("AutoScalingGroupName"));
     }
 
     @Test

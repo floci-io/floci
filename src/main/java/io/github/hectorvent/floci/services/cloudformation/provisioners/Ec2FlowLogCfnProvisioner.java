@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
@@ -36,13 +37,19 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         // An update re-invokes provision with the prior physical id. Creating unconditionally
         // would leave a second flow log on every update and orphan the first, which then outlives
-        // the stack, since delete only knows the id recorded last. Every property except Tags is
-        // createOnly, so there is nothing to modify on the reused log.
+        // the stack, since delete only knows the id recorded last.
         String existingId = r.getPhysicalId();
-        if (existingId != null && !existingId.isBlank()
-                && !flowLogService.describeFlowLogs(ctx.region(), List.of(existingId)).isEmpty()) {
-            r.getAttributes().put("Id", existingId);
-            return;
+        if (existingId != null && !existingId.isBlank()) {
+            FlowLog existing = flowLogService.describeFlowLogs(ctx.region(), List.of(existingId))
+                    .stream().findFirst().orElse(null);
+            if (existing != null) {
+                // Every property except Tags is createOnly, so there is nothing to modify on the
+                // reused log and a change to any of them is a replacement. Reusing regardless would
+                // report the stack complete while DescribeFlowLogs kept serving the old config.
+                requireUnchanged(existing, props, ctx);
+                r.getAttributes().put("Id", existingId);
+                return;
+            }
         }
         FlowLog fl = flowLogService.createFlowLog(ctx.region(),
                 ctx.resolveOptional(props, "ResourceId"),
@@ -56,6 +63,40 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                         : DEFAULT_MAX_AGGREGATION_INTERVAL);
         r.setPhysicalId(fl.getFlowLogId());
         r.getAttributes().put("Id", fl.getFlowLogId());
+    }
+
+    /**
+     * Rejects a change to any createOnly property. AWS replaces the flow log for these, and this
+     * provisioner has no replacement path, so reporting is better than reusing a log whose
+     * configuration no longer matches the template.
+     */
+    private void requireUnchanged(FlowLog existing, JsonNode props, ProvisionContext ctx) {
+        rejectIfChanged("ResourceId", existing.getResourceId(), ctx.resolveOptional(props, "ResourceId"));
+        rejectIfChanged("ResourceType", existing.getResourceType(), ctx.resolveOptional(props, "ResourceType"));
+        rejectIfChanged("TrafficType", existing.getTrafficType(), ctx.resolveOptional(props, "TrafficType"));
+        rejectIfChanged("LogDestinationType", existing.getLogDestinationType(),
+                ctx.resolveOptional(props, "LogDestinationType"));
+        rejectIfChanged("LogDestination", existing.getLogDestination(),
+                ctx.resolveOptional(props, "LogDestination"));
+        rejectIfChanged("LogFormat", existing.getLogFormat(), ctx.resolveOptional(props, "LogFormat"));
+        if (props != null && props.hasNonNull("MaxAggregationInterval")
+                && props.get("MaxAggregationInterval").asInt() != existing.getMaxAggregationInterval()) {
+            throw new AwsException("ValidationError",
+                    "Updating MaxAggregationInterval requires resource replacement, which is not supported.", 400);
+        }
+    }
+
+    /**
+     * A property the template stops declaring is left alone rather than treated as a change, and so
+     * is one the stored log never captured, since an absent value is not evidence of a different one.
+     */
+    private void rejectIfChanged(String property, String existing, String requested) {
+        if (existing == null || existing.isBlank()
+                || requested == null || requested.isBlank() || requested.equals(existing)) {
+            return;
+        }
+        throw new AwsException("ValidationError",
+                "Updating " + property + " requires resource replacement, which is not supported.", 400);
     }
 
     /** Without this the flow log outlives its stack and keeps showing up in DescribeFlowLogs. */

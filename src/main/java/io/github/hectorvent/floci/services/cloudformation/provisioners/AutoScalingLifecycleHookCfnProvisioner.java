@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -29,12 +30,11 @@ public class AutoScalingLifecycleHookCfnProvisioner implements CfnResourceProvis
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String existingName = r.getPhysicalId();
         String hookName = ctx.resolveOptional(props, "LifecycleHookName");
         if (hookName == null || hookName.isBlank()) {
             // An unnamed hook keeps the name its first execution generated. Minting a fresh one on
-            // every update leaves the previous hook on the group with nothing referencing it. A
-            // declared name needs no such care, since putLifecycleHook is idempotent on it.
-            String existingName = r.getPhysicalId();
+            // every update leaves the previous hook on the group with nothing referencing it.
             hookName = existingName != null && !existingName.isBlank()
                     ? existingName
                     : ctx.generatePhysicalName(r.getLogicalId(), 255, false);
@@ -42,6 +42,13 @@ public class AutoScalingLifecycleHookCfnProvisioner implements CfnResourceProvis
         Integer heartbeat = props != null && props.hasNonNull("HeartbeatTimeout")
                 ? props.get("HeartbeatTimeout").asInt() : null;
         String asgName = ctx.resolveOptional(props, "AutoScalingGroupName");
+        String existingAsg = r.getAttributes() == null ? null : r.getAttributes().get("AutoScalingGroupName");
+        // LifecycleHookName and AutoScalingGroupName are both createOnly, so a change to either is a
+        // replacement. Provisioning through it would put the new hook in place and overwrite the id
+        // that delete uses, leaving the previous hook on its group and still firing. Reported the
+        // same way EcsCapacityCfnProvisioner reports a changed Name.
+        requireUnchanged("LifecycleHookName", existingName, hookName);
+        requireUnchanged("AutoScalingGroupName", existingAsg, asgName);
         // Recorded so delete can scope to the owning group: hook names are unique only within one.
         if (asgName != null && !asgName.isBlank()) {
             r.getAttributes().put("AutoScalingGroupName", asgName);
@@ -56,6 +63,17 @@ public class AutoScalingLifecycleHookCfnProvisioner implements CfnResourceProvis
                 heartbeat,
                 ctx.resolveOptional(props, "DefaultResult"));
         r.setPhysicalId(hookName);
+    }
+
+    /** Rejects a change to a createOnly property rather than stranding the resource it names. */
+    private void requireUnchanged(String property, String existing, String requested) {
+        if (existing == null || existing.isBlank() || requested == null || requested.isBlank()) {
+            return;
+        }
+        if (!existing.equals(requested)) {
+            throw new AwsException("ValidationError",
+                    "Updating " + property + " requires resource replacement, which is not supported.", 400);
+        }
     }
 
     /**
