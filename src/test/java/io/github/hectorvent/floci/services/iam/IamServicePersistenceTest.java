@@ -92,10 +92,12 @@ class IamServicePersistenceTest {
                 load(dir, "iam-access-keys.json", new TypeReference<Map<String, AccessKey>>() {}),
                 load(dir, "iam-instance-profiles.json", new TypeReference<Map<String, InstanceProfile>>() {}),
                 load(dir, "iam-sessions.json", new TypeReference<Map<String, SessionCredential>>() {}),
+                load(dir, "iam-account-aliases.json", new TypeReference<Map<String, String>>() {}),
                 load(dir, "iam-oidc-providers.json", new TypeReference<Map<String, OpenIDConnectProvider>>() {}),
                 load(dir, "iam-slr-deletions.json", new TypeReference<Map<String, String>>() {}),
                 new RegionResolver("us-east-1", "000000000000"),
-                false);
+                false,
+                null);
     }
 
     private <V> StorageBackend<String, V> load(Path dir, String file, TypeReference<Map<String, V>> type) {

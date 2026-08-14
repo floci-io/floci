@@ -256,8 +256,12 @@ public class ApiGatewayExecuteController {
         }
 
         String preferredRegion = region;
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null || auth.isBlank()) {
+        // True for SigV4-unsigned requests, and also for requests whose Authorization header
+        // isn't a SigV4 credential at all (e.g. a Cognito bearer JWT) - resolveRegion silently
+        // fell back to defaultRegion in both cases, so the resolved region is a guess.
+        boolean regionUnresolved = regionResolver.resolveRegionFromAuthOrNull(
+                headers == null ? null : headers.getHeaderString("Authorization")) == null;
+        if (regionUnresolved) {
             region = apiGatewayService.resolveRestApiRegion(region, apiId);
         }
 
