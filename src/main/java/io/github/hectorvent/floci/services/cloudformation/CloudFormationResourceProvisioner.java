@@ -1051,7 +1051,11 @@ public class CloudFormationResourceProvisioner {
                 resolveStringList(props, "SecurityGroups", engine),
                 resolveOptional(props, "UserData", engine),
                 resolveOptional(props, "IamInstanceProfile", engine),
-                Boolean.parseBoolean(associatePublicIp));
+                // Absent in the template means the subnet default applies, so
+                // it stays null rather than collapsing to false.
+                associatePublicIp == null || associatePublicIp.isBlank()
+                        ? null
+                        : Boolean.parseBoolean(associatePublicIp));
         // Ref returns the launch configuration name.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
@@ -1192,8 +1196,20 @@ public class CloudFormationResourceProvisioner {
             }
         }
 
+        // The launch-time public-IP override rides on the primary network
+        // interface spec; absent means the subnet's MapPublicIpOnLaunch default.
+        Boolean associatePublicIp = null;
+        var networkInterfaces = props.path("NetworkInterfaces");
+        if (networkInterfaces.isArray() && !networkInterfaces.isEmpty()) {
+            String assocRaw = engine.resolve(networkInterfaces.get(0).path("AssociatePublicIpAddress"));
+            if (assocRaw != null && !assocRaw.isBlank()) {
+                associatePublicIp = Boolean.parseBoolean(assocRaw);
+            }
+        }
+
         var reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
-                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfile);
+                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfile,
+                associatePublicIp);
         var instance = reservation.getInstances().get(0);
         r.setPhysicalId(instance.getInstanceId());
         r.getAttributes().put("InstanceId", instance.getInstanceId());

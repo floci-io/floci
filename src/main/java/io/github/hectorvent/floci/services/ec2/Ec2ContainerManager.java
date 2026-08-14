@@ -204,9 +204,14 @@ public class Ec2ContainerManager {
 
                 configureLinkLocalMetadataEndpoint(containerId, instanceId, flociHost, imdsPort);
 
-                // Set public-facing addresses
-                instance.setPublicIpAddress("127.0.0.1");
-                instance.setPublicDnsName("localhost");
+                // Set public-facing addresses only for instances whose subnet
+                // opts in via MapPublicIpOnLaunch (#1984). Private-subnet
+                // instances have no public IP/DNS, matching real EC2. The value
+                // stays the host-reachable 127.0.0.1/localhost for public ones.
+                if (instance.isAssociatePublicIp()) {
+                    instance.setPublicIpAddress("127.0.0.1");
+                    instance.setPublicDnsName("localhost");
+                }
 
                 instance.setState(InstanceState.running());
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",

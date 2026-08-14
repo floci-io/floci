@@ -819,6 +819,17 @@ public class Ec2Service implements ContainerTeardown {
                                     List<String> securityGroupIds, String subnetId,
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, null);
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -876,6 +887,12 @@ public class Ec2Service implements ContainerTeardown {
             inst.setPlacement(new Placement(az));
             inst.setSubnetId(finalSubnetId);
             inst.setVpcId(vpcId);
+            // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
+            // override wins in both directions; the subnet's MapPublicIpOnLaunch
+            // attribute is only the default when the launch does not specify it.
+            inst.setAssociatePublicIp(associatePublicIp != null
+                    ? associatePublicIp
+                    : subnet != null && subnet.isMapPublicIpOnLaunch());
             inst.setPrivateIpAddress(privateIp);
             inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
             inst.setKeyName(keyName);
