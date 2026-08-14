@@ -323,22 +323,45 @@ public class CloudHsmV2Service {
     // ──────────────────────────── TagResource ────────────────────────────
 
     public void tagResource(String resourceId, Map<String, String> tags, String region) {
-        Cluster cluster = getCluster(resourceId, region);
-        if (tags != null && !tags.isEmpty()) {
-            cluster.getTagList().putAll(tags);
+        if (tags == null || tags.isEmpty() || tags.size() > 50) {
+            throw new AwsException("CloudHsmInvalidRequestException", "TagList must have length between 1 and 50", 400);
         }
-        clusters.put(regionKey(region, resourceId), cluster);
+        if (resourceId.startsWith("backup-")) {
+            Backup backup = getBackup(resourceId, region);
+            if (tags != null && !tags.isEmpty()) {
+                backup.getTagList().putAll(tags);
+            }
+            backups.put(regionKey(region, resourceId), backup);
+        } else {
+            Cluster cluster = getCluster(resourceId, region);
+            if (tags != null && !tags.isEmpty()) {
+                cluster.getTagList().putAll(tags);
+            }
+            clusters.put(regionKey(region, resourceId), cluster);
+        }
     }
 
     public void untagResource(String resourceId, List<String> tagKeys, String region) {
-        Cluster cluster = getCluster(resourceId, region);
-        tagKeys.forEach(cluster.getTagList()::remove);
-        clusters.put(regionKey(region, resourceId), cluster);
+        if (tagKeys == null || tagKeys.isEmpty() || tagKeys.size() > 50) {
+            throw new AwsException("CloudHsmInvalidRequestException", "TagKeyList must have length between 1 and 50", 400);
+        }
+        if (resourceId.startsWith("backup-")) {
+            Backup backup = getBackup(resourceId, region);
+            tagKeys.forEach(backup.getTagList()::remove);
+            backups.put(regionKey(region, resourceId), backup);
+        } else {
+            Cluster cluster = getCluster(resourceId, region);
+            tagKeys.forEach(cluster.getTagList()::remove);
+            clusters.put(regionKey(region, resourceId), cluster);
+        }
     }
 
     public Map<String, String> listTags(String resourceId, String region) {
-        Cluster cluster = getCluster(resourceId, region);
-        return new LinkedHashMap<>(cluster.getTagList());
+        if (resourceId.startsWith("backup-")) {
+            return new LinkedHashMap<>(getBackup(resourceId, region).getTagList());
+        } else {
+            return new LinkedHashMap<>(getCluster(resourceId, region).getTagList());
+        }
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

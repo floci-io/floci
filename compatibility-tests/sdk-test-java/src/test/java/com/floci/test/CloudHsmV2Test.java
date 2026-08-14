@@ -3,7 +3,23 @@ package com.floci.test;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
 import software.amazon.awssdk.services.cloudhsmv2.model.*;
+
 import java.util.List;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cert.X509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.operator.ContentSigner;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.bouncycastle.util.io.pem.PemObject;
+import org.bouncycastle.util.io.pem.PemWriter;
+
+import java.io.StringWriter;
+import java.math.BigInteger;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.cert.X509Certificate;
+import java.util.Date;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,7 +49,7 @@ public class CloudHsmV2Test {
 
         // 2. Initialize Cluster
         // Since we are mocking, we can just use the generated CSR or dummy certificates
-        String dummyCert = "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n";
+        String dummyCert = generateDummyCertificate();
         InitializeClusterResponse initResp = client.initializeCluster(r -> r
                 .clusterId(clusterId)
                 .signedCert(dummyCert)
@@ -96,7 +112,7 @@ public class CloudHsmV2Test {
                 .subnetIds("subnet-1", "subnet-2")
         );
         String clusterId = createClusterResponse.cluster().clusterId();
-        String dummyCert = "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n";
+        String dummyCert = generateDummyCertificate();
         client.initializeCluster(r -> r.clusterId(clusterId).signedCert(dummyCert).trustAnchor(dummyCert));
         
         Hsm hsm = client.createHsm(r -> r.clusterId(clusterId).availabilityZone("us-east-1b")).hsm();
@@ -114,5 +130,35 @@ public class CloudHsmV2Test {
                 .eniId(hsm.eniId())
         );
         assertThat(delResp.hsmId()).isEqualTo(hsm.hsmId());
+    }
+
+    private String generateDummyCertificate() {
+        try {
+            KeyPairGenerator keyPairGen = KeyPairGenerator.getInstance("RSA");
+            keyPairGen.initialize(2048);
+            KeyPair keyPair = keyPairGen.generateKeyPair();
+
+            X500Name subject = new X500Name("CN=Dummy");
+            BigInteger serial = BigInteger.valueOf(System.currentTimeMillis());
+            Date notBefore = new Date(System.currentTimeMillis() - 86400000L);
+            Date notAfter = new Date(System.currentTimeMillis() + 86400000L * 365);
+
+            X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
+                    subject, serial, notBefore, notAfter, subject, keyPair.getPublic());
+
+            ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA")
+                    .build(keyPair.getPrivate());
+
+            X509Certificate cert = new JcaX509CertificateConverter()
+                    .getCertificate(certBuilder.build(signer));
+
+            StringWriter sw = new StringWriter();
+            try (PemWriter pw = new PemWriter(sw)) {
+                pw.writeObject(new PemObject("CERTIFICATE", cert.getEncoded()));
+            }
+            return sw.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate dummy certificate", e);
+        }
     }
 }
