@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService.MetricIdentity;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -82,6 +83,9 @@ class SesEventPublishingV2IntegrationTest {
 
     @Inject
     CloudWatchMetricsService metricsService;
+
+    @Inject
+    FirehoseService firehoseService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -639,22 +643,26 @@ class SesEventPublishingV2IntegrationTest {
 
     @Test
     @Order(15)
-    void firehose_fiveSends_triggerAutoFlushAndWriteNdjsonToS3() throws Exception {
-        for (int i = 0; i < 5; i++) {
-            sendEmailToConfigSet(CS_FIREHOSE, "recipient" + i + "@example.com", "fh-evt-" + i);
-        }
+    void firehose_sendEventsAreDeliveredAsNdjsonToS3() throws Exception {
+        sendEmailToConfigSet(CS_FIREHOSE, "recipient0@example.com", "fh-evt-0");
+        sendEmailToConfigSet(CS_FIREHOSE, "recipient1@example.com", "fh-evt-1");
+
+        // Small events stay buffered until the stream's size (SizeInMBs) or
+        // interval (IntervalInSeconds) trigger fires; force the flush so the
+        // assertion is deterministic (same mechanism the scheduled flusher uses).
+        firehoseService.flush(FIREHOSE_STREAM);
 
         List<S3Object> objects = s3Service.listObjects(FIREHOSE_BUCKET, FIREHOSE_STREAM + "/", null, 100);
         assertEquals(1, objects.size(),
-                "expected exactly one flushed S3 object after 5 putRecord calls (DEFAULT_FLUSH_COUNT)");
+                "expected exactly one flushed S3 object containing the buffered events");
 
         S3Object obj = s3Service.getObject(FIREHOSE_BUCKET, objects.get(0).getKey());
         String body = new String(obj.getData(), StandardCharsets.UTF_8);
         String[] lines = body.split("\\R");
-        assertEquals(5, lines.length, "flushed object should contain 5 NDJSON records");
+        assertEquals(2, lines.length, "flushed object should contain one NDJSON record per send");
 
-        for (int i = 0; i < 5; i++) {
-            JsonNode event = MAPPER.readTree(lines[i]);
+        for (String line : lines) {
+            JsonNode event = MAPPER.readTree(line);
             assertEquals("Send", event.path("eventType").asText());
             assertEquals(SENDER, event.path("mail").path("source").asText());
             assertEquals(CS_FIREHOSE,

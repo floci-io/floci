@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -19,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class FirehoseExtendedS3IntegrationTest {
+
+    @Inject
+    FirehoseService firehoseService;
 
     private static final String STREAM_NAME = "test-extended-s3-stream";
     private static final String LEGACY_STREAM_NAME = "test-legacy-s3-stream";
@@ -339,7 +343,7 @@ class FirehoseExtendedS3IntegrationTest {
         String stream = "delivery-default-stream";
         String bucket = "extended-s3-delivery-default";
         createDeliveryStream(stream, bucket, "");
-        putFiveRecords(stream);
+        putFiveRecordsAndFlush(stream);
 
         String key = firstDeliveredKey(bucket, "");
         assertTrue(key.matches(TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
@@ -351,7 +355,7 @@ class FirehoseExtendedS3IntegrationTest {
         String stream = "delivery-static-stream";
         String bucket = "extended-s3-delivery-static";
         createDeliveryStream(stream, bucket, ", \"Prefix\": \"events/data/\"");
-        putFiveRecords(stream);
+        putFiveRecordsAndFlush(stream);
 
         String key = firstDeliveredKey(bucket, "events/data/");
         assertTrue(key.matches("events/data/" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
@@ -363,7 +367,7 @@ class FirehoseExtendedS3IntegrationTest {
         String stream = "delivery-noslash-stream";
         String bucket = "extended-s3-delivery-noslash";
         createDeliveryStream(stream, bucket, ", \"Prefix\": \"legacy\"");
-        putFiveRecords(stream);
+        putFiveRecordsAndFlush(stream);
 
         String key = firstDeliveredKey(bucket, "legacy");
         assertTrue(key.matches("legacy" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
@@ -375,7 +379,7 @@ class FirehoseExtendedS3IntegrationTest {
         String stream = "delivery-expr-stream";
         String bucket = "extended-s3-delivery-expr";
         createDeliveryStream(stream, bucket, ", \"Prefix\": \"data/!{timestamp:yyyy/MM/dd}/\"");
-        putFiveRecords(stream);
+        putFiveRecordsAndFlush(stream);
 
         String key = firstDeliveredKey(bucket, "data/");
         assertTrue(key.matches("data/\\d{4}/\\d{2}/\\d{2}/" + stream + SUFFIX_REGEX), key);
@@ -387,7 +391,7 @@ class FirehoseExtendedS3IntegrationTest {
         String stream = "delivery-rand-stream";
         String bucket = "extended-s3-delivery-rand";
         createDeliveryStream(stream, bucket, ", \"Prefix\": \"rand/!{firehose:random-string}/\"");
-        putFiveRecords(stream);
+        putFiveRecordsAndFlush(stream);
 
         String key = firstDeliveredKey(bucket, "rand/");
         assertTrue(key.matches("rand/[A-Za-z0-9]{11}/" + stream + SUFFIX_REGEX), key);
@@ -412,7 +416,7 @@ class FirehoseExtendedS3IntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CustomTimeZone",
                     equalTo("Europe/Madrid"));
 
-        putFiveRecords(stream);
+        putFiveRecordsAndFlush(stream);
         String key = firstDeliveredKey(bucket, "events/");
         assertTrue(key.matches("events/" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
     }
@@ -436,8 +440,12 @@ class FirehoseExtendedS3IntegrationTest {
             .statusCode(200);
     }
 
-    /** Five records reach DEFAULT_FLUSH_COUNT, so the batch triggers the automatic flush. */
-    private void putFiveRecords(String streamName) {
+    /**
+     * Small records stay buffered until the size (SizeInMBs) or interval
+     * (IntervalInSeconds) trigger fires; force the flush so the delivery
+     * assertions are deterministic (same mechanism the scheduled flusher uses).
+     */
+    private void putFiveRecordsAndFlush(String streamName) {
         String data = Base64.getEncoder().encodeToString("{\"id\": 1}".getBytes(StandardCharsets.UTF_8));
         given()
             .contentType(CONTENT_TYPE)
@@ -455,6 +463,7 @@ class FirehoseExtendedS3IntegrationTest {
         .then()
             .statusCode(200)
             .body("FailedPutCount", equalTo(0));
+        firehoseService.flush(streamName);
     }
 
     private String firstDeliveredKey(String bucket, String listPrefix) {

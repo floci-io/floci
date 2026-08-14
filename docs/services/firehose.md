@@ -25,7 +25,11 @@ Floci emulates Amazon Data Firehose for streaming data ingestion and delivery to
 ## How it works
 
 1. **Buffering**: Incoming records are buffered in memory.
-2. **Automatic Flush**: Floci automatically flushes the buffer to S3 after every 5 records for immediate local feedback.
+2. **Automatic Flush**: A buffer is delivered to S3 when either trigger of the stream's `BufferingHints` fires first, mirroring AWS's buffered delivery:
+    - the buffered records reach `SizeInMBs` (default 5 MiB), or
+    - `IntervalInSeconds` (default 300 s) has elapsed since the first buffered record. A background flusher checks this every `floci.services.firehose.tick-interval-seconds` (default 10 s).
+
+    Buffers are also flushed on shutdown, so pending records are not lost. Deleting a delivery stream discards its pending records without flushing, matching real AWS.
 3. **Format**: Records are flushed as raw NDJSON (newline-delimited JSON) to the bucket configured in the S3 destination (`floci-firehose-results` if the stream has no destination configuration).
 
 ## S3 object keys

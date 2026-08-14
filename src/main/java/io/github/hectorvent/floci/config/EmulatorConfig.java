@@ -1067,6 +1067,13 @@ public interface EmulatorConfig {
     interface FirehoseServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * How often the buffer flusher checks for streams whose buffering
+         * interval (BufferingHints.IntervalInSeconds) has elapsed.
+         */
+        @WithDefault("10")
+        long tickIntervalSeconds();
     }
 
     interface KmsServiceConfig {
