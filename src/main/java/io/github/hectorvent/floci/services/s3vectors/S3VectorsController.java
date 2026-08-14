@@ -394,11 +394,13 @@ public class S3VectorsController {
         );
 
         boolean returnMetadata = request.returnMetadata() != null && request.returnMetadata();
+        boolean returnDistance = request.returnDistance() != null && request.returnDistance();
 
         List<QueryResultRepresentation> reps = results.stream()
                 .map(res -> {
                     Map<String, Object> metadata = returnMetadata ? res.getVector().getMetadata() : null;
-                    return new QueryResultRepresentation(res.getVector().getKey(), res.getDistance(), metadata);
+                    Double distance = returnDistance ? res.getDistance() : null;
+                    return new QueryResultRepresentation(res.getVector().getKey(), distance, metadata);
                 })
                 .toList();
 

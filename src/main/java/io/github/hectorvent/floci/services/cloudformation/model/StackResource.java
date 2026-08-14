@@ -16,6 +16,7 @@ public class StackResource {
     private String deletionPolicy;
     private String status = "CREATE_IN_PROGRESS";
     private String statusReason;
+    private String updateReplacePolicy;
     private Instant timestamp = Instant.now();
     private Map<String, String> attributes = new HashMap<>();
 
@@ -31,6 +32,10 @@ public class StackResource {
     public void setStatus(String status) { this.status = status; }
     public String getStatusReason() { return statusReason; }
     public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
+    public String getUpdateReplacePolicy() { return updateReplacePolicy; }
+    public void setUpdateReplacePolicy(String updateReplacePolicy) {
+        this.updateReplacePolicy = updateReplacePolicy;
+    }
     public Instant getTimestamp() { return timestamp; }
     public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
     public Map<String, String> getAttributes() { return attributes; }

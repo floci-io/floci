@@ -28,7 +28,7 @@ class ApiGatewayExecuteControllerTest {
         return new ApiGatewayExecuteController(
                 null, null, null,
                 regionResolver, objectMapper, null,
-                null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext());
     }
 
     @Test
