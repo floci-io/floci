@@ -486,3 +486,5 @@ floci:
       enabled: true
     rum:
       enabled: true
+    amp:
+      enabled: true

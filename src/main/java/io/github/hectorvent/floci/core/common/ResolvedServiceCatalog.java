@@ -433,7 +433,13 @@ public class ResolvedServiceCatalog {
                         "rum", storageMode(config.storage().services().rum().mode(), config.storage().mode()),
                         config.storage().services().rum().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("rum"), Set.of(), Set.of(RumController.class))
+                        Set.of(), Set.of("rum"), Set.of(), Set.of(RumController.class)),
+                descriptor("amp", "amp", config.services().amp().enabled(), true,
+                        "amp", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        // Amazon Managed Service for Prometheus signs as "aps"
+                        Set.of(), Set.of("aps"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.amp.AmpController.class))
         ));
     }
 

@@ -108,6 +108,7 @@ nav:
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
     - CloudWatch RUM: services/rum.md
+    - Managed Prometheus (AMP): services/amp.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
