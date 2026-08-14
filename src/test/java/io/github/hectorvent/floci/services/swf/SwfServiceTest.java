@@ -705,8 +705,16 @@ class SwfServiceTest {
                         .anyMatch(e -> "MarkerRecorded".equals(e.getEventType())),
                 "the rejected token must remain claimable for a corrected batch");
 
-        // AWS names the offending member by its 1-based position in the list.
-        assertTrue(thrown.getMessage().contains("decisions.2.member.decisionType"), thrown.getMessage());
+        // AWS names the offending member by its 1-based position in the list, and renders the
+        // enum set in the service's own order — which is not the API model's order.
+        assertEquals("1 validation error detected: Value 'NotARealDecision' at "
+                        + "'decisions.2.member.decisionType' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: "
+                        + "[CompleteWorkflowExecution, StartTimer, RequestCancelExternalWorkflowExecution, "
+                        + "SignalExternalWorkflowExecution, CancelTimer, RecordMarker, ScheduleActivityTask, "
+                        + "ContinueAsNewWorkflowExecution, ScheduleLambdaFunction, FailWorkflowExecution, "
+                        + "RequestCancelActivityTask, StartChildWorkflowExecution, CancelWorkflowExecution]",
+                thrown.getMessage());
     }
 
     @Test

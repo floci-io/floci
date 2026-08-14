@@ -46,13 +46,17 @@ public final class SwfConstants {
             "StartChildWorkflowExecution",
             "ScheduleLambdaFunction");
 
-    /** The enum list exactly as the live service renders it in a ValidationException. */
+    /**
+     * The enum list exactly as the live service renders it in a ValidationException.
+     *
+     * <p>This order is the service's, not the API model's — the two differ, and the service's
+     * was stable across repeated calls, so it is what a byte-comparing client sees.
+     */
     public static final String DECISION_TYPE_SET_MESSAGE =
-            "[ScheduleActivityTask, RequestCancelActivityTask, CompleteWorkflowExecution, "
-                    + "FailWorkflowExecution, CancelWorkflowExecution, ContinueAsNewWorkflowExecution, "
-                    + "RecordMarker, StartTimer, CancelTimer, SignalExternalWorkflowExecution, "
-                    + "RequestCancelExternalWorkflowExecution, StartChildWorkflowExecution, "
-                    + "ScheduleLambdaFunction]";
+            "[CompleteWorkflowExecution, StartTimer, RequestCancelExternalWorkflowExecution, "
+                    + "SignalExternalWorkflowExecution, CancelTimer, RecordMarker, ScheduleActivityTask, "
+                    + "ContinueAsNewWorkflowExecution, ScheduleLambdaFunction, FailWorkflowExecution, "
+                    + "RequestCancelActivityTask, StartChildWorkflowExecution, CancelWorkflowExecution]";
 
     public static final String UNKNOWN_RESOURCE = "UnknownResourceFault";
     public static final String DOMAIN_ALREADY_EXISTS = "DomainAlreadyExistsFault";
