@@ -1155,6 +1155,119 @@ class RdsServiceTest {
                 eq("admin"), eq("secret"), eq("app"), any());
     }
 
+    @Test
+    void createDbSnapshotThrowsForNonPostgres() {
+        rdsService.createDbInstance("mydb", "mysql", "8.0",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSnapshot("mysnap", "mydb"));
+
+        assertEquals("InvalidDBInstanceState", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("CreateDBSnapshot is not supported for engine MYSQL"));
+    }
+
+    @Test
+    void createDbSnapshotSucceedsForPostgres() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = rdsService.createDbSnapshot("mysnap", "mydb");
+
+        assertEquals("mysnap", snapshot.getDbSnapshotIdentifier());
+        assertEquals("mydb", snapshot.getDbInstanceIdentifier());
+        assertEquals(DatabaseEngine.POSTGRES, snapshot.getEngine());
+        assertEquals("available", snapshot.getStatus());
+        verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
+    }
+
+    @Test
+    void createDbSnapshotThrowsOnDumpFailure() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenThrow(new RuntimeException("dump failed"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSnapshot("mysnap", "mydb"));
+
+        assertEquals("InvalidDBInstanceState", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Failed to create snapshot: dump failed"));
+    }
+
+    @Test
+    void restoreDbInstanceFromDbSnapshotRestoresData() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        DbInstance restored = rdsService.restoreDbInstanceFromDbSnapshot("restored-db", "mysnap", "db.t3.large", "us-east-1a", false, null, null, Map.of());
+
+        assertEquals("restored-db", restored.getDbInstanceIdentifier());
+        assertEquals("db.t3.large", restored.getDbInstanceClass());
+        assertEquals(DatabaseEngine.POSTGRES, restored.getEngine());
+        assertEquals("admin", restored.getMasterUsername());
+        assertEquals("us-east-1a", restored.getAvailabilityZone());
+        assertEquals("dbname", restored.getDbName());
+        verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
+    }
+
+    @Test
+    void restoreDbInstanceFromDbSnapshotThrowsOnRestoreFailure() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        org.mockito.Mockito.doThrow(new RuntimeException("failed restore"))
+                .when(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.restoreDbInstanceFromDbSnapshot("restored-db", "mysnap", "db.t3.large", "us-east-1a", false, null, null, Map.of()));
+
+        assertEquals("InvalidDBSnapshotState", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Failed to restore snapshot: failed restore"));
+    }
+
+    @Test
+    void describeDbSnapshotsFiltersCorrectly() {
+        rdsService.createDbInstance("mydb1", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        rdsService.createDbInstance("mydb2", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        rdsService.createDbSnapshot("snap1", "mydb1");
+        rdsService.createDbSnapshot("snap2", "mydb2");
+
+        // 1. Describe all
+        Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> all = rdsService.describeDbSnapshots(null, null);
+        assertEquals(2, all.size());
+
+        // 2. Describe by snapshot ID
+        Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> snap1Result = rdsService.describeDbSnapshots("snap1", null);
+        assertEquals(1, snap1Result.size());
+        assertEquals("snap1", snap1Result.iterator().next().getDbSnapshotIdentifier());
+
+        // 3. Describe by invalid snapshot ID throws
+        assertThrows(AwsException.class, () -> rdsService.describeDbSnapshots("invalid-snap", null));
+
+        // 4. Describe by DB instance ID
+        Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> inst1Result = rdsService.describeDbSnapshots(null, "mydb1");
+        assertEquals(1, inst1Result.size());
+        assertEquals("snap1", inst1Result.iterator().next().getDbSnapshotIdentifier());
+    }
+
     private RdsService newService(RdsContainerManager containerManager,
                                   RdsProxyManager proxyManager,
                                   StorageBackend<String, DbInstance> instances,

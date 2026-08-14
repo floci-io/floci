@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -83,6 +84,8 @@ public class RdsService implements Resettable {
     private final StorageBackend<String, DbParameterGroup> parameterGroups;
     private final StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups;
     private final StorageBackend<String, DbSubnetGroup> subnetGroups;
+    private final StorageBackend<String, DbSnapshot> snapshots;
+    private final StorageBackend<String, String> snapshotData;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     private final Ec2Service ec2Service;
@@ -123,6 +126,10 @@ public class RdsService implements Resettable {
                 new TypeReference<Map<String, DbClusterParameterGroup>>() {});
         this.subnetGroups = storageFactory.create("rds", "rds-subnet-groups.json",
                 new TypeReference<Map<String, DbSubnetGroup>>() {});
+        this.snapshots = storageFactory.create("rds", "rds-snapshots.json",
+                new TypeReference<Map<String, DbSnapshot>>() {});
+        this.snapshotData = storageFactory.create("rds", "rds-snapshot-data.json",
+                new TypeReference<Map<String, String>>() {});
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -166,6 +173,8 @@ public class RdsService implements Resettable {
         this.parameterGroups = parameterGroups;
         this.clusterParameterGroups = clusterParameterGroups;
         this.subnetGroups = subnetGroups;
+        this.snapshots = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
+        this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -307,6 +316,9 @@ public class RdsService implements Resettable {
         int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
+        } else if (masterUsername.length() > 16 || !masterUsername.matches("^[a-zA-Z][a-zA-Z0-9]*$")) {
+            throw new AwsException("InvalidParameterValue",
+                    "MasterUsername must begin with a letter and contain only alphanumeric characters.", 400);
         }
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
@@ -397,6 +409,97 @@ public class RdsService implements Resettable {
         LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
                 id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
+    }
+
+    public DbSnapshot createDbSnapshot(String snapshotId, String instanceId) {
+        if (snapshots.get(snapshotId).isPresent()) {
+            throw new AwsException("DBSnapshotAlreadyExists", "DBSnapshot " + snapshotId + " already exists.", 400);
+        }
+
+        DbInstance instance = instances.get(instanceId)
+                .orElseThrow(() -> new AwsException("DBInstanceNotFound", "DBInstance " + instanceId + " not found.", 404));
+
+        if (instance.getEngine() != DatabaseEngine.POSTGRES) {
+            throw new AwsException("InvalidDBInstanceState", "Operation CreateDBSnapshot is not supported for engine " + instance.getEngine() + ".", 400);
+        }
+
+        DbSnapshot snapshot = new DbSnapshot(snapshotId, instanceId, Instant.now(), instance.getEngine(),
+                instance.getEngineVersion(), instance.getAllocatedStorage(), "available",
+                instance.getMasterUsername(), instance.getMasterPassword(), instance.getAvailabilityZone(), instance.getVpcId(),
+                instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
+                instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId(), instance.getDbInstanceClass());
+        snapshot.setDbName(instance.getDbName());
+
+        String sqlDump = "";
+        if (!config.services().rds().mock()) {
+            try {
+                sqlDump = containerManager.createPostgresSnapshot(instance.getContainerId(), instance.getMasterUsername());
+            } catch (Exception e) {
+                throw new AwsException("InvalidDBInstanceState", "Failed to create snapshot: " + e.getMessage(), 400);
+            }
+        }
+        snapshotData.put(snapshotId, sqlDump);
+        snapshots.put(snapshotId, snapshot);
+
+        return snapshot;
+    }
+
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass, String availabilityZone, boolean multiAz, String dbSubnetGroupName, java.util.List<String> vpcSecurityGroupIds, java.util.Map<String, String> tags) {
+        DbSnapshot snapshot = snapshots.get(snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
+
+        String sqlDump = snapshotData.get(snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot data for " + snapshotId + " not found.", 404));
+
+        String targetClass = (dbInstanceClass != null && !dbInstanceClass.isBlank()) ? dbInstanceClass : snapshot.getDbInstanceClass();
+        if (targetClass == null || targetClass.isBlank()) {
+            targetClass = "db.t3.micro";
+        }
+        // Use the parameters from the snapshot
+        DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
+                snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), snapshot.isIamDatabaseAuthenticationEnabled(),
+                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds);
+
+        if (!config.services().rds().mock()) {
+            try {
+                containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
+            } catch (Exception e) {
+                try {
+                    deleteDbInstance(instanceId);
+                } catch (Exception cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+                AwsException awsEx = new AwsException("InvalidDBSnapshotState", "Failed to restore snapshot: " + e.getMessage(), 400);
+                awsEx.initCause(e);
+                throw awsEx;
+            }
+        }
+
+        return instance;
+    }
+
+    public Collection<DbSnapshot> describeDbSnapshots(String snapshotId, String instanceId) {
+        if (snapshotId != null && !snapshotId.isBlank()) {
+            DbSnapshot snapshot = snapshots.get(snapshotId)
+                    .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
+            if (instanceId != null && !instanceId.isBlank()) {
+                if (instanceId.equals(snapshot.getDbInstanceIdentifier())) {
+                    return List.of(snapshot);
+                } else {
+                    return List.of();
+                }
+            }
+            return List.of(snapshot);
+        }
+
+        List<DbSnapshot> allSnapshots = snapshots.scan(k -> true);
+        if (instanceId != null && !instanceId.isBlank()) {
+            return allSnapshots.stream()
+                    .filter(s -> instanceId.equals(s.getDbInstanceIdentifier()))
+                    .toList();
+        }
+        return allSnapshots;
     }
 
     public Map<String, String> listTagsForResource(String resourceName) {

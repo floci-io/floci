@@ -236,7 +236,7 @@ public class RdsContainerManager {
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
                 ContainerExecResult result = execInContainer(containerId, cmd, 5);
-                lastOutput = result.output();
+                lastOutput = result.output() + (result.stderr().isEmpty() ? "" : "\n" + result.stderr());
                 if (result.exitCode() == 0) {
                     LOG.infov("Initialized PostgreSQL IAM role in RDS container {0}", containerName);
                     return;
@@ -254,6 +254,120 @@ public class RdsContainerManager {
         throw new IllegalStateException("Timed out initializing PostgreSQL IAM role in " + containerName + ": " + lastOutput);
     }
 
+    public String createPostgresSnapshot(String containerId, String masterUsername) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        String[] cmd = {
+                "pg_dumpall",
+                "-U", effectiveUser
+        };
+        try {
+            ContainerExecResult result = execInContainer(containerId, cmd, 120);
+            if (result.exitCode() != 0) {
+                throw new RuntimeException("pg_dumpall failed with exit code " + result.exitCode() + ": " + result.stderr());
+            }
+            return result.output();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create postgres snapshot", e);
+        }
+    }
+
+    public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+
+        try {
+            String restoreScript = postgresRestoreScript();
+
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar =
+                         new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
+                tar.setLongFileMode(org.apache.commons.compress.archivers.tar.TarArchiveOutputStream.LONGFILE_GNU);
+
+                addTarEntry(tar, "dump.sql", sqlDump);
+                addTarEntry(tar, "restore.sh", restoreScript);
+            }
+
+            try (java.io.InputStream tarStream = new java.io.ByteArrayInputStream(bos.toByteArray())) {
+                lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                        .withRemotePath("/tmp")
+                        .withTarInputStream(tarStream)
+                        .exec();
+            }
+
+            String[] cmd = { "sh", "/tmp/restore.sh", effectiveUser };
+
+            ContainerExecResult result = null;
+            for (int i = 0; i < 60; i++) {
+                result = execInContainer(containerId, cmd, 120);
+                if (result.exitCode() == 0) {
+                    break;
+                }
+                if (result.exitCode() != 2) {
+                    break;
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted while restoring postgres snapshot", ie);
+                }
+            }
+
+            if (result == null || result.exitCode() != 0) {
+                String errMsg = result != null ? (result.stderr().isEmpty() ? result.output() : result.stderr()) : "";
+                throw new RuntimeException("psql restore failed with exit code "
+                        + (result != null ? result.exitCode() : -1) + ": " + errMsg);
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to restore postgres snapshot", e);
+        }
+    }
+
+    static String postgresRestoreScript() {
+        return """
+                #!/bin/sh
+                set -e
+                USER="$1"
+
+                # Drop all non-template, non-postgres databases
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
+                  "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'" \\
+                  | while read -r db; do
+                      [ -z "$db" ] && continue
+                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \\"$db\\""
+                    done
+
+                # Exclude the master user CREATE ROLE statement to avoid conflicts during restore
+                sed -e "s/^CREATE ROLE \\\"\\?$USER\\\"\\?.*;/-- &/" /tmp/dump.sql > /tmp/dump_filtered.sql
+                mv /tmp/dump_filtered.sql /tmp/dump.sql
+
+                # Drop all non-current-user, non-system roles
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
+                  "SELECT rolname FROM pg_roles WHERE rolname <> current_user AND rolname NOT LIKE 'pg_%'" \\
+                  | while read -r role; do
+                      [ -z "$role" ] && continue
+                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP ROLE IF EXISTS \\"$role\\""
+                    done
+
+                # Replay the dump connected to postgres
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -f /tmp/dump.sql
+                """;
+    }
+
+    private static void addTarEntry(
+            org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar,
+            String name, String content) throws java.io.IOException {
+        byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        org.apache.commons.compress.archivers.tar.TarArchiveEntry entry =
+                new org.apache.commons.compress.archivers.tar.TarArchiveEntry(name);
+        entry.setSize(bytes.length);
+        entry.setMode(0755);
+        tar.putArchiveEntry(entry);
+        tar.write(bytes);
+        tar.closeArchiveEntry();
+    }
+
     private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
         String execId = lifecycleManager.getDockerClient().execCreateCmd(containerId)
                 .withCmd(cmd)
@@ -264,13 +378,19 @@ public class RdsContainerManager {
 
         CountDownLatch latch = new CountDownLatch(1);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
         Closeable callback = lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
                 if (frame.getPayload() != null) {
                     try {
-                        output.write(frame.getPayload());
-                    } catch (IOException ignored) {
+                        if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDOUT) {
+                            output.write(frame.getPayload());
+                        } else if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDERR) {
+                            stderr.write(frame.getPayload());
+                        }
+                    } catch (IOException e) {
+                        LOG.warnv(e, "Failed to read output stream for container exec {0}", execId);
                     }
                 }
             }
@@ -289,18 +409,19 @@ public class RdsContainerManager {
         try {
             boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
             if (!completed) {
-                return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
+                return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s", "");
             }
             Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
             return new ContainerExecResult(
                     exitCode != null ? exitCode : -1,
-                    output.toString(StandardCharsets.UTF_8));
+                    output.toString(StandardCharsets.UTF_8),
+                    stderr.toString(StandardCharsets.UTF_8));
         } finally {
             callback.close();
         }
     }
 
-    record ContainerExecResult(long exitCode, String output) {}
+    record ContainerExecResult(long exitCode, String output, String stderr) {}
 
     public void removeVolume(String instanceId, String volumeId) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
