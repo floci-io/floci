@@ -202,6 +202,13 @@ class ApiGatewayExecuteControllerTest {
     }
 
     // ── HTTP API (v2) region resolution for unsigned / non-SigV4 requests ──────
+    //
+    // The two tests below (unsignedRequestFindsV2ApiDeployedOutsideDefaultRegion and
+    // signedV2RequestDoesNotConsultRegionFallback) exercise the v2 cross-region dispatch
+    // behavior that #2054 introduced on `resolveApiRegion` — not this PR's change, which is
+    // scoped to the v1 REST path's Authorization-header check below. They're kept here because
+    // they're the only controller-level coverage of that v2 behavior; treat them as pinning
+    // #2054, not as regression guards for this PR.
 
     @Test
     void unsignedRequestFindsV2ApiDeployedOutsideDefaultRegion() {
