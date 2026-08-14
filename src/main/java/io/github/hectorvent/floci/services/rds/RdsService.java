@@ -316,6 +316,9 @@ public class RdsService implements Resettable {
         int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
+        } else if (masterUsername.length() > 16 || !masterUsername.matches("^[a-zA-Z][a-zA-Z0-9]*$")) {
+            throw new AwsException("InvalidParameterValue",
+                    "MasterUsername must begin with a letter and contain only alphanumeric characters.", 400);
         }
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
@@ -424,7 +427,7 @@ public class RdsService implements Resettable {
                 instance.getEngineVersion(), instance.getAllocatedStorage(), "available",
                 instance.getMasterUsername(), instance.getMasterPassword(), instance.getAvailabilityZone(), instance.getVpcId(),
                 instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
-                instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId());
+                instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId(), instance.getDbInstanceClass());
         snapshot.setDbName(instance.getDbName());
 
         String sqlDump = "";
@@ -448,8 +451,10 @@ public class RdsService implements Resettable {
         String sqlDump = snapshotData.get(snapshotId)
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot data for " + snapshotId + " not found.", 404));
 
-        String targetClass = (dbInstanceClass != null && !dbInstanceClass.isBlank()) ? dbInstanceClass : "db.t3.micro";
-        
+        String targetClass = (dbInstanceClass != null && !dbInstanceClass.isBlank()) ? dbInstanceClass : snapshot.getDbInstanceClass();
+        if (targetClass == null || targetClass.isBlank()) {
+            targetClass = "db.t3.micro";
+        }
         // Use the parameters from the snapshot
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),

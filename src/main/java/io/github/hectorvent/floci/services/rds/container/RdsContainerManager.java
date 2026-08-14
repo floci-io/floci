@@ -275,7 +275,7 @@ public class RdsContainerManager {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
 
         try {
-            String restoreScript = postgresRestoreScript(effectiveUser);
+            String restoreScript = postgresRestoreScript();
 
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
             try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar =
@@ -293,7 +293,7 @@ public class RdsContainerManager {
                         .exec();
             }
 
-            String[] cmd = { "sh", "/tmp/restore.sh" };
+            String[] cmd = { "sh", "/tmp/restore.sh", effectiveUser };
 
             ContainerExecResult result = null;
             for (int i = 0; i < 60; i++) {
@@ -324,31 +324,35 @@ public class RdsContainerManager {
         }
     }
 
-    static String postgresRestoreScript(String user) {
+    static String postgresRestoreScript() {
         return """
                 #!/bin/sh
                 set -e
-                USER='%s'
+                USER="$1"
 
                 # Drop all non-template, non-postgres databases
-                psql -U "$USER" -d postgres -tAc \
-                  "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'" \
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
+                  "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'" \\
                   | while read -r db; do
                       [ -z "$db" ] && continue
-                      psql -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \"$db\""
+                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \\"$db\\""
                     done
 
+                # Exclude the master user CREATE ROLE statement to avoid conflicts during restore
+                sed -e "s/^CREATE ROLE \\\"\\?$USER\\\"\\?.*;/-- &/" /tmp/dump.sql > /tmp/dump_filtered.sql
+                mv /tmp/dump_filtered.sql /tmp/dump.sql
+
                 # Drop all non-current-user, non-system roles
-                psql -U "$USER" -d postgres -tAc \
-                  "SELECT rolname FROM pg_roles WHERE rolname <> current_user AND rolname NOT LIKE 'pg_%%'" \
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
+                  "SELECT rolname FROM pg_roles WHERE rolname <> current_user AND rolname NOT LIKE 'pg_%'" \\
                   | while read -r role; do
                       [ -z "$role" ] && continue
-                      psql -U "$USER" -d postgres -c "DROP ROLE IF EXISTS \"$role\""
+                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP ROLE IF EXISTS \\"$role\\""
                     done
 
                 # Replay the dump connected to postgres
-                psql -U "$USER" -d postgres -f /tmp/dump.sql
-                """.formatted(user);
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -f /tmp/dump.sql
+                """;
     }
 
     private static void addTarEntry(
@@ -385,7 +389,8 @@ public class RdsContainerManager {
                         } else if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDERR) {
                             stderr.write(frame.getPayload());
                         }
-                    } catch (IOException ignored) {
+                    } catch (IOException e) {
+                        LOG.warnv(e, "Failed to read output stream for container exec {0}", execId);
                     }
                 }
             }

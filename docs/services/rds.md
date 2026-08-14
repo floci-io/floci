@@ -32,16 +32,16 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBParameterGroup` | Delete a parameter group |
 | `ModifyDBParameterGroup` | Update parameter group settings |
 | `DescribeDBParameters` | List parameters in a group |
-| `CreateDBClusterParameterGroup` | - |
-| `DescribeDBClusterParameterGroups` | - |
-| `DeleteDBClusterParameterGroup` | - |
-| `ModifyDBClusterParameterGroup` | - |
-| `DescribeDBClusterParameters` | - |
+| `CreateDBClusterParameterGroup` | Create an Aurora-compatible cluster parameter group |
+| `DescribeDBClusterParameterGroups` | List cluster parameter groups |
+| `DeleteDBClusterParameterGroup` | Delete a cluster parameter group |
+| `ModifyDBClusterParameterGroup` | Update cluster parameter group settings |
+| `DescribeDBClusterParameters` | List parameters in a cluster group |
 | `CreateDBSnapshot` | Create a snapshot of a DB instance |
 | `RestoreDBInstanceFromDBSnapshot` | Create a new DB instance from a snapshot |
-| `DescribeDBSnapshots` | - |
-| `DescribeDBProxies` | - |
-| `DescribeDBClusterSnapshots` | - |
+| `DescribeDBSnapshots` | List DB instance snapshots |
+| `DescribeDBProxies` | List DB proxies |
+| `DescribeDBClusterSnapshots` | List DB cluster snapshots |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |

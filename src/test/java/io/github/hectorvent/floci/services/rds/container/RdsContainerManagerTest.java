@@ -158,7 +158,7 @@ class RdsContainerManagerTest {
 
     @Test
     void restoreScriptConnectsToPostgresDatabase() {
-        String script = RdsContainerManager.postgresRestoreScript("admin");
+        String script = RdsContainerManager.postgresRestoreScript();
 
         assertTrue(script.contains("-d postgres"), "Script must connect to postgres, not template1");
         assertTrue(script.contains("-f /tmp/dump.sql"), "Script must replay the dump file");
@@ -166,7 +166,7 @@ class RdsContainerManagerTest {
 
     @Test
     void restoreScriptDropsNonSystemDatabasesAndRoles() {
-        String script = RdsContainerManager.postgresRestoreScript("admin");
+        String script = RdsContainerManager.postgresRestoreScript();
 
         assertTrue(script.contains("datistemplate = false"),
                 "Script must only drop non-template databases");
@@ -180,10 +180,10 @@ class RdsContainerManagerTest {
 
     @Test
     void restoreScriptInterpolatesUser() {
-        String script = RdsContainerManager.postgresRestoreScript("myuser");
+        String script = RdsContainerManager.postgresRestoreScript();
 
-        assertTrue(script.contains("USER='myuser'"),
-                "Script must set the USER variable to the effective user");
+        assertTrue(script.contains("USER=\"$1\""),
+                "Script must assign the first argument to the USER variable");
     }
 
     private static EmulatorConfig config(Path hostRoot) {
@@ -202,6 +202,7 @@ class RdsContainerManagerTest {
         when(docker.logMaxFile()).thenReturn("3");
         when(config.storage()).thenReturn(storage);
         when(storage.hostPersistentPath()).thenReturn(hostRoot.toString());
+        when(storage.mode()).thenReturn("persistent");
         return config;
     }
 }

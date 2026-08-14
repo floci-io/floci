@@ -25,6 +25,7 @@ public class DbSnapshot {
     private boolean iamDatabaseAuthenticationEnabled;
     private String dbiResourceId;
     private String dbName;
+    private String dbInstanceClass;
     private Map<String, String> tags = new LinkedHashMap<>();
 
     public DbSnapshot() {}
@@ -32,7 +33,7 @@ public class DbSnapshot {
     public DbSnapshot(String dbSnapshotIdentifier, String dbInstanceIdentifier, Instant snapshotCreateTime,
                       DatabaseEngine engine, String engineVersion, int allocatedStorage, String status,
                       String masterUsername, String masterPassword, String availabilityZone, String vpcId, Instant instanceCreateTime,
-                      int port, boolean iamDatabaseAuthenticationEnabled, String dbiResourceId) {
+                      int port, boolean iamDatabaseAuthenticationEnabled, String dbiResourceId, String dbInstanceClass) {
         this.dbSnapshotIdentifier = dbSnapshotIdentifier;
         this.dbInstanceIdentifier = dbInstanceIdentifier;
         this.snapshotCreateTime = snapshotCreateTime;
@@ -48,6 +49,7 @@ public class DbSnapshot {
         this.port = port;
         this.iamDatabaseAuthenticationEnabled = iamDatabaseAuthenticationEnabled;
         this.dbiResourceId = dbiResourceId;
+        this.dbInstanceClass = dbInstanceClass;
     }
 
     public String getDbSnapshotIdentifier() { return dbSnapshotIdentifier; }
@@ -100,4 +102,7 @@ public class DbSnapshot {
 
     public String getDbName() { return dbName; }
     public void setDbName(String dbName) { this.dbName = dbName; }
+    
+    public String getDbInstanceClass() { return dbInstanceClass; }
+    public void setDbInstanceClass(String dbInstanceClass) { this.dbInstanceClass = dbInstanceClass; }
 }
