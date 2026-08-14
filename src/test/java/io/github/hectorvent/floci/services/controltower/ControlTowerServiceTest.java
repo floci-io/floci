@@ -41,6 +41,39 @@ class ControlTowerServiceTest {
     }
 
     @Test
+    void createLandingZoneStoresManifestAndReturnsCreateOperation() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"version":"4.0","tags":{"Environment":"test"},
+                 "manifest":{"governedRegions":["us-east-1"],"accessManagement":{"enabled":true}}}
+                """);
+
+        ControlTowerService.CreateLandingZoneResult result =
+                service.createLandingZone(ACCOUNT, REGION, request);
+
+        assertTrue(result.arn().startsWith("arn:aws:controltower:" + REGION + ":" + ACCOUNT + ":landingzone/"));
+        assertTrue(result.operationIdentifier().matches("^[a-f0-9-]{36}$"));
+        assertEquals("CREATE", service.getOperationType(result.operationIdentifier()));
+        assertEquals(request.get("manifest"), service.getOrSeedLandingZone(ACCOUNT, REGION).getManifest());
+    }
+
+    @Test
+    void createLandingZoneRejectsSecondLandingZoneAndInvalidManifest() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"version":"4.0","manifest":{"accessManagement":{"enabled":true}}}
+                """);
+        service.createLandingZone(ACCOUNT, REGION, request);
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.createLandingZone(ACCOUNT, REGION, request));
+        assertEquals("ConflictException", conflict.getErrorCode());
+
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.createLandingZone("000000000102", REGION,
+                        objectMapper.readTree("{\"version\":\"4.0\",\"manifest\":[]}")));
+        assertEquals("ValidationException", invalid.getErrorCode());
+    }
+
+    @Test
     void seededLandingZoneCarriesPinnedVersionAndInSyncDrift() {
         LandingZone seeded = service.getOrSeedLandingZone(ACCOUNT, REGION);
         assertEquals("4.0", seeded.getVersion());
@@ -107,6 +140,71 @@ class ControlTowerServiceTest {
     }
 
     @Test
+    void deleteLandingZoneRemovesStoredLandingZoneAndReturnsDeleteOperation() throws Exception {
+        service.getOrSeedLandingZone(ACCOUNT, REGION);
+
+        String opId = service.deleteLandingZone(ACCOUNT, REGION,
+                objectMapper.readTree("{\"landingZoneIdentifier\":\"" + SEEDED_ARN + "\"}"));
+
+        assertTrue(opId.matches("^[a-f0-9-]{36}$"));
+        assertEquals("DELETE", service.getOperationType(opId));
+        assertEquals(SEEDED_ARN, service.getOrSeedLandingZone(ACCOUNT, REGION).getArn());
+    }
+
+    @Test
+    void deleteLandingZoneRequiresLandingZoneIdentifier() {
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.deleteLandingZone(ACCOUNT, REGION, objectMapper.createObjectNode()));
+        assertEquals("ValidationException", invalid.getErrorCode());
+    }
+
+    @Test
+    void deleteLandingZoneRejectsMismatchedIdentifier() throws Exception {
+        service.getOrSeedLandingZone(ACCOUNT, REGION);
+
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.deleteLandingZone(ACCOUNT, REGION, objectMapper.readTree(
+                        "{\"landingZoneIdentifier\":\"arn:aws:controltower:us-east-1:000000000101:landingzone/other\"}")));
+        assertEquals("ResourceNotFoundException", invalid.getErrorCode());
+        assertEquals(404, invalid.getHttpStatus());
+    }
+
+    @Test
+    void deleteLandingZoneRejectsMissingStoredLandingZone() throws Exception {
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.deleteLandingZone(ACCOUNT, REGION, objectMapper.readTree(
+                        "{\"landingZoneIdentifier\":\"" + SEEDED_ARN + "\"}")));
+        assertEquals("ResourceNotFoundException", invalid.getErrorCode());
+        assertEquals(404, invalid.getHttpStatus());
+    }
+
+    @Test
+    void resetLandingZoneReturnsResetOperationForValidIdentifier() throws Exception {
+        service.getOrSeedLandingZone(ACCOUNT, REGION);
+
+        String opId = service.resetLandingZone(ACCOUNT, REGION,
+                objectMapper.readTree("{\"landingZoneIdentifier\":\"" + SEEDED_ARN + "\"}"));
+
+        assertTrue(opId.matches("^[a-f0-9-]{36}$"));
+        assertEquals("RESET", service.getOperationType(opId));
+        assertEquals(SEEDED_ARN, service.getOrSeedLandingZone(ACCOUNT, REGION).getArn());
+    }
+
+    @Test
+    void resetLandingZoneRejectsMissingOrMismatchedIdentifier() throws Exception {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.resetLandingZone(ACCOUNT, REGION, objectMapper.createObjectNode()));
+        assertEquals("ValidationException", missing.getErrorCode());
+
+        service.getOrSeedLandingZone(ACCOUNT, REGION);
+        AwsException mismatched = assertThrows(AwsException.class,
+                () -> service.resetLandingZone(ACCOUNT, REGION, objectMapper.readTree(
+                        "{\"landingZoneIdentifier\":\"arn:aws:controltower:us-east-1:000000000101:landingzone/other\"}")));
+        assertEquals("ResourceNotFoundException", mismatched.getErrorCode());
+        assertEquals(404, mismatched.getHttpStatus());
+    }
+
+    @Test
     void getOperationTypeReportsUpdateForIssuedAndUnknownIds() throws Exception {
         JsonNode request = objectMapper.readTree("""
                 {"version":"4.0","landingZoneIdentifier":"%s",
@@ -116,6 +214,31 @@ class ControlTowerServiceTest {
 
         assertEquals("UPDATE", service.getOperationType(opId));
         assertNotNull(service.getOperationType("never-issued"));
+    }
+
+    @Test
+    void listLandingZoneOperationsReturnsNewestFirstWithFilteringAndPagination() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"version":"4.0","landingZoneIdentifier":"%s",
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """.formatted(SEEDED_ARN));
+        String firstId = service.updateLandingZone(ACCOUNT, REGION, request);
+        String secondId = service.updateLandingZone(ACCOUNT, REGION, request);
+
+        ControlTowerService.ListLandingZoneOperationsResult first = service.listLandingZoneOperations(
+                objectMapper.readTree("{\"maxResults\":1,\"filter\":{\"statuses\":[\"SUCCEEDED\"]}}"));
+        assertEquals(1, first.landingZoneOperations().size());
+        assertEquals(secondId, first.landingZoneOperations().get(0).operationIdentifier());
+        assertEquals("UPDATE", first.landingZoneOperations().get(0).operationType());
+        assertEquals("SUCCEEDED", first.landingZoneOperations().get(0).status());
+        assertNotNull(first.nextToken());
+
+        ControlTowerService.ListLandingZoneOperationsResult second = service.listLandingZoneOperations(
+                objectMapper.readTree("{\"maxResults\":1,\"nextToken\":\"%s\",\"filter\":{\"types\":[\"UPDATE\"]}}"
+                        .formatted(first.nextToken())));
+        assertEquals(List.of(firstId), second.landingZoneOperations().stream()
+                .map(ControlTowerService.LandingZoneOperationSummary::operationIdentifier).toList());
+        assertNull(second.nextToken());
     }
 
     @Test
@@ -315,6 +438,41 @@ class ControlTowerServiceTest {
         AwsException error = assertThrows(
                 AwsException.class,
                 () -> service.resetEnabledBaseline(ACCOUNT, REGION, null));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void updateEnabledBaselineChangesVersionAndParametersAndReturnsOperationIdentifier() throws Exception {
+        String baselineArn = service.listBaselines(REGION).stream()
+                .filter(b -> "AWSControlTowerBaseline".equals(b.get("name").asText()))
+                .findFirst().orElseThrow().get("arn").asText();
+        String ouArn = "arn:aws:organizations::000000000101:ou/o-floci0001/ou-update-00000001";
+        JsonNode enableRequest = objectMapper.readTree("""
+                {"baselineIdentifier":"%s","baselineVersion":"5.0","targetIdentifier":"%s"}
+                """.formatted(baselineArn, ouArn));
+        service.enableBaseline(ACCOUNT, REGION, enableRequest);
+        EnabledBaseline enabled = service.listEnabledBaselines(ACCOUNT, REGION).stream()
+                .filter(e -> ouArn.equals(e.getTargetIdentifier()))
+                .findFirst().orElseThrow();
+
+        JsonNode updateRequest = objectMapper.readTree("""
+                {"enabledBaselineIdentifier":"%s","baselineVersion":"6.0",
+                 "parameters":[{"key":"Example","value":{"enabled":true}}]}
+                """.formatted(enabled.getArn()));
+        String opId = service.updateEnabledBaseline(ACCOUNT, REGION, updateRequest);
+
+        EnabledBaseline updated = service.getEnabledBaseline(ACCOUNT, REGION, enabled.getArn());
+        assertEquals("6.0", updated.getBaselineVersion());
+        assertEquals(true, updated.getParameters().path(0).path("value").path("enabled").asBoolean());
+        assertEquals("UPDATE_ENABLED_BASELINE", service.getBaselineOperationType(opId));
+    }
+
+    @Test
+    void updateEnabledBaselineRejectsMissingRequiredFields() throws Exception {
+        JsonNode request = objectMapper.readTree("{\"enabledBaselineIdentifier\":\"not-an-arn\"}");
+        AwsException error = assertThrows(
+                AwsException.class, () -> service.updateEnabledBaseline(ACCOUNT, REGION, request));
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
     }

@@ -3,11 +3,11 @@
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566`
 
-Floci implements the minimal AWS Control Tower surface required to unblock Landing Zone Accelerator's (LZA) `AWSAccelerator-Pipeline` **Prepare** stage when the universal config sets `controlTower.enable: true`. It is not a general-purpose Control Tower emulation — the create-landing-zone path is deliberately not implemented (see `issues/controltower/01-gap-analysis.md`).
+Floci implements the minimal AWS Control Tower surface required to unblock Landing Zone Accelerator's (LZA) `AWSAccelerator-Pipeline` **Prepare** stage when the universal config sets `controlTower.enable: true`. It is not a general-purpose Control Tower emulation; supported operations are listed below.
 
 ## Pre-seed / reconciliation-sink model
 
-Rather than modeling Control Tower's `CreateLandingZone` workflow, Floci pre-seeds exactly **one active landing zone** per account+region the first time it is read (`ListLandingZones`, `GetLandingZone`, etc.). This matters because LZA's `setup-landing-zone` module treats an *empty* `ListLandingZones` result as its create-landing-zone trigger — an empty list is not a no-op, it cascades into an entire prerequisite chain (IAM roles, KMS keys, `Organization.EnableAllFeatures`, account moves) that Floci does not implement. By never returning an empty list, that branch stays unreachable.
+Floci pre-seeds exactly **one active landing zone** per account+region the first time it is read (`ListLandingZones`, `GetLandingZone`, etc.). This matters because LZA's `setup-landing-zone` module treats an *empty* `ListLandingZones` result as its create-landing-zone trigger — an empty list is not a no-op, it cascades into an entire prerequisite chain (IAM roles, KMS keys, `Organization.EnableAllFeatures`, account moves) that Floci does not implement. By never returning an empty list on a fresh account+region, that branch stays unreachable. `CreateLandingZone` remains available for an account+region with no stored landing zone, while `DeleteLandingZone` removes the stored instance after validating its identifier.
 
 Because Floci cannot predict every config value LZA's `landingZoneUpdateOrResetRequired` check will compare against the seed, `UpdateLandingZone` is implemented as a **reconciliation sink**: it accepts whatever manifest LZA sends, stores it verbatim, and reports the operation as `SUCCEEDED`. Any mismatch between the seed and LZA's computed configuration self-heals on the first `UpdateLandingZone` call of a pipeline run rather than failing.
 
@@ -25,16 +25,20 @@ The seeded manifest always includes a `securityRoles` object. LZA's `makeManifes
 |---|---|---|
 | `ListLandingZones` | `POST /list-landingzones` | Always returns the single seeded/reconciled landing zone |
 | `GetLandingZone` | `POST /get-landingzone` | Returns the stored landing zone (arn, version, status, drift status, manifest, remediation types) |
+| `CreateLandingZone` | `POST /create-landing-zone` | Creates a landing zone from a manifest and version; returns its ARN and operation identifier |
 | `UpdateLandingZone` | `POST /update-landingzone` | Reconciliation sink — stores the supplied manifest/version/remediation types and returns an operation id |
+| `DeleteLandingZone` | `POST /delete-landingzone` | Removes the stored landing zone and returns a delete operation id |
+| `ResetLandingZone` | `POST /reset-landingzone` | Validates the landing zone identifier and returns a reset operation id |
 | `GetLandingZoneOperation` | `POST /get-landingzone-operation` | Reports `SUCCEEDED` for any operation id, including ones not in the in-memory ledger (restart-safe) |
 | `ListBaselines` | `POST /list-baselines` | Static 4-entry catalog: `AWSControlTowerBaseline`, `IdentityCenterBaseline`, `AuditBaseline`, `LogArchiveBaseline`, with region-stamped arns |
 | `ListEnabledBaselines` | `POST /list-enabled-baselines` | Supports packet-defined baseline/target/status filters and `maxResults`/`nextToken` pagination. Child resources are not materialized; `includeChildren` returns configured parent resources only. |
 | `GetEnabledBaseline` | `POST /get-enabled-baseline` | Returns an enabled baseline by ARN, including status, parameters, and optional parent/drift details; unknown ARNs return `ResourceNotFoundException` |
 | `EnableBaseline` | `POST /enable-baseline` | Stores an enabled baseline keyed by target (OU or landing zone); re-enabling a target replaces rather than duplicates |
 | `ResetEnabledBaseline` | `POST /reset-enabled-baseline` | Re-applies an enabled baseline by ARN; updates the `lastOperationIdentifier` and returns an operation id |
+| `UpdateEnabledBaseline` | `POST /update-enabled-baseline` | Updates an enabled baseline's version and optional parameters; returns an operation id |
 | `GetBaselineOperation` | `POST /get-baseline-operation` | Reports `SUCCEEDED` for any operation id, including ones not in the ledger |
 
-Note the landing-zone URIs spell "landingzone" as one word (`/list-landingzones`, `/get-landingzone`, `/update-landingzone`, `/get-landingzone-operation`) — this matches the exact literals LZA's SDK sends.
+Note the landing-zone URIs spell "landingzone" as one word for existing operations (`/list-landingzones`, `/get-landingzone`, `/update-landingzone`, `/delete-landingzone`, `/reset-landingzone`, `/get-landingzone-operation`); `CreateLandingZone` uses AWS's hyphenated `/create-landing-zone` path.
 
 ## Configuration
 
@@ -50,8 +54,8 @@ Landing zones and enabled baselines are isolated by account (via the account-awa
 
 This service exists to unblock LZA's Prepare stage, not to model Control Tower generally. The following are deliberately **not implemented**, per the gap analysis:
 
-- `CreateLandingZone`, `ResetLandingZone`, `DeleteLandingZone` — the create-landing-zone path is unreachable because `ListLandingZones` never returns empty.
-- `UpdateEnabledBaseline`, `ResetEnabledBaseline` — unreachable in the Prepare-stage flow (version-mismatch and `reregisterOu`/enroll-accounts triggers, respectively). If enroll-accounts flows are exercised later, both are small additions to the existing operation-sink pattern.
+- `ResetLandingZone` — implemented as an operation sink that validates the identifier and reports success without changing the manifest.
+- `ResetEnabledBaseline` — unreachable in the Prepare-stage flow (`reregisterOu`/enroll-accounts trigger); implemented as a small operation-sink pattern for later flows.
 - Any IAM/KMS/Organizations create-path prerequisite (`CreateRole`, `CreateKey`, `EnableAllFeatures`, etc.) — dead code on the pre-seed path.
 - `sso-admin`/`identitystore` — sidestepped by the synthetic IdentityCenter auto-enable derivation described above.
 - Org-wide CloudTrail and StackSets — manifest metadata only on the Prepare-stage path; not modeled as separate service calls.

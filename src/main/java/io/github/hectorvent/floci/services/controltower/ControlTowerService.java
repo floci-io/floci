@@ -22,14 +22,14 @@ import java.util.Comparator;
 import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Control Tower landing-zone and baseline emulation, backed by the configured Floci storage mode.
  *
  * <p>Pre-seeds exactly one active landing zone on first read (lazy seed) so LZA's Prepare stage
  * never observes an empty {@code ListLandingZones} result — an empty list is LZA's create-path
- * trigger, and floci deliberately never implements {@code CreateLandingZone}
- * (see {@code issues/controltower/01-gap-analysis.md}). {@link #updateLandingZone} is a
+ * trigger. {@link #updateLandingZone} is a
  * reconciliation sink: it stores whatever manifest LZA sends and reports success, so any mismatch
  * between the seed and LZA's computed config self-heals on the first {@code UpdateLandingZone}
  * call rather than failing.
@@ -43,7 +43,11 @@ public class ControlTowerService {
     static final String DRIFT_IN_SYNC = "IN_SYNC";
     static final String OP_SUCCEEDED = "SUCCEEDED";
     private static final String OP_TYPE_UPDATE = "UPDATE";
+    private static final String OP_TYPE_CREATE = "CREATE";
+    private static final String OP_TYPE_DELETE = "DELETE";
+    private static final String OP_TYPE_RESET = "RESET";
     private static final String OP_TYPE_BASELINE_ENABLED = "BASELINE_ENABLED";
+    private static final String OP_TYPE_BASELINE_UPDATE = "UPDATE_ENABLED_BASELINE";
     private static final String OP_TYPE_BASELINE_RESET = "BASELINE_RESET";
     private static final String IDENTITY_CENTER_BASELINE_NAME = "IdentityCenterBaseline";
     private static final String IDENTITY_CENTER_BASELINE_ID = "LN25R72TTG6IGPTQ";
@@ -68,6 +72,7 @@ public class ControlTowerService {
     // Operation ledger: opId -> operationType. In-memory on purpose: pollers within one pipeline
     // run are the only consumers, and unknown ids still answer SUCCEEDED (restart-safe for LZA).
     private final Map<String, String> operations = new ConcurrentHashMap<>();
+    private final List<String> operationOrder = new CopyOnWriteArrayList<>();
 
     @Inject
     public ControlTowerService(StorageFactory storageFactory) {
@@ -105,6 +110,32 @@ public class ControlTowerService {
         return List.of(getOrSeedLandingZone(accountId, region));
     }
 
+    public synchronized CreateLandingZoneResult createLandingZone(
+            String accountId, String region, JsonNode request) {
+        requireObject(request, "Request body");
+        JsonNode manifest = request.get("manifest");
+        if (manifest == null || !manifest.isObject()) {
+            throw validation("manifest must be a JSON object.");
+        }
+        String version = requireText(request, "version");
+        if (!version.matches("^\\d+\\.\\d+$") || version.length() < 3 || version.length() > 10) {
+            throw validation("version must be a valid landing zone version.");
+        }
+        validateTags(request.get("tags"));
+        if (landingZoneStore.get(region).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "Updating or deleting the resource can cause an inconsistent state.", 409);
+        }
+
+        String arn = "arn:aws:controltower:" + region + ":" + accountId + ":landingzone/" + shortId();
+        LandingZone landingZone = new LandingZone(
+                arn, version, version, STATUS_ACTIVE, DRIFT_IN_SYNC, manifest, null);
+        landingZoneStore.put(region, landingZone);
+        String operationIdentifier = UUID.randomUUID().toString();
+        recordOperation(operationIdentifier, OP_TYPE_CREATE);
+        return new CreateLandingZoneResult(arn, operationIdentifier);
+    }
+
     public synchronized String updateLandingZone(String accountId, String region, JsonNode request) {
         requireObject(request, "Request body");
         String version = requireText(request, "version");
@@ -124,12 +155,81 @@ public class ControlTowerService {
         landingZoneStore.put(region, lz);
 
         String opId = UUID.randomUUID().toString();
-        operations.put(opId, OP_TYPE_UPDATE);
+        recordOperation(opId, OP_TYPE_UPDATE);
+        return opId;
+    }
+
+    public synchronized String deleteLandingZone(String accountId, String region, JsonNode request) {
+        requireObject(request, "Request body");
+        String landingZoneIdentifier = requireText(request, "landingZoneIdentifier");
+        LandingZone landingZone = landingZoneStore.get(region)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Landing zone not found: " + landingZoneIdentifier, 404));
+        if (!landingZone.getArn().equals(landingZoneIdentifier)) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Landing zone not found: " + landingZoneIdentifier, 404);
+        }
+        landingZoneStore.delete(region);
+
+        String opId = UUID.randomUUID().toString();
+        recordOperation(opId, OP_TYPE_DELETE);
+        return opId;
+    }
+
+    public synchronized String resetLandingZone(String accountId, String region, JsonNode request) {
+        requireObject(request, "Request body");
+        String landingZoneIdentifier = requireText(request, "landingZoneIdentifier");
+        LandingZone landingZone = landingZoneStore.get(region)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Landing zone not found: " + landingZoneIdentifier, 404));
+        if (!landingZone.getArn().equals(landingZoneIdentifier)) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Landing zone not found: " + landingZoneIdentifier, 404);
+        }
+
+        String opId = UUID.randomUUID().toString();
+        recordOperation(opId, OP_TYPE_RESET);
         return opId;
     }
 
     public String getOperationType(String operationIdentifier) {
         return operations.getOrDefault(operationIdentifier, OP_TYPE_UPDATE);
+    }
+
+    public ListLandingZoneOperationsResult listLandingZoneOperations(JsonNode request) {
+        requireObject(request, "Request body");
+        int maxResults = readLandingZoneOperationsMaxResults(request);
+        int start = readNextToken(request);
+        Set<String> types = Set.of();
+        Set<String> statuses = Set.of();
+        JsonNode filter = request.get("filter");
+        if (filter != null && !filter.isNull()) {
+            requireObject(filter, "filter");
+            types = readLandingZoneOperationFilter(filter, "types",
+                    Set.of("DELETE", "CREATE", "UPDATE", "RESET"));
+            statuses = readLandingZoneOperationFilter(filter, "statuses",
+                    Set.of("SUCCEEDED", "FAILED", "IN_PROGRESS"));
+        }
+
+        List<LandingZoneOperationSummary> matching = new ArrayList<>();
+        for (int i = operationOrder.size() - 1; i >= 0; i--) {
+            String operationIdentifier = operationOrder.get(i);
+            String operationType = operations.get(operationIdentifier);
+            if (operationType == null || !Set.of("DELETE", "CREATE", "UPDATE", "RESET").contains(operationType)
+                    || (!types.isEmpty() && !types.contains(operationType))) {
+                continue;
+            }
+            if (!statuses.isEmpty() && !statuses.contains(OP_SUCCEEDED)) {
+                continue;
+            }
+            matching.add(new LandingZoneOperationSummary(operationIdentifier, operationType, OP_SUCCEEDED));
+        }
+        if (start > matching.size()) {
+            throw validation("nextToken is invalid.");
+        }
+        int end = Math.min(start + maxResults, matching.size());
+        String nextToken = end < matching.size() ? Integer.toString(end) : null;
+        return new ListLandingZoneOperationsResult(matching.subList(start, end), nextToken);
     }
 
     public List<ObjectNode> listBaselines(String region) {
@@ -225,7 +325,7 @@ public class ControlTowerService {
         value.setLastOperationIdentifier(opId);
         enabledBaselineStore.put(key, value);
 
-        operations.put(opId, OP_TYPE_BASELINE_ENABLED);
+        recordOperation(opId, OP_TYPE_BASELINE_ENABLED);
         return new EnableBaselineResult(opId, arn);
     }
 
@@ -238,7 +338,35 @@ public class ControlTowerService {
         baseline.setLastOperationIdentifier(opId);
         String key = region + "::" + baseline.getTargetIdentifier();
         enabledBaselineStore.put(key, baseline);
-        operations.put(opId, OP_TYPE_BASELINE_RESET);
+        recordOperation(opId, OP_TYPE_BASELINE_RESET);
+        return opId;
+    }
+
+    public synchronized String updateEnabledBaseline(
+            String accountId, String region, JsonNode request) {
+        requireObject(request, "Request body");
+        String enabledBaselineIdentifier = requireText(request, "enabledBaselineIdentifier");
+        if (!isArn(enabledBaselineIdentifier)) {
+            throw validation("enabledBaselineIdentifier must be a valid ARN.");
+        }
+        String baselineVersion = requireText(request, "baselineVersion");
+        if (!baselineVersion.matches("^\\d+(?:\\.\\d+){0,2}$") || baselineVersion.length() > 10) {
+            throw validation("baselineVersion must be a valid version.");
+        }
+
+        EnabledBaseline baseline = getEnabledBaseline(accountId, region, enabledBaselineIdentifier);
+        JsonNode parameters = request.get("parameters");
+        validateParameters(parameters);
+        baseline.setBaselineVersion(baselineVersion);
+        if (parameters != null && !parameters.isNull()) {
+            baseline.setParameters(parameters);
+        }
+        baseline.setStatus(OP_SUCCEEDED);
+        String opId = UUID.randomUUID().toString();
+        baseline.setLastOperationIdentifier(opId);
+        String key = region + "::" + baseline.getTargetIdentifier();
+        enabledBaselineStore.put(key, baseline);
+        recordOperation(opId, OP_TYPE_BASELINE_UPDATE);
         return opId;
     }
 
@@ -327,6 +455,35 @@ public class ControlTowerService {
         return value.intValue();
     }
 
+    private static int readLandingZoneOperationsMaxResults(JsonNode request) {
+        JsonNode value = request.get("maxResults");
+        if (value == null || value.isNull()) {
+            return 100;
+        }
+        if (!value.isIntegralNumber() || value.intValue() < 1 || value.intValue() > 100) {
+            throw validation("maxResults must be between 1 and 100.");
+        }
+        return value.intValue();
+    }
+
+    private static Set<String> readLandingZoneOperationFilter(
+            JsonNode filter, String field, Set<String> allowed) {
+        JsonNode value = filter.get(field);
+        if (value == null || value.isNull()) {
+            return Set.of();
+        }
+        if (!value.isArray() || value.size() != 1 || !value.get(0).isTextual()
+                || !allowed.contains(value.get(0).textValue())) {
+            throw validation(field + " must contain exactly one valid value.");
+        }
+        return Set.of(value.get(0).textValue());
+    }
+
+    private void recordOperation(String operationIdentifier, String operationType) {
+        operations.put(operationIdentifier, operationType);
+        operationOrder.add(operationIdentifier);
+    }
+
     private static int readNextToken(JsonNode request) {
         JsonNode value = request.get("nextToken");
         if (value == null || value.isNull()) {
@@ -364,6 +521,37 @@ public class ControlTowerService {
         return values;
     }
 
+    private static void validateTags(JsonNode tags) {
+        if (tags == null || tags.isNull()) {
+            return;
+        }
+        if (!tags.isObject() || tags.size() > 200) {
+            throw validation("tags must be an object with at most 200 entries.");
+        }
+        tags.fields().forEachRemaining(entry -> {
+            if (entry.getKey().isBlank() || entry.getKey().length() > 128
+                    || !entry.getValue().isTextual() || entry.getValue().textValue().length() > 256) {
+                throw validation("tags must contain string values with valid lengths.");
+            }
+        });
+    }
+
+    private static void validateParameters(JsonNode parameters) {
+        if (parameters == null || parameters.isNull()) {
+            return;
+        }
+        if (!parameters.isArray()) {
+            throw validation("parameters must be an array.");
+        }
+        for (JsonNode parameter : parameters) {
+            requireObject(parameter, "parameters item");
+            requireText(parameter, "key");
+            if (!parameter.has("value") || parameter.get("value").isMissingNode()) {
+                throw validation("parameters item must include value.");
+            }
+        }
+    }
+
     private static void requireObject(JsonNode value, String field) {
         if (value == null || !value.isObject()) {
             throw validation(field + " must be a JSON object.");
@@ -382,10 +570,21 @@ public class ControlTowerService {
         return new AwsException("ValidationException", message, 400);
     }
 
+    public record CreateLandingZoneResult(String arn, String operationIdentifier) {
+    }
+
     public record EnableBaselineResult(String operationIdentifier, String arn) {
     }
 
     public record ListEnabledBaselinesResult(List<EnabledBaseline> enabledBaselines, String nextToken) {
+    }
+
+    public record ListLandingZoneOperationsResult(
+            List<LandingZoneOperationSummary> landingZoneOperations, String nextToken) {
+    }
+
+    public record LandingZoneOperationSummary(
+            String operationIdentifier, String operationType, String status) {
     }
 
     private record BaselineCatalogEntry(String name, String id, String description) {

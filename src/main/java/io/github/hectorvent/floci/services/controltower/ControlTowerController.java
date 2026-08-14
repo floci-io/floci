@@ -114,6 +114,37 @@ public class ControlTowerController {
     }
 
     @POST
+    @Path("/delete-landingzone")
+    public Response deleteLandingZone(@Context HttpHeaders headers, String body) {
+        String opId = service.deleteLandingZone(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("operationIdentifier", opId);
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/reset-landingzone")
+    public Response resetLandingZone(@Context HttpHeaders headers, String body) {
+        String opId = service.resetLandingZone(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("operationIdentifier", opId);
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/create-landing-zone")
+    public Response createLandingZone(@Context HttpHeaders headers, String body) {
+        ControlTowerService.CreateLandingZoneResult result = service.createLandingZone(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("arn", result.arn());
+        response.put("operationIdentifier", result.operationIdentifier());
+        return Response.ok(response).build();
+    }
+
+    @POST
     @Path("/get-landingzone-operation")
     public Response getLandingZoneOperation(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
@@ -121,6 +152,26 @@ public class ControlTowerController {
         String operationType = service.getOperationType(opId);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("operationDetails", operationDetailsNode(opId, operationType));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/list-landingzone-operations")
+    public Response listLandingZoneOperations(String body) {
+        ControlTowerService.ListLandingZoneOperationsResult result =
+                service.listLandingZoneOperations(parse(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        var array = response.putArray("landingZoneOperations");
+        for (ControlTowerService.LandingZoneOperationSummary operation : result.landingZoneOperations()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("operationIdentifier", operation.operationIdentifier());
+            node.put("operationType", operation.operationType());
+            node.put("status", operation.status());
+            array.add(node);
+        }
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -183,6 +234,16 @@ public class ControlTowerController {
         String identifier = requireText(request, "enabledBaselineIdentifier");
         String opId = service.resetEnabledBaseline(
                 requestContext.getAccountId(), regionResolver.resolveRegion(headers), identifier);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("operationIdentifier", opId);
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/update-enabled-baseline")
+    public Response updateEnabledBaseline(@Context HttpHeaders headers, String body) {
+        String opId = service.updateEnabledBaseline(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
         ObjectNode response = objectMapper.createObjectNode();
         response.put("operationIdentifier", opId);
         return Response.ok(response).build();

@@ -49,6 +49,23 @@ class ControlTowerControllerIntegrationTest {
     }
 
     @Test
+    void createLandingZoneReturnsArnAndOperationIdentifier() {
+        String authorization = auth("000000000299", "us-west-2");
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"version\":\"4.0\",\"tags\":{\"Environment\":\"test\"},"
+                        + "\"manifest\":{\"accessManagement\":{\"enabled\":true}}}")
+                .when()
+                .post("/create-landing-zone")
+                .then()
+                .statusCode(200)
+                .body("arn", containsString(":landingzone/"))
+                .body("operationIdentifier", containsString("-"));
+    }
+
+    @Test
     void getLandingZoneReturnsEveryFieldLzaNonNullAsserts() {
         String authorization = auth("000000000202", EAST);
         String arn = listLandingZonesArn(authorization);
@@ -122,6 +139,66 @@ class ControlTowerControllerIntegrationTest {
                         equalTo(90))
                 .body("landingZone.latestAvailableVersion", equalTo("4.0"))
                 .body("landingZone.remediationTypes[0]", equalTo("INHERITANCE_DRIFT"));
+    }
+
+    @Test
+    void deleteLandingZoneReturnsOperationIdentifierAndCanBePolled() {
+        String authorization = auth("000000000205", EAST);
+        String arn = listLandingZonesArn(authorization);
+
+        String operationIdentifier = given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"landingZoneIdentifier\":\"" + arn + "\"}")
+                .when()
+                .post("/delete-landingzone")
+                .then()
+                .statusCode(200)
+                .extract().path("operationIdentifier");
+
+        assertNotNull(operationIdentifier);
+        assertTrue(operationIdentifier.matches("^[a-f0-9-]{36}$"));
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"operationIdentifier\":\"" + operationIdentifier + "\"}")
+                .when()
+                .post("/get-landingzone-operation")
+                .then()
+                .statusCode(200)
+                .body("operationDetails.operationType", equalTo("DELETE"))
+                .body("operationDetails.status", equalTo("SUCCEEDED"));
+    }
+
+    @Test
+    void resetLandingZoneReturnsOperationIdentifierAndCanBePolled() {
+        String authorization = auth("000000000206", EAST);
+        String arn = listLandingZonesArn(authorization);
+
+        String operationIdentifier = given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"landingZoneIdentifier\":\"" + arn + "\"}")
+                .when()
+                .post("/reset-landingzone")
+                .then()
+                .statusCode(200)
+                .extract().path("operationIdentifier");
+
+        assertNotNull(operationIdentifier);
+        assertTrue(operationIdentifier.matches("^[a-f0-9-]{36}$"));
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"operationIdentifier\":\"" + operationIdentifier + "\"}")
+                .when()
+                .post("/get-landingzone-operation")
+                .then()
+                .statusCode(200)
+                .body("operationDetails.operationType", equalTo("RESET"))
+                .body("operationDetails.status", equalTo("SUCCEEDED"));
     }
 
     @Test
@@ -199,6 +276,79 @@ class ControlTowerControllerIntegrationTest {
         for (Map<String, Object> entry : finalEnabled) {
             assertNotNull(entry.get("targetIdentifier"));
         }
+    }
+
+    @Test
+    void updateEnabledBaselineReturnsOperationAndPersistsVersionAndParameters() {
+        String authorization = auth("000000000207", EAST);
+        Response baselines = given()
+                .header("Authorization", authorization)
+                .when()
+                .post("/list-baselines")
+                .then()
+                .statusCode(200)
+                .extract().response();
+        String baselineArn = ((List<Map<String, Object>>) baselines.path("baselines")).stream()
+                .filter(b -> "AWSControlTowerBaseline".equals(b.get("name")))
+                .findFirst().orElseThrow().get("arn").toString();
+        String targetArn = "arn:aws:organizations::000000000207:ou/o-floci0001/ou-update-00000001";
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"baselineIdentifier\":\"" + baselineArn
+                        + "\",\"baselineVersion\":\"5.0\",\"targetIdentifier\":\""
+                        + targetArn + "\"}")
+                .when()
+                .post("/enable-baseline")
+                .then()
+                .statusCode(200);
+
+        Response enabled = given()
+                .header("Authorization", authorization)
+                .when()
+                .post("/list-enabled-baselines")
+                .then()
+                .statusCode(200)
+                .extract().response();
+        String enabledArn = ((List<Map<String, Object>>) enabled.path("enabledBaselines")).stream()
+                .filter(b -> targetArn.equals(b.get("targetIdentifier")))
+                .findFirst().orElseThrow().get("arn").toString();
+
+        String operationIdentifier = given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"enabledBaselineIdentifier\":\"" + enabledArn
+                        + "\",\"baselineVersion\":\"6.0\",\"parameters\":[{\"key\":\"Example\",\"value\":{\"enabled\":true}}]}")
+                .when()
+                .post("/update-enabled-baseline")
+                .then()
+                .statusCode(200)
+                .extract().path("operationIdentifier");
+        assertNotNull(operationIdentifier);
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"operationIdentifier\":\"" + operationIdentifier + "\"}")
+                .when()
+                .post("/get-baseline-operation")
+                .then()
+                .statusCode(200)
+                .body("baselineOperation.operationType", equalTo("UPDATE_ENABLED_BASELINE"))
+                .body("baselineOperation.status", equalTo("SUCCEEDED"));
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"enabledBaselineIdentifier\":\"" + enabledArn + "\"}")
+                .when()
+                .post("/get-enabled-baseline")
+                .then()
+                .statusCode(200)
+                .body("enabledBaselineDetails.baselineVersion", equalTo("6.0"))
+                .body("enabledBaselineDetails.parameters[0].key", equalTo("Example"))
+                .body("enabledBaselineDetails.parameters[0].value.enabled", equalTo(true));
     }
 
     @Test
