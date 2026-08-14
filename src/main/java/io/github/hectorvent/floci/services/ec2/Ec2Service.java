@@ -84,6 +84,7 @@ public class Ec2Service implements ContainerTeardown {
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
+    private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -702,8 +703,8 @@ public class Ec2Service implements ContainerTeardown {
             Volume rootVol = new Volume();
             rootVol.setVolumeId(rootVolId);
             rootVol.setAvailabilityZone(az);
-            rootVol.setVolumeType("gp3");
-            rootVol.setSize(8);
+            rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+            rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
             rootVol.setState("in-use");
             rootVol.setRegion(region);
             rootVol.setCreateTime(Instant.now());
@@ -1784,7 +1785,7 @@ public class Ec2Service implements ContainerTeardown {
         EbsBlockDevice ebs = new EbsBlockDevice();
         ebs.setSnapshotId("snap-" + randomHex(17));
         ebs.setVolumeSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
-        ebs.setVolumeType("gp2");
+        ebs.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
         ebs.setDeleteOnTermination(true);
         BlockDeviceMapping mapping = new BlockDeviceMapping();
         mapping.setDeviceName(rootDeviceName);

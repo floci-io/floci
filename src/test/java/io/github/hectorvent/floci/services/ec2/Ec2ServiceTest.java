@@ -447,6 +447,11 @@ class Ec2ServiceTest {
         assertEquals("/dev/xvda", root.getDeviceName());
         assertNotNull(root.getEbs().getSnapshotId());
 
+        // The rebuilt root describes the volume RunInstances actually created for the
+        // source, so DescribeImages does not report a type the instance never had.
+        assertEquals("gp3", root.getEbs().getVolumeType());
+        assertEquals(8, root.getEbs().getVolumeSize());
+
         // The mapping's snapshot is registered, so DescribeSnapshots can resolve it.
         List<Snapshot> snapshots = service.describeSnapshots("us-east-1",
                 List.of(root.getEbs().getSnapshotId()), null, null);
