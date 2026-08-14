@@ -22,7 +22,11 @@ USER root
 RUN microdnf install -y --nodocs python3 python3-pip \
     && pip3 install --no-cache-dir awscli boto3 \
     && microdnf clean all \
-    && rm -rf /root/.cache/pip
+    && rm -rf /root/.cache/pip \
+    && aws_bin="$(command -v aws)" \
+    && mv "$aws_bin" /usr/bin/aws.real \
+    && printf '#!/bin/sh\nif [ -n "${AWS_ENDPOINT_URL:-}" ]; then\n    exec /usr/bin/aws.real --endpoint-url "$AWS_ENDPOINT_URL" "$@"\nfi\nexec /usr/bin/aws.real "$@"\n' > /usr/bin/aws \
+    && chmod +x /usr/bin/aws
 
 COPY bin/awslocal /usr/local/bin/awslocal
 RUN chmod +x /usr/local/bin/awslocal
@@ -36,4 +40,7 @@ RUN mkdir -p /etc/localstack/init/boot.d /etc/localstack/init/start.d /etc/local
              /etc/floci/init/boot.d /etc/floci/init/start.d /etc/floci/init/ready.d \
     && chown -R 1001:root /etc/localstack /etc/floci
 
+RUN mkdir -p /etc/floci/aws \
+    && printf '[default]\nregion = us-east-1\n' > /etc/floci/aws/config
+    
 USER 1001
