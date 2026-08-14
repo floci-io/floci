@@ -1,15 +1,37 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+import org.jboss.logging.Logger;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Catalog of commonly-used AWS managed policies seeded at startup.
- * Policy documents use a permissive wildcard because floci does not
- * enforce IAM policy evaluation.
+ * Catalog of AWS managed policies, loaded from {@code iam/managed-policies.yaml}.
+ *
+ * <p>Floci resolves {@code arn:aws:iam::aws:policy/*} ARNs against this catalog, so an ARN
+ * that is absent returns {@code NoSuchEntity} — the same as real AWS. Carrying the full
+ * published list is what keeps that faithful in both directions: policies AWS actually
+ * publishes attach cleanly, while typos and invented names are still rejected. A curated
+ * subset would reject valid configurations; resolving every well-formed ARN would accept
+ * invalid ones.
+ *
+ * <p>Policy documents are not modelled. Floci does not evaluate IAM by default, so every
+ * entry shares {@link #PERMISSIVE_DOCUMENT} and only the name, path and description matter.
  */
 final class AwsManagedPolicies {
 
+    private static final Logger LOG = Logger.getLogger(AwsManagedPolicies.class);
+
     static final String ARN_PREFIX = "arn:aws:iam::aws:policy";
+
+    private static final String CATALOG_RESOURCE_NAME = "iam/managed-policies.yaml";
 
     static final String PERMISSIVE_DOCUMENT =
             "{\"Version\":\"2012-10-17\",\"Statement\":"
@@ -21,163 +43,45 @@ final class AwsManagedPolicies {
         }
     }
 
-    static final List<ManagedPolicyDef> POLICIES = List.of(
-        // General access policies
-        new ManagedPolicyDef("AdministratorAccess", "/",
-                "Provides full access to AWS services and resources."),
-        new ManagedPolicyDef("PowerUserAccess", "/",
-                "Provides full access to AWS services and resources, but does not allow management of Users and groups."),
-        new ManagedPolicyDef("ReadOnlyAccess", "/",
-                "Provides read-only access to AWS services and resources."),
-        new ManagedPolicyDef("SecurityAudit", "/",
-                "The security audit template grants access to read security configuration metadata. "
-                + "It is useful for software that audits the configuration of an AWS account."),
-        new ManagedPolicyDef("IAMFullAccess", "/",
-                "Provides full access to IAM."),
-        new ManagedPolicyDef("AmazonS3FullAccess", "/",
-                "Provides full access to all buckets via the AWS Management Console."),
-        new ManagedPolicyDef("AmazonS3ReadOnlyAccess", "/",
-                "Provides read-only access to all buckets via the AWS Management Console."),
-        new ManagedPolicyDef("AmazonDynamoDBFullAccess", "/",
-                "Provides full access to Amazon DynamoDB via the AWS Management Console."),
-        new ManagedPolicyDef("AmazonEC2FullAccess", "/",
-                "Provides full access to Amazon EC2 via the AWS Management Console."),
-        new ManagedPolicyDef("AmazonEC2ContainerRegistryReadOnly", "/",
-                "Provides read-only access to Amazon EC2 Container Registry repositories."),
-        new ManagedPolicyDef("AmazonSQSFullAccess", "/",
-                "Provides full access to Amazon SQS via the AWS Management Console."),
-        new ManagedPolicyDef("AmazonSNSFullAccess", "/",
-                "Provides full access to Amazon SNS via the AWS Management Console."),
-        new ManagedPolicyDef("AmazonVPCFullAccess", "/",
-                "Provides full access to Amazon VPC via the AWS Management Console."),
-        new ManagedPolicyDef("CloudWatchFullAccess", "/",
-                "Provides full access to CloudWatch."),
-        new ManagedPolicyDef("CloudWatchAgentServerPolicy", "/",
-                "Provides permissions required to use the CloudWatch agent on servers."),
-        new ManagedPolicyDef("AWSLambdaFullAccess", "/",
-                "Provides full access to Lambda, S3, DynamoDB, CloudWatch Metrics and Logs."),
-        new ManagedPolicyDef("AWSCloudFormationReadOnlyAccess", "/",
-                "Provides access to AWS CloudFormation via the AWS Management Console."),
-        new ManagedPolicyDef("AWSCloudFormationFullAccess", "/",
-                "Provides full access to AWS CloudFormation."),
-        new ManagedPolicyDef("AWSXRayDaemonWriteAccess", "/",
-                "Allows write permissions to the AWS X-Ray daemon."),
-        new ManagedPolicyDef("AmazonElasticFileSystemClientFullAccess", "/",
-                "Provides root client access to an Amazon EFS file system."),
-        // Attached by the roles `cdk bootstrap` creates, so without it the CDKToolkit stack
-        // rolls back and no CDK app can be deployed.
-        new ManagedPolicyDef("AmazonAthenaFullAccess", "/",
-                "Provide full access to Amazon Athena and scoped access to the dependencies "
-                + "needed to enable querying, writing results, and data management."),
-        new ManagedPolicyDef("AmazonRedshiftFullAccess", "/",
-                "Provides full access to Amazon Redshift via the AWS Management Console."),
-        new ManagedPolicyDef("AmazonS3TablesReadOnlyAccess", "/",
-                "Provides read only access to all S3 table buckets."),
-        new ManagedPolicyDef("AWSCloudTrail_FullAccess", "/",
-                "Provides full access to AWS CloudTrail."),
-        new ManagedPolicyDef("AWSCloudTrail_ReadOnlyAccess", "/",
-                "Provides read-only access to AWS CloudTrail."),
+    static final List<ManagedPolicyDef> POLICIES = load();
 
-        // Lambda execution role policies
-        new ManagedPolicyDef("AWSLambdaBasicExecutionRole", "/service-role/",
-                "Provides write permissions to CloudWatch Logs."),
-        new ManagedPolicyDef("AWSLambdaBasicDurableExecutionRolePolicy", "/service-role/",
-                "Provides write permissions to CloudWatch Logs and read/write permissions to durable execution APIs for Lambda durable functions."),
-        new ManagedPolicyDef("AWSLambdaDynamoDBExecutionRole", "/service-role/",
-                "Provides list and read access to DynamoDB streams and write permissions to CloudWatch Logs."),
-        new ManagedPolicyDef("AWSLambdaKinesisExecutionRole", "/service-role/",
-                "Provides list and read access to Kinesis streams and write permissions to CloudWatch Logs."),
-        new ManagedPolicyDef("AWSLambdaMSKExecutionRole", "/service-role/",
-                "Provides permissions required to access an MSK cluster within a VPC, manage network interfaces, and write to CloudWatch Logs."),
-        new ManagedPolicyDef("AWSLambdaSQSQueueExecutionRole", "/service-role/",
-                "Provides receive message, delete message, and read attribute access to SQS queues, and write permissions to CloudWatch Logs."),
-        new ManagedPolicyDef("AWSLambdaVPCAccessExecutionRole", "/service-role/",
-                "Provides minimum permissions for a Lambda function to execute while accessing a resource within a VPC."),
+    private AwsManagedPolicies() {
+    }
 
-        // ECS / EKS execution role policies
-        new ManagedPolicyDef("AmazonECSTaskExecutionRolePolicy", "/service-role/",
-                "Provides the Amazon ECS container agent and Fargate agent permissions to make AWS API calls on your behalf."),
-        new ManagedPolicyDef("AmazonEKSFargatePodExecutionRolePolicy", "/",
-                "Provides access to other AWS service resources required to run Amazon EKS pods on AWS Fargate."),
+    private static List<ManagedPolicyDef> load() {
+        try (InputStream in = Thread.currentThread().getContextClassLoader()
+                .getResourceAsStream(CATALOG_RESOURCE_NAME)) {
+            if (in == null) {
+                throw new IllegalStateException(
+                        "AWS managed policy catalog not found on the classpath: " + CATALOG_RESOURCE_NAME);
+            }
+            Catalog catalog = new ObjectMapper(new YAMLFactory()).readValue(in, Catalog.class);
+            List<ManagedPolicyDef> defs = new ArrayList<>();
+            for (CatalogEntry entry : catalog.policies == null ? List.<CatalogEntry>of() : catalog.policies) {
+                if (entry.name == null || entry.name.isBlank() || entry.path == null || entry.path.isBlank()) {
+                    continue;
+                }
+                defs.add(new ManagedPolicyDef(entry.name, entry.path, entry.description));
+            }
+            LOG.debugv("Loaded {0} AWS managed policies from {1}", defs.size(), CATALOG_RESOURCE_NAME);
+            return List.copyOf(defs);
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "Failed to read the AWS managed policy catalog: " + CATALOG_RESOURCE_NAME, e);
+        }
+    }
 
-        // EKS cluster and node group policies (required by the EKS console/SDK and
-        // the terraform-aws-modules/eks module — see #1092).
-        new ManagedPolicyDef("AmazonEKSClusterPolicy", "/",
-                "Provides Kubernetes the permissions it requires to manage resources on your behalf."),
-        new ManagedPolicyDef("AmazonEKSServicePolicy", "/",
-                "This policy allows Amazon Elastic Container Service for Kubernetes to create and manage the necessary resources to operate EKS Clusters."),
-        new ManagedPolicyDef("AmazonEKSVPCResourceController", "/",
-                "Policy used by VPC Resource Controller to manage ENI and IPs for worker nodes."),
-        new ManagedPolicyDef("AmazonEKSWorkerNodePolicy", "/",
-                "This policy allows Amazon EKS worker nodes to connect to Amazon EKS Clusters."),
-        new ManagedPolicyDef("AmazonEKS_CNI_Policy", "/",
-                "Provides the Amazon VPC CNI Plugin the permissions it requires to modify the IP address configuration on your EKS worker nodes."),
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static final class Catalog {
+        public List<CatalogEntry> policies;
+    }
 
-        // RDS execution role policy
-        new ManagedPolicyDef("AmazonRDSEnhancedMonitoringRole", "/service-role/",
-                "Provides permissions required for Amazon RDS Enhanced Monitoring."),
-
-        // S3 Object Lambda execution role policy
-        new ManagedPolicyDef("AmazonS3ObjectLambdaExecutionRolePolicy", "/service-role/",
-                "Provides write permissions to CloudWatch Logs for S3 Object Lambda access points."),
-
-        // CloudWatch Lambda execution role policies
-        new ManagedPolicyDef("CloudWatchLambdaInsightsExecutionRolePolicy", "/",
-                "Allows Lambda Insights to create and write to CloudWatch Logs log groups for Lambda Insights monitoring."),
-        new ManagedPolicyDef("CloudWatchLambdaApplicationSignalsExecutionRolePolicy", "/",
-                "Provides write access to X-Ray and CloudWatch Application Signals log group."),
-
-        // API Gateway execution role policy
-        new ManagedPolicyDef("AmazonAPIGatewayPushToCloudWatchLogs", "/service-role/",
-                "Allows API Gateway to push logs to CloudWatch Logs."),
-
-        // Config execution role policy
-        new ManagedPolicyDef("AWSConfigRulesExecutionRole", "/service-role/",
-                "Allows AWS Config Rules Lambda functions to call AWS services and read the configuration of AWS resources."),
-
-        // MSK replicator execution role policy
-        new ManagedPolicyDef("AWSMSKReplicatorExecutionRole", "/service-role/",
-                "Grants permissions to Amazon MSK Replicator to replicate data between MSK Clusters."),
-
-        // SSM Automation execution role policies
-        new ManagedPolicyDef("AWS-SSM-DiagnosisAutomation-ExecutionRolePolicy", "/",
-                "Provides permissions for AWS Systems Manager diagnosis automation execution."),
-        new ManagedPolicyDef("AWS-SSM-RemediationAutomation-ExecutionRolePolicy", "/",
-                "Provides permissions for AWS Systems Manager remediation automation execution."),
-        new ManagedPolicyDef("AmazonSSMManagedInstanceCore", "/",
-                "Provides permissions required for instances to use AWS Systems Manager core service functionality."),
-
-        // SageMaker execution role policies
-        new ManagedPolicyDef("AmazonSageMakerGeospatialExecutionRole", "/service-role/",
-                "Provides full access to Amazon SageMaker Geospatial capabilities and related services."),
-        new ManagedPolicyDef("AmazonSageMakerCanvasEMRServerlessExecutionRolePolicy", "/",
-                "Provides access for Amazon SageMaker Canvas to manage EMR Serverless resources."),
-
-        // SageMaker Studio execution role policies
-        new ManagedPolicyDef("SageMakerStudioBedrockFunctionExecutionRolePolicy", "/service-role/",
-                "Provides permissions for SageMaker Studio Bedrock function execution role."),
-        new ManagedPolicyDef("SageMakerStudioDomainExecutionRolePolicy", "/service-role/",
-                "Provides permissions for the SageMaker Studio domain execution role."),
-        new ManagedPolicyDef("SageMakerStudioQueryExecutionRolePolicy", "/service-role/",
-                "Provides permissions for SageMaker Studio query execution role."),
-
-        // Amazon DataZone execution role policy
-        new ManagedPolicyDef("AmazonDataZoneDomainExecutionRolePolicy", "/service-role/",
-                "Provides permissions for the Amazon DataZone domain execution role."),
-
-        // Amazon Bedrock policies
-        new ManagedPolicyDef("AmazonBedrockFullAccess", "/",
-                "Provides full access to Amazon Bedrock as well as limited access to related services "
-                + "that are required by it"),
-        new ManagedPolicyDef("AmazonBedrockReadOnly", "/",
-                "Provides read only access to Amazon Bedrock"),
-        new ManagedPolicyDef("AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy", "/",
-                "Provides Bedrock Model inference permissions to Bedrock agent core memory."),
-
-        // AWS Partner Central execution role policy
-        new ManagedPolicyDef("AWSPartnerCentralSellingResourceSnapshotJobExecutionRolePolicy", "/",
-                "Provides permissions for AWS Partner Central resource snapshot job execution role.")
-    );
-
-    private AwsManagedPolicies() {}
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static final class CatalogEntry {
+        public String name;
+        public String path;
+        public String description;
+    }
 }

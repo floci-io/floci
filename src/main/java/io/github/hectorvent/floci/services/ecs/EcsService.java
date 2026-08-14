@@ -74,7 +74,7 @@ public class EcsService implements ContainerTeardown {
     private Map<String, Integer> latestRevisions = new ConcurrentHashMap<>();
     // taskArn → EcsTask
     private final Map<String, EcsTask> tasks = new ConcurrentHashMap<>();
-    // taskArn → EcsTaskHandle (running containers)
+    // taskArn → EcsTaskHandle (running containers or unresolved log readers)
     private final Map<String, EcsTaskHandle> taskHandles = new ConcurrentHashMap<>();
     // region::clusterName/serviceName → EcsServiceModel
     private Map<String, EcsServiceModel> services = new ConcurrentHashMap<>();
@@ -554,7 +554,11 @@ public class EcsService implements ContainerTeardown {
         Map<String, Integer> exitCodes = Map.of();
         if (dockerMode) {
             EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
-            exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
+            try {
+                exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
+            } finally {
+                retainUnresolvedLogHandle(task.getTaskArn(), handle);
+            }
         }
 
         task.setLastStatus(TaskStatus.STOPPED.name());
@@ -1411,7 +1415,16 @@ public class EcsService implements ContainerTeardown {
 
     private void reconcileTask(String taskArn) {
         EcsTask task = tasks.get(taskArn);
-        if (task == null || !TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+        if (task == null) {
+            return;
+        }
+
+        if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
+            reconcileStoppedTask(taskArn);
+            return;
+        }
+
+        if (!TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
             return;
         }
 
@@ -1461,6 +1474,27 @@ public class EcsService implements ContainerTeardown {
         }
 
         LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
+    }
+
+    private void reconcileStoppedTask(String taskArn) {
+        EcsTaskHandle claimed = taskHandles.remove(taskArn);
+        if (claimed == null) {
+            return;
+        }
+
+        try {
+            containerManager.stopTaskAndCollectExitCodes(claimed);
+        } finally {
+            // A task can be reported STOPPED even if Docker rejected both teardown attempts.
+            // Keep only the affected log readers and retry their teardown on later reconciliation ticks.
+            retainUnresolvedLogHandle(taskArn, claimed);
+        }
+    }
+
+    private void retainUnresolvedLogHandle(String taskArn, EcsTaskHandle handle) {
+        if (handle != null && handle.hasOpenLogStreams()) {
+            taskHandles.put(taskArn, handle);
+        }
     }
 
     void reconcileServices() {

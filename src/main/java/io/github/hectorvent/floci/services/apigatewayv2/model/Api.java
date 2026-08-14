@@ -19,6 +19,7 @@ public class Api {
     private String routeSelectionExpression;
     private String description;
     private String apiKeySelectionExpression;
+    private boolean disableExecuteApiEndpoint;
     private Cors corsConfiguration;
 
     public Api() {}
@@ -49,6 +50,11 @@ public class Api {
 
     public String getApiKeySelectionExpression() { return apiKeySelectionExpression; }
     public void setApiKeySelectionExpression(String apiKeySelectionExpression) { this.apiKeySelectionExpression = apiKeySelectionExpression; }
+
+    public boolean isDisableExecuteApiEndpoint() { return disableExecuteApiEndpoint; }
+    public void setDisableExecuteApiEndpoint(boolean disableExecuteApiEndpoint) {
+        this.disableExecuteApiEndpoint = disableExecuteApiEndpoint;
+    }
 
     public Cors getCorsConfiguration() { return corsConfiguration; }
     public void setCorsConfiguration(Cors corsConfiguration) { this.corsConfiguration = corsConfiguration; }

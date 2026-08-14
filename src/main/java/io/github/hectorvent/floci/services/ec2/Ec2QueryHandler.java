@@ -79,6 +79,11 @@ public class Ec2QueryHandler {
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
                 case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
                 case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
+                case "CreateManagedPrefixList" -> handleCreateManagedPrefixList(params, region);
+                case "DescribeManagedPrefixLists" -> handleDescribeManagedPrefixLists(params, region);
+                case "GetManagedPrefixListEntries" -> handleGetManagedPrefixListEntries(params, region);
+                case "ModifyManagedPrefixList" -> handleModifyManagedPrefixList(params, region);
+                case "DeleteManagedPrefixList" -> handleDeleteManagedPrefixList(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -420,6 +425,19 @@ public class Ec2QueryHandler {
         int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
+        // The launch-time public-IP override arrives either on the primary
+        // network interface spec (the shape Terraform's
+        // associate_public_ip_address sends) or as the legacy top-level
+        // parameter. AWS rejects both at once, so the interface spec wins when
+        // present. Absent means "use the subnet's MapPublicIpOnLaunch default".
+        String assocParam = p.getFirst("NetworkInterface.1.AssociatePublicIpAddress");
+        if (assocParam == null) {
+            assocParam = p.getFirst("AssociatePublicIpAddress");
+        }
+        Boolean associatePublicIp = assocParam == null ? null : Boolean.parseBoolean(assocParam);
+        if (subnetId == null) {
+            subnetId = p.getFirst("NetworkInterface.1.SubnetId");
+        }
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -466,7 +484,8 @@ public class Ec2QueryHandler {
         }
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -980,6 +999,142 @@ public class Ec2QueryHandler {
         }
         xml.end("prefixListSet").end("DescribePrefixListsResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        ManagedPrefixList list = service.createManagedPrefixList(
+                region,
+                p.getFirst("PrefixListName"),
+                p.getFirst("AddressFamily"),
+                intOrNull(p, "MaxEntries"),
+                parsePrefixListEntries(p, "Entry"),
+                parseTagsForResource(p, "prefix-list"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("CreateManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeManagedPrefixLists(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "PrefixListId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeManagedPrefixListsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixListSet");
+        for (ManagedPrefixList list : lists) {
+            xml.start("item").raw(managedPrefixListXml(list)).end("item");
+        }
+        xml.end("prefixListSet").end("DescribeManagedPrefixListsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetManagedPrefixListEntries(MultivaluedMap<String, String> p, String region) {
+        List<PrefixListEntry> entries = service.getManagedPrefixListEntries(
+                region, p.getFirst("PrefixListId"), longOrNull(p, "TargetVersion"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetManagedPrefixListEntriesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("entrySet");
+        for (PrefixListEntry entry : entries) {
+            xml.start("item").elem("cidr", entry.getCidr());
+            if (entry.getDescription() != null) {
+                xml.elem("description", entry.getDescription());
+            }
+            xml.end("item");
+        }
+        xml.end("entrySet").end("GetManagedPrefixListEntriesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        List<PrefixListEntry> removeEntries = parsePrefixListEntries(p, "RemoveEntry");
+        ManagedPrefixList list = service.modifyManagedPrefixList(
+                region,
+                p.getFirst("PrefixListId"),
+                longOrNull(p, "CurrentVersion"),
+                p.getFirst("PrefixListName"),
+                intOrNull(p, "MaxEntries"),
+                parsePrefixListEntries(p, "AddEntry"),
+                removeEntries.stream().map(PrefixListEntry::getCidr).toList());
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("ModifyManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        ManagedPrefixList list = service.deleteManagedPrefixList(region, p.getFirst("PrefixListId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("DeleteManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String managedPrefixListXml(ManagedPrefixList list) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("prefixListId", list.getPrefixListId())
+                .elem("addressFamily", list.getAddressFamily())
+                .elem("state", list.getState());
+        if (list.getStateMessage() != null) {
+            xml.elem("stateMessage", list.getStateMessage());
+        }
+        xml.elem("prefixListArn", list.getPrefixListArn())
+                .elem("prefixListName", list.getPrefixListName())
+                .elem("maxEntries", list.getMaxEntries() == null ? 0 : list.getMaxEntries())
+                .elem("version", list.getVersion())
+                .elem("ownerId", list.getOwnerId());
+        xml.raw(tagSetXml(list.getTags()));
+        return xml.build();
+    }
+
+    // Entry lists arrive as Entry.N.Cidr / AddEntry.N.Cidr / RemoveEntry.N.Cidr. RemoveEntry
+    // carries only a Cidr on the wire, which parses here as an entry with a null description.
+    private List<PrefixListEntry> parsePrefixListEntries(MultivaluedMap<String, String> p, String prefix) {
+        List<PrefixListEntry> entries = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String cidr = p.getFirst(prefix + "." + i + ".Cidr");
+            if (cidr == null) break;
+            entries.add(new PrefixListEntry(cidr, p.getFirst(prefix + "." + i + ".Description")));
+        }
+        return entries;
+    }
+
+    // Malformed numerics must surface as a client error, not escape the handler as an
+    // unchecked NumberFormatException and turn into a 500. Only an absent parameter is null: a
+    // present but blank value is malformed input, and treating it as absent would quietly drop
+    // the conditional-version check on ModifyManagedPrefixList.
+    private Integer intOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
+    }
+
+    private Long longOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Long.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
     }
 
     private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {

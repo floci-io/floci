@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -55,6 +56,13 @@ public class IamService implements SessionAccountLookup {
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
+    private static final int MAX_OIDC_CLIENT_IDS = 100;
+    private static final int MAX_OIDC_THUMBPRINTS = 5;
+    private static final int MAX_OIDC_URL_LENGTH = 255;
+
+    /** Guards the read-modify-write in the OIDC provider mutators. */
+    private final Object oidcProviderLock = new Object();
+
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
     private static final String AMAZONAWS_DOMAIN = ".amazonaws.com";
@@ -71,6 +79,7 @@ public class IamService implements SessionAccountLookup {
     private final StorageBackend<String, AccessKey> accessKeys;
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
+    private final StorageBackend<String, OpenIDConnectProvider> oidcProviders;
     /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
     private final RegionResolver regionResolver;
@@ -93,6 +102,7 @@ public class IamService implements SessionAccountLookup {
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal()
@@ -120,7 +130,7 @@ public class IamService implements SessionAccountLookup {
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
-                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -130,6 +140,7 @@ public class IamService implements SessionAccountLookup {
                StorageBackend<String, AccessKey> accessKeys,
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                StorageBackend<String, String> serviceLinkedRoleDeletions,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
@@ -140,6 +151,7 @@ public class IamService implements SessionAccountLookup {
         this.accessKeys = accessKeys;
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
+        this.oidcProviders = oidcProviders;
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
@@ -163,20 +175,19 @@ public class IamService implements SessionAccountLookup {
         return catalog;
     }
 
+    /**
+     * Makes the AWS-managed policy catalog available.
+     *
+     * <p>The catalog itself is the single source of truth: {@link #getPolicy} resolves
+     * {@code arn:aws:iam::aws:policy/*} from it directly, and {@link #listPolicies} reads
+     * the AWS scope from it too. Earlier versions also mirrored every entry into the
+     * default-account store, but that copy was never read back — {@code listPolicies}
+     * explicitly filters AWS-managed ARNs out of the local scan to avoid listing them
+     * twice — and writing the full published catalog to disk on every start costs about a
+     * megabyte of persisted state and several seconds of startup for nothing.
+     */
     void seedAwsManagedPolicies() {
-        // Managed policies are served globally from the catalog (see getPolicy); this also
-        // mirrors them into the default-account store so ListPolicies(Scope=AWS) lists them.
-        int seeded = 0;
-        for (Map.Entry<String, IamPolicy> entry : awsManagedPolicies.entrySet()) {
-            if (policies.get(entry.getKey()).isPresent()) {
-                continue;
-            }
-            policies.put(entry.getKey(), entry.getValue());
-            seeded++;
-        }
-        if (seeded > 0) {
-            LOG.infov("Seeded {0} AWS managed policies", seeded);
-        }
+        LOG.debugv("AWS managed policy catalog available: {0} policies", awsManagedPolicies.size());
     }
 
     private void seedDefaultDeployerPrincipal() {
@@ -731,6 +742,64 @@ public class IamService implements SessionAccountLookup {
         return result;
     }
 
+    /**
+     * Entity counts and quotas backing GetAccountSummary. Covers all 34 documented SummaryMap
+     * keys; quota values are cross-checked against AWS's published IAM service quotas
+     * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
+     * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
+     * not track at all (MFA devices, SAML/OIDC providers, server certificates, account password -
+     * all stub-empty elsewhere in this handler) are reported as zero rather than omitted, so
+     * callers indexing into the full AWS field set don't hit a missing-key error.
+     */
+    public Map<String, Long> getAccountSummary() {
+        long localPolicyCount = 0;
+        long policyVersionsInUse = 0;
+        for (IamPolicy policy : policies.scan(k -> true)) {
+            if (policy.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+                continue;
+            }
+            localPolicyCount++;
+            policyVersionsInUse += policy.getVersions().size();
+        }
+
+        Map<String, Long> summary = new LinkedHashMap<>();
+        summary.put("Users", (long) listUsers(null).size());
+        summary.put("UsersQuota", 5000L);
+        summary.put("Groups", (long) listGroups(null).size());
+        summary.put("GroupsQuota", 300L);
+        summary.put("GroupsPerUserQuota", 10L);
+        summary.put("Roles", (long) listRoles(null).size());
+        summary.put("RolesQuota", 1000L);
+        summary.put("AssumeRolePolicySizeQuota", 2048L);
+        summary.put("Policies", localPolicyCount);
+        summary.put("PoliciesQuota", 1500L);
+        summary.put("PolicySizeQuota", 6144L);
+        summary.put("PolicyVersionsInUse", policyVersionsInUse);
+        summary.put("PolicyVersionsInUseQuota", 10000L);
+        summary.put("VersionsPerPolicyQuota", 5L);
+        summary.put("InstanceProfiles", (long) listInstanceProfiles(null).size());
+        summary.put("InstanceProfilesQuota", 1000L);
+        summary.put("AttachedPoliciesPerUserQuota", 10L);
+        summary.put("AttachedPoliciesPerGroupQuota", 10L);
+        summary.put("AttachedPoliciesPerRoleQuota", 10L);
+        summary.put("GroupPolicySizeQuota", 5120L);
+        summary.put("UserPolicySizeQuota", 2048L);
+        summary.put("RolePolicySizeQuota", 10240L);
+        summary.put("AccessKeysPerUserQuota", 2L);
+        summary.put("SigningCertificatesPerUserQuota", 2L);
+        summary.put("ServerCertificates", 0L);
+        summary.put("ServerCertificatesQuota", 20L);
+        summary.put("Providers", 0L);
+        summary.put("MFADevices", 0L);
+        summary.put("MFADevicesInUse", 0L);
+        summary.put("AccountMFAEnabled", 0L);
+        summary.put("AccountAccessKeysPresent", 0L);
+        summary.put("AccountSigningCertificatesPresent", 0L);
+        summary.put("AccountPasswordPresent", 0L);
+        summary.put("GlobalEndpointTokenVersion", 1L);
+        return summary;
+    }
+
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
@@ -1156,6 +1225,194 @@ public class IamService implements SessionAccountLookup {
         return instanceProfiles.scan(k -> true).stream()
                 .filter(p -> p.getRoleNames().contains(roleName))
                 .toList();
+    }
+
+    // =========================================================================
+    // OIDC Identity Providers
+    // =========================================================================
+
+    /**
+     * AWS identifies a provider by URL, so the ARN is derived from it rather than from a random
+     * id, and the scheme is stripped: {@code https://host/path} becomes
+     * {@code arn:aws:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
+     * therefore a duplicate resource, not a second provider.
+     */
+    public OpenIDConnectProvider createOpenIDConnectProvider(String url, List<String> clientIdList,
+                                                             List<String> thumbprintList,
+                                                             Map<String, String> providerTags) {
+        if (url == null || url.isBlank()) {
+            throw new AwsException("ValidationError", "The request must contain the parameter Url.", 400);
+        }
+        if (!url.startsWith("https://")) {
+            throw new AwsException("ValidationError",
+                    "The OpenID Connect provider URL must begin with https://.", 400);
+        }
+        if (url.length() > MAX_OIDC_URL_LENGTH) {
+            throw new AwsException("ValidationError",
+                    "The OpenID Connect provider URL must be at most "
+                            + MAX_OIDC_URL_LENGTH + " characters.", 400);
+        }
+        String normalizedUrl = url.substring("https://".length());
+        if (normalizedUrl.isBlank()) {
+            throw new AwsException("ValidationError", "The OpenID Connect provider URL is not valid.", 400);
+        }
+        if (thumbprintList != null && thumbprintList.size() > MAX_OIDC_THUMBPRINTS) {
+            throw new AwsException("InvalidInput",
+                    "Thumbprint list must contain fewer than " + MAX_OIDC_THUMBPRINTS + " entries.", 400);
+        }
+        if (clientIdList != null && clientIdList.size() > MAX_OIDC_CLIENT_IDS) {
+            throw new AwsException("LimitExceeded",
+                    "Cannot exceed quota for ClientIdsPerOpenIdConnectProvider: " + MAX_OIDC_CLIENT_IDS, 409);
+        }
+
+        String arn = iamArn("oidc-provider", "/", normalizedUrl);
+        OpenIDConnectProvider provider = new OpenIDConnectProvider();
+        provider.setArn(arn);
+        provider.setUrl(normalizedUrl);
+        provider.setClientIdList(clientIdList == null ? new ArrayList<>() : new ArrayList<>(clientIdList));
+        provider.setThumbprintList(thumbprintList == null ? new ArrayList<>() : new ArrayList<>(thumbprintList));
+        provider.setCreateDate(Instant.now());
+        if (providerTags != null && !providerTags.isEmpty()) {
+            provider.setTags(providerTags);
+        }
+        // Racing creates collide only on the same URL, but they can carry different client IDs,
+        // thumbprints and tags, so an unguarded check-then-write would report success to every
+        // caller while storing one arbitrary payload.
+        synchronized (oidcProviderLock) {
+            if (oidcProviders.get(arn).isPresent()) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Provider with url " + url + " already exists.", 409);
+            }
+            oidcProviders.put(arn, provider);
+        }
+        LOG.infov("Created OIDC provider: {0}", arn);
+        return provider;
+    }
+
+    public OpenIDConnectProvider getOpenIDConnectProvider(String arn) {
+        requireProviderArn(arn);
+        return oidcProviders.get(arn)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "OpenIDConnect Provider not found for arn " + arn, 404));
+    }
+
+    public List<OpenIDConnectProvider> listOpenIDConnectProviders() {
+        return oidcProviders.scan(k -> true);
+    }
+
+    public void deleteOpenIDConnectProvider(String arn) {
+        requireProviderArn(arn);
+        synchronized (oidcProviderLock) {
+            if (oidcProviders.get(arn).isEmpty()) {
+                throw new AwsException("NoSuchEntity",
+                        "OpenId connect Provider " + arn + " cannot be found.", 404);
+            }
+            oidcProviders.delete(arn);
+        }
+        LOG.infov("Deleted OIDC provider: {0}", arn);
+    }
+
+    public void addClientIdToOpenIDConnectProvider(String arn, String clientId) {
+        requireProviderArn(arn);
+        requireClientId(clientId);
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            // AWS treats adding a client ID that is already present as a no-op success, so this
+            // returns rather than reporting a conflict.
+            if (provider.getClientIdList().contains(clientId)) {
+                return;
+            }
+            if (provider.getClientIdList().size() >= MAX_OIDC_CLIENT_IDS) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for ClientIdsPerOpenIdConnectProvider: " + MAX_OIDC_CLIENT_IDS, 409);
+            }
+            List<String> updated = new ArrayList<>(provider.getClientIdList());
+            updated.add(clientId);
+            provider.setClientIdList(updated);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public void removeClientIdFromOpenIDConnectProvider(String arn, String clientId) {
+        requireProviderArn(arn);
+        requireClientId(clientId);
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            // Removing a client ID that is not present is a no-op success on AWS, not an error.
+            if (!provider.getClientIdList().contains(clientId)) {
+                return;
+            }
+            List<String> updated = new ArrayList<>(provider.getClientIdList());
+            updated.remove(clientId);
+            provider.setClientIdList(updated);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    private void requireProviderArn(String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter OpenIDConnectProviderArn.", 400);
+        }
+    }
+
+    private void requireClientId(String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter ClientID.", 400);
+        }
+    }
+
+    public void updateOpenIDConnectProviderThumbprint(String arn, List<String> thumbprintList) {
+        requireProviderArn(arn);
+        if (thumbprintList == null || thumbprintList.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter ThumbprintList.", 400);
+        }
+        if (thumbprintList.size() > MAX_OIDC_THUMBPRINTS) {
+            throw new AwsException("InvalidInput",
+                    "Thumbprint list must contain fewer than " + MAX_OIDC_THUMBPRINTS + " entries.", 400);
+        }
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            provider.setThumbprintList(new ArrayList<>(thumbprintList));
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    // AWS rejects an empty tag map rather than treating it as a no-op, and reports InvalidInput
+    // rather than ValidationError. Both verified against a live account.
+    public void tagOpenIDConnectProvider(String arn, Map<String, String> newTags) {
+        requireProviderArn(arn);
+        if (newTags == null || newTags.isEmpty()) {
+            throw new AwsException("InvalidInput", "The provided tag map must not be null/empty.", 400);
+        }
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            Map<String, String> merged = new LinkedHashMap<>(provider.getTags());
+            merged.putAll(newTags);
+            provider.setTags(merged);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public void untagOpenIDConnectProvider(String arn, List<String> tagKeys) {
+        requireProviderArn(arn);
+        if (tagKeys == null || tagKeys.isEmpty()) {
+            throw new AwsException("InvalidInput", "The provided tag keys must not be null/empty.", 400);
+        }
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            Map<String, String> remaining = new LinkedHashMap<>(provider.getTags());
+            tagKeys.forEach(remaining::remove);
+            provider.setTags(remaining);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public Map<String, String> listOpenIDConnectProviderTags(String arn) {
+        requireProviderArn(arn);
+        return getOpenIDConnectProvider(arn).getTags();
     }
 
     // =========================================================================

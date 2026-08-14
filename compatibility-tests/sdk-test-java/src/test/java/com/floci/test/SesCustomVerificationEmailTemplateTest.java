@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class SesCustomVerificationEmailTemplateTest {
 
     private static final String FROM = "cvet-sdk-sender@floci-cvet.test";
+    private static final String RECIPIENT = "cvet-sdk-recipient@floci-cvet.test";
     private static final String NAME = "cvet-sdk-a";
 
     private static SesClient sesV1;
@@ -49,14 +50,19 @@ class SesCustomVerificationEmailTemplateTest {
             for (String n : new String[] {NAME, "cvet-sdk-shared"}) {
                 try {
                     sesV2.deleteCustomVerificationEmailTemplate(b -> b.templateName(n));
-                } catch (Exception ignored) {
-                    // Best-effort cleanup: the template may already be gone.
+                } catch (Exception e) {
+                    // Best-effort cleanup (the template may already be gone); log so a real failure
+                    // is diagnosable rather than silently leaving state behind.
+                    System.out.println("Cleanup: failed to delete template " + n + ": " + e.getMessage());
                 }
             }
-            try {
-                sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(FROM).build());
-            } catch (Exception ignored) {
-                // Best-effort cleanup.
+            for (String id : new String[] {FROM, RECIPIENT}) {
+                try {
+                    sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(id).build());
+                } catch (Exception e) {
+                    // Best-effort cleanup; log so a real deletion failure is diagnosable.
+                    System.out.println("Cleanup: failed to delete identity " + id + ": " + e.getMessage());
+                }
             }
             sesV2.close();
         }
@@ -117,5 +123,21 @@ class SesCustomVerificationEmailTemplateTest {
 
         assertThat(sesV2.getCustomVerificationEmailTemplate(b -> b.templateName("cvet-sdk-shared"))
                 .templateSubject()).isEqualTo("Shared");
+    }
+
+    @Test
+    @Order(4)
+    void v2_sendCustomVerificationEmail() {
+        String messageId = sesV2.sendCustomVerificationEmail(b -> b
+                .emailAddress(RECIPIENT).templateName(NAME)).messageId();
+        assertThat(messageId).isNotBlank();
+
+        // The recipient is registered as a pending-verification identity by the send.
+        assertThat(sesV2.getEmailIdentity(b -> b.emailIdentity(RECIPIENT)).verifiedForSendingStatus())
+                .isFalse();
+
+        assertThatThrownBy(() -> sesV2.sendCustomVerificationEmail(b -> b
+                .emailAddress(RECIPIENT).templateName("nope-sdk")))
+                .isInstanceOf(NotFoundException.class);
     }
 }

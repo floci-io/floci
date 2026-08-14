@@ -130,6 +130,38 @@
 | UpdateAccessKey | Updates an access key's status. |
 | DeleteAccessKey | Deletes an access key from a user. |
 
+### OIDC Identity Providers
+
+| Action | Description |
+|--------|-------------|
+| CreateOpenIDConnectProvider | Creates an OIDC identity provider from an https URL. |
+| GetOpenIDConnectProvider | Returns a provider's URL, client IDs, thumbprints and tags. |
+| ListOpenIDConnectProviders | Lists the ARNs of stored OIDC providers. |
+| DeleteOpenIDConnectProvider | Deletes an OIDC identity provider. |
+| AddClientIDToOpenIDConnectProvider | Adds a client ID (audience) to a provider. |
+| RemoveClientIDFromOpenIDConnectProvider | Removes a client ID from a provider. |
+| UpdateOpenIDConnectProviderThumbprint | Replaces a provider's thumbprint list. |
+| TagOpenIDConnectProvider | Adds tags to a provider. |
+| UntagOpenIDConnectProvider | Removes tags from a provider. |
+| ListOpenIDConnectProviderTags | Lists tags stored for a provider. |
+
+A provider is identified by its URL, so the ARN is derived from it rather than from a generated
+id: `https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLE` becomes
+`arn:aws:iam::<account>:oidc-provider/oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLE`. Creating
+the same URL twice returns `EntityAlreadyExists`. As on AWS, `GetOpenIDConnectProvider` reports
+the URL **without** its scheme.
+
+The URL must begin with `https://` and is at most 255 characters. It is not normalized, matching
+AWS: a trailing slash or a difference in case produces a separate provider rather than a
+duplicate.
+
+A provider holds at most 100 client IDs (`LimitExceeded` beyond that) and 5 thumbprints
+(`InvalidInput` beyond that). Adding a client ID that is already present, and removing one that
+was never added, both succeed and change nothing, as they do on AWS.
+
+Thumbprints are stored and echoed back but never validated against the remote endpoint, since
+nothing here performs the TLS handshake they describe.
+
 ### Login Profiles
 
 | Action | Description |
@@ -143,6 +175,12 @@
 | Action | Description |
 |--------|-------------|
 | SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
+
+### Account
+
+| Action | Description |
+|--------|-------------|
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. Resources Floci does not track (MFA devices, SAML/OIDC providers, server certificates) are reported as zero rather than omitted. |
 
 ## AWS Managed Policies
 

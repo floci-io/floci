@@ -246,7 +246,17 @@ final class CognitoAuthFlowHandler {
         // Check revocation before issuing new tokens
         service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);
 
-        CognitoUser user = service.adminGetUser(pool.getId(), username);
+        CognitoUser user;
+        try {
+            user = service.adminGetUser(pool.getId(), username);
+        } catch (AwsException ae) {
+            // Real Cognito never reveals whether the encoded username exists; any
+            // refresh token that doesn't resolve to a real user is simply invalid.
+            if ("UserNotFoundException".equals(ae.getErrorCode())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            }
+            throw ae;
+        }
         CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
                 clientMetadata, "TokenGeneration_RefreshTokens");
         Map<String, Object> auth = new HashMap<>();

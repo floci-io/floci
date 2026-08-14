@@ -144,7 +144,15 @@ public class RdsQueryHandler {
             filterId = extractRdsFilterValue(params, "db-instance-id");
         }
         try {
-            Collection<DbInstance> result = service.listDbInstances(filterId);
+            Collection<DbInstance> result;
+            if (filterId != null && !filterId.isBlank()) {
+                result = service.listDbInstances(filterId);
+            } else {
+                List<String> resourceIds = extractRdsFilterValues(params, "dbi-resource-id");
+                result = resourceIds.isEmpty()
+                        ? service.listDbInstances(null)
+                        : service.listDbInstancesByDbiResourceIds(resourceIds);
+            }
             // AWS parity: the DBInstanceIdentifier PARAMETER faults with
             // DBInstanceNotFound when no instance matches, while the
             // db-instance-id Filters form returns an empty list.
@@ -925,16 +933,35 @@ public class RdsQueryHandler {
      * Returns null if no matching filter is present.
      */
     private static String extractRdsFilterValue(MultivaluedMap<String, String> params, String filterName) {
+        List<String> values = extractRdsFilterValues(params, filterName);
+        return values.isEmpty() ? null : values.getFirst();
+    }
+
+    /**
+     * Extracts all values for a named RDS filter. Values within one filter use
+     * AWS OR semantics and are encoded as {@code Values.Value.N}.
+     */
+    private static List<String> extractRdsFilterValues(MultivaluedMap<String, String> params, String filterName) {
         for (int i = 1; ; i++) {
             String name = params.getFirst("Filters.Filter." + i + ".Name");
             if (name == null) {
                 break;
             }
             if (filterName.equals(name)) {
-                return params.getFirst("Filters.Filter." + i + ".Values.Value.1");
+                java.util.ArrayList<String> values = new java.util.ArrayList<>();
+                for (int valueIndex = 1; ; valueIndex++) {
+                    String value = params.getFirst("Filters.Filter." + i + ".Values.Value." + valueIndex);
+                    if (value == null) {
+                        break;
+                    }
+                    if (!value.isBlank()) {
+                        values.add(value);
+                    }
+                }
+                return List.copyOf(values);
             }
         }
-        return null;
+        return List.of();
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {

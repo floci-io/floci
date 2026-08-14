@@ -145,9 +145,6 @@ floci:
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
-      default-postgres-image: "postgres:16-alpine"
-      default-mysql-image: "mysql:8.0"
-      default-mariadb-image: "mariadb:11"
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -280,6 +277,7 @@ floci:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4

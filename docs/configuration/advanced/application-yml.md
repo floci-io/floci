@@ -164,9 +164,12 @@ floci:
       mock: false                             # true = clusters/instances created without Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
-      default-postgres-image: "postgres:16-alpine"
-      default-mysql-image: "mysql:8.0"
-      default-mariadb-image: "mariadb:11"
+      # endpoint-host: localhost              # Hostname clients use; enables published-port translation in Docker
+      # Omit image overrides to adapt Floci's built-in images to EngineVersion.
+      # Uncomment an override to pin that engine to an exact image.
+      # default-postgres-image: "registry.example.com/postgres:16-alpine"
+      # default-mysql-image: "registry.example.com/mysql:8.0"
+      # default-mariadb-image: "registry.example.com/mariadb:11"
 
     rds-data:
       enabled: true
