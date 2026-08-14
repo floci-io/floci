@@ -56,7 +56,7 @@ public class FirehoseService {
         this.s3Service = s3Service;
         this.regionResolver = regionResolver;
         this.clock = clock;
-        this.tickIntervalSeconds = config.services().firehose().tickIntervalSeconds();
+        this.tickIntervalSeconds = Math.max(1, config.services().firehose().tickIntervalSeconds());
         this.flushRecordCount = Math.max(0, config.services().firehose().flushRecordCount());
         this.flusherEnabled = config.services().firehose().enabled();
         this.flushExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
