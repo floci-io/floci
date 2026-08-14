@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 
@@ -24,6 +25,8 @@ import static org.mockito.Mockito.when;
 
 /** The VPC-endpoint CFN provisioner in isolation, mocking only Ec2Service. */
 class Ec2VpcEndpointCfnProvisionerTest {
+
+    private static final Instant CREATED_AT = Instant.parse("2026-08-13T10:15:30Z");
 
     private final Ec2Service ec2 = mock(Ec2Service.class);
     private final Ec2VpcEndpointCfnProvisioner provisioner = new Ec2VpcEndpointCfnProvisioner(ec2);
@@ -59,6 +62,7 @@ class Ec2VpcEndpointCfnProvisionerTest {
     private VpcEndpoint endpoint(String id) {
         VpcEndpoint e = new VpcEndpoint();
         e.setVpcEndpointId(id);
+        e.setCreationTimestamp(CREATED_AT);
         return e;
     }
 
@@ -77,6 +81,7 @@ class Ec2VpcEndpointCfnProvisionerTest {
 
         assertEquals("vpce-123", r.getPhysicalId());
         assertEquals("vpce-123", r.getAttributes().get("Id"));
+        assertEquals("2026-08-13T10:15:30.000Z", r.getAttributes().get("CreationTimestamp"));
     }
 
     @Test

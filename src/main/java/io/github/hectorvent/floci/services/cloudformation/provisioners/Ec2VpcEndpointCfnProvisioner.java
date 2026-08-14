@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -21,6 +23,10 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
+
+    /** Same rendering DescribeVpcEndpoints uses, so the attribute reads as the API reports it. */
+    private static final DateTimeFormatter ISO_FMT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private final Ec2Service ec2Service;
 
@@ -56,6 +62,11 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
                 List.of());
         r.setPhysicalId(endpoint.getVpcEndpointId());
         r.getAttributes().put("Id", endpoint.getVpcEndpointId());
+        // An unset attribute resolves to the literal "LogicalId.CreationTimestamp" rather than
+        // failing, so leaving it out hands the template a wrong value quietly.
+        if (endpoint.getCreationTimestamp() != null) {
+            r.getAttributes().put("CreationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
+        }
         if (previousEndpointId != null && !previousEndpointId.equals(endpoint.getVpcEndpointId())) {
             deleteReplacedEndpoint(previousEndpointId, ctx.region());
         }
