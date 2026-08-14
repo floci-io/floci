@@ -61,7 +61,9 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Lambda::Permission" -> {
                 int sep = physicalId.lastIndexOf('|');
                 if (sep > 0) {
-                    lambdaService.removePermission(region, physicalId.substring(0, sep),
+                    // Null qualifier: this provisioner only ever adds statements on the unqualified
+                    // function, so that is the resource the statement is scoped to.
+                    lambdaService.removePermission(region, physicalId.substring(0, sep), null,
                             physicalId.substring(sep + 1));
                 }
             }
@@ -102,7 +104,7 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
         String sourceAccount = ctx.resolveOptional(props, "SourceAccount");
         if (sourceAccount != null && !sourceAccount.isBlank()) request.put("SourceAccount", sourceAccount);
         try {
-            lambdaService.addPermission(ctx.region(), functionName, request);
+            lambdaService.addPermission(ctx.region(), functionName, null, request);
         } catch (RuntimeException failure) {
             // Without this the rejected update leaves the function with no statement at all, and
             // rollback does not restore it: callers that could invoke before the update lose access.
@@ -134,7 +136,7 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
         String statementId = physicalId.substring(sep + 1);
         Map<String, Object> statement = findStatement(region, functionName, statementId);
         try {
-            lambdaService.removePermission(region, functionName, statementId);
+            lambdaService.removePermission(region, functionName, null, statementId);
         } catch (AwsException ignored) {
             // statement or function already gone — nothing to replace, nothing to restore
             return null;
@@ -144,7 +146,7 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
 
     private Map<String, Object> findStatement(String region, String functionName, String statementId) {
         try {
-            Object policy = lambdaService.getPolicy(region, functionName).get("policy");
+            Object policy = lambdaService.getPolicy(region, functionName, null).get("policy");
             if (policy instanceof Map<?, ?> policyMap
                     && policyMap.get("Statement") instanceof List<?> statements) {
                 for (Object candidate : statements) {

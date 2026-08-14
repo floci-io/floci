@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -46,10 +47,10 @@ class LambdaAddressingCfnProvisionerTest {
         existing.put("Effect", "Allow");
         existing.put("Principal", Map.of("Service", "s3.amazonaws.com"));
         existing.put("Action", "lambda:InvokeFunction");
-        when(lambda.getPolicy(REGION, "app-fn"))
+        when(lambda.getPolicy(REGION, "app-fn", null))
                 .thenReturn(Map.of("policy", Map.of("Statement", List.of(existing))));
         doThrow(new AwsException("InvalidParameterValueException", "bad principal", 400))
-                .when(lambda).addPermission(eq(REGION), eq("app-fn"), anyMap());
+                .when(lambda).addPermission(eq(REGION), eq("app-fn"), isNull(), anyMap());
 
         StackResource r = resource();
         r.setPhysicalId("app-fn|InvokePermission");
@@ -57,7 +58,7 @@ class LambdaAddressingCfnProvisionerTest {
         assertThrows(AwsException.class, () -> provisioner.provision(r, props("app-fn"), ctx()));
 
         ArgumentCaptor<Map<String, Object>> restored = ArgumentCaptor.captor();
-        verify(lambda).removePermission(REGION, "app-fn", "InvokePermission");
+        verify(lambda).removePermission(REGION, "app-fn", null, "InvokePermission");
         verify(lambda).restorePermissionStatement(eq(REGION), eq("app-fn"), restored.capture());
         assertEquals("InvokePermission", restored.getValue().get("Sid"));
         assertEquals("lambda:InvokeFunction", restored.getValue().get("Action"));
@@ -69,7 +70,7 @@ class LambdaAddressingCfnProvisionerTest {
     void aSuccessfulReplacementDoesNotRestoreAnything() {
         Map<String, Object> existing = new LinkedHashMap<>();
         existing.put("Sid", "InvokePermission");
-        when(lambda.getPolicy(REGION, "app-fn"))
+        when(lambda.getPolicy(REGION, "app-fn", null))
                 .thenReturn(Map.of("policy", Map.of("Statement", List.of(existing))));
 
         StackResource r = resource();
@@ -77,7 +78,7 @@ class LambdaAddressingCfnProvisionerTest {
 
         provisioner.provision(r, props("app-fn"), ctx());
 
-        verify(lambda).removePermission(REGION, "app-fn", "InvokePermission");
+        verify(lambda).removePermission(REGION, "app-fn", null, "InvokePermission");
         verify(lambda, never()).restorePermissionStatement(anyString(), anyString(), anyMap());
         assertEquals("app-fn|InvokePermission", r.getPhysicalId());
     }
@@ -88,7 +89,7 @@ class LambdaAddressingCfnProvisionerTest {
 
         provisioner.provision(r, props("app-fn"), ctx());
 
-        verify(lambda, never()).removePermission(anyString(), anyString(), anyString());
+        verify(lambda, never()).removePermission(anyString(), anyString(), any(), anyString());
         verify(lambda, never()).restorePermissionStatement(anyString(), anyString(), anyMap());
         assertEquals("app-fn|InvokePermission", r.getPhysicalId());
     }

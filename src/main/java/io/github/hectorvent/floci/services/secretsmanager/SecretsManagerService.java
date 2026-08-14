@@ -136,6 +136,13 @@ public class SecretsManagerService {
                 throw new AwsException("ResourceNotFoundException",
                         "Secrets Manager can't find the specified secret version.", 400);
             }
+            // When both selectors are supplied they must name the same version.
+            if (versionStage != null && !versionStage.isEmpty()
+                    && (version.getVersionStages() == null
+                            || !version.getVersionStages().contains(versionStage))) {
+                throw new AwsException("InvalidRequestException",
+                        "You provided a VersionStage that is not associated to the provided VersionId.", 400);
+            }
         } else {
             String stage = (versionStage != null && !versionStage.isEmpty()) ? versionStage : AWSCURRENT;
             version = findVersionByStage(secret, stage);
@@ -285,6 +292,85 @@ public class SecretsManagerService {
     public Secret describeSecret(String secretId, String region) {
         Secret secret = resolveSecret(secretId, region);
         return secret;
+    }
+
+    /**
+     * Claims the single Secrets Manager target-attachment slot for a CloudFormation resource.
+     *
+     * @return {@code true} when this call created the claim, or {@code false} when the same
+     *         resource already owned it.
+     */
+    public boolean claimTargetAttachment(String secretId, String attachmentOwner, String region) {
+        Secret resolved = resolveSecret(secretId, region);
+        synchronized (lockFor(resolved.getArn())) {
+            Secret secret = resolveSecret(resolved.getArn(), region);
+            if (secret.getDeletedDate() != null) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Secrets Manager can't find the specified secret.", 400);
+            }
+
+            String existingOwner = secret.getTargetAttachmentOwner();
+            if (existingOwner != null && !existingOwner.equals(attachmentOwner)) {
+                throw new AwsException("ResourceExistsException",
+                        "A target is already attached to secret " + secret.getArn() + ".", 400);
+            }
+            if (existingOwner != null) {
+                return false;
+            }
+
+            secret.setTargetAttachmentOwner(attachmentOwner);
+            store.put(regionKey(region, secret.getName()), secret);
+            return true;
+        }
+    }
+
+    /**
+     * Returns whether an attachment may mutate this secret. Unclaimed secrets remain manageable
+     * so target attachments persisted before ownership tracking was introduced can still detach.
+     */
+    public boolean canManageTargetAttachment(String secretId, String attachmentOwner, String region) {
+        Secret resolved;
+        try {
+            resolved = resolveSecret(secretId, region);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return true;
+            }
+            throw e;
+        }
+
+        synchronized (lockFor(resolved.getArn())) {
+            Secret secret = resolveSecret(resolved.getArn(), region);
+            String existingOwner = secret.getTargetAttachmentOwner();
+            return existingOwner == null
+                    || attachmentOwner != null && attachmentOwner.equals(existingOwner);
+        }
+    }
+
+    /** Releases a target-attachment claim only when it is still owned by the caller. */
+    public void releaseTargetAttachment(String secretId, String attachmentOwner, String region) {
+        if (attachmentOwner == null || attachmentOwner.isBlank()) {
+            return;
+        }
+
+        Secret resolved;
+        try {
+            resolved = resolveSecret(secretId, region);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return;
+            }
+            throw e;
+        }
+
+        synchronized (lockFor(resolved.getArn())) {
+            Secret secret = resolveSecret(resolved.getArn(), region);
+            if (!attachmentOwner.equals(secret.getTargetAttachmentOwner())) {
+                return;
+            }
+            secret.setTargetAttachmentOwner(null);
+            store.put(regionKey(region, secret.getName()), secret);
+        }
     }
 
     public List<Secret> listSecrets(String region) {

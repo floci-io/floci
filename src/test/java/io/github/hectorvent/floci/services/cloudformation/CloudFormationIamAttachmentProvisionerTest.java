@@ -4,12 +4,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.util.List;
@@ -50,7 +53,8 @@ class CloudFormationIamAttachmentProvisionerTest {
                 mapper,
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
-                new CloudFormationResourceRegistry(List.of()));
+                null, null,
+                new CloudFormationResourceRegistry(List.of(new IamRoleCfnProvisioner(iamService))));
     }
 
     @Test
@@ -88,6 +92,76 @@ class CloudFormationIamAttachmentProvisionerTest {
         verify(iamService).detachRolePolicy("existing-role", NEW_POLICY);
         verify(iamService, never()).detachRolePolicy("existing-role", EXISTING_POLICY);
         verify(iamService, never()).deleteRole("existing-role");
+    }
+
+    @Test
+    void sameStackRoleUpdateAppliesChangedTrustPolicy() throws Exception {
+        // github.com/floci-io/floci/issues/2084 — adopting an existing role on update must still
+        // apply this template's current AssumeRolePolicyDocument, or a changed trust policy is
+        // silently dropped while the stack still reports UPDATE_COMPLETE.
+        IamRole role = role("existing-role");
+        String newTrustPolicyJson =
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
+        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
+        when(iamService.getRole("existing-role")).thenReturn(role);
+
+        StackResource result = provision("Role", "AWS::IAM::Role", """
+                {"RoleName":"existing-role","AssumeRolePolicyDocument":%s}
+                """.formatted(newTrustPolicyJson), "existing-role", Map.of("RoleId", role.getRoleId()));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+        verify(iamService).updateAssumeRolePolicy(eq("existing-role"), docCaptor.capture(), eq(role.getRoleId()));
+        assertEquals(mapper.readTree(newTrustPolicyJson), mapper.readTree(docCaptor.getValue()));
+    }
+
+    @Test
+    void sameStackRoleUpdateFailureRestoresPriorTrustPolicy() throws Exception {
+        // Companion to sameStackRoleUpdateAppliesChangedTrustPolicy: if a later step in this same
+        // attempt fails (e.g. a bad ManagedPolicyArns entry), the whole resource update fails and
+        // CloudFormation reports UPDATE_ROLLBACK_COMPLETE. The trust policy must actually roll back
+        // too, not stay on the new value while the stack claims nothing changed.
+        IamRole role = role("existing-role");
+        String priorTrustPolicy = role.getAssumeRolePolicyDocument();
+        String newTrustPolicyJson =
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
+        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
+        when(iamService.getRole("existing-role")).thenReturn(role);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iamService).attachRolePolicy("existing-role", MISSING_POLICY);
+
+        StackResource result = provision("Role", "AWS::IAM::Role", """
+                {"RoleName":"existing-role","AssumeRolePolicyDocument":%s,"ManagedPolicyArns":["%s"]}
+                """.formatted(newTrustPolicyJson, MISSING_POLICY), "existing-role", Map.of("RoleId", role.getRoleId()));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        // Both the primary write and the failure-triggered restore use the ID-verified overload,
+        // guarding against a role replaced under the same name mid-attempt in either direction.
+        ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+        verify(iamService, times(2)).updateAssumeRolePolicy(
+                eq("existing-role"), docCaptor.capture(), eq(role.getRoleId()));
+        List<String> calls = docCaptor.getAllValues();
+        assertEquals(mapper.readTree(newTrustPolicyJson), mapper.readTree(calls.get(0)),
+                "first call applies the template's new trust policy");
+        assertEquals(priorTrustPolicy, calls.get(1),
+                "second call restores the role's pre-update trust policy after the failure");
+        verify(iamService, never()).updateAssumeRolePolicy(anyString(), anyString());
+    }
+
+    @Test
+    void freshRoleCreationDoesNotRedundantlyUpdateTrustPolicy() {
+        IamRole role = role("new-role");
+        when(iamService.createRole("new-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+                .thenReturn(role);
+
+        provisionRole("new-role", List.of());
+
+        verify(iamService, never()).updateAssumeRolePolicy(anyString(), anyString());
+        verify(iamService, never()).updateAssumeRolePolicy(anyString(), anyString(), anyString());
     }
 
     @Test
@@ -130,11 +204,11 @@ class CloudFormationIamAttachmentProvisionerTest {
                 "Role", "AWS::IAM::Role", """
                         {"RoleName":"same-name","ManagedPolicyArns":["%s"]}
                         """.formatted(NEW_POLICY), "same-name",
-                Map.of("RoleId", "AROAOLD", CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR, "true"));
+                Map.of("RoleId", "AROAOLD", CfnRollback.ROLLBACK_OWNED_ATTR, "true"));
 
         assertEquals("CREATE_FAILED", result.getStatus());
         assertEquals("already exists", result.getStatusReason());
-        assertNull(result.getAttributes().get(CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+        assertNull(result.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
         verify(iamService, never()).attachRolePolicy("same-name", NEW_POLICY);
         verify(iamService, never()).deleteRole("same-name");
     }
@@ -190,6 +264,28 @@ class CloudFormationIamAttachmentProvisionerTest {
     }
 
     @Test
+    void managedPolicyExposesPolicyArnForGetAtt() {
+        // PolicyArn is the attribute CloudFormation documents for AWS::IAM::ManagedPolicy. Without
+        // it Fn::GetAtt does not resolve and the unresolved literal reaches the consuming resource.
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/test-policy";
+        IamPolicy policy = new IamPolicy();
+        policy.setArn(policyArn);
+        when(iamService.createPolicy("test-policy", "/", null, policyDocument(), Map.of()))
+                .thenReturn(policy);
+
+        StackResource result = provision("ManagedPolicy", "AWS::IAM::ManagedPolicy", """
+                {
+                  "ManagedPolicyName": "test-policy",
+                  "PolicyDocument": {"Version": "2012-10-17", "Statement": []}
+                }
+                """);
+
+        assertEquals(policyArn, result.getAttributes().get("PolicyArn"));
+        assertEquals(policyArn, result.getAttributes().get("Arn"));
+        assertEquals(policyArn, result.getPhysicalId());
+    }
+
+    @Test
     void cleanupFailureDoesNotMaskPrimaryFailureOrSkipDeletion() {
         IamRole role = role("cleanup-role");
         when(iamService.createRole("cleanup-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
@@ -224,7 +320,7 @@ class CloudFormationIamAttachmentProvisionerTest {
         assertEquals("CREATE_FAILED", result.getStatus());
         assertEquals("existing-role", result.getAttributes().get("InlineRoleTargets"));
         assertEquals("true", result.getAttributes().get(
-                CloudFormationResourceProvisioner.ROLLBACK_OWNED_ATTR));
+                CfnRollback.ROLLBACK_OWNED_ATTR));
 
         provisioner.delete(result, "us-east-1");
 

@@ -334,6 +334,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_MOCK` | `false` | When `true`, DB clusters and instances are created instantly without a real container or auth proxy (API only) |
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last port in the RDS proxy range |
+| `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Default MySQL Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Default MariaDB Docker image |
@@ -359,6 +360,14 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_MSK_ENABLED` | `true` | Enable the MSK service |
 | `FLOCI_SERVICES_MSK_MOCK` | `false` | When `true`, clusters are created instantly without a real Redpanda container |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Docker image for Kafka/Redpanda brokers |
+
+### Managed Service for Apache Flink (Kinesis Analytics V2)
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_KINESIS_ANALYTICS_ENABLED` | `true` | Enable the Managed Flink (Kinesis Analytics V2) service |
+| `FLOCI_SERVICES_KINESIS_ANALYTICS_MOCK` | `false` | When `true`, applications start instantly without a real Flink container |
+| `FLOCI_SERVICES_KINESIS_ANALYTICS_DEFAULT_IMAGE` | _(unset)_ | Optional image override; when unset, the image is chosen from the requested `RuntimeEnvironment` (e.g. `FLINK-1_19` → `apache/flink:1.19`) |
 
 ### ECR (Elastic Container Registry)
 

@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM eclipse-temurin:25-jdk AS build
+FROM eclipse-temurin:25-jdk-noble AS build
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y maven && rm -rf /var/lib/apt/lists/*
@@ -11,7 +11,7 @@ COPY src/ src/
 RUN mvn clean package -DskipTests -q
 
 # Stage 2: Runtime
-FROM eclipse-temurin:25-jre-alpine
+FROM eclipse-temurin:25-jre-noble
 
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
@@ -26,16 +26,19 @@ ENV GOSU_VERSION=1.17
 ENV GOSU_AMD64_SHA256=bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3
 ENV GOSU_ARM64_SHA256=c3805a85d17f4454c23d7059bcb97e1ec1af272b90126e79ed002342de08389b
 RUN set -eux; \
-    apk add --no-cache shadow ca-certificates python3 py3-pip; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget; \
+    rm -rf /var/lib/apt/lists/*; \
     pip3 install --no-cache-dir --break-system-packages awscli boto3; \
-    mv /usr/bin/aws /usr/bin/aws.real; \
+    aws_bin="$(command -v aws)"; \
+    mv "$aws_bin" /usr/bin/aws.real; \
     printf '#!/bin/sh\nexec /usr/bin/aws.real --endpoint-url=http://localhost:4566 "$@"\n' > /usr/bin/aws; \
     chmod +x /usr/bin/aws; \
     useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci; \
-    arch="$(apk --print-arch)"; \
+    arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-        x86_64) gosuArch='amd64'; gosuSha256="$GOSU_AMD64_SHA256" ;; \
-        aarch64) gosuArch='arm64'; gosuSha256="$GOSU_ARM64_SHA256" ;; \
+        amd64) gosuArch='amd64'; gosuSha256="$GOSU_AMD64_SHA256" ;; \
+        arm64) gosuArch='arm64'; gosuSha256="$GOSU_ARM64_SHA256" ;; \
         *) echo >&2 "unsupported arch: $arch"; exit 1 ;; \
     esac; \
     wget -q -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosuArch}"; \
@@ -58,7 +61,31 @@ COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
 
 VOLUME /app/data
 
-EXPOSE 4566 6379-6399
+EXPOSE 4566
+
+# Need to expose separately due to https://github.com/floci-io/floci/issues/2095.
+# This preseres compatibility with https://github.com/docker-java/docker-java/blob/002b6eb7aa2b892be729c7c2a5e95f782924db38/docker-java-api/src/main/java/com/github/dockerjava/api/model/ExposedPort.java#L119
+EXPOSE 6379
+EXPOSE 6380
+EXPOSE 6381
+EXPOSE 6382
+EXPOSE 6383
+EXPOSE 6384
+EXPOSE 6385
+EXPOSE 6386
+EXPOSE 6387
+EXPOSE 6388
+EXPOSE 6389
+EXPOSE 6390
+EXPOSE 6391
+EXPOSE 6392
+EXPOSE 6393
+EXPOSE 6394
+EXPOSE 6395
+EXPOSE 6396
+EXPOSE 6397
+EXPOSE 6398
+EXPOSE 6399
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
     CMD wget -q --spider http://localhost:4566/_floci/health || exit 1

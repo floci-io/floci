@@ -1,6 +1,6 @@
 # Step Functions
 
-**Protocol:** JSON 1.1 (`X-Amz-Target: AmazonStatesService.*`)
+**Protocol:** AWS JSON 1.0 (`X-Amz-Target: AWSStepFunctions.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
 ## Supported Actions
@@ -9,6 +9,7 @@
 | Action | Description |
 | --- | --- |
 | `CreateStateMachine` | Create a state machine (Standard or Express) |
+| `UpdateStateMachine` | Update definition, role, logging, tracing, or encryption settings and optionally publish a version |
 | `DescribeStateMachine` | Get state machine definition and metadata |
 | `ListStateMachines` | List all state machines |
 | `DeleteStateMachine` | Delete a state machine |
@@ -34,6 +35,21 @@
 | `TagResource` | - |
 | `UntagResource` | - |
 <!-- floci:actions:end -->
+
+`UpdateStateMachine` returns the new revision ID and update timestamp. CloudFormation updates
+definition, role, logging, tracing, encryption, and tags without replacing the state machine;
+changes to `StateMachineName` or `StateMachineType` use replacement semantics.
+
+## Map concurrency
+
+Map states honor `MaxConcurrency` and, for JSONPath state machines, `MaxConcurrencyPath`.
+JSONata state machines may supply `MaxConcurrency` as an expression. A value of `0`, or an
+omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline Map states and
+10,000 for Distributed Map states. `MaxConcurrency: 1` runs iterations sequentially.
+
+Results remain in input order even when iterations finish out of order. If an iteration fails,
+the Map state fails promptly, cancels its active sibling iterations, and does not start queued
+iterations.
 
 ## Configuration
 

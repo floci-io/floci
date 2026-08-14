@@ -54,7 +54,6 @@ Floci uses a **tag-driven release model**. Docker images are never published on 
 | Branch | Purpose | Docker published? |
 |---|---|---|
 | `main` | Integration branch — all PRs merge here. Treated as unstable/nightly. | No (CI tests only) |
-| `release/x.y.x` | Stable line for a minor version. Receives cherry-picked fixes from `main`. | No (CI tests only) |
 | `X.Y.Z` tag | Signals a production release. Triggers the full Docker publish pipeline. | Yes (`x.y.z`, `latest`, `x.y.z-jvm`, `latest-jvm`) |
 
 ## Commit Message Format
@@ -147,6 +146,40 @@ ln -s AGENTS.md COPILOT.md
 
 Always implement the **real AWS wire protocol** — never invent custom endpoints. The AWS SDK must work against Floci without modification.
 
+## Adding a CloudFormation Resource Type
+
+CloudFormation resource types live in **per-service provisioner classes**, not in
+`CloudFormationResourceProvisioner`. That class is a legacy monolith being dismantled — please do
+not add cases to it. If the service you need already has a `*CfnProvisioner`, add your type there;
+otherwise create one.
+
+1. Create `services/cloudformation/provisioners/<Service>CfnProvisioner.java`, annotate it
+   `@ApplicationScoped`, and inject **only** the service it wraps. Registration is automatic —
+   `CloudFormationResourceRegistry` discovers it via CDI. (Forgetting `@ApplicationScoped` compiles
+   and unit-tests green, but the type is never wired.)
+2. Implement `resourceTypes()` returning every `AWS::*` type the class serves, and `provision(...)`.
+   When you serve more than one type, switch on `resource.getResourceType()`.
+3. In `provision`, set **both**:
+   - `resource.setPhysicalId(...)` — this is what `Ref` resolves to
+   - `resource.getAttributes().put("Name", value)` for every `Fn::GetAtt` attribute — a *separate*
+     map. Forgetting it does not fail: `Fn::GetAtt` silently resolves to the literal string
+     `"LogicalId.Attr"`. Take the attribute names from the resource's registry schema under
+     `local/aws/cfn-resource-schemas/us-east-1/` (`readOnlyProperties`).
+4. **`provision` is also the update path.** On `UpdateStack` it is called again with the previous
+   physical id and attributes already set on the resource. Check for an existing physical id and
+   update in place rather than creating unconditionally, which would otherwise throw
+   `AlreadyExists` or orphan the old resource.
+5. Override `delete(...)` if the type has a backing delete. Deleting a resource that is already gone
+   should be tolerated.
+6. Add a focused unit test (mock only your service — see `SqsCfnProvisionerTest`) and an integration
+   test. Assert the **specific `Fn::GetAtt` attribute keys**, not just `CREATE_COMPLETE`: an
+   unmapped type is stubbed out as a successful no-op, so a status-only assertion passes even when
+   nothing was provisioned.
+7. Add the type to the table in `docs/services/cloudformation.md`.
+
+`SqsCfnProvisioner` is the smallest reference implementation; `Ec2LaunchTemplateCfnProvisioner`
+shows update-in-place and replacement handling.
+
 ## Pull Request Guidelines
 
 1. Branch off `main`: `git checkout -b feature/my-feature`
@@ -160,34 +193,16 @@ Docker images are never built on contributor PRs, so merging to `main` is always
 
 ## Release Process (maintainers)
 
-### New minor or major release
+Releases are cut from `main` with the **Release Cut** workflow
+(Actions → Release Cut → Run workflow). semantic-release analyzes the
+Conventional Commits since the last tag, bumps `pom.xml`, regenerates
+`CHANGELOG.md`, commits, tags, and publishes the GitHub Release; the tag
+push triggers the Docker publish pipeline. Use the `dry-run` input to
+preview the next version and notes without releasing.
 
-```bash
-# 1. Create a release branch from main
-git checkout main && git pull
-git checkout -b release/1.2.x
-
-# 2. Push — the semver.yml workflow runs semantic-release automatically,
-#    bumps the version, updates CHANGELOG.md + pom.xml, and pushes tag 1.2.0.
-git push origin release/1.2.x
-
-# 3. The tag push triggers the Docker publish pipeline.
-```
-
-### Patch release on an existing line
-
-```bash
-git checkout release/1.1.x
-git cherry-pick <commit-sha>
-git push origin release/1.1.x
-# semver workflow creates 1.1.x and triggers Docker publish
-```
-
-### Hotfix
-
-1. Fix on `main` via the normal PR process.
-2. Cherry-pick the merge commit onto the relevant `release/x.y.x` branch and push.
-3. If the bug only affects a release branch, open a PR directly against that branch.
+`CHANGELOG.md` is generated — **do not edit it by hand**. Your Conventional
+Commit message is the changelog entry. Genuine corrections to the file
+require the `changelog-edit` label on the PR.
 
 ## Testing Policy for Pull Requests
 

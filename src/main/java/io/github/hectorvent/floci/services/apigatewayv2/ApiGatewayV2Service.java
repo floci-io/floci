@@ -99,6 +99,7 @@ public class ApiGatewayV2Service {
         api.setRouteSelectionExpression(routeSelectionExpression);
         api.setDescription(description);
         api.setApiKeySelectionExpression(apiKeySelectionExpression);
+        api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
 
         if ("WEBSOCKET".equals(protocolType)) {
             api.setApiEndpoint(String.format("wss://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
@@ -124,6 +125,18 @@ public class ApiGatewayV2Service {
     public Api getApi(String region, String apiId) {
         return apiStore.get(apiKey(region, apiId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
+    }
+
+    public String resolveApiRegion(String preferredRegion, String apiId) {
+        if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {
+            return preferredRegion;
+        }
+
+        return apiStore.keys().stream()
+                .filter(k -> k.endsWith("::" + apiId))
+                .map(k -> k.substring(0, k.indexOf("::")))
+                .findFirst()
+                .orElse(preferredRegion);
     }
 
     public List<Api> getApis(String region) {
@@ -167,6 +180,10 @@ public class ApiGatewayV2Service {
         if (request.containsKey("apiKeySelectionExpression") && request.get("apiKeySelectionExpression") != null) {
             api.setApiKeySelectionExpression((String) request.get("apiKeySelectionExpression"));
         }
+        if (request.containsKey("disableExecuteApiEndpoint")
+                && request.get("disableExecuteApiEndpoint") != null) {
+            api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
+        }
         if (request.containsKey("tags")) {
             @SuppressWarnings("unchecked")
             Map<String, String> tags = (Map<String, String>) request.get("tags");
@@ -181,6 +198,10 @@ public class ApiGatewayV2Service {
 
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    private static boolean booleanValue(Object value) {
+        return value != null && Boolean.parseBoolean(String.valueOf(value));
     }
 
     private static Api.Cors toCors(Map<String, Object> m) {

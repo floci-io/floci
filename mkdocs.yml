@@ -81,10 +81,12 @@ nav:
     - S3: services/s3.md
     - DynamoDB: services/dynamodb.md
     - Lambda: services/lambda.md
+    - Lambda MicroVMs: services/lambda-microvms.md
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - KMS: services/kms.md
     - Kinesis: services/kinesis.md
+    - Managed Service for Apache Flink: services/kinesisanalytics.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
     - Step Functions: services/step-functions.md
@@ -104,11 +106,13 @@ nav:
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch RUM: services/rum.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
     - EKS: services/eks.md
+    - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
     - Lightsail: services/lightsail.md

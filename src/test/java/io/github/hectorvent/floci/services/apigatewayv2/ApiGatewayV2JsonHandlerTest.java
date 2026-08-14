@@ -48,7 +48,11 @@ class ApiGatewayV2JsonHandlerTest {
                 .header("X-Amz-Target", TARGET_PREFIX + "CreateApi")
                 .header("Authorization", AUTH_HEADER)
                 .body("""
-                        {"Name":"json11-test","ProtocolType":"HTTP"}
+                        {
+                          "Name":"json11-test",
+                          "ProtocolType":"HTTP",
+                          "DisableExecuteApiEndpoint":true
+                        }
                         """)
                 .when().post("/")
                 .then()
@@ -59,7 +63,20 @@ class ApiGatewayV2JsonHandlerTest {
                 // AWS defaults must be populated
                 .body("RouteSelectionExpression", equalTo("${request.method} ${request.path}"))
                 .body("ApiKeySelectionExpression", equalTo("$request.header.x-api-key"))
+                .body("DisableExecuteApiEndpoint", equalTo(true))
                 .extract().path("ApiId");
+
+        given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "UpdateApi")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s","DisableExecuteApiEndpoint":false}
+                        """.formatted(apiId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("DisableExecuteApiEndpoint", equalTo(false));
     }
 
     @Test

@@ -3,8 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
@@ -12,12 +11,17 @@ import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.Volume;
+import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -63,6 +67,36 @@ class Ec2ServiceTest {
 
         assertEquals("MissingParameter", error.getErrorCode());
         assertEquals("The request must contain the parameter ImageId", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createSubnetRequiresVpcIdInsteadOfNotFound() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createSubnet(
+                "us-east-1", null, "10.0.1.0/24", null));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The request must contain the parameter VpcId", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createSubnetRejectsBlankVpcIdInsteadOfNotFound() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createSubnet(
+                "us-east-1", "   ", "10.0.1.0/24", null));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The request must contain the parameter VpcId", error.getMessage());
         assertEquals(400, error.getHttpStatus());
     }
 
@@ -342,6 +376,72 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void deleteKeyPairByNameRemovesItFromTheStore() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "by-name");
+        service.deleteKeyPair("us-east-1", "by-name", null);
+
+        // A deleted key pair is gone for good: describe by name must report NotFound
+        // rather than returning the key that DeleteKeyPair claimed to remove.
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of("by-name"), List.of()));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteKeyPairByNameLeavesOtherKeysAndRegionsIntact() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "target");
+        service.createKeyPair("us-east-1", "bystander");
+        service.createKeyPair("eu-west-1", "target");
+
+        service.deleteKeyPair("us-east-1", "target", null);
+
+        // Deleting resolves through the store key, so it must not take the same-named
+        // key in another region — nor any other key in the same region — with it.
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("bystander"), List.of()).size());
+        assertEquals(1, service.describeKeyPairs("eu-west-1", List.of("target"), List.of()).size());
+    }
+
+    @Test
+    void deleteKeyPairByIdRemovesItFromTheStore() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        String keyPairId = service.createKeyPair("us-east-1", "by-id").getKeyPairId();
+        service.deleteKeyPair("us-east-1", null, keyPairId);
+
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteKeyPairForUnknownNameIsANoOp() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "present-key");
+
+        // Real EC2 DeleteKeyPair is idempotent — deleting a key that does not exist
+        // succeeds rather than raising InvalidKeyPair.NotFound.
+        service.deleteKeyPair("us-east-1", "never-existed", null);
+
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("present-key"), List.of()).size());
+    }
+
+    @Test
     void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -361,7 +461,7 @@ class Ec2ServiceTest {
 
     @Test
     void describeSnapshotsDefaultsToOwnedSnapshots() {
-        InMemoryStorage<String, Snapshot> snapshotStore = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Snapshot> snapshotStore = AccountAwareStorageBackend.inMemory("000000000000");
         Snapshot foreign = new Snapshot();
         foreign.setSnapshotId("snap-foreign");
         foreign.setOwnerId("111111111111");
@@ -391,6 +491,402 @@ class Ec2ServiceTest {
         return mapping;
     }
 
+    @Test
+    void attachVolumeMarksVolumeInUseWithAttachmentDetails() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        String instanceId = inst.getInstanceId();
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
+                false, 0, null, null, List.of());
+        VolumeAttachment response = service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
+
+        assertEquals(volume.getVolumeId(), response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals("/dev/sdf", response.getDevice());
+        assertEquals("attached", response.getState());
+        assertFalse(response.isDeleteOnTermination());
+        Volume attached = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("in-use", attached.getState());
+        assertEquals(1, attached.getAttachments().size());
+        assertEquals(instanceId, attached.getAttachments().getFirst().getInstanceId());
+        assertEquals("/dev/sdf", attached.getAttachments().getFirst().getDevice());
+        assertEquals("attached", attached.getAttachments().getFirst().getState());
+        assertFalse(attached.getAttachments().getFirst().isDeleteOnTermination());
+    }
+
+    @Test
+    void attachVolumeThrowsWithDifferentAZ() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        String volumeAz = List.of("us-east-1a", "us-east-1b", "us-east-1c").stream()
+                .filter(az -> !az.equals(instanceAz))
+                .findFirst()
+                .orElseThrow();
+        Volume volume = service.createVolume("us-east-1", volumeAz, "gp3", 8,
+                false, 0, null, null, List.of());
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.attachVolume("us-east-1", volume.getVolumeId(), inst.getInstanceId(), "/dev/sdf"));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void attachVolumeThrowsWithIncorrectInstanceState() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.pending());
+        String az = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", az, "gp3", 8,
+                false, 0, null, null, List.of());
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.attachVolume("us-east-1", volume.getVolumeId(), inst.getInstanceId(), "/dev/sdf"));
+        assertEquals("IncorrectInstanceState", error.getErrorCode());
+    }
+
+    @Test
+    void detachVolumeMarksVolumeAvailableAndClearsAttachment() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        String instanceId = inst.getInstanceId();
+        String instanceAz = inst.getPlacement().getAvailabilityZone();
+        Volume volume = service.createVolume("us-east-1", instanceAz, "gp3", 8,
+                false, 0, null, null, List.of());
+        service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf");
+
+        VolumeAttachment response = service.detachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/sdf", false);
+
+        assertEquals(volume.getVolumeId(), response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals("/dev/sdf", response.getDevice());
+        assertEquals("detached", response.getState());
+        assertFalse(response.isDeleteOnTermination());
+        Volume detached = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("available", detached.getState());
+        assertTrue(detached.getAttachments().isEmpty());
+    }
+
+    @Test
+    void detachRootVolumeRequiresForceAndStopped() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        String instanceId = inst.getInstanceId();
+        String rootVolumeId = inst.getRootVolumeId();
+        String rootDeviceName = inst.getRootDeviceName();
+
+        // forced but not stopped
+        inst.setState(InstanceState.running());
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, true));
+        assertEquals("OperationNotPermitted", error.getErrorCode());
+        AwsException errorWithoutInstanceId = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, null, null, true));
+        assertEquals("OperationNotPermitted", errorWithoutInstanceId.getErrorCode());
+
+        // stopped but not forced
+        inst.setState(InstanceState.stopped());
+        error = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, false));
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        errorWithoutInstanceId = assertThrows(AwsException.class,
+                () -> service.detachVolume("us-east-1", rootVolumeId, null, null, false));
+        assertEquals("InvalidParameterCombination", errorWithoutInstanceId.getErrorCode());
+
+        // success
+        VolumeAttachment response = service.detachVolume("us-east-1", rootVolumeId, instanceId, rootDeviceName, true);
+        assertEquals(rootVolumeId, response.getVolumeId());
+        assertEquals(instanceId, response.getInstanceId());
+        assertEquals(rootDeviceName, response.getDevice());
+        assertEquals("detached", response.getState());
+        assertTrue(response.isDeleteOnTermination());
+
+        Volume detached = service.describeVolumes("us-east-1", List.of(rootVolumeId), Map.of()).getFirst();
+        assertEquals("available", detached.getState());
+    }
+
+    // =========================================================================
+    // Managed prefix lists
+    // =========================================================================
+
+    private static Ec2Service prefixListService() {
+        return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+    }
+
+    @Test
+    void createManagedPrefixListStoresEntriesAtVersionOne() {
+        Ec2Service service = prefixListService();
+
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", "corporate")), List.of());
+
+        assertTrue(list.getPrefixListId().startsWith("pl-"));
+        assertEquals("create-complete", list.getState());
+        assertEquals(1, list.getVersion());
+        assertEquals("000000000000", list.getOwnerId());
+        assertEquals("arn:aws:ec2:us-east-1:000000000000:prefix-list/" + list.getPrefixListId(),
+                list.getPrefixListArn());
+        assertEquals(1, list.currentEntries().size());
+        assertEquals("corporate", list.currentEntries().getFirst().getDescription());
+    }
+
+    @Test
+    void createManagedPrefixListRejectsMoreEntriesThanMaxEntries() {
+        Ec2Service service = prefixListService();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createManagedPrefixList(
+                "us-east-1", "corp", "IPv4", 1,
+                List.of(new PrefixListEntry("10.0.0.0/8", null), new PrefixListEntry("10.1.0.0/16", null)),
+                List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void createManagedPrefixListRejectsCidrOfTheWrongAddressFamily() {
+        Ec2Service service = prefixListService();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createManagedPrefixList(
+                "us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("2001:db8::/32", null)), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void describeManagedPrefixListsIncludesAwsManagedAndIsRegionScoped() {
+        Ec2Service service = prefixListService();
+        service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5, List.of(), List.of());
+
+        List<ManagedPrefixList> east = service.describeManagedPrefixLists("us-east-1", List.of(), Map.of());
+        assertEquals(3, east.size());
+        assertTrue(east.stream().anyMatch(l -> "com.amazonaws.us-east-1.s3".equals(l.getPrefixListName())));
+        assertTrue(east.stream().anyMatch(l -> "corp".equals(l.getPrefixListName())));
+
+        // The customer list belongs to us-east-1; only the AWS-managed pair shows up elsewhere.
+        List<ManagedPrefixList> west = service.describeManagedPrefixLists("us-west-2", List.of(), Map.of());
+        assertEquals(2, west.size());
+        assertTrue(west.stream().allMatch(ManagedPrefixList::isAwsManaged));
+        assertTrue(west.stream().anyMatch(l -> "com.amazonaws.us-west-2.s3".equals(l.getPrefixListName())));
+    }
+
+    @Test
+    void createManagedPrefixListAcceptsIpv6Entries() {
+        Ec2Service service = prefixListService();
+
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp-v6", "IPv6", 5,
+                List.of(new PrefixListEntry("2001:db8::/32", "lab")), List.of());
+
+        assertEquals("IPv6", list.getAddressFamily());
+        assertEquals("2001:db8::/32", list.currentEntries().getFirst().getCidr());
+
+        service.modifyManagedPrefixList("us-east-1", list.getPrefixListId(), null, null, null,
+                List.of(new PrefixListEntry("2001:db8:1::/48", null)), List.of());
+        assertEquals(2, service.getManagedPrefixListEntries("us-east-1", list.getPrefixListId(), null).size());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyManagedPrefixList(
+                "us-east-1", list.getPrefixListId(), null, null, null,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void managedPrefixListLookupsRejectAMissingId() {
+        Ec2Service service = prefixListService();
+
+        for (String missing : new String[] {null, "  "}) {
+            assertEquals("MissingParameter", assertThrows(AwsException.class, () ->
+                    service.getManagedPrefixListEntries("us-east-1", missing, null)).getErrorCode());
+            assertEquals("MissingParameter", assertThrows(AwsException.class, () ->
+                    service.deleteManagedPrefixList("us-east-1", missing)).getErrorCode());
+            assertEquals("MissingParameter", assertThrows(AwsException.class, () ->
+                    service.modifyManagedPrefixList("us-east-1", missing, null, null, null,
+                            List.of(), List.of())).getErrorCode());
+        }
+    }
+
+    @Test
+    void describeManagedPrefixListsFiltersByName() {
+        Ec2Service service = prefixListService();
+        service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5, List.of(), List.of());
+
+        List<ManagedPrefixList> found = service.describeManagedPrefixLists("us-east-1", List.of(),
+                Map.of("prefix-list-name", List.of("corp")));
+
+        assertEquals(1, found.size());
+        assertEquals("corp", found.getFirst().getPrefixListName());
+    }
+
+    @Test
+    void describeManagedPrefixListsRejectsUnknownId() {
+        Ec2Service service = prefixListService();
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.describeManagedPrefixLists("us-east-1", List.of("pl-missing"), Map.of()));
+        assertEquals("InvalidPrefixListID.NotFound", error.getErrorCode());
+    }
+
+    @Test
+    void modifyBumpsVersionAndKeepsEarlierVersionsRetrievable() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
+
+        ManagedPrefixList modified = service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(),
+                null, null, null, List.of(new PrefixListEntry("192.168.0.0/16", "lab")), List.of());
+
+        assertEquals(2, modified.getVersion());
+        assertEquals("modify-complete", modified.getState());
+        assertEquals(2, service.getManagedPrefixListEntries("us-east-1", created.getPrefixListId(), null).size());
+        assertEquals(1, service.getManagedPrefixListEntries("us-east-1", created.getPrefixListId(), 1L).size());
+    }
+
+    @Test
+    void modifyAppliesRemovalsBeforeAdditionsSoADescriptionCanBeReplaced() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", "old")), List.of());
+
+        service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(), null, null, null,
+                List.of(new PrefixListEntry("10.0.0.0/8", "new")), List.of("10.0.0.0/8"));
+
+        List<PrefixListEntry> entries =
+                service.getManagedPrefixListEntries("us-east-1", created.getPrefixListId(), null);
+        assertEquals(1, entries.size());
+        assertEquals("new", entries.getFirst().getDescription());
+    }
+
+    @Test
+    void renamingDoesNotCreateANewVersion() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
+
+        ManagedPrefixList renamed = service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(),
+                null, "corp-renamed", null, List.of(), List.of());
+
+        assertEquals("corp-renamed", renamed.getPrefixListName());
+        assertEquals(1, renamed.getVersion());
+    }
+
+    @Test
+    void modifyWithStaleCurrentVersionIsRejected() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
+        service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(), null, null, null,
+                List.of(new PrefixListEntry("192.168.0.0/16", null)), List.of());
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(), 1L, null, null,
+                        List.of(new PrefixListEntry("172.16.0.0/12", null)), List.of()));
+        assertEquals("PrefixListVersionMismatch", error.getErrorCode());
+    }
+
+    @Test
+    void awsManagedListsCannotBeModifiedOrDeleted() {
+        Ec2Service service = prefixListService();
+
+        AwsException modifyError = assertThrows(AwsException.class, () ->
+                service.modifyManagedPrefixList("us-east-1", "pl-63a5400a", null, "hijacked", null,
+                        List.of(), List.of()));
+        assertEquals("UnsupportedOperation", modifyError.getErrorCode());
+
+        AwsException deleteError = assertThrows(AwsException.class, () ->
+                service.deleteManagedPrefixList("us-east-1", "pl-63a5400a"));
+        assertEquals("UnsupportedOperation", deleteError.getErrorCode());
+    }
+
+    @Test
+    void deleteRemovesTheListFromDescribe() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+
+        ManagedPrefixList deleted = service.deleteManagedPrefixList("us-east-1", created.getPrefixListId());
+
+        assertEquals("delete-complete", deleted.getState());
+        assertThrows(AwsException.class, () ->
+                service.describeManagedPrefixLists("us-east-1", List.of(created.getPrefixListId()), Map.of()));
+    }
+
+    @Test
+    void legacyDescribePrefixListsProjectsTheSameAwsManagedData() {
+        Ec2Service service = prefixListService();
+
+        var legacy = service.describePrefixLists("us-east-1", List.of(),
+                Map.of("prefix-list-name", List.of("com.amazonaws.us-east-1.s3")));
+
+        assertEquals(1, legacy.size());
+        assertEquals("pl-63a5400a", legacy.getFirst().getPrefixListId());
+        assertEquals(List.of("52.216.0.0/15", "54.231.0.0/16"), legacy.getFirst().getCidrs());
+    }
+
+    @Test
+    void modifyRejectsANonPositiveMaxEntries() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+
+        // The list is empty, so a size check alone would let a zero capacity through.
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(), null, null, 0,
+                        List.of(), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals(5, service.describeManagedPrefixLists("us-east-1",
+                List.of(created.getPrefixListId()), Map.of()).getFirst().getMaxEntries());
+    }
+
+    @Test
+    void createTagsOnAPrefixListIsVisibleToDescribeAndTagFilters() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+
+        service.createTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", "prod")));
+
+        ManagedPrefixList described = service.describeManagedPrefixLists("us-east-1",
+                List.of(created.getPrefixListId()), Map.of()).getFirst();
+        assertEquals(1, described.getTags().size());
+        assertEquals("prod", described.getTags().getFirst().getValue());
+
+        assertEquals(1, service.describeManagedPrefixLists("us-east-1", List.of(),
+                Map.of("tag:env", List.of("prod"))).size());
+
+        assertEquals("prefix-list", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(created.getPrefixListId()))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("prefix-list"))).size());
+
+        service.deleteTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", null)));
+        assertTrue(service.describeManagedPrefixLists("us-east-1", List.of(created.getPrefixListId()), Map.of())
+                .getFirst().getTags().isEmpty());
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -403,26 +899,26 @@ class Ec2ServiceTest {
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> overrides;
+        private final Map<String, AccountAwareStorageBackend<?>> overrides;
 
         private InMemoryStorageFactory() {
             this(Map.of());
         }
 
-        private InMemoryStorageFactory(Map<String, StorageBackend<String, ?>> overrides) {
+        private InMemoryStorageFactory(Map<String, AccountAwareStorageBackend<?>> overrides) {
             super(null, null);
             this.overrides = overrides;
         }
 
         @Override
         @SuppressWarnings("unchecked")
-        public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
-            StorageBackend<String, ?> override = overrides.get(fileName);
+            AccountAwareStorageBackend<?> override = overrides.get(fileName);
             if (override != null) {
-                return (StorageBackend<String, V>) override;
+                return (AccountAwareStorageBackend<V>) override;
             }
-            return new InMemoryStorage<>();
+            return AccountAwareStorageBackend.inMemory("000000000000");
         }
     }
 }

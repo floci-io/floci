@@ -39,6 +39,8 @@ public class CodeBuildService {
     private Map<String, Map<String, SourceCredential>> sourceCredentials = new ConcurrentHashMap<>();
     // key: region -> buildId -> build (transient: builds are runtime state)
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Build>> builds = new ConcurrentHashMap<>();
+    // key: region -> buildId -> request buildspec override (transient: builds are runtime state)
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, String>> buildspecOverrides = new ConcurrentHashMap<>();
     // key: region:projectName -> build counter (transient)
     private final ConcurrentHashMap<String, AtomicLong> buildCounters = new ConcurrentHashMap<>();
 
@@ -106,6 +108,10 @@ public class CodeBuildService {
 
     private Map<String, Build> buildsFor(String region) {
         return builds.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private Map<String, String> buildspecOverridesFor(String region) {
+        return buildspecOverrides.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
     // ---- Projects ----
@@ -448,10 +454,14 @@ public class CodeBuildService {
         build.setPhases(new CopyOnWriteArrayList<>());
 
         buildsFor(region).put(buildId, build);
+        if (buildspecOverride != null && !buildspecOverride.isBlank()) {
+            buildspecOverridesFor(region).put(buildId, buildspecOverride);
+        }
+        Build responseBuild = copyBuild(build);
 
         runner.startBuild(region, build, project, buildspecOverride);
 
-        return build;
+        return responseBuild;
     }
 
     public Build getBuild(String region, String buildId) {
@@ -499,8 +509,32 @@ public class CodeBuildService {
 
     public Build retryBuild(String region, String account, String buildId) {
         Build original = getBuild(region, buildId);
+        String buildspecOverride = buildspecOverridesFor(region).get(original.getId());
         return startBuild(region, account, original.getProjectName(),
-                null, original.getEnvironment(), original.getArtifacts(),
+                buildspecOverride, original.getEnvironment(), original.getArtifacts(),
                 null, original.getTimeoutInMinutes(), null, null);
+    }
+
+    private Build copyBuild(Build source) {
+        Build copy = new Build();
+        copy.setId(source.getId());
+        copy.setArn(source.getArn());
+        copy.setBuildNumber(source.getBuildNumber());
+        copy.setBuildStatus(source.getBuildStatus());
+        copy.setBuildComplete(source.getBuildComplete());
+        copy.setCurrentPhase(source.getCurrentPhase());
+        copy.setProjectName(source.getProjectName());
+        copy.setInitiator(source.getInitiator());
+        copy.setStartTime(source.getStartTime());
+        copy.setEndTime(source.getEndTime());
+        copy.setSource(source.getSource());
+        copy.setArtifacts(source.getArtifacts());
+        copy.setEnvironment(source.getEnvironment());
+        copy.setLogs(source.getLogs());
+        copy.setPhases(source.getPhases() != null ? new ArrayList<>(source.getPhases()) : null);
+        copy.setTimeoutInMinutes(source.getTimeoutInMinutes());
+        copy.setQueuedTimeoutInMinutes(source.getQueuedTimeoutInMinutes());
+        copy.setEncryptionKey(source.getEncryptionKey());
+        return copy;
     }
 }
