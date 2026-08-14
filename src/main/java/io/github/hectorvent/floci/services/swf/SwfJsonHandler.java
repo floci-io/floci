@@ -335,9 +335,8 @@ public class SwfJsonHandler {
      */
     private <T> Response pagedList(JsonNode request, String itemsField, List<T> items,
                                    Function<T, ObjectNode> render) {
-        int pageSize = service.registrationPageSize(optionalInt(request, "maximumPageSize"));
-        int offset = requirePageToken(text(request, "nextPageToken"));
-        int from = Math.min(offset, items.size());
+        int pageSize = service.pageSize(optionalInt(request, "maximumPageSize"));
+        int from = Math.min(decodePageToken(text(request, "nextPageToken")).offset(), items.size());
         int to = Math.min(from + pageSize, items.size());
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -346,7 +345,7 @@ public class SwfJsonHandler {
             array.add(render.apply(item));
         }
         if (to < items.size()) {
-            response.put("nextPageToken", encodePageToken(to));
+            response.put("nextPageToken", encodePageToken(to, null));
         }
         return Response.ok(response).build();
     }
@@ -356,19 +355,7 @@ public class SwfJsonHandler {
         List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(region, text(request, "domain"),
                 nested(request, "execution", "workflowId"), nested(request, "execution", "runId"), reverseOrder);
 
-        int pageSize = service.historyPageSize(optionalInt(request, "maximumPageSize"));
-        int offset = decodePageToken(text(request, "nextPageToken"));
-        int end = Math.min(offset + pageSize, events.size());
-
-        ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode array = response.putArray("events");
-        for (SwfHistoryEvent event : events.subList(Math.min(offset, events.size()), end)) {
-            array.add(historyEvent(event));
-        }
-        if (end < events.size()) {
-            response.put("nextPageToken", encodePageToken(end));
-        }
-        return Response.ok(response).build();
+        return pagedList(request, "events", events, this::historyEvent);
     }
 
     private Response listExecutions(JsonNode request, String region, boolean closed) {
@@ -379,19 +366,7 @@ public class SwfJsonHandler {
             java.util.Collections.reverse(executions);
         }
 
-        int pageSize = service.historyPageSize(optionalInt(request, "maximumPageSize"));
-        int offset = decodePageToken(text(request, "nextPageToken"));
-        int end = Math.min(offset + pageSize, executions.size());
-
-        ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode array = response.putArray("executionInfos");
-        for (SwfWorkflowExecution execution : executions.subList(Math.min(offset, executions.size()), end)) {
-            array.add(executionInfo(execution));
-        }
-        if (end < executions.size()) {
-            response.put("nextPageToken", encodePageToken(end));
-        }
-        return Response.ok(response).build();
+        return pagedList(request, "executionInfos", executions, this::executionInfo);
     }
 
     private Response countExecutions(JsonNode request, String region, boolean closed) {
@@ -502,7 +477,10 @@ public class SwfJsonHandler {
         SwfDecisionTask task;
         int offset;
         if (pageToken != null && !pageToken.isEmpty()) {
-            DecisionPage page = decodeDecisionPageToken(pageToken);
+            Page page = decodePageToken(pageToken);
+            if (page.taskToken() == null) {
+                throw SwfFaults.invalidPageToken();
+            }
             task = service.decisionTaskForToken(page.taskToken());
             offset = page.offset();
         } else {
@@ -527,7 +505,7 @@ public class SwfJsonHandler {
             events = events.stream().filter(e -> e.getEventId() >= from).toList();
         }
 
-        int pageSize = service.historyPageSize(optionalInt(request, "maximumPageSize"));
+        int pageSize = service.pageSize(optionalInt(request, "maximumPageSize"));
         int end = Math.min(offset + pageSize, events.size());
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -540,7 +518,7 @@ public class SwfJsonHandler {
         }
         response.put("previousStartedEventId", task.getPreviousStartedEventId());
         if (end < events.size()) {
-            response.put("nextPageToken", encodeDecisionPageToken(task.getTaskToken(), end));
+            response.put("nextPageToken", encodePageToken(end, task.getTaskToken()));
         }
 
         SwfWorkflowExecution execution = service.describeWorkflowExecution(region, task.getDomain(),
@@ -748,29 +726,28 @@ public class SwfJsonHandler {
     }
 
     /**
-     * Page tokens are an opaque offset. SWF's own tokens are opaque blobs, so callers must
-     * not parse them; a malformed token restarts from the beginning rather than faulting,
-     * which is what the live service does with a stale token.
+     * A decoded continuation token: how far the caller has read, and — for
+     * {@code PollForDecisionTask} — which decision task the page belongs to.
+     *
+     * <p>SWF tokens are opaque blobs, so the encoding is ours to choose; a corrupt one is
+     * rejected with {@code ValidationException: Invalid token} rather than restarting at the
+     * first page, which would turn a caller's paging loop into an infinite one.
      */
-    private static String encodePageToken(int offset) {
+    private record Page(int offset, String taskToken) {
+
+        static final Page FIRST = new Page(0, null);
+    }
+
+    private static String encodePageToken(int offset, String taskToken) {
+        String body = "offset=" + offset + (taskToken == null ? "" : "\ntask=" + taskToken);
         return java.util.Base64.getEncoder()
-                .encodeToString(("offset=" + offset).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                .encodeToString(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
-    /**
-     * A {@code PollForDecisionTask} continuation token: the task it belongs to, and how far
-     * through that task's history the caller has read.
-     */
-    private record DecisionPage(String taskToken, int offset) {
-    }
-
-    private static String encodeDecisionPageToken(String taskToken, int offset) {
-        return java.util.Base64.getEncoder().encodeToString(
-                ("offset=" + offset + "\ntask=" + taskToken)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-    }
-
-    private static DecisionPage decodeDecisionPageToken(String token) {
+    private static Page decodePageToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return Page.FIRST;
+        }
         String decoded;
         try {
             decoded = new String(java.util.Base64.getDecoder().decode(token),
@@ -778,56 +755,20 @@ public class SwfJsonHandler {
         } catch (IllegalArgumentException e) {
             throw SwfFaults.invalidPageToken();
         }
+        if (!decoded.startsWith("offset=")) {
+            throw SwfFaults.invalidPageToken();
+        }
         int split = decoded.indexOf("\ntask=");
-        if (!decoded.startsWith("offset=") || split < 0) {
-            throw SwfFaults.invalidPageToken();
-        }
+        String offsetPart = split < 0 ? decoded.substring("offset=".length())
+                : decoded.substring("offset=".length(), split);
+        String taskToken = split < 0 ? null : decoded.substring(split + "\ntask=".length());
         try {
-            int offset = Integer.parseInt(decoded.substring("offset=".length(), split));
-            String taskToken = decoded.substring(split + "\ntask=".length());
-            if (offset < 0 || taskToken.isEmpty()) {
+            int offset = Integer.parseInt(offsetPart);
+            if (offset < 0 || (taskToken != null && taskToken.isEmpty())) {
                 throw SwfFaults.invalidPageToken();
             }
-            return new DecisionPage(taskToken, offset);
+            return new Page(offset, taskToken);
         } catch (NumberFormatException e) {
-            throw SwfFaults.invalidPageToken();
-        }
-    }
-
-    private static int decodePageToken(String token) {
-        if (token == null || token.isEmpty()) {
-            return 0;
-        }
-        try {
-            String decoded = new String(java.util.Base64.getDecoder().decode(token),
-                    java.nio.charset.StandardCharsets.UTF_8);
-            return Integer.parseInt(decoded.substring("offset=".length()));
-        } catch (IllegalArgumentException | IndexOutOfBoundsException e) {
-            return 0;
-        }
-    }
-
-    /**
-     * Like {@link #decodePageToken(String)} but rejects a token it cannot read. The live
-     * service answers a corrupt token with {@code ValidationException: Invalid token} rather
-     * than quietly returning the first page, which would make a paging loop repeat forever.
-     */
-    private static int requirePageToken(String token) {
-        if (token == null || token.isEmpty()) {
-            return 0;
-        }
-        try {
-            String decoded = new String(java.util.Base64.getDecoder().decode(token),
-                    java.nio.charset.StandardCharsets.UTF_8);
-            if (!decoded.startsWith("offset=")) {
-                throw SwfFaults.invalidPageToken();
-            }
-            int offset = Integer.parseInt(decoded.substring("offset=".length()));
-            if (offset < 0) {
-                throw SwfFaults.invalidPageToken();
-            }
-            return offset;
-        } catch (IllegalArgumentException | IndexOutOfBoundsException e) {
             throw SwfFaults.invalidPageToken();
         }
     }

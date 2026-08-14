@@ -64,9 +64,8 @@ public class SwfService implements Resettable {
     private static final Logger LOG = Logger.getLogger(SwfService.class);
 
     private static final int MAX_TAGS = 50;
-    private static final int DEFAULT_HISTORY_PAGE_SIZE = 1000;
-    /** SWF caps maximumPageSize at 1000 on the registration lists. */
-    private static final int MAX_REGISTRATION_PAGE_SIZE = 1000;
+    /** SWF caps maximumPageSize at 1000 on every paginated operation. */
+    private static final int MAX_PAGE_SIZE = 1000;
 
     private final StorageBackend<String, SwfDomain> domainStore;
     private final StorageBackend<String, SwfWorkflowType> workflowTypeStore;
@@ -449,28 +448,26 @@ public class SwfService implements Resettable {
         return events;
     }
 
-    public int historyPageSize(Integer requested) {
-        if (requested == null || requested <= 0) {
-            return DEFAULT_HISTORY_PAGE_SIZE;
-        }
-        return Math.min(requested, DEFAULT_HISTORY_PAGE_SIZE);
-    }
-
     /**
-     * Page size for the registration lists (ListDomains, ListWorkflowTypes,
-     * ListActivityTypes).
+     * The page size for every paginated operation: the registration lists, the history, the
+     * execution listings, and PollForDecisionTask.
      *
-     * <p>Measured against the live service: an absent or zero {@code maximumPageSize} means
-     * "no caller limit" and returns everything up to the service maximum, while a value above
-     * 1000 is rejected rather than clamped.
+     * <p>Measured against the live service on all four: an absent or zero
+     * {@code maximumPageSize} means "no caller limit" and returns everything up to the service
+     * maximum, above 1000 is rejected rather than clamped, and a negative value is rejected
+     * with its own constraint message.
      */
-    public int registrationPageSize(Integer requested) {
+    public int pageSize(Integer requested) {
         if (requested == null || requested == 0) {
-            return MAX_REGISTRATION_PAGE_SIZE;
+            return MAX_PAGE_SIZE;
         }
-        if (requested < 0 || requested > MAX_REGISTRATION_PAGE_SIZE) {
+        if (requested < 0) {
             throw SwfFaults.validationConstraint(String.valueOf(requested), "maximumPageSize",
-                    "Member must have value less than or equal to " + MAX_REGISTRATION_PAGE_SIZE);
+                    "Member must have value greater than or equal to 0");
+        }
+        if (requested > MAX_PAGE_SIZE) {
+            throw SwfFaults.validationConstraint(String.valueOf(requested), "maximumPageSize",
+                    "Member must have value less than or equal to " + MAX_PAGE_SIZE);
         }
         return requested;
     }

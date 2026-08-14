@@ -1463,6 +1463,46 @@ class SwfIntegrationTest {
                 ("offset=0\ntask=" + taskToken).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
+    @Test
+    void everyPaginatedOperation_rejectsAnOversizedPageSize() {
+        String domain = uniqueName("pagesize");
+        registerDomain(domain);
+        registerWorkflowType(domain, "W", "1.0");
+        Response started = call("StartWorkflowExecution", """
+                {"domain": "%s", "workflowId": "wf-ps",
+                 "workflowType": {"name": "W", "version": "1.0"},
+                 "taskList": {"name": "tl"}}
+                """.formatted(domain));
+        String runId = started.path("runId");
+
+        // The live service applies the same 1000 cap to the history and the execution listings,
+        // not only to the registration lists — the history used to clamp instead of rejecting.
+        call("GetWorkflowExecutionHistory", """
+                {"domain": "%s", "execution": {"workflowId": "wf-ps", "runId": "%s"},
+                 "maximumPageSize": 1001}
+                """.formatted(domain, runId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("com.amazon.coral.validate#ValidationException"))
+                .body("message", containsString("less than or equal to 1000"));
+
+        call("ListOpenWorkflowExecutions", """
+                {"domain": "%s", "startTimeFilter": {"oldestDate": 0}, "maximumPageSize": 1001}
+                """.formatted(domain))
+                .then()
+                .statusCode(400)
+                .body("message", containsString("less than or equal to 1000"));
+
+        // A negative page size has its own constraint message.
+        call("GetWorkflowExecutionHistory", """
+                {"domain": "%s", "execution": {"workflowId": "wf-ps", "runId": "%s"},
+                 "maximumPageSize": -1}
+                """.formatted(domain, runId))
+                .then()
+                .statusCode(400)
+                .body("message", containsString("greater than or equal to 0"));
+    }
+
     // ───────────────────────────── Counting and tags ─────────────────────────
 
     @Test

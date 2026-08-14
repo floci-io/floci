@@ -659,17 +659,17 @@ class SwfServiceTest {
     }
 
     @Test
-    void registrationPageSize_matchesTheLiveServiceLimits() {
+    void pageSize_matchesTheLiveServiceLimits() {
         // Absent or zero means "no caller limit"; above the 1000 cap is rejected, not clamped.
-        assertEquals(1000, service.registrationPageSize(null));
-        assertEquals(1000, service.registrationPageSize(0));
-        assertEquals(25, service.registrationPageSize(25));
-        assertEquals(1000, service.registrationPageSize(1000));
+        assertEquals(1000, service.pageSize(null));
+        assertEquals(1000, service.pageSize(0));
+        assertEquals(25, service.pageSize(25));
+        assertEquals(1000, service.pageSize(1000));
 
-        AwsException tooBig = assertThrows(AwsException.class, () -> service.registrationPageSize(1001));
+        AwsException tooBig = assertThrows(AwsException.class, () -> service.pageSize(1001));
         assertEquals("ValidationException", tooBig.getErrorCode());
         assertTrue(tooBig.getMessage().contains("less than or equal to 1000"), tooBig.getMessage());
-        assertThrows(AwsException.class, () -> service.registrationPageSize(-1));
+        assertThrows(AwsException.class, () -> service.pageSize(-1));
     }
 
     @Test
