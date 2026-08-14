@@ -21,6 +21,8 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -1363,6 +1365,102 @@ class SwfIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("com.amazonaws.swf.base.model#DomainAlreadyExistsFault"));
+    }
+
+    @Test
+    void pollForDecisionTask_continuationReturnsTheSameTasksNextPage() {
+        String domain = uniqueName("poll-paging");
+        registerDomain(domain);
+        registerWorkflowType(domain, "W", "1.0");
+        call("StartWorkflowExecution", """
+                {"domain": "%s", "workflowId": "wf-paged",
+                 "workflowType": {"name": "W", "version": "1.0"},
+                 "taskList": {"name": "tl"}}
+                """.formatted(domain)).then().statusCode(200);
+
+        // Page 1 claims the task; the history is 3 events, so a page size of 2 leaves a token.
+        Response first = call("PollForDecisionTask", """
+                {"domain": "%s", "taskList": {"name": "tl"}, "maximumPageSize": 2}
+                """.formatted(domain));
+        first.then()
+                .statusCode(200)
+                .body("events.size()", equalTo(2))
+                .body("nextPageToken", notNullValue());
+        String taskToken = first.path("taskToken");
+        int startedEventId = first.path("startedEventId");
+
+        // The continuation must be the SAME task's next page, not a new claim: AWS documents
+        // that "calling PollForDecisionTask with a nextPageToken doesn't return a new decision
+        // task". Previously this re-polled and answered with an empty task.
+        Response second = call("PollForDecisionTask", """
+                {"domain": "%s", "taskList": {"name": "tl"}, "maximumPageSize": 2,
+                 "nextPageToken": "%s"}
+                """.formatted(domain, first.path("nextPageToken").toString()));
+        second.then()
+                .statusCode(200)
+                .body("taskToken", equalTo(taskToken))
+                .body("startedEventId", equalTo(startedEventId))
+                .body("workflowExecution.workflowId", equalTo("wf-paged"))
+                .body("events.size()", equalTo(1))
+                .body("nextPageToken", nullValue());
+
+        // The pages are contiguous and do not repeat.
+        List<Integer> firstIds = first.path("events.eventId");
+        List<Integer> secondIds = second.path("events.eventId");
+        assertEquals(List.of(1, 2), firstIds);
+        assertEquals(List.of(3), secondIds);
+    }
+
+    @Test
+    void pollForDecisionTask_startAtPreviousStartedEventTrimsSeenHistory() {
+        String domain = uniqueName("poll-sap");
+        registerDomain(domain);
+        registerWorkflowType(domain, "W", "1.0");
+        call("StartWorkflowExecution", """
+                {"domain": "%s", "workflowId": "wf-sap",
+                 "workflowType": {"name": "W", "version": "1.0"},
+                 "taskList": {"name": "tl"}}
+                """.formatted(domain)).then().statusCode(200);
+
+        // Complete one decision task so previousStartedEventId becomes non-zero, then signal to
+        // get a second task.
+        Response initial = call("PollForDecisionTask", """
+                {"domain": "%s", "taskList": {"name": "tl"}}
+                """.formatted(domain));
+        call("RespondDecisionTaskCompleted", """
+                {"taskToken": "%s", "decisions": [
+                   {"decisionType": "RecordMarker",
+                    "recordMarkerDecisionAttributes": {"markerName": "m0"}}]}
+                """.formatted(initial.path("taskToken").toString())).then().statusCode(200);
+        call("SignalWorkflowExecution", """
+                {"domain": "%s", "workflowId": "wf-sap", "signalName": "go"}
+                """.formatted(domain)).then().statusCode(200);
+
+        Response full = call("PollForDecisionTask", """
+                {"domain": "%s", "taskList": {"name": "tl"}}
+                """.formatted(domain));
+        List<Integer> allIds = full.path("events.eventId");
+        int previousStarted = full.path("previousStartedEventId");
+        assertTrue(previousStarted > 0, "need a completed decision task for this case");
+        assertTrue(allIds.contains(1), "the default poll returns the whole history");
+
+        // Same outstanding task, but asking only for what the decider has not seen. The live
+        // service starts *at* previousStartedEventId, inclusive.
+        Response trimmed = call("PollForDecisionTask", """
+                {"domain": "%s", "taskList": {"name": "tl"}, "startAtPreviousStartedEvent": true,
+                 "nextPageToken": "%s"}
+                """.formatted(domain, encodedFirstPage(full.path("taskToken"))));
+        List<Integer> trimmedIds = trimmed.path("events.eventId");
+        assertFalse(trimmedIds.contains(1),
+                "startAtPreviousStartedEvent must drop already-seen events: " + trimmedIds);
+        assertEquals(previousStarted, trimmedIds.get(0).intValue(),
+                "the window starts at previousStartedEventId inclusive");
+    }
+
+    /** A page-1 continuation token for a task, so a poll resolves that task without claiming. */
+    private static String encodedFirstPage(String taskToken) {
+        return java.util.Base64.getEncoder().encodeToString(
+                ("offset=0\ntask=" + taskToken).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     // ───────────────────────────── Counting and tags ─────────────────────────

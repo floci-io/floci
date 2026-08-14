@@ -487,20 +487,47 @@ public class SwfJsonHandler {
 
     // ─────────────────────────────── Task polling ────────────────────────────
 
+    /**
+     * {@code PollForDecisionTask}.
+     *
+     * <p>A request carrying {@code nextPageToken} continues an earlier poll rather than starting
+     * a new one — the live service documents that "calling PollForDecisionTask with a
+     * nextPageToken doesn't return a new decision task", and answers with the same task's next
+     * history page, same {@code startedEventId} and {@code workflowExecution}. The token
+     * therefore names the task it belongs to, and a continuation resolves that task instead of
+     * claiming another.
+     */
     private Response pollForDecisionTask(JsonNode request, String region) {
-        Optional<SwfDecisionTask> maybeTask = service.pollForDecisionTask(region, text(request, "domain"),
-                nested(request, "taskList", "name"), text(request, "identity"));
-        if (maybeTask.isEmpty()) {
-            return Response.ok(emptyPollResponse()).build();
+        String pageToken = text(request, "nextPageToken");
+        SwfDecisionTask task;
+        int offset;
+        if (pageToken != null && !pageToken.isEmpty()) {
+            DecisionPage page = decodeDecisionPageToken(pageToken);
+            task = service.decisionTaskForToken(page.taskToken());
+            offset = page.offset();
+        } else {
+            Optional<SwfDecisionTask> maybeTask = service.pollForDecisionTask(region,
+                    text(request, "domain"), nested(request, "taskList", "name"),
+                    text(request, "identity"));
+            if (maybeTask.isEmpty()) {
+                return Response.ok(emptyPollResponse()).build();
+            }
+            task = maybeTask.get();
+            offset = 0;
         }
 
-        SwfDecisionTask task = maybeTask.get();
         boolean reverseOrder = request.path("reverseOrder").asBoolean(false);
         List<SwfHistoryEvent> events = service.getWorkflowExecutionHistory(region, task.getDomain(),
                 task.getWorkflowId(), task.getRunId(), reverseOrder);
 
+        // startAtPreviousStartedEvent trims the history to what the decider has not seen,
+        // starting *at* previousStartedEventId — inclusive, measured against the live service.
+        long from = task.getPreviousStartedEventId();
+        if (request.path("startAtPreviousStartedEvent").asBoolean(false) && from > 0) {
+            events = events.stream().filter(e -> e.getEventId() >= from).toList();
+        }
+
         int pageSize = service.historyPageSize(optionalInt(request, "maximumPageSize"));
-        int offset = decodePageToken(text(request, "nextPageToken"));
         int end = Math.min(offset + pageSize, events.size());
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -513,7 +540,7 @@ public class SwfJsonHandler {
         }
         response.put("previousStartedEventId", task.getPreviousStartedEventId());
         if (end < events.size()) {
-            response.put("nextPageToken", encodePageToken(end));
+            response.put("nextPageToken", encodeDecisionPageToken(task.getTaskToken(), end));
         }
 
         SwfWorkflowExecution execution = service.describeWorkflowExecution(region, task.getDomain(),
@@ -728,6 +755,43 @@ public class SwfJsonHandler {
     private static String encodePageToken(int offset) {
         return java.util.Base64.getEncoder()
                 .encodeToString(("offset=" + offset).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /**
+     * A {@code PollForDecisionTask} continuation token: the task it belongs to, and how far
+     * through that task's history the caller has read.
+     */
+    private record DecisionPage(String taskToken, int offset) {
+    }
+
+    private static String encodeDecisionPageToken(String taskToken, int offset) {
+        return java.util.Base64.getEncoder().encodeToString(
+                ("offset=" + offset + "\ntask=" + taskToken)
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static DecisionPage decodeDecisionPageToken(String token) {
+        String decoded;
+        try {
+            decoded = new String(java.util.Base64.getDecoder().decode(token),
+                    java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw SwfFaults.invalidPageToken();
+        }
+        int split = decoded.indexOf("\ntask=");
+        if (!decoded.startsWith("offset=") || split < 0) {
+            throw SwfFaults.invalidPageToken();
+        }
+        try {
+            int offset = Integer.parseInt(decoded.substring("offset=".length(), split));
+            String taskToken = decoded.substring(split + "\ntask=".length());
+            if (offset < 0 || taskToken.isEmpty()) {
+                throw SwfFaults.invalidPageToken();
+            }
+            return new DecisionPage(taskToken, offset);
+        } catch (NumberFormatException e) {
+            throw SwfFaults.invalidPageToken();
+        }
     }
 
     private static int decodePageToken(String token) {

@@ -33,6 +33,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -60,6 +61,7 @@ class SwfServiceTest {
     private List<String> lambdaInvocations;
     private LambdaInvocationResult lambdaResponse;
     private RuntimeException lambdaFailure;
+    private LambdaGate lambdaGate;
 
     @BeforeEach
     void setUp() {
@@ -67,6 +69,7 @@ class SwfServiceTest {
         lambdaInvocations = new ArrayList<>();
         lambdaResponse = new LambdaInvocationResult("{\"ok\":true}", null);
         lambdaFailure = null;
+        lambdaGate = null;
         service = new SwfService(new InMemoryStorageFactory(),
                 new RegionResolver("us-east-1", "000000000000"), clock, recordingLambdaInvoker());
 
@@ -84,6 +87,16 @@ class SwfServiceTest {
         return (region, functionName, payload) -> {
             lambdaInvocations.add(region + "|" + functionName + "|"
                     + new String(payload, StandardCharsets.UTF_8));
+            LambdaGate gate = lambdaGate;
+            if (gate != null) {
+                // Let the test observe that the invocation is in flight, then block in it.
+                gate.started().countDown();
+                try {
+                    gate.release().await(15, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             if (lambdaFailure != null) {
                 throw lambdaFailure;
             }
@@ -657,6 +670,149 @@ class SwfServiceTest {
         assertEquals("ValidationException", tooBig.getErrorCode());
         assertTrue(tooBig.getMessage().contains("less than or equal to 1000"), tooBig.getMessage());
         assertThrows(AwsException.class, () -> service.registrationPageSize(-1));
+    }
+
+    @Test
+    void anInvalidDecisionAnywhereInABatch_leavesTheExecutionUntouched() {
+        String runId = start("wf-batch");
+        SwfDecisionTask task = pollFor("wf-batch");
+        int before = service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-batch", runId, false).size();
+
+        // A valid decision followed by an unknown type: the live service rejects the batch and
+        // persists none of it, so the marker must not appear and the token must stay claimable.
+        AwsException thrown = assertThrows(AwsException.class, () -> service.respondDecisionTaskCompleted(
+                task.getTaskToken(),
+                List.of(new Decision("RecordMarker", Map.of("markerName", "should-not-persist")),
+                        new Decision("NotARealDecision", Map.of())),
+                null));
+        assertEquals("ValidationException", thrown.getErrorCode());
+
+        // Assert the state damage first: on the previous implementation the batch was rejected
+        // too, but only after DecisionTaskCompleted and MarkerRecorded had already been appended
+        // and the token consumed. That — not the message wording — is what this guards.
+        List<SwfHistoryEvent> after =
+                service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-batch", runId, false);
+        assertEquals(before, after.size(), "a rejected batch must not grow the history");
+        assertTrue(after.stream().noneMatch(e -> "DecisionTaskCompleted".equals(e.getEventType())),
+                "DecisionTaskCompleted must not be appended for a rejected batch");
+        assertTrue(after.stream().noneMatch(e -> "MarkerRecorded".equals(e.getEventType())),
+                "an earlier decision in a rejected batch must not be applied");
+
+        // The same token still works, so the decider has a recovery path.
+        service.respondDecisionTaskCompleted(task.getTaskToken(),
+                List.of(new Decision("RecordMarker", Map.of("markerName", "retry-after-reject"))), null);
+        assertTrue(service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-batch", runId, false).stream()
+                        .anyMatch(e -> "MarkerRecorded".equals(e.getEventType())),
+                "the rejected token must remain claimable for a corrected batch");
+
+        // AWS names the offending member by its 1-based position in the list.
+        assertTrue(thrown.getMessage().contains("decisions.2.member.decisionType"), thrown.getMessage());
+    }
+
+    @Test
+    void aChildThatContinuesAsNew_keepsItsParentAndRepointsTheParentsChildEntry() {
+        String parentRun = start("wf-cn-parent");
+        SwfDecisionTask parentTask = pollFor("wf-cn-parent");
+        service.respondDecisionTaskCompleted(parentTask.getTaskToken(),
+                List.of(new Decision("StartChildWorkflowExecution", Map.of(
+                        "workflowId", "wf-cn-child",
+                        "workflowType", Map.of("name", "W", "version", "1"),
+                        "taskList", Map.of("name", "tl"),
+                        "childPolicy", "TERMINATE"))),
+                null);
+
+        SwfWorkflowExecution child = service.describeWorkflowExecution(REGION, DOMAIN, "wf-cn-child", null);
+        String originalChildRun = child.getRunId();
+        assertEquals("wf-cn-parent", child.getParentWorkflowId());
+
+        SwfDecisionTask childTask = pollFor("wf-cn-child");
+        service.respondDecisionTaskCompleted(childTask.getTaskToken(),
+                List.of(new Decision("ContinueAsNewWorkflowExecution", Map.of(
+                        "taskList", Map.of("name", "tl"), "childPolicy", "TERMINATE"))),
+                null);
+
+        SwfWorkflowExecution successor = service.describeWorkflowExecution(REGION, DOMAIN, "wf-cn-child", null);
+        assertNotEquals(originalChildRun, successor.getRunId(), "continue-as-new must open a new run");
+        assertEquals(originalChildRun, successor.getContinuedExecutionRunId());
+
+        // The successor keeps the parent link the live service reports on it.
+        assertEquals("wf-cn-parent", successor.getParentWorkflowId(),
+                "the successor of a child must keep its parent");
+        assertEquals(parentRun, successor.getParentRunId());
+        assertEquals(child.getParentInitiatedEventId(), successor.getParentInitiatedEventId());
+
+        // ...and the parent now tracks the successor, not the closed original run.
+        SwfWorkflowExecution parent =
+                service.describeWorkflowExecution(REGION, DOMAIN, "wf-cn-parent", parentRun);
+        assertEquals(successor.getRunId(), parent.getChildExecutions().get("wf-cn-child"),
+                "the parent must track the successor run, not the closed one");
+
+        // The successor's started event carries the parent, as the live service does.
+        SwfHistoryEvent startedEvent = service
+                .getWorkflowExecutionHistory(REGION, DOMAIN, "wf-cn-child", successor.getRunId(), false)
+                .get(0);
+        assertEquals("WorkflowExecutionStarted", startedEvent.getEventType());
+        assertNotNull(startedEvent.getAttributes().get("parentWorkflowExecution"),
+                "the successor's WorkflowExecutionStarted must name the parent");
+    }
+
+    @Test
+    void aBlockingLambdaDoesNotStallOtherExecutionsInTheDomain() throws Exception {
+        // A decision that schedules a Lambda must not hold the domain lock for the duration of
+        // the invocation: the lock deliberately covers the whole domain, so a cold start would
+        // otherwise stall every unrelated execution in it.
+        CountDownLatch invocationStarted = new CountDownLatch(1);
+        CountDownLatch releaseInvocation = new CountDownLatch(1);
+        lambdaGate = new LambdaGate(invocationStarted, releaseInvocation);
+
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String lambdaRun = service.startWorkflowExecution(new StartWorkflowExecutionRequest(
+                REGION, DOMAIN, "wf-lambda", "LW", "1",
+                null, null, null, null, null, null, null,
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        SwfDecisionTask lambdaTask = pollFor("wf-lambda");
+
+        // A second, unrelated execution in the same domain.
+        String otherRun = start("wf-other");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> scheduling = pool.submit(() -> service.respondDecisionTaskCompleted(
+                    lambdaTask.getTaskToken(),
+                    List.of(new Decision("ScheduleLambdaFunction",
+                            Map.of("id", "lam-1", "name", "blocking-fn"))),
+                    null));
+
+            assertTrue(invocationStarted.await(5, TimeUnit.SECONDS),
+                    "the Lambda invocation should have been reached");
+
+            // While the invocation is blocked, an unrelated execution must still progress.
+            Future<?> signalling = pool.submit(() -> service.signalWorkflowExecution(
+                    REGION, DOMAIN, "wf-other", otherRun, "ping", null));
+            try {
+                signalling.get(5, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                releaseInvocation.countDown();
+                throw new AssertionError(
+                        "signalling an unrelated execution blocked on the Lambda invocation", e);
+            }
+
+            releaseInvocation.countDown();
+            scheduling.get(10, TimeUnit.SECONDS);
+        } finally {
+            releaseInvocation.countDown();
+            pool.shutdownNow();
+        }
+
+        // The outcome is still recorded on the execution that scheduled it.
+        assertTrue(service.getWorkflowExecutionHistory(REGION, DOMAIN, "wf-lambda", lambdaRun, false)
+                        .stream().anyMatch(e -> "LambdaFunctionCompleted".equals(e.getEventType())),
+                "the invocation's result must still be recorded after the lock is released");
+    }
+
+    /** Blocks inside invoke() until released, so the test can observe lock behaviour. */
+    private record LambdaGate(CountDownLatch started, CountDownLatch release) {
     }
 
     @Test

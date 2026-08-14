@@ -26,6 +26,34 @@ public final class SwfConstants {
             "CancelWorkflowExecution",
             "ContinueAsNewWorkflowExecution");
 
+    /**
+     * Every decision type the service accepts. A batch containing anything else is rejected
+     * before any of it is applied, so this is the single source of truth for both the check
+     * and the enum list the fault message quotes.
+     */
+    public static final Set<String> DECISION_TYPES = Set.of(
+            "ScheduleActivityTask",
+            "RequestCancelActivityTask",
+            "CompleteWorkflowExecution",
+            "FailWorkflowExecution",
+            "CancelWorkflowExecution",
+            "ContinueAsNewWorkflowExecution",
+            "RecordMarker",
+            "StartTimer",
+            "CancelTimer",
+            "SignalExternalWorkflowExecution",
+            "RequestCancelExternalWorkflowExecution",
+            "StartChildWorkflowExecution",
+            "ScheduleLambdaFunction");
+
+    /** The enum list exactly as the live service renders it in a ValidationException. */
+    public static final String DECISION_TYPE_SET_MESSAGE =
+            "[ScheduleActivityTask, RequestCancelActivityTask, CompleteWorkflowExecution, "
+                    + "FailWorkflowExecution, CancelWorkflowExecution, ContinueAsNewWorkflowExecution, "
+                    + "RecordMarker, StartTimer, CancelTimer, SignalExternalWorkflowExecution, "
+                    + "RequestCancelExternalWorkflowExecution, StartChildWorkflowExecution, "
+                    + "ScheduleLambdaFunction]";
+
     public static final String UNKNOWN_RESOURCE = "UnknownResourceFault";
     public static final String DOMAIN_ALREADY_EXISTS = "DomainAlreadyExistsFault";
     public static final String DOMAIN_DEPRECATED = "DomainDeprecatedFault";

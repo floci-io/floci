@@ -81,6 +81,14 @@ public class SwfService implements Resettable {
     private final Clock clock;
     private final LambdaInvoker lambdaInvoker;
 
+    /**
+     * Lambda invocations a decision batch queued, collected while the domain lock is held and
+     * run after it is released. Per-thread because the queue only spans a single
+     * {@code respondDecisionTaskCompleted} call.
+     */
+    private final ThreadLocal<List<PendingLambda>> pendingLambdas =
+            ThreadLocal.withInitial(ArrayList::new);
+
     @Inject
     public SwfService(StorageFactory storageFactory, RegionResolver regionResolver, Clock clock,
                       LambdaInvoker lambdaInvoker) {
@@ -595,7 +603,7 @@ public class SwfService implements Resettable {
 
             // Rejected before anything is mutated: the live service answers 400 and leaves
             // the task outstanding, so the decider can retry with a corrected batch.
-            requireCloseIsLastDecision(decisions);
+            requireValidBatch(decisions);
 
             SwfHistoryEvent completed = appendEvent(execution, "DecisionTaskCompleted");
             completed.attr("executionContext", executionContext)
@@ -618,18 +626,65 @@ public class SwfService implements Resettable {
             }
             executionStore.put(executionKey(execution), execution);
         }
+        drainPendingLambdas();
     }
 
     /**
-     * Rejects a batch whose closing decision is not last, with the live service's message.
-     * The closing decision itself may appear only once and only in final position.
+     * Runs whatever Lambda invocations this batch queued, now that the domain lock is released.
+     * Each records its own outcome under the lock again, so an unrelated execution in the same
+     * domain is never blocked for the duration of an invocation.
      */
-    private void requireCloseIsLastDecision(List<Decision> decisions) {
-        if (decisions == null || decisions.size() < 2) {
+    private void drainPendingLambdas() {
+        List<PendingLambda> queued = pendingLambdas.get();
+        if (queued.isEmpty()) {
             return;
         }
-        for (int i = 0; i < decisions.size() - 1; i++) {
-            if (SwfConstants.CLOSING_DECISIONS.contains(decisions.get(i).type())) {
+        List<PendingLambda> toRun = new ArrayList<>(queued);
+        queued.clear();
+        toRun.forEach(this::runPendingLambda);
+    }
+
+    /**
+     * The decision task a token identifies, without claiming anything.
+     *
+     * <p>Used by {@code PollForDecisionTask} continuation paging: the live service returns the
+     * same task's next history page for a {@code nextPageToken} rather than handing out a new
+     * task, so a continuation resolves the original task instead of polling again.
+     */
+    public SwfDecisionTask decisionTaskForToken(String taskToken) {
+        SwfWorkflowExecution execution = executionForDecisionToken(taskToken);
+        SwfDecisionTask task = execution.getDecisionTask();
+        if (task == null || !taskToken.equals(task.getTaskToken())) {
+            throw SwfFaults.unknownTaskToken();
+        }
+        return task;
+    }
+
+    /**
+     * Validates a whole batch before any of it is applied.
+     *
+     * <p>The live service rejects an invalid batch with {@code ValidationException} and leaves
+     * the execution untouched: no {@code DecisionTaskCompleted}, no earlier decision applied,
+     * and the token still claimable for a corrected batch. Validating up front is what makes
+     * that possible — the mutations land on the in-memory execution and on
+     * {@code decisionTokens}, so there is nothing to roll back once they have happened.
+     *
+     * <p>Two rules, both measured against the live service: every {@code decisionType} must be
+     * one the service knows, and a closing decision may appear only last.
+     */
+    private void requireValidBatch(List<Decision> decisions) {
+        if (decisions == null || decisions.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < decisions.size(); i++) {
+            String type = decisions.get(i).type();
+            if (!SwfConstants.DECISION_TYPES.contains(type)) {
+                // AWS names the offending member by its 1-based position in the list.
+                throw SwfFaults.validationConstraint(type,
+                        "decisions." + (i + 1) + ".member.decisionType",
+                        "Member must satisfy enum value set: " + SwfConstants.DECISION_TYPE_SET_MESSAGE);
+            }
+            if (i < decisions.size() - 1 && SwfConstants.CLOSING_DECISIONS.contains(type)) {
                 throw SwfFaults.validation("Close must be last decision in list");
             }
         }
@@ -664,12 +719,8 @@ public class SwfService implements Resettable {
             case "RequestCancelExternalWorkflowExecution" -> cancelExternal(execution, decision, decisionEventId);
             case "StartChildWorkflowExecution" -> startChild(execution, decision, decisionEventId);
             case "ScheduleLambdaFunction" -> scheduleLambdaFunction(execution, decision, decisionEventId);
-            default -> throw SwfFaults.validationConstraint(decision.type(), "decisions.1.member.decisionType",
-                    "Member must satisfy enum value set: [ScheduleActivityTask, RequestCancelActivityTask, "
-                            + "CompleteWorkflowExecution, FailWorkflowExecution, CancelWorkflowExecution, "
-                            + "ContinueAsNewWorkflowExecution, RecordMarker, StartTimer, CancelTimer, "
-                            + "SignalExternalWorkflowExecution, RequestCancelExternalWorkflowExecution, "
-                            + "StartChildWorkflowExecution, ScheduleLambdaFunction]");
+            // requireValidBatch has already rejected anything outside DECISION_TYPES.
+            default -> throw new IllegalStateException("unvalidated decision type " + decision.type());
         }
     }
 
@@ -837,6 +888,33 @@ public class SwfService implements Resettable {
         closeExecution(execution, SwfConstants.CLOSE_STATUS_CANCELED);
     }
 
+    /**
+     * Moves a parent relationship from a run onto its continue-as-new successor.
+     *
+     * <p>Continuing as new closes one run and opens another, and the live service keeps the
+     * parent link across that boundary: the successor reports the same
+     * {@code parentWorkflowExecution} and {@code parentInitiatedEventId}. The parent's own child
+     * entry has to move too, otherwise it keeps pointing at the closed run and would never see
+     * the successor's outcome or have child policy applied to it.
+     */
+    private void carryParentTo(SwfWorkflowExecution closing, SwfWorkflowExecution successor) {
+        if (closing.getParentWorkflowId() == null) {
+            return;
+        }
+        successor.setParentWorkflowId(closing.getParentWorkflowId());
+        successor.setParentRunId(closing.getParentRunId());
+        successor.setParentInitiatedEventId(closing.getParentInitiatedEventId());
+        successor.setParentStartedEventId(closing.getParentStartedEventId());
+
+        // The parent shares this run's domain, so the domain lock is already held.
+        String parentKey = executionKey(closing.getRegion(), closing.getDomain(),
+                closing.getParentWorkflowId(), closing.getParentRunId());
+        executionStore.get(parentKey).ifPresent(parent -> {
+            parent.getChildExecutions().put(successor.getWorkflowId(), successor.getRunId());
+            executionStore.put(parentKey, parent);
+        });
+    }
+
     private void continueAsNew(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
         String version = firstNonEmpty(decision.string("workflowTypeVersion"), execution.getWorkflowTypeVersion());
         SwfWorkflowType type = workflowTypeStore
@@ -865,6 +943,7 @@ public class SwfService implements Resettable {
 
         SwfWorkflowExecution next = buildExecution(request, type);
         next.setContinuedExecutionRunId(execution.getRunId());
+        carryParentTo(execution, next);
 
         appendEvent(execution, "WorkflowExecutionContinuedAsNew")
                 .attr("input", decision.string("input"))
@@ -1154,38 +1233,75 @@ public class SwfService implements Resettable {
         byte[] payload = (input == null || input.isEmpty() ? "{}" : input)
                 .getBytes(StandardCharsets.UTF_8);
 
+        // The invocation runs once the domain lock is released: a cold start takes seconds and
+        // this lock deliberately covers every execution in the domain.
+        pendingLambdas.get().add(new PendingLambda(executionKey(execution), id, name, payload,
+                scheduled.getEventId(), started.getEventId()));
+    }
+
+    /** A Lambda invocation a decision queued, to run once the domain lock is released. */
+    private record PendingLambda(String executionKey, String id, String name, byte[] payload,
+                                 long scheduledEventId, long startedEventId) {
+    }
+
+    /**
+     * Invokes a queued function with no lock held, then re-takes the domain lock to record the
+     * outcome as one atomic transition.
+     */
+    private void runPendingLambda(PendingLambda pending) {
+        String eventType;
+        String reason = null;
+        String details = null;
+        String result = null;
         try {
-            LambdaInvocationResult result = lambdaInvoker.invoke(
-                    execution.getRegion(), name, payload);
-            if (result.functionError() != null && !result.functionError().isEmpty()) {
-                appendEvent(execution, "LambdaFunctionFailed")
-                        .attr("scheduledEventId", scheduled.getEventId())
-                        .attr("startedEventId", started.getEventId())
-                        .attr("reason", result.functionError())
-                        .attr("details", result.payload());
+            LambdaInvocationResult invoked = lambdaInvoker.invoke(
+                    regionOf(pending.executionKey()), pending.name(), pending.payload());
+            if (invoked.functionError() != null && !invoked.functionError().isEmpty()) {
+                eventType = "LambdaFunctionFailed";
+                reason = invoked.functionError();
+                details = invoked.payload();
             } else {
-                appendEvent(execution, "LambdaFunctionCompleted")
-                        .attr("scheduledEventId", scheduled.getEventId())
-                        .attr("startedEventId", started.getEventId())
-                        .attr("result", result.payload());
+                eventType = "LambdaFunctionCompleted";
+                result = invoked.payload();
             }
         } catch (AwsException e) {
             // The live service surfaces the Lambda SDK's own error code and message here, so a
             // decider sees ResourceNotFoundException for a function that does not exist.
-            appendEvent(execution, "LambdaFunctionFailed")
-                    .attr("scheduledEventId", scheduled.getEventId())
-                    .attr("startedEventId", started.getEventId())
-                    .attr("reason", e.getErrorCode())
-                    .attr("details", e.getMessage());
+            eventType = "LambdaFunctionFailed";
+            reason = e.getErrorCode();
+            details = e.getMessage();
         } catch (RuntimeException e) {
-            LOG.warnv("SWF Lambda invocation {0} ({1}) failed: {2}", id, name, e.getMessage());
-            appendEvent(execution, "LambdaFunctionFailed")
-                    .attr("scheduledEventId", scheduled.getEventId())
-                    .attr("startedEventId", started.getEventId())
-                    .attr("reason", e.getClass().getSimpleName())
-                    .attr("details", nullToEmpty(e.getMessage()));
+            LOG.warnv("SWF Lambda invocation {0} ({1}) failed: {2}",
+                    pending.id(), pending.name(), e.getMessage());
+            eventType = "LambdaFunctionFailed";
+            reason = e.getClass().getSimpleName();
+            details = nullToEmpty(e.getMessage());
         }
-        execution.setDecisionNeeded(true);
+
+        synchronized (domainLockForKey(pending.executionKey())) {
+            SwfWorkflowExecution execution = executionStore.get(pending.executionKey()).orElse(null);
+            if (execution == null || !execution.isOpen()) {
+                return;
+            }
+            appendEvent(execution, eventType)
+                    .attr("scheduledEventId", pending.scheduledEventId())
+                    .attr("startedEventId", pending.startedEventId())
+                    .attr("reason", reason)
+                    .attr("details", details)
+                    .attr("result", result);
+            if (hasNothingPending(execution)) {
+                scheduleDecisionTask(execution);
+            } else {
+                execution.setDecisionNeeded(true);
+            }
+            executionStore.put(pending.executionKey(), execution);
+        }
+    }
+
+    /** The region segment of a {@code <region>:<domain>/...} storage key. */
+    private static String regionOf(String executionKey) {
+        int colon = executionKey.indexOf(':');
+        return colon < 0 ? executionKey : executionKey.substring(0, colon);
     }
 
     // ────────────────────────────── Activity tasks ───────────────────────────
