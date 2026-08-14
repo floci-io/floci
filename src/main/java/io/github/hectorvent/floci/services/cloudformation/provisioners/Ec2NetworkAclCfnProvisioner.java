@@ -64,6 +64,25 @@ public class Ec2NetworkAclCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionNetworkAcl(StackResource r, JsonNode props, ProvisionContext ctx) {
         String vpcId = ctx.resolveOptional(props, "VpcId");
+        // An update re-invokes provision with the prior physical id. Creating unconditionally
+        // would mint a second ACL and orphan the first permanently, so reuse the one this stack
+        // already made; only create when it is absent, meaning a first execution or one removed
+        // out of band.
+        String existingId = r.getPhysicalId();
+        var existing = existingId == null || existingId.isBlank() ? null
+                : ec2Service.describeNetworkAcls(ctx.region(), List.of(existingId), Map.of())
+                        .stream().findFirst().orElse(null);
+        if (existing != null) {
+            // VpcId is createOnly, so a change is a replacement. Report it rather than leave the
+            // ACL silently attached to the original VPC, matching how EcsCapacityCfnProvisioner
+            // treats Name.
+            if (vpcId != null && !vpcId.equals(existing.getVpcId())) {
+                throw new AwsException("ValidationError",
+                        "Updating VpcId requires resource replacement, which is not supported.", 400);
+            }
+            r.getAttributes().put("Id", existingId);
+            return;
+        }
         var acl = ec2Service.createNetworkAcl(ctx.region(), vpcId);
         r.setPhysicalId(acl.getNetworkAclId());
         r.getAttributes().put("Id", acl.getNetworkAclId());
@@ -85,7 +104,10 @@ public class Ec2NetworkAclCfnProvisioner implements CfnResourceProvisioner {
                 ctx.resolveOptional(props, "RuleAction"),
                 egress,
                 ctx.resolveOptional(props, "CidrBlock"),
-                from, to, false);
+                // RuleNumber, Egress and NetworkAclId are the createOnly key, so re-provisioning
+                // the same key is an update. replace=false would raise NetworkAclEntryAlreadyExists
+                // on every stack update.
+                from, to, true);
         r.setPhysicalId(aclId + "|" + ruleNumber + "|" + (egress ? "egress" : "ingress"));
     }
 

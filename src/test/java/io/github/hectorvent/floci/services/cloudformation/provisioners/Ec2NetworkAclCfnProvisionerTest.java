@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
@@ -119,7 +121,7 @@ class Ec2NetworkAclCfnProvisionerTest {
         provisioner.provision(r, props, new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack"));
 
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 150, "6", "deny", true,
-                "0.0.0.0/0", 22, 22, false);
+                "0.0.0.0/0", 22, 22, true);
         assertEquals("acl-abc|150|egress", r.getPhysicalId());
     }
 
@@ -131,8 +133,53 @@ class Ec2NetworkAclCfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 100, "-1", null, false,
-                null, null, null, false);
+                null, null, null, true);
         assertEquals("acl-abc|100|ingress", r.getPhysicalId());
+    }
+
+    @Test
+    void updateReusesTheAclThisStackAlreadyCreated() {
+        StackResource r = resource("AWS::EC2::NetworkAcl", "Acl");
+        r.setPhysicalId("acl-abc");
+        when(ec2.describeNetworkAcls("us-east-1", List.of("acl-abc"), Map.of()))
+                .thenReturn(List.of(acl("acl-abc", "vpc-123", false)));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", "vpc-123");
+
+        provisioner.provision(r, props, ctx());
+
+        // A second ACL here would orphan the first permanently: nothing else references it.
+        verify(ec2, never()).createNetworkAcl(any(), any());
+        assertEquals("acl-abc", r.getPhysicalId());
+        assertEquals("acl-abc", r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void updateRecreatesAnAclRemovedOutOfBand() {
+        StackResource r = resource("AWS::EC2::NetworkAcl", "Acl");
+        r.setPhysicalId("acl-gone");
+        when(ec2.describeNetworkAcls("us-east-1", List.of("acl-gone"), Map.of()))
+                .thenReturn(List.of());
+        when(ec2.createNetworkAcl("us-east-1", "vpc-123")).thenReturn(acl("acl-new", "vpc-123", false));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", "vpc-123");
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("acl-new", r.getPhysicalId());
+        assertEquals("acl-new", r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void changingVpcIdReportsAnUnsupportedReplacement() {
+        StackResource r = resource("AWS::EC2::NetworkAcl", "Acl");
+        r.setPhysicalId("acl-abc");
+        when(ec2.describeNetworkAcls("us-east-1", List.of("acl-abc"), Map.of()))
+                .thenReturn(List.of(acl("acl-abc", "vpc-123", false)));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", "vpc-456");
+
+        // VpcId is createOnly. Reusing silently would leave the ACL on the original VPC.
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(ec2, never()).createNetworkAcl(any(), any());
     }
 
     @Test
