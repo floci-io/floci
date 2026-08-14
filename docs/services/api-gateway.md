@@ -279,7 +279,12 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 
 #### Behavior Notes
 
-- **Connection URL**: Floci uses `ws://localhost:4566/ws/{apiId}/{stage}` instead of AWS's `wss://{api-id}.execute-api.{region}.amazonaws.com/{stage}`.
+- **Connection URL**: Floci accepts the AWS-style execute-api host as well as the path form. All of these reach the same WebSocket API:
+  - `ws://{apiId}.execute-api.{region}.localhost:4566/{stage}` — region-bearing, mirroring AWS's `wss://{api-id}.execute-api.{region}.amazonaws.com/{stage}`
+  - `ws://{apiId}.execute-api.localhost.floci.io:4566/{stage}` — Floci's built-in execute-api domain (regionless; the region is resolved by an apiId lookup)
+  - `ws://localhost:4566/ws/{apiId}/{stage}` — the explicit path form
+
+  The `@connections` management API is likewise reachable on the execute-api host (`http://{apiId}.execute-api.{region}.localhost:4566/{stage}/@connections/{connectionId}`).
 - **Idle timeout**: 10 minutes (matching AWS default). Not configurable per-API.
 - **Max connection duration**: 2 hours (matching AWS). Connections are closed automatically.
 - **Payload size limit**: 128 KB per frame (matching AWS). Oversized messages receive an error frame.

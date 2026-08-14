@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -53,6 +54,11 @@ public class FirehoseService {
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
                                        String deliveryStreamType) {
+        return createDeliveryStream(name, s3Config, tags, deliveryStreamType, null);
+    }
+
+    public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
+                                       String deliveryStreamType, KinesisStreamSource source) {
         if (name == null || name.isEmpty() || name.length() > 64 || !name.matches("[a-zA-Z0-9_.-]+")) {
             throw new AwsException("InvalidArgumentException",
                     "Delivery stream name must be between 1 and 64 characters and contain only letters, numbers, underscores, hyphens, or periods.", 400);
@@ -65,7 +71,7 @@ public class FirehoseService {
 
         validateBufferingHints(s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
-        DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config);
+        DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config, source);
         description.setAccountId(regionResolver.getAccountId());
         description.setTags(tags);
         if (deliveryStreamType != null && !deliveryStreamType.isBlank()) {

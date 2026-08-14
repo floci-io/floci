@@ -102,7 +102,7 @@ public class AutoScalingQueryHandler {
                 memberList(p, "SecurityGroups"),
                 p.getFirst("UserData"),
                 p.getFirst("IamInstanceProfile"),
-                "true".equalsIgnoreCase(p.getFirst("AssociatePublicIpAddress")));
+                nullableBoolParam(p, "AssociatePublicIpAddress"));
         String xml = new XmlBuilder()
                 .start("CreateLaunchConfigurationResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -122,8 +122,12 @@ public class AutoScalingQueryHandler {
             xml.start("member")
                .elem("LaunchConfigurationName", lc.getLaunchConfigurationName())
                .elem("LaunchConfigurationARN", lc.getLaunchConfigurationArn())
-               .elem("CreatedTime", ISO_FMT.format(lc.getCreatedTime()))
-               .elem("AssociatePublicIpAddress", String.valueOf(lc.isAssociatePublicIpAddress()));
+               .elem("CreatedTime", ISO_FMT.format(lc.getCreatedTime()));
+            // AWS omits the flag entirely when the LC never set it, which is
+            // what tells a caller the subnet default still applies.
+            if (lc.getAssociatePublicIpAddress() != null) {
+                xml.elem("AssociatePublicIpAddress", String.valueOf(lc.getAssociatePublicIpAddress()));
+            }
             if (lc.getImageId() != null) { xml.elem("ImageId", lc.getImageId()); }
             if (lc.getInstanceType() != null) { xml.elem("InstanceType", lc.getInstanceType()); }
             if (lc.getKeyName() != null) { xml.elem("KeyName", lc.getKeyName()); }

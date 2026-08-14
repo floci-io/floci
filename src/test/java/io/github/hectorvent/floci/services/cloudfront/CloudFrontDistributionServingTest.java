@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -15,8 +18,10 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPairGenerator;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +32,8 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end tests for CloudFront distribution request-serving: a viewer request addressed to a
@@ -386,6 +393,393 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
+    void roundTripsTrustedKeyGroupsThroughDistributionConfigApi()
+            throws Exception {
+        String suffix = suffix();
+        SignerResources defaultSigner =
+                createSignerResources("default-" + suffix);
+        SignerResources privateSigner =
+                createSignerResources("private-" + suffix);
+        String body = distributionConfigXml("trusted-key-groups-roundtrip-" + suffix, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Enabled>true</Enabled>
+                    <Quantity>1</Quantity>
+                    <Items><KeyGroup>%s</KeyGroup></Items>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                <CacheBehaviors>
+                  <Quantity>1</Quantity>
+                  <Items>
+                    <CacheBehavior>
+                      <PathPattern>/private/*</PathPattern>
+                      <TargetOriginId>o1</TargetOriginId>
+                      <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                      <TrustedKeyGroups>
+                        <Enabled>true</Enabled>
+                        <Quantity>1</Quantity>
+                        <Items><KeyGroup>%s</KeyGroup></Items>
+                      </TrustedKeyGroups>
+                    </CacheBehavior>
+                  </Items>
+                </CacheBehaviors>
+                """.formatted(
+                        defaultSigner.keyGroupId(),
+                        privateSigner.keyGroupId()));
+
+        var created = given()
+                .contentType("application/xml")
+                .body(body)
+            .when()
+                .post("/2020-05-31/distribution")
+            .then()
+                .statusCode(201)
+                .body(containsString("<ActiveTrustedKeyGroups>"))
+                .body(containsString("<Enabled>true</Enabled>"))
+                .body(containsString(
+                        "<KeyGroupId>" + defaultSigner.keyGroupId()
+                                + "</KeyGroupId>"))
+                .body(containsString(
+                        "<KeyPairId>" + defaultSigner.publicKeyId()
+                                + "</KeyPairId>"))
+                .body(containsString("<ActiveTrustedSigners>"))
+                .extract().response();
+
+        String configPath = created.header("Location") + "/config";
+        var config = given()
+            .when()
+                .get(configPath)
+            .then()
+                .statusCode(200)
+                .extract().response();
+
+        String configXml = config.asString();
+        assertTrue(configXml.contains(
+                trustedKeyGroupsXml(defaultSigner.keyGroupId())));
+        assertTrue(configXml.contains(
+                trustedKeyGroupsXml(privateSigner.keyGroupId())));
+
+        given()
+                .contentType("application/xml")
+                .header("If-Match", config.header("ETag"))
+                .body(configXml)
+            .when()
+                .put(configPath)
+            .then()
+                .statusCode(200)
+                .body(containsString(
+                        trustedKeyGroupsXml(defaultSigner.keyGroupId())))
+                .body(containsString(
+                        trustedKeyGroupsXml(privateSigner.keyGroupId())))
+                .body(containsString("<ActiveTrustedKeyGroups>"))
+                .body(containsString(
+                        "<KeyGroupId>" + privateSigner.keyGroupId()
+                                + "</KeyGroupId>"));
+    }
+
+    @Test
+    void disabledTrustedKeyGroupsRemainConfiguredButDoNotRequireSignatures()
+            throws Exception {
+        String suffix = suffix();
+        SignerResources defaultSigner =
+                createSignerResources("disabled-default-" + suffix);
+        SignerResources privateSigner =
+                createSignerResources("disabled-private-" + suffix);
+        String body = distributionConfigXml("disabled-key-groups-" + suffix, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Enabled>false</Enabled>
+                    <Quantity>1</Quantity>
+                    <Items><KeyGroup>%s</KeyGroup></Items>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                <CacheBehaviors>
+                  <Quantity>1</Quantity>
+                  <Items>
+                    <CacheBehavior>
+                      <PathPattern>/private/*</PathPattern>
+                      <TargetOriginId>o1</TargetOriginId>
+                      <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                      <TrustedKeyGroups>
+                        <Enabled>false</Enabled>
+                        <Quantity>1</Quantity>
+                        <Items><KeyGroup>%s</KeyGroup></Items>
+                      </TrustedKeyGroups>
+                    </CacheBehavior>
+                  </Items>
+                </CacheBehaviors>
+                """.formatted(
+                        defaultSigner.keyGroupId(),
+                        privateSigner.keyGroupId()));
+
+        var created = given()
+                .contentType("application/xml")
+                .body(body)
+            .when()
+                .post("/2020-05-31/distribution")
+            .then()
+                .statusCode(201)
+                .body(containsString("<Enabled>false</Enabled>"))
+                .body(containsString(
+                        "<ActiveTrustedKeyGroups><Enabled>false</Enabled>"
+                                + "<Quantity>0</Quantity></ActiveTrustedKeyGroups>"))
+                .extract().response();
+
+        String configPath = created.header("Location") + "/config";
+        var config = given()
+            .when()
+                .get(configPath)
+            .then()
+                .statusCode(200)
+                .body(containsString("<Enabled>false</Enabled>"))
+                .extract().response();
+
+        given()
+                .contentType("application/xml")
+                .header("If-Match", config.header("ETag"))
+                .body(config.asString())
+            .when()
+                .put(configPath)
+            .then()
+                .statusCode(200)
+                .body(containsString("<Enabled>false</Enabled>"));
+
+        String distributionId = XmlParser.extractFirst(
+                created.asString(), "Id", null);
+        DistributionConfig stored = cloudFrontService
+                .getDistribution(distributionId)
+                .getConfig();
+
+        assertFalse(stored.getDefaultCacheBehavior()
+                .isTrustedKeyGroupsEnabled());
+        assertEquals(
+                List.of(defaultSigner.keyGroupId()),
+                stored.getDefaultCacheBehavior().getTrustedKeyGroups());
+        assertFalse(stored.getCacheBehaviors().getFirst()
+                .isTrustedKeyGroupsEnabled());
+        assertEquals(
+                List.of(privateSigner.keyGroupId()),
+                stored.getCacheBehaviors().getFirst().getTrustedKeyGroups());
+        assertTrue(CloudFrontRequestRouter
+                .trustedKeyGroupsFor(stored, "/public/file.txt")
+                .isEmpty());
+        assertTrue(CloudFrontRequestRouter
+                .trustedKeyGroupsFor(stored, "/private/file.txt")
+                .isEmpty());
+    }
+
+    @Test
+    void rejectsEnabledTrustedKeyGroupsWithoutItems() {
+        String callerReference =
+                "empty-enabled-key-groups-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Enabled>true</Enabled>
+                    <Quantity>0</Quantity>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
+    void rejectsUnknownTrustedKeyGroup() {
+        String callerReference =
+                "unknown-key-group-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Enabled>true</Enabled>
+                    <Quantity>1</Quantity>
+                    <Items><KeyGroup>missing-key-group</KeyGroup></Items>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString(
+                    "<Code>TrustedKeyGroupDoesNotExist</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
+    void rejectsMalformedTrustedKeyGroupsInDefaultBehavior() {
+        String callerReference = "malformed-default-key-groups-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Quantity>1</Quantity>
+                    <Items><KeyGroup>kg-private</KeyGroup></Items>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
+    void rejectsTrustedKeyGroupsWithoutQuantityInDefaultBehavior() {
+        String callerReference = "missing-default-key-group-quantity-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Enabled>true</Enabled>
+                    <Items><KeyGroup>kg-private</KeyGroup></Items>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
+    void rejectsTrustedKeyGroupsWithInconsistentQuantity() {
+        String callerReference = "inconsistent-key-group-quantity-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  <TrustedKeyGroups>
+                    <Enabled>true</Enabled>
+                    <Quantity>2</Quantity>
+                    <Items><KeyGroup>kg-private</KeyGroup></Items>
+                  </TrustedKeyGroups>
+                </DefaultCacheBehavior>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InconsistentQuantities</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
+    void rejectsMalformedTrustedKeyGroupsInOrderedBehavior() {
+        String callerReference = "malformed-ordered-key-groups-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                </DefaultCacheBehavior>
+                <CacheBehaviors>
+                  <Quantity>1</Quantity>
+                  <Items>
+                    <CacheBehavior>
+                      <PathPattern>/private/*</PathPattern>
+                      <TargetOriginId>o1</TargetOriginId>
+                      <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                      <TrustedKeyGroups>
+                        <Quantity>1</Quantity>
+                        <Items><KeyGroup>kg-private</KeyGroup></Items>
+                      </TrustedKeyGroups>
+                    </CacheBehavior>
+                  </Items>
+                </CacheBehaviors>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
+    void rejectsTrustedKeyGroupsWithoutQuantityInOrderedBehavior() {
+        String callerReference = "missing-ordered-key-group-quantity-" + suffix();
+        String body = distributionConfigXml(callerReference, """
+                <DefaultCacheBehavior>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                </DefaultCacheBehavior>
+                <CacheBehaviors>
+                  <Quantity>1</Quantity>
+                  <Items>
+                    <CacheBehavior>
+                      <PathPattern>/private/*</PathPattern>
+                      <TargetOriginId>o1</TargetOriginId>
+                      <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                      <TrustedKeyGroups>
+                        <Enabled>true</Enabled>
+                        <Items><KeyGroup>kg-private</KeyGroup></Items>
+                      </TrustedKeyGroups>
+                    </CacheBehavior>
+                  </Items>
+                </CacheBehaviors>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+
+        assertDistributionWasNotCreated(callerReference);
+    }
+
+    @Test
     void roundTripsOriginCustomHeadersThroughTheApi() {
         // The distribution parser must capture and re-serialize origin CustomHeaders so a read-back
         // (get-distribution) matches what was configured, rather than dropping them.
@@ -691,6 +1085,59 @@ class CloudFrontDistributionServingTest {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
+    private static String trustedKeyGroupsXml(String keyGroup) {
+        return "<TrustedKeyGroups><Enabled>true</Enabled><Quantity>1</Quantity>"
+                + "<Items><KeyGroup>" + keyGroup + "</KeyGroup></Items></TrustedKeyGroups>";
+    }
+
+    private String distributionConfigXml(String callerReference, String cacheBehaviors) {
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>%s</CallerReference>
+                  <Origins>
+                    <Quantity>1</Quantity>
+                    <Items>
+                      <Origin>
+                        <Id>o1</Id>
+                        <DomainName>malformed-key-groups.s3.us-east-1.amazonaws.com</DomainName>
+                        <S3OriginConfig><OriginAccessIdentity></OriginAccessIdentity></S3OriginConfig>
+                      </Origin>
+                    </Items>
+                  </Origins>
+                  %s
+                  <Comment>must not be created</Comment>
+                  <Enabled>true</Enabled>
+                </DistributionConfig>
+                """.formatted(callerReference, cacheBehaviors);
+    }
+
+    private void assertDistributionWasNotCreated(String callerReference) {
+        assertTrue(cloudFrontService.listDistributions(null, Integer.MAX_VALUE).stream()
+                .noneMatch(d -> callerReference.equals(d.getConfig().getCallerReference())));
+    }
+
+    private SignerResources createSignerResources(String name)
+            throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        String encodedKey = "-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(
+                        generator.generateKeyPair().getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----";
+        PublicKey publicKey = new PublicKey();
+        publicKey.setCallerReference("reference-" + name);
+        publicKey.setName("key-" + name);
+        publicKey.setEncodedKey(encodedKey);
+        publicKey = cloudFrontService.createPublicKey(publicKey);
+
+        KeyGroup keyGroup = new KeyGroup();
+        keyGroup.setName("group-" + name);
+        keyGroup.setItems(List.of(publicKey.getId()));
+        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+        return new SignerResources(publicKey.getId(), keyGroup.getId());
+    }
+
     private void createBucket(String bucket) {
         s3Service.createBucket(bucket, REGION);
     }
@@ -738,5 +1185,9 @@ class CloudFrontDistributionServingTest {
 
     private static String suffix() {
         return Long.toString(System.nanoTime(), 36);
+    }
+
+    private record SignerResources(
+            String publicKeyId, String keyGroupId) {
     }
 }

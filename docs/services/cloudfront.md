@@ -1,6 +1,6 @@
 # CloudFront
 
-CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, CloudFront Functions, invalidations, tagging, and GET/HEAD delivery from S3 or custom origins.
+CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and GET/HEAD delivery from S3 or custom origins.
 
 **Protocol:** REST XML  
 **API version:** `2020-05-31`  
@@ -97,6 +97,23 @@ CloudFront management-plane and local content-delivery emulation. Supports distr
 | `DeleteFunction` | DELETE | `/2020-05-31/function/{Name}` |
 | `ListFunctions` | GET | `/2020-05-31/function` |
 
+### Public Keys and Key Groups
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreatePublicKey` | POST | `/2020-05-31/public-key` |
+| `GetPublicKey` | GET | `/2020-05-31/public-key/{Id}` |
+| `GetPublicKeyConfig` | GET | `/2020-05-31/public-key/{Id}/config` |
+| `UpdatePublicKey` | PUT | `/2020-05-31/public-key/{Id}/config` |
+| `DeletePublicKey` | DELETE | `/2020-05-31/public-key/{Id}` |
+| `ListPublicKeys` | GET | `/2020-05-31/public-key` |
+| `CreateKeyGroup` | POST | `/2020-05-31/key-group` |
+| `GetKeyGroup` | GET | `/2020-05-31/key-group/{Id}` |
+| `GetKeyGroupConfig` | GET | `/2020-05-31/key-group/{Id}/config` |
+| `UpdateKeyGroup` | PUT | `/2020-05-31/key-group/{Id}` |
+| `DeleteKeyGroup` | DELETE | `/2020-05-31/key-group/{Id}` |
+| `ListKeyGroups` | GET | `/2020-05-31/key-group` |
+
 ### Tagging
 
 | Operation | Method | Path |
@@ -113,7 +130,10 @@ CloudFront management-plane and local content-delivery emulation. Supports distr
 - ARNs are global — no region segment: `arn:aws:cloudfront::{accountId}:distribution/{id}`.
 - Invalidations are immediately marked `Completed`.
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
-- All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current `ETag`. A missing or incorrect `ETag` returns `InvalidIfMatchVersion` (400).
+- All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current
+  `ETag`. Public key and key group updates and deletions distinguish a missing header
+  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Other CloudFront
+  resources currently return `InvalidIfMatchVersion` (400) for either case.
 - All `GET` and `POST` (create) responses include an `ETag` response header.
 - List operations emit the payload root declared by the CloudFront REST XML model (for example,
   `ListDistributions` returns `<DistributionList>`), with list contents represented by
@@ -130,6 +150,19 @@ CloudFront management-plane and local content-delivery emulation. Supports distr
   configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
   values, inconsistent quantities, duplicates, and quota violations are rejected with modeled
   CloudFront errors when the distribution is created or updated.
+- Cache behaviors with enabled `TrustedKeyGroups` require a valid CloudFront signed URL or signed
+  cookie before the origin is contacted. Signed URL parameters take precedence over signed cookies.
+  Canned and custom policies support SHA-1 or SHA-256 signatures with RSA-2048 or ECDSA P-256 public
+  keys. Custom policies enforce resource wildcards, expiration, optional activation time, and
+  IPv4 CIDR restrictions. Canned resources compare literally, including query strings. Exact custom
+  resources can include one raw query delimiter. As a conservative limitation, other custom
+  resources containing a raw `?` fail closed because the character is ambiguous with CloudFront's
+  one-character wildcard; custom query-string wildcards are therefore not supported. Invalid or
+  expired signatures return 403.
+- A key group must contain one to five existing public keys. Public keys that belong to a key group
+  and key groups referenced by a cache behavior cannot be deleted until those references are removed.
+- Application query parameters are retained when constructing the resource covered by a signature.
+  CloudFront signing parameters are excluded from that resource and are never sent to the origin.
 - S3-origin reads honor anonymous access, OAI bucket-policy or object-ACL grants, and OAC
   service-principal bucket-policy grants (including the distribution `AWS:SourceArn`) when strict S3
   authentication is enabled. OAC `always`, `never`, and unsigned `no-override` requests follow their
@@ -238,9 +271,8 @@ aws cloudfront delete-distribution --id E1Z2X3C4V5B6N7 --if-match "$ETAG"
 - `CopyDistribution` (staging distributions)
 - Real-time log configs (`CreateRealtimeLogConfig`, etc.)
 - Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
-- Public keys and key groups (`CreatePublicKey`, `CreateKeyGroup`, etc.)
 - `TestFunction` execution (function is stored, not executed)
 - Streaming distributions (RTMP — deprecated by AWS)
 - VPC origins, Anycast IP lists, key value stores
 - Monitoring subscriptions
-- Actual CDN content delivery and caching
+- Persistent edge caching and global CDN propagation
