@@ -377,4 +377,35 @@ class AthenaIntegrationTest {
                 .body("TableMetadata.CreateTime", instanceOf(Number.class))
                 .body("TableMetadata.LastAccessTime", instanceOf(Number.class));
     }
+
+    @Test
+    @Order(13)
+    void outputLocationIsTheResultCsvObjectKey() {
+        String id = given()
+            .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "QueryString": "SELECT 1",
+                  "ResultConfiguration": { "OutputLocation": "s3://athena-location-test/out/" }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("QueryExecutionId");
+
+        // AWS reports the result CSV object itself, not a directory prefix
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + id + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueryExecution.ResultConfiguration.OutputLocation",
+                    equalTo("s3://athena-location-test/out/" + id + ".csv"));
+    }
 }

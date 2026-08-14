@@ -53,7 +53,6 @@ public class UserPool {
         long now = System.currentTimeMillis() / 1000L;
         this.creationDate = now;
         this.lastModifiedDate = now;
-        this.signingSecret = java.util.UUID.randomUUID().toString().replace("-", "");
     }
 
     public String getId() { return id; }

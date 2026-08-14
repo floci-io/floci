@@ -10,6 +10,7 @@ public class UserIdGroupPair {
     private String groupId;
     private String userId;
     private String groupName;
+    private String description;
 
     public UserIdGroupPair() {}
 
@@ -21,4 +22,7 @@ public class UserIdGroupPair {
 
     public String getGroupName() { return groupName; }
     public void setGroupName(String groupName) { this.groupName = groupName; }
+
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
 }

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -22,11 +23,15 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -42,12 +47,34 @@ import static org.mockito.Mockito.when;
 
 class RdsServiceTest {
 
+    private static final List<String> CURRENT_MANAGED_CLUSTER_PARAMETER_GROUP_FAMILIES = List.of(
+            "aurora-mysql5.7",
+            "aurora-mysql8.0",
+            "aurora-mysql8.4",
+            "aurora-postgresql11",
+            "aurora-postgresql12",
+            "aurora-postgresql13",
+            "aurora-postgresql14",
+            "aurora-postgresql15",
+            "aurora-postgresql16",
+            "aurora-postgresql17",
+            "aurora-postgresql18",
+            "mysql8.0",
+            "mysql8.4",
+            "postgres13",
+            "postgres14",
+            "postgres15",
+            "postgres16",
+            "postgres17",
+            "postgres18");
+
     private RdsService rdsService;
     private RdsContainerManager containerManager;
     private RdsProxyManager proxyManager;
     private Ec2Service ec2Service;
     private RegionResolver regionResolver;
     private EmulatorConfig config;
+    private EmulatorConfig.RdsServiceConfig rdsConfig;
 
     @BeforeEach
     void setUp() {
@@ -57,15 +84,15 @@ class RdsServiceTest {
         regionResolver = new RegionResolver("us-east-1", "123456789012");
         config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.RdsServiceConfig rdsConfig = mock(EmulatorConfig.RdsServiceConfig.class);
+        rdsConfig = mock(EmulatorConfig.RdsServiceConfig.class);
 
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(rdsConfig.proxyBasePort()).thenReturn(7000);
         when(rdsConfig.proxyMaxPort()).thenReturn(7099);
-        when(rdsConfig.defaultPostgresImage()).thenReturn("postgres:16-alpine");
-        when(rdsConfig.defaultMysqlImage()).thenReturn("mysql:8.0");
-        when(rdsConfig.defaultMariadbImage()).thenReturn("mariadb:11");
+        when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.empty());
+        when(rdsConfig.defaultMysqlImage()).thenReturn(Optional.empty());
+        when(rdsConfig.defaultMariadbImage()).thenReturn(Optional.empty());
 
         rdsService = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -140,6 +167,30 @@ class RdsServiceTest {
     }
 
     @Test
+    void configuredPostgresImageIsNotRewrittenForRequestedEngineVersion() {
+        when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.of("postgres:16.14-alpine3.23"));
+
+        rdsService.createDbCluster("cluster1", "postgres", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        verify(containerManager).start(eq("cluster1"), any(), eq(DatabaseEngine.POSTGRES),
+                eq("postgres:16.14-alpine3.23"), eq("admin"), eq("password"), eq("dbname"));
+    }
+
+    @Test
+    void explicitlyConfiguredDefaultPostgresImageIsNotRewritten() {
+        when(rdsConfig.defaultPostgresImage())
+                .thenReturn(Optional.of(EmulatorConfig.RdsServiceConfig.DEFAULT_POSTGRES_IMAGE));
+
+        rdsService.createDbCluster("cluster1", "postgres", "18.1",
+                "admin", "password", "dbname", false, null);
+
+        verify(containerManager).start(eq("cluster1"), any(), eq(DatabaseEngine.POSTGRES),
+                eq(EmulatorConfig.RdsServiceConfig.DEFAULT_POSTGRES_IMAGE),
+                eq("admin"), eq("password"), eq("dbname"));
+    }
+
+    @Test
     void dbInstanceTagsRoundTripAndMutateByArn() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -164,13 +215,31 @@ class RdsServiceTest {
         when(dockerHostResolver.resolve()).thenReturn("floci.local");
         RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver, null);
 
         DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
                 20, false, null, null, null);
 
         assertEquals("floci.local", instance.getEndpoint().address());
+    }
+
+    @Test
+    void dbInstanceEndpointUsesPublishedProxyPort() {
+        CurrentContainerNetworkResolver currentContainerNetworkResolver = mock(CurrentContainerNetworkResolver.class);
+        when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));
+        when(currentContainerNetworkResolver.resolvePublishedPort(7000)).thenReturn(OptionalInt.of(49173));
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, currentContainerNetworkResolver);
+
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        assertEquals("localhost", instance.getEndpoint().address());
+        assertEquals(49173, instance.getEndpoint().port());
+        assertEquals(7000, instance.getProxyPort());
     }
 
     @Test
@@ -245,6 +314,65 @@ class RdsServiceTest {
     void listDbInstancesReturnsEmptyWhenNotFound() {
         Collection<DbInstance> result = rdsService.listDbInstances("nonexistent");
         assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void listDbInstancesMatchesByArn() {
+        DbInstance created = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        Collection<DbInstance> result = rdsService.listDbInstances(created.getDbInstanceArn());
+        assertEquals(1, result.size());
+        assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
+    }
+
+    @Test
+    void listDbClustersMatchesByArn() {
+        DbCluster created = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        Collection<DbCluster> result = rdsService.listDbClusters(created.getDbClusterArn());
+        assertEquals(1, result.size());
+        assertEquals("cluster1", result.iterator().next().getDbClusterIdentifier());
+    }
+
+    @Test
+    void listDbInstancesDoesNotMatchForeignArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertTrue(rdsService.listDbInstances(
+                "arn:aws:rds:us-east-1:999999999999:db:mydb").isEmpty(), "cross-account ARN must not match");
+        assertTrue(rdsService.listDbInstances(
+                "arn:aws:rds:eu-west-1:123456789012:db:mydb").isEmpty(), "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbClustersDoesNotMatchForeignArn() {
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertTrue(rdsService.listDbClusters(
+                "arn:aws:rds:us-east-1:999999999999:cluster:cluster1").isEmpty(), "cross-account ARN must not match");
+        assertTrue(rdsService.listDbClusters(
+                "arn:aws:rds:eu-west-1:123456789012:cluster:cluster1").isEmpty(), "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbInstancesByDbiResourceIdsUsesExactOrMatching() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        Collection<DbInstance> result = rdsService.listDbInstancesByDbiResourceIds(
+                List.of("db-missing", instance.getDbiResourceId()));
+
+        assertEquals(1, result.size());
+        assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
+        assertTrue(rdsService.listDbInstancesByDbiResourceIds(
+                List.of(instance.getDbiResourceId().toLowerCase())).isEmpty());
     }
 
     @Test
@@ -574,6 +702,103 @@ class RdsServiceTest {
         assertEquals("DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", exception.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "aurora-mysql, 5.7.mysql_aurora.2.12.4, aurora-mysql5.7",
+            "aurora-mysql, 8.0.mysql_aurora.3.10.0, aurora-mysql8.0",
+            "aurora-mysql, 8.4.mysql_aurora.8.4.7, aurora-mysql8.4",
+            "aurora-postgresql, 11.21, aurora-postgresql11",
+            "aurora-postgresql, 12.22, aurora-postgresql12",
+            "aurora-postgresql, 13.18, aurora-postgresql13",
+            "aurora-postgresql, 14.15, aurora-postgresql14",
+            "aurora-postgresql, 15.10, aurora-postgresql15",
+            "aurora-postgresql, 16.4, aurora-postgresql16",
+            "aurora-postgresql, 17.4, aurora-postgresql17",
+            "aurora-postgresql, 18.3, aurora-postgresql18",
+            "mysql, 8.0.36, mysql8.0",
+            "mysql, 8.4.7, mysql8.4",
+            "postgres, 13.20, postgres13",
+            "postgres, 14.17, postgres14",
+            "postgres, 15.12, postgres15",
+            "postgres, 16.8, postgres16",
+            "postgres, 17.4, postgres17",
+            "postgres, 18.1, postgres18"
+    })
+    void createDbClusterAcceptsCurrentAwsDefaultClusterParameterGroups(
+            String engine, String engineVersion, String family) {
+        String groupName = "default." + family;
+
+        DbCluster cluster = rdsService.createDbCluster("cluster", engine, engineVersion,
+                "admin", "password", "coredb", false, groupName);
+
+        assertEquals("cluster", cluster.getDbClusterIdentifier());
+        assertEquals(family, rdsService.getDbClusterParameterGroup(groupName).getDbParameterGroupFamily());
+    }
+
+    @Test
+    void createDbClusterRejectsUnsupportedAwsDefaultClusterParameterGroup() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.4",
+                        "admin", "password", "coredb", false,
+                        "default.aurora-postgresql999"));
+
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+    }
+
+    @Test
+    void listDbClusterParameterGroupsAlwaysIncludesStableManagedDefaults() {
+        List<String> before = rdsService.listDbClusterParameterGroups(null).stream()
+                .map(group -> group.getDbClusterParameterGroupName()
+                        + ":" + group.getDbParameterGroupFamily())
+                .toList();
+
+        Collection<DbClusterParameterGroup> groups =
+                rdsService.listDbClusterParameterGroups("default.aurora-postgresql16");
+
+        assertEquals(1, groups.size());
+        DbClusterParameterGroup group = groups.iterator().next();
+        assertEquals("default.aurora-postgresql16", group.getDbClusterParameterGroupName());
+        assertEquals("aurora-postgresql16", group.getDbParameterGroupFamily());
+        assertEquals("Default cluster parameter group", group.getDescription());
+        List<String> after = rdsService.listDbClusterParameterGroups(null).stream()
+                .map(item -> item.getDbClusterParameterGroupName()
+                        + ":" + item.getDbParameterGroupFamily())
+                .toList();
+        assertEquals(CURRENT_MANAGED_CLUSTER_PARAMETER_GROUP_FAMILIES.stream()
+                .map(family -> "default." + family + ":" + family)
+                .toList(), before);
+        assertEquals(before, after);
+    }
+
+    @Test
+    void unsupportedManagedDefaultNamesAreNotFabricatedByReads() {
+        List<String> before = rdsService.listDbClusterParameterGroups(null).stream()
+                .map(DbClusterParameterGroup::getDbClusterParameterGroupName)
+                .toList();
+
+        for (String name : List.of("default.", "default.not-a-real-family",
+                "default.aurora-postgresql999", "default.mariadb11.2")) {
+            AwsException exception = assertThrows(
+                    AwsException.class, () -> rdsService.getDbClusterParameterGroup(name));
+            assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        }
+
+        assertEquals(before, rdsService.listDbClusterParameterGroups(null).stream()
+                .map(DbClusterParameterGroup::getDbClusterParameterGroupName)
+                .toList());
+    }
+
+    @Test
+    void namedClusterParameterGroupListingUsesAwsNotFoundCode() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listDbClusterParameterGroups("default.not-a-real-family"));
+
+        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBParameterGroupName doesn't refer to an existing DB parameter group.",
+                exception.getMessage());
+        assertEquals(404, exception.getHttpStatus());
+    }
+
     @Test
     void createDbClusterRejectsIncompatibleClusterParameterGroupFamily() {
         rdsService.createDbClusterParameterGroup("cpg1", "aurora-mysql8.0", "test group");
@@ -584,6 +809,22 @@ class RdsServiceTest {
         assertEquals("InvalidParameterCombination", exception.getErrorCode());
         assertEquals("Parameters that must not be used together were used together. Remove one of the conflicting parameters and try again.",
                 exception.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "aurora-postgresql, 16.4, default.aurora-postgresql15",
+            "aurora-mysql, 8.0.mysql_aurora.3.10.0, default.aurora-mysql5.7",
+            "postgres, 16.8, default.postgres15",
+            "mysql, 8.4.7, default.mysql8.0"
+    })
+    void createDbClusterRejectsManagedDefaultFromAnotherMajorVersion(
+            String engine, String engineVersion, String groupName) {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbCluster("cluster", engine, engineVersion,
+                        "admin", "password", "coredb", false, groupName));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
     }
 
     @Test
@@ -598,7 +839,42 @@ class RdsServiceTest {
         assertEquals("cpg1", fetched.getDbClusterParameterGroupName());
 
         Collection<DbClusterParameterGroup> listed = rdsService.listDbClusterParameterGroups(null);
-        assertEquals(1, listed.size());
+        List<String> names = listed.stream()
+                .map(DbClusterParameterGroup::getDbClusterParameterGroupName)
+                .toList();
+        assertEquals(CURRENT_MANAGED_CLUSTER_PARAMETER_GROUP_FAMILIES.size() + 1, names.size());
+        assertTrue(names.containsAll(CURRENT_MANAGED_CLUSTER_PARAMETER_GROUP_FAMILIES.stream()
+                .map(family -> "default." + family)
+                .toList()));
+        assertTrue(names.contains("cpg1"));
+    }
+
+    @Test
+    void createDbClusterParameterGroupRejectsManagedDefaultName() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbClusterParameterGroup(
+                        "default.aurora-postgresql16", "aurora-postgresql16", "shadow"));
+
+        assertEquals("DBParameterGroupAlreadyExists", exception.getErrorCode());
+    }
+
+    @Test
+    void persistedManagedDefaultOverridesCatalogWithoutDuplication() {
+        StorageBackend<String, DbClusterParameterGroup> clusterGroups = new InMemoryStorage<>();
+        clusterGroups.put("default.aurora-postgresql16", new DbClusterParameterGroup(
+                "default.aurora-postgresql16", "aurora-postgresql16", "persisted default"));
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                clusterGroups, new InMemoryStorage<>());
+
+        List<DbClusterParameterGroup> listed = List.copyOf(service.listDbClusterParameterGroups(null));
+        assertEquals(CURRENT_MANAGED_CLUSTER_PARAMETER_GROUP_FAMILIES.size(), listed.size());
+        List<DbClusterParameterGroup> matching = listed.stream()
+                .filter(group -> "default.aurora-postgresql16".equals(
+                        group.getDbClusterParameterGroupName()))
+                .toList();
+        assertEquals(1, matching.size());
+        assertEquals("persisted default", matching.getFirst().getDescription());
     }
 
     @Test
@@ -745,6 +1021,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void modifyManagedDefaultClusterParameterGroupIsRejectedWithoutPersistingChanges() {
+        String name = "default.aurora-postgresql16";
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbClusterParameterGroup(
+                        name, Map.of("log_statement", "all")));
+
+        assertEquals("InvalidDBParameterGroupState", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertTrue(rdsService.getDbClusterParameterGroup(name).getParameters().isEmpty());
+    }
+
+    @Test
+    void deleteManagedDefaultClusterParameterGroupIsRejectedAndGroupRemainsResolvable() {
+        String name = "default.aurora-postgresql16";
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.deleteDbClusterParameterGroup(name));
+
+        assertEquals("InvalidDBParameterGroupState", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals(name, rdsService.getDbClusterParameterGroup(name).getDbClusterParameterGroupName());
+    }
+
+    @Test
     void deleteDbClusterParameterGroupMissingThrows() {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.deleteDbClusterParameterGroup("nonexistent"));
@@ -874,7 +1175,7 @@ class RdsServiceTest {
                                   SecretsManagerService secretsManager) {
         return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(),
-                secretsManager, null);
+                secretsManager, null, null);
     }
 
     private static List<Subnet> defaultSubnets() {

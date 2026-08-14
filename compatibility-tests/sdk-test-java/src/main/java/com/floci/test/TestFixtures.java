@@ -4,6 +4,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
 import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
@@ -24,6 +25,7 @@ import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.neptune.NeptuneClient;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rum.RumClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.endpoints.Endpoint;
 import software.amazon.awssdk.services.s3control.S3ControlClient;
@@ -32,13 +34,18 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.swf.SwfClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.kafka.KafkaClient;
 import software.amazon.awssdk.services.mq.MqClient;
+import software.amazon.awssdk.services.kinesisanalyticsv2.KinesisAnalyticsV2Client;
 import software.amazon.awssdk.services.athena.AthenaClient;
+import software.amazon.awssdk.services.athena.model.GetQueryExecutionRequest;
+import software.amazon.awssdk.services.athena.model.QueryExecutionState;
+import software.amazon.awssdk.services.athena.model.QueryExecutionStatus;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
@@ -395,12 +402,44 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static KinesisAnalyticsV2Client kinesisAnalyticsV2Client() {
+        return KinesisAnalyticsV2Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AthenaClient athenaClient() {
         return AthenaClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
+    }
+
+    static QueryExecutionStatus awaitAthenaQueryTerminal(
+            AthenaClient athena, String queryExecutionId, Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            QueryExecutionStatus status = athena.getQueryExecution(
+                    GetQueryExecutionRequest.builder()
+                            .queryExecutionId(queryExecutionId)
+                            .build())
+                    .queryExecution()
+                    .status();
+            QueryExecutionState state = status.state();
+            if (state != QueryExecutionState.QUEUED && state != QueryExecutionState.RUNNING) {
+                return status;
+            }
+
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return status;
+            }
+            long sleepMillis = Math.min(500, Math.max(1, Duration.ofNanos(remainingNanos).toMillis()));
+            Thread.sleep(sleepMillis);
+        }
     }
 
     public static GlueClient glueClient() {
@@ -493,6 +532,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static CloudFrontClient cloudFrontClient() {
+        return CloudFrontClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static EventBridgeClient eventBridgeClient() {
         return EventBridgeClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -541,6 +588,22 @@ public final class TestFixtures {
         return SfnClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static SwfClient swfClient() {
+        return swfClient(REGION);
+    }
+
+    /**
+     * SWF names are unique per region, so cross-region tests need two clients pointed at the
+     * same emulator with different regions.
+     */
+    public static SwfClient swfClient(Region region) {
+        return SwfClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(region)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }
@@ -632,6 +695,14 @@ public final class TestFixtures {
 
     public static RdsClient rdsClient() {
         return RdsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static RumClient rumClient() {
+        return RumClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

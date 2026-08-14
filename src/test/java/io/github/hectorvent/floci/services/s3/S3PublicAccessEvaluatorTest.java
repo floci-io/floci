@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.s3;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
+import static io.github.hectorvent.floci.services.s3.S3PublicAccessEvaluator.PublicAccessDecision.ALLOW;
 import static io.github.hectorvent.floci.services.s3.S3PublicAccessEvaluator.PublicAccessDecision.DENY;
 import static io.github.hectorvent.floci.services.s3.S3PublicAccessEvaluator.PublicAccessDecision.NEUTRAL;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -97,6 +100,78 @@ class S3PublicAccessEvaluatorTest {
 
         assertEquals(NEUTRAL, S3PublicAccessEvaluator.publicPolicyDecision(
                 OBJECT_MAPPER, policy, "s3:GetObject", OBJECT_ARN));
+    }
+
+    @Test
+    void cloudFrontServicePrincipalRequiresMatchingSourceArn() {
+        String distributionArn =
+                "arn:aws:cloudfront::000000000000:distribution/EDISTRIBUTION";
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"Allow",
+                  "Principal":{"Service":"cloudfront.amazonaws.com"},
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*",
+                  "Condition":{"StringEquals":{"AWS:SourceArn":"%s"}}
+                }}""".formatted(distributionArn);
+
+        assertEquals(ALLOW, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "Service", "cloudfront.amazonaws.com",
+                "s3:GetObject", OBJECT_ARN, Map.of("aws:sourcearn", distributionArn)));
+        assertEquals(NEUTRAL, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "Service", "cloudfront.amazonaws.com",
+                "s3:GetObject", OBJECT_ARN,
+                Map.of("AWS:SourceArn",
+                        "arn:aws:cloudfront::000000000000:distribution/EOTHER")));
+    }
+
+    @Test
+    void cloudFrontOaiPrincipalMatchesAwsPrincipal() {
+        String oaiArn =
+                "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity EIDENTITY";
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"Allow",
+                  "Principal":{"AWS":"%s"},
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*"
+                }}""".formatted(oaiArn);
+
+        assertEquals(ALLOW, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "AWS", oaiArn,
+                "s3:GetObject", OBJECT_ARN, Map.of()));
+    }
+
+    @Test
+    void principalConditionalDenyOnlyAppliesWhenConditionMatches() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {
+                    "Effect":"Allow",
+                    "Principal":{"Service":"cloudfront.amazonaws.com"},
+                    "Action":"s3:GetObject",
+                    "Resource":"arn:aws:s3:::public-bucket/*"
+                  },
+                  {
+                    "Effect":"Deny",
+                    "Principal":{"Service":"cloudfront.amazonaws.com"},
+                    "Action":"s3:GetObject",
+                    "Resource":"arn:aws:s3:::public-bucket/*",
+                    "Condition":{"StringEquals":{"AWS:SourceArn":
+                      "arn:aws:cloudfront::000000000000:distribution/EBLOCKED"}}
+                  }
+                ]}""";
+
+        assertEquals(ALLOW, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "Service", "cloudfront.amazonaws.com",
+                "s3:GetObject", OBJECT_ARN,
+                Map.of("AWS:SourceArn",
+                        "arn:aws:cloudfront::000000000000:distribution/EALLOWED")));
+        assertEquals(DENY, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "Service", "cloudfront.amazonaws.com",
+                "s3:GetObject", OBJECT_ARN,
+                Map.of("AWS:SourceArn",
+                        "arn:aws:cloudfront::000000000000:distribution/EBLOCKED")));
     }
 
     @Test

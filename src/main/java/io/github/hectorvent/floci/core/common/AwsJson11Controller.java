@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
@@ -17,6 +20,7 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsT
 import io.github.hectorvent.floci.services.bcmdataexports.BcmDataExportsJsonHandler;
 import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailJsonHandler;
+import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAutoScalingJsonHandler;
 import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
@@ -32,6 +36,7 @@ import io.github.hectorvent.floci.services.emr.EmrHandler;
 import io.github.hectorvent.floci.services.memorydb.MemoryDbHandler;
 import io.github.hectorvent.floci.services.wafv2.WafV2Handler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
+import io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsV2JsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
 import io.github.hectorvent.floci.services.ssm.Ec2MessagesJsonHandler;
@@ -59,6 +64,7 @@ public class AwsJson11Controller {
     private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
 
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictBodyReader;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
     private final SsmJsonHandler ssmJsonHandler;
@@ -70,6 +76,7 @@ public class AwsJson11Controller {
     private final CloudWatchLogsHandler cloudWatchLogsHandler;
     private final SecretsManagerJsonHandler secretsManagerJsonHandler;
     private final KinesisJsonHandler kinesisJsonHandler;
+    private final KinesisAnalyticsV2JsonHandler kinesisAnalyticsV2JsonHandler;
     private final ApiGatewayV2JsonHandler apigwV2JsonHandler;
     private final KmsJsonHandler kmsJsonHandler;
     private final CognitoJsonHandler cognitoJsonHandler;
@@ -95,6 +102,7 @@ public class AwsJson11Controller {
     private final CloudTrailJsonHandler cloudTrailJsonHandler;
     private final LightsailJsonHandler lightsailJsonHandler;
     private final CloudControlJsonHandler cloudControlJsonHandler;
+    private final ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -107,6 +115,7 @@ public class AwsJson11Controller {
                                CloudWatchLogsHandler cloudWatchLogsHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
                                KinesisJsonHandler kinesisJsonHandler,
+                               KinesisAnalyticsV2JsonHandler kinesisAnalyticsV2JsonHandler,
                                ApiGatewayV2JsonHandler apigwV2JsonHandler,
                                KmsJsonHandler kmsJsonHandler, CognitoJsonHandler cognitoJsonHandler,
                                AcmJsonHandler acmJsonHandler, EcsJsonHandler ecsJsonHandler,
@@ -128,8 +137,10 @@ public class AwsJson11Controller {
                                ConfigServiceJsonHandler configServiceJsonHandler,
                                CloudTrailJsonHandler cloudTrailJsonHandler,
                                LightsailJsonHandler lightsailJsonHandler,
-                               CloudControlJsonHandler cloudControlJsonHandler) {
+                               CloudControlJsonHandler cloudControlJsonHandler,
+                               ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler) {
         this.objectMapper = objectMapper;
+        this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
@@ -141,6 +152,7 @@ public class AwsJson11Controller {
         this.cloudWatchLogsHandler = cloudWatchLogsHandler;
         this.secretsManagerJsonHandler = secretsManagerJsonHandler;
         this.kinesisJsonHandler = kinesisJsonHandler;
+        this.kinesisAnalyticsV2JsonHandler = kinesisAnalyticsV2JsonHandler;
         this.apigwV2JsonHandler = apigwV2JsonHandler;
         this.kmsJsonHandler = kmsJsonHandler;
         this.cognitoJsonHandler = cognitoJsonHandler;
@@ -166,6 +178,7 @@ public class AwsJson11Controller {
         this.cloudTrailJsonHandler = cloudTrailJsonHandler;
         this.lightsailJsonHandler = lightsailJsonHandler;
         this.cloudControlJsonHandler = cloudControlJsonHandler;
+        this.applicationAutoScalingJsonHandler = applicationAutoScalingJsonHandler;
     }
 
     @POST
@@ -189,8 +202,14 @@ public class AwsJson11Controller {
         String action = targetMatch.action();
         LOG.infov("AwsJson11Controller {0} action: {1}", serviceKey, action);
 
+        JsonNode request;
         try {
-            JsonNode request = objectMapper.readTree(body);
+            request = strictBodyReader.readTree(body);
+        } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+
+        try {
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {
@@ -203,6 +222,7 @@ public class AwsJson11Controller {
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
+                case "kinesisanalytics" -> kinesisAnalyticsV2JsonHandler.handle(action, request, region);
                 case "apigatewayv2" -> apigwV2JsonHandler.handle(action, request, region);
                 case "kms" -> kmsJsonHandler.handle(action, request, region);
                 case "cognito-idp" -> cognitoJsonHandler.handle(action, request, region);
@@ -227,6 +247,7 @@ public class AwsJson11Controller {
                 case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
                 case "config" -> configServiceJsonHandler.handle(action, request, region);
                 case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
+                case "application-autoscaling" -> applicationAutoScalingJsonHandler.handle(action, request, region);
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 default -> null;

@@ -53,6 +53,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `FLOCI_SERVICES_RDS_MOCK` | `false` | `true` = metadata only (no Docker container or auth proxy) |
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7000` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
+| `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
@@ -60,6 +61,11 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 ### Docker Compose
 
 RDS requires the Docker socket and port range exposure. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
+
+When Docker publishes RDS proxy ports dynamically, set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to the
+hostname used by clients. Floci inspects its own container through the Docker socket and returns the
+corresponding published port from `DescribeDBInstances` and `DescribeDBClusters`. Leave the setting
+unset to retain the auto-detected endpoint host and configured proxy port.
 
 ```yaml
 services:
