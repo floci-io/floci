@@ -127,6 +127,11 @@ public class ApiGatewayV2Service {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
     }
 
+    /**
+     * Mirrors ApiGatewayService#resolveRestApiRegion: unsigned data-plane requests carry no
+     * region, so preferredRegion is whatever RegionResolver defaults to, which need not match
+     * where the API was actually created. Falls back to scanning stored keys for the apiId.
+     */
     public String resolveApiRegion(String preferredRegion, String apiId) {
         if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {
             return preferredRegion;

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -159,6 +160,7 @@ class Ec2PublicIpOnLaunchTest {
                 load(dir, "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
                 load(dir, "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 load(dir, "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
+                load(dir, "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
                 load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 

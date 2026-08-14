@@ -1245,8 +1245,7 @@ public class CloudFrontController {
                     .start("KeyGroupConfig", NS)
                     .elem("Name", group.getName() != null ? group.getName() : "")
                     .elem("Comment", group.getComment() != null ? group.getComment() : "")
-                    .raw(xmlQuantityItems("Items", "PublicKey", items.size(),
-                            items.stream().map(k -> "<PublicKey>" + XmlBuilder.escape(k) + "</PublicKey>").toList()))
+                    .raw(xmlDirectItems("Items", "PublicKey", items))
                     .end("KeyGroupConfig")
                     .build();
             return Response.ok(xml, XML).header("ETag", group.getEtag()).build();
@@ -1723,6 +1722,11 @@ public class CloudFrontController {
                 .elem("DomainName", dist.getDomainName())
                 .elem("LastModifiedTime",
                         dist.getLastModifiedTime() != null ? dist.getLastModifiedTime().toString() : "")
+                .raw(xmlActiveTrustedKeyGroups(dist.getConfig()))
+                .start("ActiveTrustedSigners")
+                .elem("Enabled", false)
+                .elem("Quantity", 0)
+                .end("ActiveTrustedSigners")
                 .start("DistributionConfig")
                 .raw(xmlDistributionConfigBody(dist.getConfig()))
                 .end("DistributionConfig")
@@ -1853,6 +1857,9 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", dcb.getResponseHeadersPolicyId())
                 .elem("Compress", dcb.isCompress());
 
+        xml.raw(xmlTrustedKeyGroups(
+                dcb.isTrustedKeyGroupsEnabled(), dcb.getTrustedKeyGroups()));
+
         List<String> allowed = dcb.getAllowedMethods();
         if (allowed == null || allowed.isEmpty()) {
             allowed = List.of("GET", "HEAD");
@@ -1879,6 +1886,9 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", cb.getResponseHeadersPolicyId())
                 .elem("Compress", cb.isCompress());
 
+        xml.raw(xmlTrustedKeyGroups(
+                cb.isTrustedKeyGroupsEnabled(), cb.getTrustedKeyGroups()));
+
         List<String> allowed = cb.getAllowedMethods();
         if (allowed == null || allowed.isEmpty()) {
             allowed = List.of("GET", "HEAD");
@@ -1891,6 +1901,52 @@ public class CloudFrontController {
 
         xml.end("CacheBehavior");
         return xml.build();
+    }
+
+    private String xmlTrustedKeyGroups(
+            boolean enabled, List<String> trustedKeyGroups) {
+        List<String> keyGroups = trustedKeyGroups != null ? trustedKeyGroups : List.of();
+        XmlBuilder xml = new XmlBuilder()
+                .start("TrustedKeyGroups")
+                .elem("Enabled", enabled)
+                .elem("Quantity", keyGroups.size());
+        if (!keyGroups.isEmpty()) {
+            xml.start("Items");
+            for (String keyGroup : keyGroups) {
+                xml.elem("KeyGroup", keyGroup);
+            }
+            xml.end("Items");
+        }
+        return xml.end("TrustedKeyGroups").build();
+    }
+
+    private String xmlActiveTrustedKeyGroups(DistributionConfig config) {
+        List<KeyGroup> groups = service.activeTrustedKeyGroups(config);
+        XmlBuilder xml = new XmlBuilder()
+                .start("ActiveTrustedKeyGroups")
+                .elem("Enabled", !groups.isEmpty())
+                .elem("Quantity", groups.size());
+        if (!groups.isEmpty()) {
+            xml.start("Items");
+            for (KeyGroup group : groups) {
+                List<String> keyPairIds =
+                        group.getItems() != null ? group.getItems() : List.of();
+                xml.start("KeyGroup")
+                        .elem("KeyGroupId", group.getId())
+                        .start("KeyPairIds")
+                        .elem("Quantity", keyPairIds.size());
+                if (!keyPairIds.isEmpty()) {
+                    xml.start("Items");
+                    for (String keyPairId : keyPairIds) {
+                        xml.elem("KeyPairId", keyPairId);
+                    }
+                    xml.end("Items");
+                }
+                xml.end("KeyPairIds").end("KeyGroup");
+            }
+            xml.end("Items");
+        }
+        return xml.end("ActiveTrustedKeyGroups").build();
     }
 
     private String xmlViewerCertificate(Map<String, String> vc) {
@@ -2099,6 +2155,14 @@ public class CloudFrontController {
         return xml.build();
     }
 
+    private String xmlDirectItems(String wrapper, String itemTag, List<String> items) {
+        XmlBuilder xml = new XmlBuilder().start(wrapper);
+        for (String item : items) {
+            xml.elem(itemTag, item);
+        }
+        return xml.end(wrapper).build();
+    }
+
     private static int paginationFetchLimit(int maxItems) {
         return maxItems > 0 && maxItems < Integer.MAX_VALUE ? maxItems + 1 : maxItems;
     }
@@ -2131,17 +2195,25 @@ public class CloudFrontController {
     // ── Request parsers ───────────────────────────────────────────────────────
 
     private DistributionConfig parseDistributionConfig(String body) {
+        Map<String, String> values =
+                parseDistributionConfigTopLevelValues(body);
         DistributionConfig cfg = new DistributionConfig();
-        cfg.setCallerReference(XmlParser.extractFirst(body, "CallerReference", null));
-        cfg.setEnabled("true".equalsIgnoreCase(XmlParser.extractFirst(body, "Enabled", "true")));
-        cfg.setComment(XmlParser.extractFirst(body, "Comment", ""));
-        cfg.setDefaultRootObject(XmlParser.extractFirst(body, "DefaultRootObject", ""));
-        cfg.setHttpVersion(XmlParser.extractFirst(body, "HttpVersion", "http2"));
-        cfg.setPriceClass(XmlParser.extractFirst(body, "PriceClass", "PriceClass_All"));
-        cfg.setIPV6Enabled("true".equalsIgnoreCase(XmlParser.extractFirst(body, "IsIPV6Enabled", "true")));
-        cfg.setWebAclId(XmlParser.extractFirst(body, "WebAclId", null));
-        cfg.setContinuousDeploymentPolicyId(XmlParser.extractFirst(body, "ContinuousDeploymentPolicyId", null));
-        cfg.setStaging("true".equalsIgnoreCase(XmlParser.extractFirst(body, "Staging", "false")));
+        cfg.setCallerReference(values.get("CallerReference"));
+        cfg.setEnabled("true".equalsIgnoreCase(
+                values.getOrDefault("Enabled", "true")));
+        cfg.setComment(values.getOrDefault("Comment", ""));
+        cfg.setDefaultRootObject(
+                values.getOrDefault("DefaultRootObject", ""));
+        cfg.setHttpVersion(values.getOrDefault("HttpVersion", "http2"));
+        cfg.setPriceClass(
+                values.getOrDefault("PriceClass", "PriceClass_All"));
+        cfg.setIPV6Enabled("true".equalsIgnoreCase(
+                values.getOrDefault("IsIPV6Enabled", "true")));
+        cfg.setWebAclId(values.get("WebAclId"));
+        cfg.setContinuousDeploymentPolicyId(
+                values.get("ContinuousDeploymentPolicyId"));
+        cfg.setStaging("true".equalsIgnoreCase(
+                values.getOrDefault("Staging", "false")));
 
         cfg.setOrigins(parseOrigins(body));
         cfg.setDefaultCacheBehavior(parseDefaultCacheBehavior(body));
@@ -2151,6 +2223,75 @@ public class CloudFrontController {
         cfg.setCustomErrorResponses(parseCustomErrorResponses(body));
 
         return cfg;
+    }
+
+    private Map<String, String> parseDistributionConfigTopLevelValues(
+            String body) {
+        Map<String, String> values = new LinkedHashMap<>();
+        if (body == null || body.isEmpty()) {
+            return values;
+        }
+        try {
+            XMLStreamReader reader = XML_FACTORY.createXMLStreamReader(
+                    new StringReader(body));
+            boolean inDistributionConfig = false;
+            int nestedDepth = 0;
+            while (reader.hasNext()) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String local = reader.getLocalName();
+                    if (!inDistributionConfig
+                            && "DistributionConfig".equals(local)) {
+                        inDistributionConfig = true;
+                        continue;
+                    }
+                    if (!inDistributionConfig) {
+                        continue;
+                    }
+                    nestedDepth++;
+                    if (nestedDepth == 1
+                            && isDistributionConfigScalar(local)) {
+                        values.put(local, reader.getElementText());
+                        nestedDepth--;
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT
+                        && inDistributionConfig) {
+                    if (nestedDepth == 0
+                            && "DistributionConfig".equals(
+                                    reader.getLocalName())) {
+                        inDistributionConfig = false;
+                    } else {
+                        nestedDepth--;
+                    }
+                }
+            }
+            reader.close();
+        } catch (Exception e) {
+            LOG.debugv(
+                    "Invalid DistributionConfig XML: {0}",
+                    e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument",
+                    "The DistributionConfig XML is invalid.",
+                    400);
+        }
+        return values;
+    }
+
+    private static boolean isDistributionConfigScalar(String local) {
+        return switch (local) {
+            case "CallerReference",
+                    "Enabled",
+                    "Comment",
+                    "DefaultRootObject",
+                    "HttpVersion",
+                    "PriceClass",
+                    "IsIPV6Enabled",
+                    "WebAclId",
+                    "ContinuousDeploymentPolicyId",
+                    "Staging" -> true;
+            default -> false;
+        };
     }
 
     /**
@@ -2355,7 +2496,12 @@ public class CloudFrontController {
             XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
             boolean inDcb = false;
             boolean inAllowedMethods = false;
+            boolean inTrustedKeyGroups = false;
+            boolean sawTrustedKeyGroups = false;
+            Boolean trustedKeyGroupsEnabled = null;
+            Integer trustedKeyGroupsQuantity = null;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> trustedKeyGroups = new ArrayList<>();
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2363,6 +2509,29 @@ public class CloudFrontController {
                     String local = r.getLocalName();
                     switch (local) {
                         case "DefaultCacheBehavior" -> inDcb = true;
+                        case "TrustedKeyGroups" -> {
+                            if (inDcb) {
+                                inTrustedKeyGroups = true;
+                                sawTrustedKeyGroups = true;
+                            }
+                        }
+                        case "Enabled" -> {
+                            if (inTrustedKeyGroups) {
+                                trustedKeyGroupsEnabled =
+                                        parseTrustedKeyGroupsEnabled(r.getElementText());
+                            }
+                        }
+                        case "Quantity" -> {
+                            if (inTrustedKeyGroups) {
+                                trustedKeyGroupsQuantity =
+                                        parseTrustedKeyGroupsQuantity(r.getElementText());
+                            }
+                        }
+                        case "KeyGroup" -> {
+                            if (inTrustedKeyGroups) {
+                                trustedKeyGroups.add(r.getElementText());
+                            }
+                        }
                         case "AllowedMethods" -> {
                             if (inDcb) inAllowedMethods = true;
                         }
@@ -2399,6 +2568,7 @@ public class CloudFrontController {
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "DefaultCacheBehavior" -> inDcb = false;
                         default -> {
                         }
@@ -2409,7 +2579,28 @@ public class CloudFrontController {
             if (!allowedMethods.isEmpty()) {
                 dcb.setAllowedMethods(allowedMethods);
             }
-        } catch (Exception ignored) {
+            if (!trustedKeyGroups.isEmpty()) {
+                dcb.setTrustedKeyGroups(trustedKeyGroups);
+            }
+            if (sawTrustedKeyGroups) {
+                if (trustedKeyGroupsEnabled == null) {
+                    throw new AwsException(
+                            "InvalidArgument",
+                            "TrustedKeyGroups must include Enabled.",
+                            400);
+                }
+                validateTrustedKeyGroupsQuantity(
+                        trustedKeyGroupsQuantity, trustedKeyGroups.size());
+                validateEnabledTrustedKeyGroups(
+                        trustedKeyGroupsEnabled, trustedKeyGroups.size());
+                dcb.setTrustedKeyGroupsEnabled(trustedKeyGroupsEnabled);
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.debugv("Invalid DefaultCacheBehavior XML: {0}", e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument", "The DefaultCacheBehavior configuration is invalid.", 400);
         }
         return dcb;
     }
@@ -2424,8 +2615,13 @@ public class CloudFrontController {
             boolean inCacheBehaviors = false;
             boolean inCacheBehavior = false;
             boolean inAllowedMethods = false;
+            boolean inTrustedKeyGroups = false;
             CacheBehavior current = null;
+            boolean sawTrustedKeyGroups = false;
+            Boolean trustedKeyGroupsEnabled = null;
+            Integer trustedKeyGroupsQuantity = null;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> trustedKeyGroups = new ArrayList<>();
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2437,7 +2633,34 @@ public class CloudFrontController {
                             if (inCacheBehaviors) {
                                 inCacheBehavior = true;
                                 current = new CacheBehavior();
+                                sawTrustedKeyGroups = false;
+                                trustedKeyGroupsEnabled = null;
+                                trustedKeyGroupsQuantity = null;
                                 allowedMethods = new ArrayList<>();
+                                trustedKeyGroups = new ArrayList<>();
+                            }
+                        }
+                        case "TrustedKeyGroups" -> {
+                            if (inCacheBehavior) {
+                                inTrustedKeyGroups = true;
+                                sawTrustedKeyGroups = true;
+                            }
+                        }
+                        case "Enabled" -> {
+                            if (inTrustedKeyGroups) {
+                                trustedKeyGroupsEnabled =
+                                        parseTrustedKeyGroupsEnabled(r.getElementText());
+                            }
+                        }
+                        case "Quantity" -> {
+                            if (inTrustedKeyGroups) {
+                                trustedKeyGroupsQuantity =
+                                        parseTrustedKeyGroupsQuantity(r.getElementText());
+                            }
+                        }
+                        case "KeyGroup" -> {
+                            if (inTrustedKeyGroups) {
+                                trustedKeyGroups.add(r.getElementText());
                             }
                         }
                         case "AllowedMethods" -> {
@@ -2477,10 +2700,30 @@ public class CloudFrontController {
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "CacheBehavior" -> {
                             if (inCacheBehavior && current != null) {
                                 if (!allowedMethods.isEmpty()) {
                                     current.setAllowedMethods(allowedMethods);
+                                }
+                                if (!trustedKeyGroups.isEmpty()) {
+                                    current.setTrustedKeyGroups(trustedKeyGroups);
+                                }
+                                if (sawTrustedKeyGroups) {
+                                    if (trustedKeyGroupsEnabled == null) {
+                                        throw new AwsException(
+                                                "InvalidArgument",
+                                            "TrustedKeyGroups must include Enabled.",
+                                            400);
+                                    }
+                                    validateTrustedKeyGroupsQuantity(
+                                            trustedKeyGroupsQuantity,
+                                            trustedKeyGroups.size());
+                                    validateEnabledTrustedKeyGroups(
+                                            trustedKeyGroupsEnabled,
+                                            trustedKeyGroups.size());
+                                    current.setTrustedKeyGroupsEnabled(
+                                            trustedKeyGroupsEnabled);
                                 }
                                 result.add(current);
                             }
@@ -2494,9 +2737,66 @@ public class CloudFrontController {
                 }
             }
             r.close();
-        } catch (Exception ignored) {
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.debugv("Invalid CacheBehaviors XML: {0}", e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument", "The CacheBehaviors configuration is invalid.", 400);
         }
         return result;
+    }
+
+    private static boolean parseTrustedKeyGroupsEnabled(String value) {
+        if (!"true".equalsIgnoreCase(value)
+                && !"false".equalsIgnoreCase(value)) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "TrustedKeyGroups Enabled must be true or false.",
+                    400);
+        }
+        return Boolean.parseBoolean(value);
+    }
+
+    private static int parseTrustedKeyGroupsQuantity(String value) {
+        try {
+            int quantity = Integer.parseInt(value);
+            if (quantity < 0) {
+                throw new NumberFormatException("negative quantity");
+            }
+            return quantity;
+        } catch (NumberFormatException e) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "TrustedKeyGroups Quantity must be a non-negative integer.",
+                    400);
+        }
+    }
+
+    private static void validateTrustedKeyGroupsQuantity(
+            Integer quantity, int itemCount) {
+        if (quantity == null) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "TrustedKeyGroups must include Quantity.",
+                    400);
+        }
+        if (quantity != itemCount) {
+            throw new AwsException(
+                    "InconsistentQuantities",
+                    "The value of Quantity does not match the number of items.",
+                    400);
+        }
+    }
+
+    private static void validateEnabledTrustedKeyGroups(
+            boolean enabled, int itemCount) {
+        if (enabled && itemCount == 0) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "TrustedKeyGroups cannot be enabled without a key group.",
+                    400);
+        }
     }
 
     private List<String> parseAliases(String body) {
@@ -2676,8 +2976,7 @@ public class CloudFrontController {
                 .start("KeyGroupConfig")
                 .elem("Name", group.getName() != null ? group.getName() : "")
                 .elem("Comment", group.getComment() != null ? group.getComment() : "")
-                .raw(xmlQuantityItems("Items", "PublicKey", items.size(),
-                        items.stream().map(k -> "<PublicKey>" + XmlBuilder.escape(k) + "</PublicKey>").toList()))
+                .raw(xmlDirectItems("Items", "PublicKey", items))
                 .end("KeyGroupConfig")
                 .end("KeyGroup");
         return xml.build();

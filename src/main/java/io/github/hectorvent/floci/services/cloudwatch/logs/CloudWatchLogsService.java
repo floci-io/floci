@@ -387,6 +387,8 @@ public class CloudWatchLogsService {
             int end = parseTokenIndex(nextToken, 2);
             pageEnd = Math.min(end, total);
             pageStart = Math.max(pageEnd - maxEvents, 0);
+        } else if (nextToken != null) {
+            throw invalidNextToken();
         } else if (!startFromHead) {
             pageEnd = total;
             pageStart = Math.max(total - maxEvents, 0);
@@ -400,11 +402,20 @@ public class CloudWatchLogsService {
     }
 
     private int parseTokenIndex(String token, int prefixLen) {
+        int index;
         try {
-            return Integer.parseInt(token.substring(prefixLen));
+            index = Integer.parseInt(token.substring(prefixLen));
         } catch (NumberFormatException e) {
-            return 0;
+            throw invalidNextToken();
         }
+        if (index < 0) {
+            throw invalidNextToken();
+        }
+        return index;
+    }
+
+    private AwsException invalidNextToken() {
+        return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
     }
 
     /**

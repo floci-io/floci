@@ -682,7 +682,8 @@ class Ec2ServiceTest {
         List<SecurityGroupRule> rules =
                 service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of());
 
-        assertEquals(1, rules.stream().filter(r -> "sg-peer-a".equals(r.getReferencedGroupId())).count());
+        assertEquals(1, rules.stream().filter(r -> r.getReferencedGroupInfo() != null
+                && "sg-peer-a".equals(r.getReferencedGroupInfo().getGroupId())).count());
         assertEquals(1, rules.stream().filter(r -> "2001:db8:1::/64".equals(r.getCidrIpv6())).count());
     }
 
@@ -827,6 +828,51 @@ class Ec2ServiceTest {
                     service.modifyManagedPrefixList("us-east-1", missing, null, null, null,
                             List.of(), List.of())).getErrorCode());
         }
+    }
+
+    /**
+     * Verified against a live AWS account: the three dotted prefixes are rejected, and the
+     * trailing dot matters — {@code com.amazonaws-probe} and {@code comamazonaws.probe} are both
+     * accepted there, so a dotless prefix match would refuse names AWS allows.
+     */
+    @Test
+    void createManagedPrefixListRejectsNamesReservedByAws() {
+        Ec2Service service = prefixListService();
+
+        for (String reserved : new String[] {"com.amazonaws.probe", "com.amazon.probe", "com.aws.probe"}) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createManagedPrefixList(
+                    "us-east-1", reserved, "IPv4", 5, List.of(), List.of()), "expected rejection for " + reserved);
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+        }
+
+        // Names that only look reserved are still allowed.
+        for (String allowed : new String[] {"com.amazonaws-probe", "comamazonaws.probe", "corp"}) {
+            assertEquals(allowed, service.createManagedPrefixList(
+                    "us-east-1", allowed, "IPv4", 5, List.of(), List.of()).getPrefixListName());
+        }
+    }
+
+    /**
+     * Verified against a live AWS account: the rename path applies the same rule, and rejecting it
+     * leaves the existing name in place. A lookalike is still allowed.
+     */
+    @Test
+    void renamingToAReservedNameIsRejected() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyManagedPrefixList(
+                "us-east-1", list.getPrefixListId(), null, "com.amazonaws.us-east-1.s3", null,
+                List.of(), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals("corp", service.describeManagedPrefixLists("us-east-1",
+                List.of(list.getPrefixListId()), Map.of()).getFirst().getPrefixListName());
+
+        service.modifyManagedPrefixList("us-east-1", list.getPrefixListId(), null,
+                "com.amazonaws-renamed", null, List.of(), List.of());
+        assertEquals("com.amazonaws-renamed", service.describeManagedPrefixLists("us-east-1",
+                List.of(list.getPrefixListId()), Map.of()).getFirst().getPrefixListName());
     }
 
     @Test

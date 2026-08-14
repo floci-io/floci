@@ -49,7 +49,6 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
-import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
@@ -61,6 +60,7 @@ import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import io.github.hectorvent.floci.services.ec2.model.PrefixList;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
+import io.github.hectorvent.floci.services.ec2.model.ReferencedSecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
@@ -70,6 +70,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -564,6 +565,23 @@ public class Ec2Service implements ContainerTeardown {
     // Managed prefix lists
     // =========================================================================
 
+    /**
+     * Name prefixes AWS reserves for its own gateway-endpoint lists. The trailing dot is part of
+     * each: {@code com.amazonaws-probe} is accepted on AWS, so matching without it over-rejects.
+     */
+    private static final List<String> RESERVED_PREFIX_LIST_NAME_PREFIXES =
+            List.of("com.amazonaws.", "com.amazon.", "com.aws.");
+
+    /** AWS applies the reserved-name rule to a rename as well as a create. */
+    private void requireUnreservedPrefixListName(String prefixListName) {
+        for (String reserved : RESERVED_PREFIX_LIST_NAME_PREFIXES) {
+            if (prefixListName.startsWith(reserved)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The prefix list name cannot begin with (com.amazonaws., com.amazon., com.aws.).", 400);
+            }
+        }
+    }
+
     private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
         return List.of(
                 awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
@@ -597,6 +615,7 @@ public class Ec2Service implements ContainerTeardown {
         if (prefixListName == null || prefixListName.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter PrefixListName.", 400);
         }
+        requireUnreservedPrefixListName(prefixListName);
         if (!"IPv4".equals(addressFamily) && !"IPv6".equals(addressFamily)) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid value '" + addressFamily + "' for addressFamily. Valid values are IPv4 and IPv6.", 400);
@@ -707,6 +726,7 @@ public class Ec2Service implements ContainerTeardown {
                 list.setMaxEntries(maxEntries);
             }
             if (prefixListName != null && !prefixListName.isBlank()) {
+                requireUnreservedPrefixListName(prefixListName);
                 list.setPrefixListName(prefixListName);
             }
 
@@ -1660,6 +1680,7 @@ public class Ec2Service implements ContainerTeardown {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
             for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
                 next.add(perm);
                 rules.addAll(createRules(region, groupId, perm, false));
             }
@@ -1677,6 +1698,7 @@ public class Ec2Service implements ContainerTeardown {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
             for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
                 next.add(perm);
                 rules.addAll(createRules(region, groupId, perm, true));
             }
@@ -1687,43 +1709,43 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     /**
-     * One rule record per peer the permission names — each ipv4 range, each ipv6 range and each
-     * referenced group — as AWS does. Recording the peer, not just protocol and ports, is what lets
-     * {@link #removeRecordedPermission} take out the rule that was asked for rather than the first
-     * one that happens to share a port.
+     * Flattens one permission into the {@link SecurityGroupRule} entries DescribeSecurityGroupRules
+     * serves. AWS gives every rule exactly one source, so a permission carrying several sources fans
+     * out into one rule each.
      */
     private List<SecurityGroupRule> createRules(String region, String groupId, IpPermission perm, boolean egress) {
         List<SecurityGroupRule> rules = new ArrayList<>();
-        List<IpRange> ranges = perm.getIpRanges();
-        if (ranges != null) {
-            for (IpRange range : ranges) {
-                SecurityGroupRule rule = newRule(groupId, egress, perm);
+        if (perm.getIpRanges() != null) {
+            for (IpRange range : perm.getIpRanges()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
                 rule.setCidrIpv4(range.getCidrIp());
                 rule.setDescription(range.getDescription());
                 rules.add(rule);
             }
         }
-        List<Ipv6Range> ranges6 = perm.getIpv6Ranges();
-        if (ranges6 != null) {
-            for (Ipv6Range range : ranges6) {
-                SecurityGroupRule rule = newRule(groupId, egress, perm);
+        if (perm.getIpv6Ranges() != null) {
+            for (Ipv6Range range : perm.getIpv6Ranges()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
                 rule.setCidrIpv6(range.getCidrIpv6());
                 rule.setDescription(range.getDescription());
                 rules.add(rule);
             }
         }
-        List<UserIdGroupPair> pairs = perm.getUserIdGroupPairs();
-        if (pairs != null) {
-            for (UserIdGroupPair pair : pairs) {
-                // UserIdGroupPair has no description field to carry over.
-                SecurityGroupRule rule = newRule(groupId, egress, perm);
-                rule.setReferencedGroupId(pair.getGroupId());
+        if (perm.getUserIdGroupPairs() != null) {
+            for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
+                ReferencedSecurityGroup ref = new ReferencedSecurityGroup();
+                ref.setGroupId(pair.getGroupId());
+                ref.setUserId(pair.getUserId());
+                rule.setReferencedGroupInfo(ref);
+                rule.setDescription(pair.getDescription());
                 rules.add(rule);
             }
         }
+        // Real AWS rejects a permission with no source at all; Floci keeps accepting it, so it still
+        // needs a rule to describe.
         if (rules.isEmpty()) {
-            // A permission naming no peer at all — protocol and ports are its whole identity.
-            rules.add(newRule(groupId, egress, perm));
+            rules.add(newRule(groupId, perm, egress));
         }
         for (SecurityGroupRule rule : rules) {
             securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
@@ -1731,7 +1753,7 @@ public class Ec2Service implements ContainerTeardown {
         return rules;
     }
 
-    private SecurityGroupRule newRule(String groupId, boolean egress, IpPermission perm) {
+    private SecurityGroupRule newRule(String groupId, IpPermission perm, boolean egress) {
         SecurityGroupRule rule = new SecurityGroupRule();
         rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
         rule.setGroupId(groupId);
@@ -1741,6 +1763,34 @@ public class Ec2Service implements ContainerTeardown {
         rule.setFromPort(perm.getFromPort());
         rule.setToPort(perm.getToPort());
         return rule;
+    }
+
+    /**
+     * Fills in the source details AWS returns but a caller may leave out: an absent {@code UserId}
+     * is this account, and a reference made by group name is resolved to its group id so the
+     * flattened rule can carry a {@code referencedGroupInfo} (the AWS shape has no group name).
+     *
+     * <p>Group names are unique per VPC rather than per region, so resolution is confined to the
+     * VPC of the group being authorized. A name matching nothing there stays unresolved: Floci does
+     * not check that a referenced group exists, for ids either.
+     */
+    private void resolveGroupReferences(String region, String vpcId, IpPermission perm) {
+        if (perm.getUserIdGroupPairs() == null) {
+            return;
+        }
+        for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
+            if (pair.getUserId() == null) {
+                pair.setUserId(accountId);
+            }
+            if (pair.getGroupId() == null && pair.getGroupName() != null) {
+                securityGroups.scan(k -> true).stream()
+                        .filter(sg -> sg.getRegion().equals(region)
+                                && Objects.equals(vpcId, sg.getVpcId())
+                                && pair.getGroupName().equals(sg.getGroupName()))
+                        .findFirst()
+                        .ifPresent(sg -> pair.setGroupId(sg.getGroupId()));
+            }
+        }
     }
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
@@ -1767,12 +1817,9 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     /**
-     * Removes a single rule by its SecurityGroupRuleId: the stored rule record, then the permission
-     * it describes on the owning group. CloudFormation deletes standalone
-     * {@code AWS::EC2::SecurityGroupIngress}/{@code Egress} resources through here — the
-     * by-permission revoke above matches on protocol and ports alone, so it would also strip the
-     * group's unrelated rules that happen to share them. Returns false when no such rule is
-     * recorded, and succeeds quietly when the group itself is already gone.
+     * Deletes a rule by its {@code sgr-} id, which is what a standalone
+     * {@code AWS::EC2::SecurityGroupIngress} or {@code Egress} resource holds as its physical id.
+     * Returns false when the rule is already gone, so a stack delete stays idempotent.
      */
     public boolean deleteSecurityGroupRule(String region, String securityGroupRuleId) {
         ensureDefaultResources(region);
@@ -1808,11 +1855,13 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     /**
-     * Drops exactly the peer a rule record names — its ipv4 cidr, ipv6 cidr or referenced group —
-     * and the whole permission only once nothing is left in it. Matching on protocol and ports
-     * alone would take out an unrelated rule that happens to share them.
+     * Drops exactly the peer a rule record names, its ipv4 cidr, ipv6 cidr or referenced group, and
+     * the whole permission only once nothing is left in it. Matching on protocol and ports alone
+     * would take out an unrelated rule that happens to share them.
      */
     private boolean removeRecordedPermission(List<IpPermission> perms, SecurityGroupRule rule) {
+        String referencedGroupId = rule.getReferencedGroupInfo() == null
+                ? null : rule.getReferencedGroupInfo().getGroupId();
         for (IpPermission perm : perms) {
             if (!Objects.equals(perm.getIpProtocol(), rule.getIpProtocol())
                     || !Objects.equals(perm.getFromPort(), rule.getFromPort())
@@ -1830,9 +1879,9 @@ public class Ec2Service implements ContainerTeardown {
                 dropIfEmpty(perms, perm);
                 return true;
             }
-            if (rule.getReferencedGroupId() != null) {
+            if (referencedGroupId != null) {
                 UserIdGroupPair matchPair = perm.getUserIdGroupPairs().stream()
-                        .filter(pair -> rule.getReferencedGroupId().equals(pair.getGroupId()))
+                        .filter(pair -> referencedGroupId.equals(pair.getGroupId()))
                         .findFirst().orElse(null);
                 if (matchPair == null) {
                     continue;

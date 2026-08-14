@@ -19,8 +19,7 @@ public class SecurityGroupRule {
     private Integer toPort;
     private String cidrIpv4;
     private String cidrIpv6;
-    /** The peer security group, for a rule authorized against a group rather than a CIDR. */
-    private String referencedGroupId;
+    private ReferencedSecurityGroup referencedGroupInfo;
     private String description;
     private List<Tag> tags = new ArrayList<>();
 
@@ -53,8 +52,10 @@ public class SecurityGroupRule {
     public String getCidrIpv6() { return cidrIpv6; }
     public void setCidrIpv6(String cidrIpv6) { this.cidrIpv6 = cidrIpv6; }
 
-    public String getReferencedGroupId() { return referencedGroupId; }
-    public void setReferencedGroupId(String referencedGroupId) { this.referencedGroupId = referencedGroupId; }
+    public ReferencedSecurityGroup getReferencedGroupInfo() { return referencedGroupInfo; }
+    public void setReferencedGroupInfo(ReferencedSecurityGroup referencedGroupInfo) {
+        this.referencedGroupInfo = referencedGroupInfo;
+    }
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
