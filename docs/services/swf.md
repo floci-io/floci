@@ -246,7 +246,17 @@ Faults use the AWS codes and messages, so SDK error handling works unchanged:
   storage modes, matching the fact that SWF tokens are not durable handles.
 - **Retention.** `workflowExecutionRetentionPeriodInDays` is stored and returned but
   closed executions are not pruned.
-- **Pagination.** `maximumPageSize` and `nextPageToken` are honored on the history,
-  execution-list, and registration-list (`ListDomains`, `ListWorkflowTypes`,
-  `ListActivityTypes`) operations; tokens are opaque offsets and are not interchangeable with
-  real SWF tokens.
+- **Pagination.** `maximumPageSize` and `nextPageToken` are honored on every paginated
+  operation — the history, the execution listings, the registration listings (`ListDomains`,
+  `ListWorkflowTypes`, `ListActivityTypes`) and `PollForDecisionTask`. All of them apply the
+  service's 1000 cap, rejecting a larger value rather than clamping it. Tokens are opaque and
+  are not interchangeable with real SWF tokens.
+- **`PollForDecisionTask` continuation.** A request carrying `nextPageToken` continues the
+  earlier poll instead of claiming a new task, so it returns the same `startedEventId`,
+  `previousStartedEventId` and `workflowExecution` with the next page of that task's history.
+  `startAtPreviousStartedEvent` trims the window to events from `previousStartedEventId`
+  onward, which the service treats as inclusive.
+- **Decision batches are all-or-nothing.** A batch containing an unknown `decisionType`, or a
+  closing decision that is not last, is rejected with `ValidationException` before anything is
+  applied: no `DecisionTaskCompleted`, no earlier decision, and the task token stays claimable
+  for a corrected batch.
