@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.util.List;
@@ -52,7 +53,7 @@ class CloudFormationIamAttachmentProvisionerTest {
                 mapper,
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
-                null,
+                null, null,
                 new CloudFormationResourceRegistry(List.of(new IamRoleCfnProvisioner(iamService))));
     }
 
@@ -91,6 +92,76 @@ class CloudFormationIamAttachmentProvisionerTest {
         verify(iamService).detachRolePolicy("existing-role", NEW_POLICY);
         verify(iamService, never()).detachRolePolicy("existing-role", EXISTING_POLICY);
         verify(iamService, never()).deleteRole("existing-role");
+    }
+
+    @Test
+    void sameStackRoleUpdateAppliesChangedTrustPolicy() throws Exception {
+        // github.com/floci-io/floci/issues/2084 — adopting an existing role on update must still
+        // apply this template's current AssumeRolePolicyDocument, or a changed trust policy is
+        // silently dropped while the stack still reports UPDATE_COMPLETE.
+        IamRole role = role("existing-role");
+        String newTrustPolicyJson =
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
+        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
+        when(iamService.getRole("existing-role")).thenReturn(role);
+
+        StackResource result = provision("Role", "AWS::IAM::Role", """
+                {"RoleName":"existing-role","AssumeRolePolicyDocument":%s}
+                """.formatted(newTrustPolicyJson), "existing-role", Map.of("RoleId", role.getRoleId()));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+        verify(iamService).updateAssumeRolePolicy(eq("existing-role"), docCaptor.capture(), eq(role.getRoleId()));
+        assertEquals(mapper.readTree(newTrustPolicyJson), mapper.readTree(docCaptor.getValue()));
+    }
+
+    @Test
+    void sameStackRoleUpdateFailureRestoresPriorTrustPolicy() throws Exception {
+        // Companion to sameStackRoleUpdateAppliesChangedTrustPolicy: if a later step in this same
+        // attempt fails (e.g. a bad ManagedPolicyArns entry), the whole resource update fails and
+        // CloudFormation reports UPDATE_ROLLBACK_COMPLETE. The trust policy must actually roll back
+        // too, not stay on the new value while the stack claims nothing changed.
+        IamRole role = role("existing-role");
+        String priorTrustPolicy = role.getAssumeRolePolicyDocument();
+        String newTrustPolicyJson =
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
+        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
+        when(iamService.getRole("existing-role")).thenReturn(role);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iamService).attachRolePolicy("existing-role", MISSING_POLICY);
+
+        StackResource result = provision("Role", "AWS::IAM::Role", """
+                {"RoleName":"existing-role","AssumeRolePolicyDocument":%s,"ManagedPolicyArns":["%s"]}
+                """.formatted(newTrustPolicyJson, MISSING_POLICY), "existing-role", Map.of("RoleId", role.getRoleId()));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        // Both the primary write and the failure-triggered restore use the ID-verified overload,
+        // guarding against a role replaced under the same name mid-attempt in either direction.
+        ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+        verify(iamService, times(2)).updateAssumeRolePolicy(
+                eq("existing-role"), docCaptor.capture(), eq(role.getRoleId()));
+        List<String> calls = docCaptor.getAllValues();
+        assertEquals(mapper.readTree(newTrustPolicyJson), mapper.readTree(calls.get(0)),
+                "first call applies the template's new trust policy");
+        assertEquals(priorTrustPolicy, calls.get(1),
+                "second call restores the role's pre-update trust policy after the failure");
+        verify(iamService, never()).updateAssumeRolePolicy(anyString(), anyString());
+    }
+
+    @Test
+    void freshRoleCreationDoesNotRedundantlyUpdateTrustPolicy() {
+        IamRole role = role("new-role");
+        when(iamService.createRole("new-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+                .thenReturn(role);
+
+        provisionRole("new-role", List.of());
+
+        verify(iamService, never()).updateAssumeRolePolicy(anyString(), anyString());
+        verify(iamService, never()).updateAssumeRolePolicy(anyString(), anyString(), anyString());
     }
 
     @Test

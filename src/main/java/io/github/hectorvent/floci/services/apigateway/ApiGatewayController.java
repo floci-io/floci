@@ -642,6 +642,32 @@ public class ApiGatewayController {
         return Response.ok(node.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
+    @PATCH
+    @Path("/apikeys/{apiKeyId}")
+    public Response updateApiKey(@Context HttpHeaders headers,
+                                 @PathParam("apiKeyId") String apiKeyId,
+                                 String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
+            ApiKey key = service.updateApiKey(region, apiKeyId, patchOperations);
+            return Response.ok(toApiKeyNode(key).toString()).type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @DELETE
+    @Path("/apikeys/{apiKeyId}")
+    public Response deleteApiKey(@Context HttpHeaders headers,
+                                 @PathParam("apiKeyId") String apiKeyId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteApiKey(region, apiKeyId);
+        return Response.accepted().build();
+    }
+
     @POST
     @Path("/usageplans")
     public Response createUsagePlan(@Context HttpHeaders headers, String body) {
@@ -1666,6 +1692,9 @@ public class ApiGatewayController {
         node.put("name", k.getName());
         node.put("value", k.getValue());
         node.put("enabled", k.isEnabled());
+        if (k.getDescription() != null) {
+            node.put("description", k.getDescription());
+        }
         if (k.getTags() != null && !k.getTags().isEmpty()) {
             ObjectNode tags = node.putObject("tags");
             k.getTags().forEach(tags::put);
@@ -1677,6 +1706,10 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", p.getId());
         node.put("name", p.getName());
+        if (p.getTags() != null && !p.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            p.getTags().forEach(tags::put);
+        }
         return node;
     }
 
@@ -1759,6 +1792,7 @@ public class ApiGatewayController {
         node.put("protocolType", api.getProtocolType());
         node.put("apiEndpoint", api.getApiEndpoint());
         node.put("createdDate", java.time.Instant.ofEpochMilli(api.getCreatedDate()).toString());
+        node.put("disableExecuteApiEndpoint", api.isDisableExecuteApiEndpoint());
         if (api.getRouteSelectionExpression() != null) node.put("routeSelectionExpression", api.getRouteSelectionExpression());
         if (api.getDescription() != null) node.put("description", api.getDescription());
         if (api.getApiKeySelectionExpression() != null) node.put("apiKeySelectionExpression", api.getApiKeySelectionExpression());

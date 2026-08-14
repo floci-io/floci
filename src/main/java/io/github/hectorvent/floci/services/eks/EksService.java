@@ -11,7 +11,9 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
@@ -53,11 +55,13 @@ public class EksService implements TagHandler {
     private final RegionResolver regionResolver;
     private final EksClusterManager clusterManager;
     private final Ec2Service ec2Service;
+    private final EksOidcService oidcService;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
-            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service) {
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -71,13 +75,53 @@ public class EksService implements TagHandler {
         this.regionResolver = regionResolver;
         this.clusterManager = clusterManager;
         this.ec2Service = ec2Service;
+        this.oidcService = oidcService;
     }
 
     @PostConstruct
     public void init() {
+        backfillOidcIdentities();
         if (!config.services().eks().mock()) {
             startReadinessPoller();
         }
+    }
+
+    /**
+     * Gives clusters persisted before IRSA support an OIDC issuer and signing key. Without this,
+     * a cluster restored from {@code eks-clusters.json} would report no
+     * {@code identity.oidc.issuer}, and token minting and the JWKS routes would fail for it until
+     * it was recreated.
+     */
+    private void backfillOidcIdentities() {
+        for (Cluster cluster : allClusters()) {
+            // Runs at startup with no request context, so the owning account must come from the
+            // cluster record and be passed explicitly, so the account-scoped put()/get() would
+            // resolve to the default account and strand a cluster owned by any other one.
+            String accountId = cluster.getAccountId() != null
+                    ? cluster.getAccountId()
+                    : regionResolver.getAccountId();
+
+            if (cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
+                    && cluster.getIdentity().getOidc().getIssuer() != null) {
+                oidcService.ensureKeyForAccount(accountId, cluster.getName(),
+                        cluster.getIdentity().getOidc().getIssuer());
+                continue;
+            }
+            String issuer = oidcService.newIssuerUrl(config.defaultRegion());
+            cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+            oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+            putClusterForAccount(accountId, cluster);
+            LOG.infov("Backfilled IRSA OIDC issuer for existing EKS cluster {0} in account {1}",
+                    cluster.getName(), accountId);
+        }
+    }
+
+    private void putClusterForAccount(String accountId, Cluster cluster) {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            aware.putForAccount(accountId, cluster.getName(), cluster);
+            return;
+        }
+        storage.put(cluster.getName(), cluster);
     }
 
     @PreDestroy
@@ -119,6 +163,10 @@ public class EksService implements TagHandler {
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
+        String issuer = oidcService.newIssuerUrl(region);
+        cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        oidcService.ensureKey(name, issuer);
+
         if (config.services().eks().mock()) {
             cluster.setStatus(ClusterStatus.ACTIVE);
             cluster.setEndpoint("https://localhost:" + config.services().eks().apiServerBasePort());
@@ -157,6 +205,7 @@ public class EksService implements TagHandler {
             clusterManager.stopCluster(cluster);
         }
         storage.delete(name);
+        oidcService.deleteKey(name);
         return cluster;
     }
 

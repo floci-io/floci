@@ -5,7 +5,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
-
+import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
 import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
@@ -41,6 +41,7 @@ import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.kafka.KafkaClient;
 import software.amazon.awssdk.services.mq.MqClient;
+import software.amazon.awssdk.services.kinesisanalyticsv2.KinesisAnalyticsV2Client;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.GetQueryExecutionRequest;
 import software.amazon.awssdk.services.athena.model.QueryExecutionState;
@@ -407,6 +408,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static KinesisAnalyticsV2Client kinesisAnalyticsV2Client() {
+        return KinesisAnalyticsV2Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AthenaClient athenaClient() {
         return AthenaClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -523,6 +532,14 @@ public final class TestFixtures {
 
     public static CloudFormationClient cloudFormationClient() {
         return CloudFormationClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static CloudFrontClient cloudFrontClient() {
+        return CloudFrontClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

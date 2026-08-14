@@ -1,0 +1,15 @@
+--- compatibility-tests/sdk-test-java/src/main/java/com/floci/test/TestFixtures.java
++++ compatibility-tests/sdk-test-java/src/main/java/com/floci/test/TestFixtures.java
+@@ -4,11 +4,8 @@
+ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+ import software.amazon.awssdk.regions.Region;
+ import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+-<<<<<<< HEAD
+ import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
+-
+-=======
+ import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
+->>>>>>> upstream/main
+ import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
+ import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+ import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
