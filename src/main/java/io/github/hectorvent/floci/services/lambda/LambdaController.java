@@ -626,6 +626,13 @@ public class LambdaController {
             node.put("KMSKeyArn", fn.getKmsKeyArn());
         }
 
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            ArrayNode fileSystems = node.putArray("FileSystemConfigs");
+            fn.getFileSystemConfigs().forEach(fileSystem -> fileSystems.addObject()
+                    .put("Arn", fileSystem.getArn())
+                    .put("LocalMountPath", fileSystem.getLocalMountPath()));
+        }
+
         // Environment — always present (SDK expects it even when empty)
         ObjectNode envNode = node.putObject("Environment");
         if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {

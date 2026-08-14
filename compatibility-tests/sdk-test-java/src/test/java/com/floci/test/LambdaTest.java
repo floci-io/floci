@@ -6,6 +6,8 @@ import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.*;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("Lambda")
@@ -14,6 +16,7 @@ class LambdaTest {
 
     private static LambdaClient lambda;
     private static final String FUNCTION_NAME = "sdk-test-fn";
+    private static final String FILE_SYSTEM_FUNCTION_NAME = "sdk-test-efs-fn";
     private static final String ROLE = "arn:aws:iam::000000000000:role/lambda-role";
     private static String functionArn;
 
@@ -37,6 +40,12 @@ class LambdaTest {
                 lambda.deleteFunction(DeleteFunctionRequest.builder()
                         .functionName("sdk-test-provided-fn").build());
             } catch (Exception ignored) {}
+            try {
+                lambda.deleteFunction(DeleteFunctionRequest.builder()
+                        .functionName(FILE_SYSTEM_FUNCTION_NAME).build());
+            } catch (Exception e) {
+                System.err.println("Best-effort Lambda file-system test cleanup failed: " + e.getMessage());
+            }
             lambda.close();
         }
     }
@@ -363,5 +372,55 @@ class LambdaTest {
         // Cleanup
         lambda.deleteFunction(DeleteFunctionRequest.builder()
                 .functionName(rubyFn).build());
+    }
+
+    @Test
+    @Order(19)
+    void fileSystemConfigsRoundTripAndMountWithAwsSdk() {
+        FileSystemConfig fileSystem = FileSystemConfig.builder()
+                .arn("arn:aws:elasticfilesystem:us-east-1:000000000000:"
+                        + "access-point/fsap-0123456789abcdef0")
+                .localMountPath("/mnt/shared")
+                .build();
+
+        CreateFunctionResponse created = lambda.createFunction(CreateFunctionRequest.builder()
+                .functionName(FILE_SYSTEM_FUNCTION_NAME)
+                .runtime(Runtime.NODEJS20_X)
+                .role(ROLE)
+                .handler("index.handler")
+                .vpcConfig(VpcConfig.builder()
+                        .subnetIds("subnet-0123456789abcdef0")
+                        .securityGroupIds("sg-0123456789abcdef0")
+                        .build())
+                .fileSystemConfigs(fileSystem)
+                .code(FunctionCode.builder()
+                        .zipFile(SdkBytes.fromByteArray(LambdaUtils.fileSystemZip()))
+                        .build())
+                .build());
+
+        assertThat(created.fileSystemConfigs()).containsExactly(fileSystem);
+
+        GetFunctionConfigurationResponse configuration = lambda.getFunctionConfiguration(
+                GetFunctionConfigurationRequest.builder()
+                        .functionName(FILE_SYSTEM_FUNCTION_NAME)
+                        .build());
+        assertThat(configuration.fileSystemConfigs()).containsExactly(fileSystem);
+
+        InvokeResponse invocation = lambda.invoke(InvokeRequest.builder()
+                .functionName(FILE_SYSTEM_FUNCTION_NAME)
+                .invocationType(InvocationType.REQUEST_RESPONSE)
+                .payload(SdkBytes.fromUtf8String("{\"value\":\"from-sdk\"}"))
+                .build());
+        assertThat(invocation.functionError()).isNull();
+        assertThat(invocation.payload().asUtf8String())
+                .contains("\"mounted\":true")
+                .contains("\"value\":\"from-sdk\"");
+
+        UpdateFunctionConfigurationResponse updated = lambda.updateFunctionConfiguration(
+                UpdateFunctionConfigurationRequest.builder()
+                        .functionName(FILE_SYSTEM_FUNCTION_NAME)
+                        .fileSystemConfigs(List.of())
+                        .build());
+        assertThat(updated.fileSystemConfigs()).isEmpty();
     }
 }

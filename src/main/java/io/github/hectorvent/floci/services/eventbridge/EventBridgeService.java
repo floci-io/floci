@@ -137,9 +137,8 @@ public class EventBridgeService {
 
     public EventBus createEventBus(String name, String description,
                                    Map<String, String> tags, String region) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("ValidationException", "EventBus name is required.", 400);
-        }
+        validateCustomEventBusName(name);
+        validateEventBusDescription(description);
         String key = busKey(region, name);
         if (busStore.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
@@ -166,13 +165,15 @@ public class EventBridgeService {
             throw new AwsException("ValidationException", "EventBus name is required.", 400);
         }
         String effectiveName = resolvedBusName(name);
+        validateEventBusNameForMutation(effectiveName);
         if ("default".equals(effectiveName)) {
             throw new AwsException("ValidationException", "Cannot delete the default event bus.", 400);
         }
         String key = busKey(region, effectiveName);
-        EventBus bus = busStore.get(key)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + effectiveName, 404));
+        EventBus bus = busStore.get(key).orElse(null);
+        if (bus == null) {
+            return;
+        }
         String rulePrefix = ruleKeyPrefix(region, effectiveName);
         boolean hasRules = ruleStore.keys().stream().anyMatch(k -> k.startsWith(rulePrefix));
         if (hasRules) {
@@ -192,7 +193,7 @@ public class EventBridgeService {
         }
         return busStore.get(busKey(region, effectiveName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + name, 404));
+                        "EventBus not found: " + name, 400));
     }
 
     public EventBus updateEventBus(String name,
@@ -201,19 +202,22 @@ public class EventBridgeService {
                                    String deadLetterConfig,
                                    String logConfig,
                                    String region) {
+        validateEventBusDescription(description);
+        if (name != null) {
+            validateEventBusNameForMutation(name);
+        }
         // Name identifies the bus; never mutated (AWS does not support rename).
-        String effectiveName = name == null || name.isBlank() ? "default" : name;
+        String effectiveName = name == null ? "default" : name;
         EventBus bus = "default".equals(effectiveName)
                 ? getOrCreateDefaultBus(region)
                 : busStore.get(busKey(region, effectiveName))
                         .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                                "EventBus not found: " + effectiveName, 404));
+                                "EventBus not found: " + effectiveName, 400));
 
-        // Only mark dirty when a field is both non-blank AND different from
-        // the value currently on the bus — re-sending the same value is a no-op.
+        // Description accepts an explicit empty string so callers can clear it. A null value means
+        // the field was omitted and must remain unchanged.
         boolean dirty = false;
-        if (description != null && !description.isBlank()
-                && !description.equals(bus.getDescription())) {
+        if (description != null && !description.equals(bus.getDescription())) {
             bus.setDescription(description);
             dirty = true;
         }
@@ -239,6 +243,34 @@ public class EventBridgeService {
                     effectiveName, bus.getArn(), region);
         }
         return bus;
+    }
+
+    private void validateCustomEventBusName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "EventBus name is required.", 400);
+        }
+        if (name.length() > 256
+                || !name.matches("[.\\-_A-Za-z0-9]+")
+                || "default".equals(name)) {
+            throw new AwsException("ValidationException",
+                    "Invalid custom event bus name: " + name, 400);
+        }
+    }
+
+    private void validateEventBusDescription(String description) {
+        if (description != null && description.length() > 512) {
+            throw new AwsException("ValidationException",
+                    "EventBus description must not exceed 512 characters.", 400);
+        }
+    }
+
+    private void validateEventBusNameForMutation(String name) {
+        if (name.isEmpty()
+                || name.length() > 256
+                || !name.matches("[/\\.\\-_A-Za-z0-9]+")) {
+            throw new AwsException("ValidationException",
+                    "Invalid event bus name: " + name, 400);
+        }
     }
 
     public List<EventBus> listEventBuses(String namePrefix, String region) {

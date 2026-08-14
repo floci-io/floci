@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
@@ -45,6 +46,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -85,6 +87,8 @@ class ContainerLauncherTest {
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        EmulatorConfig.EfsSharingConfig efs = mock(EmulatorConfig.EfsSharingConfig.class);
 
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
@@ -100,6 +104,16 @@ class ContainerLauncherTest {
         lenient().when(tls.enabled()).thenReturn(false);
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
+        // The large-code path resolves a code-volume completion marker under the storage persistent path.
+        lenient().when(config.storage()).thenReturn(storage);
+        lenient().when(storage.persistentPath()).thenReturn(tempDir.toString());
+        lenient().when(storage.efs()).thenReturn(efs);
+        lenient().when(efs.ownerUid()).thenReturn(OptionalInt.empty());
+        lenient().when(efs.ownerGid()).thenReturn(OptionalInt.empty());
+        lenient().when(efs.rootPermissions()).thenReturn(Optional.empty());
+        lenient().when(efs.initImage()).thenReturn("busybox:stable");
+        lenient().when(efs.mountUser()).thenReturn(Optional.empty());
+        lenient().when(efs.mountGroupAdd()).thenReturn(OptionalInt.empty());
 
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
 
@@ -207,6 +221,35 @@ class ContainerLauncherTest {
         // The code is tar-copied straight into /var/task on the real container.
         assertTrue(capturedRemotePaths.contains("/var/task"),
                 "small code should be copied directly into /var/task");
+    }
+
+    @Test
+    void launchFunction_mountsConfiguredFileSystemVolume() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("efs-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("efs-fn");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:000000000000:function:efs-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setFileSystemConfigs(List.of(new LambdaFileSystemConfig(
+                "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                "/mnt/shared")));
+
+        launcher.launch(fn);
+
+        String expectedVolumeName = "floci-efs-fsap-0123456789abcdef0-"
+                + "9d6eafd2aec94d4518a004f005725b4b3c673c1506436bb7368cfd5450fc0810";
+        verify(lifecycleManager).ensureSharedVolume(expectedVolumeName,
+                OptionalInt.empty(), OptionalInt.empty(), Optional.empty(), "busybox:stable");
+        Mount mount = captureRealContainerSpec().mounts().stream()
+                .filter(candidate -> "/mnt/shared".equals(candidate.getTarget()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(MountType.VOLUME, mount.getType());
+        assertEquals(expectedVolumeName, mount.getSource());
+        assertTrue(!Boolean.TRUE.equals(mount.getReadOnly()));
     }
 
     @Test
